@@ -86,6 +86,7 @@ export function Sidebar() {
   const [creatingFolderIn, setCreatingFolderIn] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
 
   // Search: filter by title AND content
   const isSearching = search.trim().length > 0;
@@ -172,6 +173,10 @@ export function Sidebar() {
         e.dataTransfer.effectAllowed = "move";
       }}
       onClick={() => setActiveDocId(doc.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
+      }}
       className={cn(
         "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
         activeDocId === doc.id
@@ -443,6 +448,58 @@ export function Sidebar() {
         {documents.length} document{documents.length !== 1 ? "s" : ""}
         {folders.length > 1 && ` / ${folders.length - 1} folder${folders.length > 2 ? "s" : ""}`}
       </div>
+
+      {/* Context menu for "Move to folder" */}
+      {contextMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
+        >
+          <div
+            className="absolute rounded-md border border-border bg-popover shadow-md py-1 min-w-[140px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="px-3 py-1 text-[10px] text-muted-foreground uppercase tracking-wider">
+              Move to
+            </p>
+            {folders.map((f) => {
+              const doc = documents.find((d) => d.id === contextMenu.docId);
+              const isCurrent = doc?.folder === f;
+              return (
+                <button
+                  key={f}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent transition-colors",
+                    isCurrent && "text-muted-foreground",
+                  )}
+                  disabled={isCurrent}
+                  onClick={() => {
+                    moveDocument(contextMenu.docId, f);
+                    setContextMenu(null);
+                  }}
+                >
+                  <Folder className="h-3 w-3 shrink-0" />
+                  {f === "/" ? "Root" : f.split("/").pop()}
+                  {isCurrent && <span className="text-[10px] ml-auto">(current)</span>}
+                </button>
+              );
+            })}
+            <Separator className="my-1" />
+            <button
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent transition-colors"
+              onClick={() => {
+                deleteDocument(contextMenu.docId);
+                setContextMenu(null);
+              }}
+            >
+              <Trash2 className="h-3 w-3 shrink-0" />
+              Delete
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

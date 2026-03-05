@@ -13,6 +13,7 @@ import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { EditorToolbar } from "./EditorToolbar";
+import { useAutoVersion } from "@/hooks/use-auto-version";
 
 // HTML → Markdown converter for legacy Tiptap content
 const turndown = new TurndownService({
@@ -59,6 +60,13 @@ export function Editor() {
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
+
+  // Auto-save versions when content changes significantly
+  useAutoVersion({
+    docId: activeDocId,
+    content: activeDoc?.content ?? "",
+    title: activeDoc?.title ?? "",
+  });
 
   // Auto-convert legacy HTML content to Markdown on first load
   useEffect(() => {
