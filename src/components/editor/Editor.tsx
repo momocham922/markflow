@@ -5,46 +5,79 @@ import Typography from "@tiptap/extension-typography";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
+import Collaboration from "@tiptap/extension-collaboration";
+import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
 import { common, createLowlight } from "lowlight";
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, useRef } from "react";
 import { useAppStore } from "@/stores/app-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { EditorToolbar } from "./EditorToolbar";
+import {
+  getYDoc,
+  getProvider,
+  disconnectProvider,
+  getRandomColor,
+} from "@/services/yjs";
 
 const lowlight = createLowlight(common);
 
 export function Editor() {
   const { activeDocId, documents, updateDocument } = useAppStore();
+  const user = useAuthStore((s) => s.user);
+  const isOnline = useAuthStore((s) => s.isOnline);
   const activeDoc = documents.find((d) => d.id === activeDocId);
+  const prevDocIdRef = useRef<string | null>(null);
+  const colorRef = useRef(getRandomColor());
 
-  const editor = useEditor({
-    extensions: [
-      StarterKit.configure({
-        codeBlock: false,
-      }),
-      Placeholder.configure({
-        placeholder: "Start writing...",
-      }),
-      Typography,
-      TaskList,
-      TaskItem.configure({ nested: true }),
-      CodeBlockLowlight.configure({ lowlight }),
-    ],
-    content: activeDoc?.content || "",
-    editorProps: {
-      attributes: {
-        class:
-          "prose prose-neutral dark:prose-invert max-w-none outline-none min-h-[calc(100vh-8rem)] px-12 py-8",
+  // Determine if collaboration should be enabled
+  const collabEnabled = !!user && isOnline && !!activeDocId;
+
+  const editor = useEditor(
+    {
+      extensions: [
+        StarterKit.configure({
+          codeBlock: false,
+        }),
+        Placeholder.configure({
+          placeholder: "Start writing...",
+        }),
+        Typography,
+        TaskList,
+        TaskItem.configure({ nested: true }),
+        CodeBlockLowlight.configure({ lowlight }),
+        // Collaboration extensions (only when online + authenticated)
+        ...(collabEnabled
+          ? [
+              Collaboration.configure({
+                document: getYDoc(activeDocId),
+              }),
+              CollaborationCursor.configure({
+                provider: getProvider(activeDocId, {
+                  name: user.displayName || user.email || "Anonymous",
+                  color: colorRef.current,
+                }),
+              }),
+            ]
+          : []),
+      ],
+      content: collabEnabled ? undefined : activeDoc?.content || "",
+      editorProps: {
+        attributes: {
+          class:
+            "prose prose-neutral dark:prose-invert max-w-none outline-none min-h-[calc(100vh-8rem)] px-12 py-8",
+        },
+      },
+      onUpdate: ({ editor: e }) => {
+        if (activeDocId) {
+          updateDocument(activeDocId, {
+            content: e.getHTML(),
+            updatedAt: Date.now(),
+          });
+        }
       },
     },
-    onUpdate: ({ editor }) => {
-      if (activeDocId) {
-        updateDocument(activeDocId, {
-          content: editor.getHTML(),
-          updatedAt: Date.now(),
-        });
-      }
-    },
-  });
+    [activeDocId, collabEnabled],
+  );
 
   const updateTitle = useCallback(() => {
     if (!editor || !activeDocId) return;
@@ -55,14 +88,19 @@ export function Editor() {
     }
   }, [editor, activeDocId, updateDocument]);
 
+  // Clean up previous collaboration when switching docs
   useEffect(() => {
-    if (editor && activeDoc) {
-      const currentContent = editor.getHTML();
-      if (currentContent !== activeDoc.content) {
-        editor.commands.setContent(activeDoc.content || "");
-      }
+    if (prevDocIdRef.current && prevDocIdRef.current !== activeDocId) {
+      disconnectProvider(prevDocIdRef.current);
     }
-  }, [activeDocId]); // eslint-disable-line react-hooks/exhaustive-deps
+    prevDocIdRef.current = activeDocId;
+
+    return () => {
+      if (activeDocId) {
+        disconnectProvider(activeDocId);
+      }
+    };
+  }, [activeDocId]);
 
   useEffect(() => {
     if (!editor) return;

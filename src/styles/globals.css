@@ -236,3 +236,29 @@
   max-width: 100%;
   border-radius: 0.5em;
 }
+
+/* Collaboration cursor styles */
+.collaboration-cursor__caret {
+  border-left: 1px solid var(--color, #333);
+  border-right: 1px solid var(--color, #333);
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+}
+
+.collaboration-cursor__label {
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  left: -1px;
+  line-height: normal;
+  padding: 0.1rem 0.3rem;
+  position: absolute;
+  top: -1.4em;
+  user-select: none;
+  white-space: nowrap;
+  background-color: var(--color, #333);
+}
