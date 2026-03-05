@@ -9,6 +9,18 @@ export interface Document {
   updatedAt: number;
 }
 
+export interface ThemeSettings {
+  previewTheme: string;
+  editorTheme: string;
+  customPreviewCss: string;
+}
+
+const defaultThemeSettings: ThemeSettings = {
+  previewTheme: "github",
+  editorTheme: "default",
+  customPreviewCss: "",
+};
+
 interface AppState {
   // UI state
   sidebarOpen: boolean;
@@ -16,6 +28,10 @@ interface AppState {
   theme: "light" | "dark";
   toggleTheme: () => void;
   initialized: boolean;
+
+  // Theme customization
+  themeSettings: ThemeSettings;
+  setThemeSettings: (settings: Partial<ThemeSettings>) => void;
 
   // Document state
   activeDocId: string | null;
@@ -95,6 +111,16 @@ export const useAppStore = create<AppState>((set) => ({
       return { theme: next };
     }),
 
+  themeSettings: { ...defaultThemeSettings },
+  setThemeSettings: (updates) =>
+    set((s) => {
+      const themeSettings = { ...s.themeSettings, ...updates };
+      db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(
+        console.error,
+      );
+      return { themeSettings };
+    }),
+
   initialized: false,
 
   activeDocId: null,
@@ -114,14 +140,22 @@ export const useAppStore = create<AppState>((set) => ({
       }));
 
       const savedTheme = await db.getSetting("theme");
+      const savedThemeSettings = await db.getSetting("themeSettings");
+      let themeSettings = { ...defaultThemeSettings };
+      if (savedThemeSettings) {
+        try {
+          themeSettings = { ...defaultThemeSettings, ...JSON.parse(savedThemeSettings) };
+        } catch { /* ignore */ }
+      }
+
       if (savedTheme === "light" || savedTheme === "dark") {
         document.documentElement.classList.toggle(
           "dark",
           savedTheme === "dark",
         );
-        set({ documents, theme: savedTheme, initialized: true });
+        set({ documents, theme: savedTheme, themeSettings, initialized: true });
       } else {
-        set({ documents, initialized: true });
+        set({ documents, themeSettings, initialized: true });
       }
     } catch {
       // Running in browser without Tauri — skip DB
@@ -150,6 +184,12 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   deleteDocument: async (id) => {
+    // Cancel any pending save for this doc
+    const timer = saveTimers.get(id);
+    if (timer) clearTimeout(timer);
+    saveTimers.delete(id);
+    pendingDocs.delete(id);
+
     set((s) => ({
       documents: s.documents.filter((d) => d.id !== id),
       activeDocId: s.activeDocId === id ? null : s.activeDocId,
@@ -159,5 +199,9 @@ export const useAppStore = create<AppState>((set) => ({
     } catch {
       // Ignore if no DB
     }
+    // Also delete from cloud
+    import("@/stores/auth-store").then(({ useAuthStore }) => {
+      useAuthStore.getState().deleteFromCloud(id);
+    }).catch(() => {})
   },
 }));

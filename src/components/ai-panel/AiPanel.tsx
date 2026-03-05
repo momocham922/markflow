@@ -44,7 +44,7 @@ const iconMap: Record<string, React.ElementType> = {
 };
 
 const SYSTEM_PROMPT =
-  "You are a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user's message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses.";
+  "You are a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user's message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. Do NOT use emojis in your responses unless the user explicitly asks for them. Keep responses concise and professional.";
 
 interface AiPanelProps {
   onClose: () => void;
@@ -256,7 +256,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   if (!user) {
     return (
-      <div className="flex h-full w-80 flex-col border-l border-border bg-background">
+      <div className="flex h-full w-[28rem] flex-col border-l border-border bg-background">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <div className="flex items-center gap-2">
             <Bot className="h-4 w-4" />
@@ -356,7 +356,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   );
 
   return (
-    <div className="flex h-full w-80 flex-col border-l border-border bg-background select-none">
+    <div className="flex h-full w-[28rem] flex-col border-l border-border bg-background select-none">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <div className="flex items-center gap-2">
@@ -439,13 +439,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
       )}
 
       {/* Messages */}
-      <ScrollArea ref={scrollAreaRef} className="flex-1 min-h-0 p-3">
+      <ScrollArea ref={scrollAreaRef} className="ai-panel-scroll flex-1 min-h-0 p-3">
         <div className="space-y-3">
           {messages.length === 0 && !streaming && (
             <p className="text-xs text-muted-foreground text-center py-8">
               Use quick actions or chat below.
               <br />
-              <span className="text-[10px]">Shift+Enter to send</span>
+              <span className="text-[10px]">Cmd+Enter to send</span>
             </p>
           )}
           {messages.map((msg) => (
@@ -527,18 +527,18 @@ export function AiPanel({ onClose }: AiPanelProps) {
         <div className="flex gap-1 items-end">
           <textarea
             ref={textareaRef}
-            placeholder="Ask about your document... (Shift+Enter to send)"
+            placeholder="Ask about your document... (Cmd+Enter to send)"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && e.shiftKey) {
+              if (e.key === "Enter" && e.metaKey) {
                 e.preventDefault();
                 handleChat();
               }
             }}
             rows={1}
             disabled={streaming}
-            className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring resize-none select-text"
+            className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border"
           />
           <Button
             size="icon"

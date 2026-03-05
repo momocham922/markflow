@@ -7,6 +7,7 @@ import {
   fetchUserDocuments,
   createDocumentInFirestore,
   saveDocumentToFirestore,
+  deleteDocumentFromFirestore,
 } from "@/services/firebase";
 import { useAppStore, type Document } from "./app-store";
 
@@ -21,6 +22,7 @@ interface AuthState {
   logout: () => Promise<void>;
   syncToCloud: () => Promise<void>;
   syncFromCloud: () => Promise<void>;
+  deleteFromCloud: (docId: string) => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -102,6 +104,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       console.error("Sync from cloud failed:", error);
     } finally {
       set({ syncing: false });
+    }
+  },
+
+  deleteFromCloud: async (docId: string) => {
+    const { user, isOnline } = get();
+    if (!user || !isOnline) return;
+    try {
+      await deleteDocumentFromFirestore(docId);
+    } catch (error) {
+      console.error("Failed to delete from cloud:", error);
     }
   },
 
