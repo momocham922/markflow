@@ -30,17 +30,55 @@ interface AppState {
 // Debounce save to avoid excessive writes
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// Track pending docs for flush-on-exit
+const pendingDocs = new Map<string, Document>();
+
 function debouncedSave(doc: Document) {
   const existing = saveTimers.get(doc.id);
   if (existing) clearTimeout(existing);
+  pendingDocs.set(doc.id, doc);
   saveTimers.set(
     doc.id,
-    setTimeout(() => {
-      db.upsertDocument(doc).catch(console.error);
+    setTimeout(async () => {
+      try {
+        await db.upsertDocument(doc);
+      } catch (e) {
+        console.error("Local save failed:", e);
+      }
       saveTimers.delete(doc.id);
+      pendingDocs.delete(doc.id);
+      // Trigger cloud sync after local save
+      cloudSyncDebounced();
     }, 500),
   );
 }
+
+// Debounced cloud sync — don't sync on every keystroke
+let cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+function cloudSyncDebounced() {
+  if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(() => {
+    cloudSyncTimer = null;
+    // Dynamically import to avoid circular dependency
+    import("@/stores/auth-store").then(({ useAuthStore }) => {
+      useAuthStore.getState().syncToCloud();
+    });
+  }, 3000);
+}
+
+// Flush all pending saves immediately (called on app close)
+function flushPendingSaves() {
+  for (const [id, doc] of pendingDocs) {
+    const timer = saveTimers.get(id);
+    if (timer) clearTimeout(timer);
+    saveTimers.delete(id);
+    pendingDocs.delete(id);
+    db.upsertDocument(doc).catch(console.error);
+  }
+}
+
+// Save pending changes before window unload
+window.addEventListener("beforeunload", flushPendingSaves);
 
 export const useAppStore = create<AppState>((set) => ({
   sidebarOpen: true,

@@ -36,7 +36,9 @@ export function getProvider(
   let provider = providers.get(docId);
   if (!provider) {
     const ydoc = getYDoc(docId);
-    provider = new WebsocketProvider(WS_URL, `markflow-${docId}`, ydoc);
+    provider = new WebsocketProvider(WS_URL, `markflow-${docId}`, ydoc, {
+      connect: false, // Don't auto-connect; connect explicitly when server is ready
+    });
     provider.awareness.setLocalStateField("user", user);
     providers.set(docId, provider);
   }

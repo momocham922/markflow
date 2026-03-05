@@ -78,19 +78,27 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
   const handleCopyLink = async () => {
     if (!activeDocId) return;
-    const link = `markflow://doc/${activeDocId}`;
-    await navigator.clipboard.writeText(link);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      const link = `markflow://doc/${activeDocId}`;
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Failed to copy to clipboard");
+    }
   };
 
   const handleCopyMarkdown = async () => {
     if (!activeDoc) return;
-    const div = document.createElement("div");
-    div.innerHTML = activeDoc.content;
-    await navigator.clipboard.writeText(div.textContent || "");
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      const parser = new DOMParser();
+      const parsed = parser.parseFromString(activeDoc.content, "text/html");
+      await navigator.clipboard.writeText(parsed.body.textContent || "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Failed to copy to clipboard");
+    }
   };
 
   return (

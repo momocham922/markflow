@@ -42,7 +42,7 @@ export function Sidebar() {
   return (
     <div className="flex h-full w-60 flex-col border-r border-border bg-sidebar-background">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 pt-10 pb-2">
+      <div className="flex items-center justify-between px-3 pt-2 pb-2">
         <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">
           MarkFlow
         </span>

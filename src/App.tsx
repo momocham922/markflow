@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, lazy, Suspense } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { Editor } from "@/components/editor/Editor";
@@ -88,6 +89,11 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
   return (
     <TooltipProvider>
       <div className="flex h-screen w-screen flex-col overflow-hidden">
+        {/* Window drag region — full width, topmost element */}
+        <div
+          className="h-7 w-full shrink-0"
+          onMouseDown={() => getCurrentWindow().startDragging()}
+        />
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
           <div
@@ -102,7 +108,9 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
           {/* Main content */}
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* Top bar */}
-            <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
+            <div
+              className="flex items-center justify-between border-b border-border px-3 pb-1.5"
+            >
               <div className="flex items-center gap-1">
                 {!sidebarOpen && (
                   <Button

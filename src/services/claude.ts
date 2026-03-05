@@ -1,36 +1,56 @@
-const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
+import { auth } from "./firebase";
+
+const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
 
 export interface ClaudeMessage {
   role: "user" | "assistant";
   content: string;
 }
 
+async function getFirebaseIdToken(): Promise<string> {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Not authenticated. Please sign in with Google first.");
+  return await user.getIdToken();
+}
+
+// Active abort controller for cancellation support
+let activeAbortController: AbortController | null = null;
+
+export function abortClaude() {
+  activeAbortController?.abort();
+  activeAbortController = null;
+}
+
 export async function sendToClaude(
-  apiKey: string,
+  _unused: string,
   systemPrompt: string,
   messages: ClaudeMessage[],
   onChunk?: (text: string) => void,
 ): Promise<string> {
-  const response = await fetch(CLAUDE_API_URL, {
+  const idToken = await getFirebaseIdToken();
+
+  abortClaude(); // Cancel any in-flight request
+  const controller = new AbortController();
+  activeAbortController = controller;
+
+  const response = await fetch(`${AI_PROXY_URL}/v1/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
+      Authorization: `Bearer ${idToken}`,
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4096,
       system: systemPrompt,
       messages,
+      max_tokens: 4096,
       stream: !!onChunk,
     }),
+    signal: controller.signal,
   });
 
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`Claude API error: ${response.status} ${error}`);
+    throw new Error(`AI error: ${response.status} ${error}`);
   }
 
   if (onChunk) {
@@ -40,32 +60,41 @@ export async function sendToClaude(
 
     if (!reader) throw new Error("No response body");
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      let lineBuf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split("\n");
+        lineBuf += decoder.decode(value, { stream: true });
+        const lines = lineBuf.split("\n");
+        // Keep the last (possibly incomplete) line in the buffer
+        lineBuf = lines.pop() || "";
 
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.type === "content_block_delta" && parsed.delta?.text) {
-              fullText += parsed.delta.text;
-              onChunk(fullText);
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            if (data === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.type === "content_block_delta" && parsed.delta?.text) {
+                fullText += parsed.delta.text;
+                onChunk(fullText);
+              }
+            } catch {
+              // Skip unparseable lines
             }
-          } catch {
-            // Skip unparseable chunks
           }
         }
       }
+    } finally {
+      reader.releaseLock();
+      activeAbortController = null;
     }
     return fullText;
   }
 
+  activeAbortController = null;
   const data = await response.json();
   return data.content?.[0]?.text || "";
 }

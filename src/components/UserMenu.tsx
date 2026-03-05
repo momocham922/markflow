@@ -3,22 +3,29 @@ import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
 
 export function UserMenu() {
-  const { user, loading, isOnline, syncing, login, logout, syncToCloud } =
+  const { user, loading, isOnline, syncing, loginError, login, logout, syncToCloud } =
     useAuthStore();
 
   if (loading) return null;
 
   if (!user) {
     return (
-      <Button
-        variant="ghost"
-        size="sm"
-        className="gap-2 text-xs"
-        onClick={login}
-      >
-        <LogIn className="h-3.5 w-3.5" />
-        Sign in with Google
-      </Button>
+      <div className="flex items-center gap-2">
+        {loginError && (
+          <span className="text-[10px] text-red-500 max-w-[200px] truncate" title={loginError}>
+            {loginError}
+          </span>
+        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-2 text-xs"
+          onClick={login}
+        >
+          <LogIn className="h-3.5 w-3.5" />
+          Sign in with Google
+        </Button>
+      </div>
     );
   }
 

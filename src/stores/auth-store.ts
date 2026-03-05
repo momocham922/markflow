@@ -15,6 +15,7 @@ interface AuthState {
   loading: boolean;
   isOnline: boolean;
   syncing: boolean;
+  loginError: string | null;
   init: () => () => void;
   login: () => Promise<void>;
   logout: () => Promise<void>;
@@ -27,6 +28,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   loading: true,
   isOnline: navigator.onLine,
   syncing: false,
+  loginError: null,
 
   init: () => {
     const unsubAuth = onAuthChange((user) => {
@@ -53,10 +55,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   login: async () => {
+    set({ loginError: null });
     try {
       await signInWithGoogle();
     } catch (error) {
+      const msg = error instanceof Error ? error.message : "Login failed";
       console.error("Login failed:", error);
+      set({ loginError: msg });
     }
   },
 
@@ -108,21 +113,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const { documents } = useAppStore.getState();
       for (const doc of documents) {
+        const payload = {
+          id: doc.id,
+          title: doc.title,
+          content: doc.content,
+          ownerId: user.uid,
+        };
         try {
-          await saveDocumentToFirestore({
-            id: doc.id,
-            title: doc.title,
-            content: doc.content,
-            ownerId: user.uid,
-          });
-        } catch {
-          // If doc doesn't exist yet, create it
-          await createDocumentInFirestore({
-            id: doc.id,
-            title: doc.title,
-            content: doc.content,
-            ownerId: user.uid,
-          });
+          await saveDocumentToFirestore(payload);
+        } catch (saveErr) {
+          // Only create if it's a not-found error; rethrow others
+          try {
+            await createDocumentInFirestore(payload);
+          } catch (createErr) {
+            console.error(`Failed to sync document ${doc.id}:`, saveErr, createErr);
+          }
         }
       }
     } catch (error) {

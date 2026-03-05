@@ -73,13 +73,26 @@ export function VersionPanel({ onClose }: VersionPanelProps) {
     }
   };
 
-  const handleRestore = (version: Version) => {
-    if (!activeDocId) return;
+  const handleRestore = async (version: Version) => {
+    if (!activeDocId || !activeDoc) return;
+    // Auto-save current state as a snapshot before restoring
+    try {
+      await db.createVersion({
+        id: crypto.randomUUID(),
+        documentId: activeDoc.id,
+        content: activeDoc.content,
+        title: `Before restore: ${activeDoc.title}`,
+        message: null,
+      });
+    } catch {
+      // Best-effort backup
+    }
     updateDocument(activeDocId, {
       content: version.content,
       updatedAt: Date.now(),
     });
     setSelectedVersion(null);
+    await loadVersions();
   };
 
   if (!activeDoc) {

@@ -2,11 +2,18 @@ import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { useEditorStore } from "@/stores/editor-store";
 
 export function StatusBar() {
   const { theme, toggleTheme, activeDocId, documents } = useAppStore();
   const { user, isOnline, syncing } = useAuthStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
+  const editor = useEditorStore((s) => s.editor);
+
+  // Compute word/char count from editor text
+  const text = editor?.getText() || "";
+  const charCount = text.length;
+  const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
 
   return (
     <div className="flex h-7 items-center justify-between border-t border-border bg-background px-3 text-[11px] text-muted-foreground">
@@ -20,9 +27,7 @@ export function StatusBar() {
           {syncing ? "Syncing..." : isOnline ? "Online" : "Offline"}
         </span>
         {user && (
-          <span className="text-muted-foreground/60">
-            {user.email}
-          </span>
+          <span className="text-muted-foreground/60">{user.email}</span>
         )}
         {activeDoc && (
           <span>
@@ -31,7 +36,12 @@ export function StatusBar() {
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-3">
+        {activeDoc && (
+          <span>
+            {wordCount} words / {charCount} chars
+          </span>
+        )}
         <Button
           variant="ghost"
           size="icon"

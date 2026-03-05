@@ -1,115 +1,254 @@
-import { useEditor, EditorContent } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Placeholder from "@tiptap/extension-placeholder";
-import Typography from "@tiptap/extension-typography";
-import TaskList from "@tiptap/extension-task-list";
-import TaskItem from "@tiptap/extension-task-item";
-import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
-import Collaboration from "@tiptap/extension-collaboration";
-import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
-import { common, createLowlight } from "lowlight";
-import { useEffect, useCallback, useRef } from "react";
+import { useEffect, useCallback, useState, useMemo, useRef } from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { languages } from "@codemirror/language-data";
+import { oneDark } from "@codemirror/theme-one-dark";
+import { EditorView } from "@codemirror/view";
+import { marked } from "marked";
+import hljs from "highlight.js";
+import TurndownService from "turndown";
 import { useAppStore } from "@/stores/app-store";
-import { useAuthStore } from "@/stores/auth-store";
+import { useEditorStore } from "@/stores/editor-store";
 import { EditorToolbar } from "./EditorToolbar";
-import {
-  getYDoc,
-  getProvider,
-  disconnectProvider,
-  getRandomColor,
-} from "@/services/yjs";
 
-const lowlight = createLowlight(common);
+// HTML → Markdown converter for legacy Tiptap content
+const turndown = new TurndownService({
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
+  bulletListMarker: "-",
+});
+
+/** Detect if content is HTML (from old Tiptap editor) */
+function isHtmlContent(content: string): boolean {
+  return /^\s*<[a-z][\s\S]*>/i.test(content);
+}
+
+/** Convert HTML to Markdown, or return as-is if already markdown */
+function ensureMarkdown(content: string): string {
+  if (!content || !isHtmlContent(content)) return content;
+  try {
+    return turndown.turndown(content);
+  } catch {
+    return content;
+  }
+}
+
+export type PreviewMode = "edit" | "split" | "preview";
+
+// Configure marked with highlight.js
+marked.setOptions({
+  gfm: true,
+  breaks: true,
+});
+
+const renderer = new marked.Renderer();
+renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+  const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
+  const highlighted = hljs.highlight(text, { language }).value;
+  return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
+};
+marked.use({ renderer });
+
+// Light theme for CodeMirror
+const lightTheme = EditorView.theme(
+  {
+    "&": {
+      fontSize: "15px",
+      fontFamily:
+        '"SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
+    },
+    ".cm-content": {
+      padding: "2rem 3rem",
+      minHeight: "calc(100vh - 8rem)",
+      caretColor: "oklch(0.3 0 0)",
+    },
+    ".cm-gutters": {
+      background: "transparent",
+      border: "none",
+      color: "oklch(0.7 0 0)",
+    },
+    ".cm-activeLineGutter": {
+      background: "transparent",
+    },
+    ".cm-activeLine": {
+      background: "oklch(0 0 0 / 0.03)",
+    },
+    ".cm-selectionBackground": {
+      background: "oklch(0.7 0.15 250 / 0.25) !important",
+    },
+    "&.cm-focused .cm-selectionBackground": {
+      background: "oklch(0.7 0.15 250 / 0.3) !important",
+    },
+    ".cm-cursor": {
+      borderLeftColor: "oklch(0.3 0 0)",
+      borderLeftWidth: "2px",
+    },
+    /* Markdown syntax highlighting */
+    ".cm-header-1": {
+      fontSize: "1.6em",
+      fontWeight: "700",
+      color: "oklch(0.3 0.05 250)",
+    },
+    ".cm-header-2": {
+      fontSize: "1.35em",
+      fontWeight: "600",
+      color: "oklch(0.35 0.04 250)",
+    },
+    ".cm-header-3": {
+      fontSize: "1.15em",
+      fontWeight: "600",
+      color: "oklch(0.4 0.03 250)",
+    },
+    ".cm-strong": { fontWeight: "700" },
+    ".cm-em": { fontStyle: "italic" },
+    ".cm-strikethrough": { textDecoration: "line-through" },
+    ".cm-link": { color: "oklch(0.5 0.2 250)", textDecoration: "underline" },
+    ".cm-url": { color: "oklch(0.55 0.12 250)" },
+    ".cm-formatting": { color: "oklch(0.65 0 0)" },
+    ".cm-quote": {
+      color: "oklch(0.45 0.08 160)",
+      fontStyle: "italic",
+    },
+    ".cm-inline-code": {
+      background: "oklch(0.95 0 0)",
+      borderRadius: "3px",
+      padding: "1px 4px",
+      fontFamily:
+        '"SF Mono", "Fira Code", "Cascadia Code", monospace',
+    },
+    ".cm-monospace": {
+      fontFamily:
+        '"SF Mono", "Fira Code", "Cascadia Code", monospace',
+    },
+  },
+  { dark: false },
+);
+
+// Dark theme overrides (extends oneDark)
+const darkThemeOverride = EditorView.theme(
+  {
+    "&": {
+      fontSize: "15px",
+      fontFamily:
+        '"SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
+    },
+    ".cm-content": {
+      padding: "2rem 3rem",
+      minHeight: "calc(100vh - 8rem)",
+    },
+    ".cm-gutters": {
+      background: "transparent",
+      border: "none",
+    },
+    ".cm-activeLineGutter": {
+      background: "transparent",
+    },
+    ".cm-header-1": {
+      fontSize: "1.6em",
+      fontWeight: "700",
+      color: "oklch(0.85 0.08 250)",
+    },
+    ".cm-header-2": {
+      fontSize: "1.35em",
+      fontWeight: "600",
+      color: "oklch(0.8 0.06 250)",
+    },
+    ".cm-header-3": {
+      fontSize: "1.15em",
+      fontWeight: "600",
+      color: "oklch(0.75 0.04 250)",
+    },
+    ".cm-link": { color: "oklch(0.75 0.15 250)" },
+    ".cm-url": { color: "oklch(0.65 0.1 250)" },
+    ".cm-formatting": { color: "oklch(0.5 0 0)" },
+    ".cm-quote": {
+      color: "oklch(0.65 0.06 160)",
+      fontStyle: "italic",
+    },
+    ".cm-inline-code": {
+      background: "oklch(0.25 0 0)",
+      borderRadius: "3px",
+      padding: "1px 4px",
+    },
+  },
+  { dark: true },
+);
 
 export function Editor() {
-  const { activeDocId, documents, updateDocument } = useAppStore();
-  const user = useAuthStore((s) => s.user);
-  const isOnline = useAuthStore((s) => s.isOnline);
+  const { activeDocId, documents, updateDocument, theme } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const prevDocIdRef = useRef<string | null>(null);
-  const colorRef = useRef(getRandomColor());
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
+  const setView = useEditorStore((s) => s.setView);
+  const viewRef = useRef<EditorView | null>(null);
+  const convertedRef = useRef<Set<string>>(new Set());
 
-  // Determine if collaboration should be enabled
-  const collabEnabled = !!user && isOnline && !!activeDocId;
+  // Auto-convert legacy HTML content to Markdown on first load
+  useEffect(() => {
+    if (!activeDocId || !activeDoc?.content) return;
+    if (convertedRef.current.has(activeDocId)) return;
+    if (isHtmlContent(activeDoc.content)) {
+      const md = ensureMarkdown(activeDoc.content);
+      convertedRef.current.add(activeDocId);
+      updateDocument(activeDocId, { content: md, updatedAt: Date.now() });
+    }
+  }, [activeDocId, activeDoc?.content, updateDocument]);
 
-  const editor = useEditor(
-    {
-      extensions: [
-        StarterKit.configure({
-          codeBlock: false,
-        }),
-        Placeholder.configure({
-          placeholder: "Start writing...",
-        }),
-        Typography,
-        TaskList,
-        TaskItem.configure({ nested: true }),
-        CodeBlockLowlight.configure({ lowlight }),
-        // Collaboration extensions (only when online + authenticated)
-        ...(collabEnabled
-          ? [
-              Collaboration.configure({
-                document: getYDoc(activeDocId),
-              }),
-              CollaborationCursor.configure({
-                provider: getProvider(activeDocId, {
-                  name: user.displayName || user.email || "Anonymous",
-                  color: colorRef.current,
-                }),
-              }),
-            ]
-          : []),
-      ],
-      content: collabEnabled ? undefined : activeDoc?.content || "",
-      editorProps: {
-        attributes: {
-          class:
-            "prose prose-neutral dark:prose-invert max-w-none outline-none min-h-[calc(100vh-8rem)] px-12 py-8",
-        },
-      },
-      onUpdate: ({ editor: e }) => {
-        if (activeDocId) {
-          updateDocument(activeDocId, {
-            content: e.getHTML(),
-            updatedAt: Date.now(),
-          });
-        }
-      },
-    },
-    [activeDocId, collabEnabled],
+  // Memoize extensions
+  const extensions = useMemo(
+    () => [
+      markdown({ base: markdownLanguage, codeLanguages: languages }),
+      EditorView.lineWrapping,
+    ],
+    [],
   );
 
-  const updateTitle = useCallback(() => {
-    if (!editor || !activeDocId) return;
-    const text = editor.getText();
-    const firstLine = text.split("\n")[0]?.trim();
-    if (firstLine) {
-      updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
-    }
-  }, [editor, activeDocId, updateDocument]);
+  const editorTheme = useMemo(() => {
+    if (theme === "dark") return [oneDark, darkThemeOverride];
+    return [lightTheme];
+  }, [theme]);
 
-  // Clean up previous collaboration when switching docs
-  useEffect(() => {
-    if (prevDocIdRef.current && prevDocIdRef.current !== activeDocId) {
-      disconnectProvider(prevDocIdRef.current);
+  // Convert markdown to HTML for preview
+  const previewHtml = useMemo(() => {
+    if (!activeDoc?.content) return "";
+    try {
+      return marked.parse(activeDoc.content) as string;
+    } catch {
+      return activeDoc.content;
     }
-    prevDocIdRef.current = activeDocId;
+  }, [activeDoc?.content]);
 
-    return () => {
+  const onChange = useCallback(
+    (value: string) => {
       if (activeDocId) {
-        disconnectProvider(activeDocId);
+        updateDocument(activeDocId, {
+          content: value,
+          updatedAt: Date.now(),
+        });
+        // Auto-update title from first line
+        const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+        if (firstLine) {
+          updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
+        }
       }
-    };
-  }, [activeDocId]);
+    },
+    [activeDocId, updateDocument],
+  );
 
+  const onCreateEditor = useCallback(
+    (view: EditorView) => {
+      viewRef.current = view;
+      setView(view);
+    },
+    [setView],
+  );
+
+  // Cleanup on unmount or doc change
   useEffect(() => {
-    if (!editor) return;
-    const handler = () => updateTitle();
-    editor.on("update", handler);
     return () => {
-      editor.off("update", handler);
+      setView(null);
+      viewRef.current = null;
     };
-  }, [editor, updateTitle]);
+  }, [activeDocId, setView]);
 
   if (!activeDoc) {
     return (
@@ -126,9 +265,45 @@ export function Editor() {
 
   return (
     <div className="flex h-full flex-col">
-      <EditorToolbar editor={editor} />
-      <div className="flex-1 overflow-auto">
-        <EditorContent editor={editor} />
+      <EditorToolbar
+        previewMode={previewMode}
+        onPreviewModeChange={setPreviewMode}
+      />
+      <div className="flex flex-1 overflow-hidden">
+        {/* Editor pane — raw markdown with syntax highlighting */}
+        {previewMode !== "preview" && (
+          <div
+            className={`overflow-auto ${previewMode === "split" ? "w-1/2 border-r border-border" : "flex-1"}`}
+          >
+            <CodeMirror
+              value={activeDoc.content || ""}
+              onChange={onChange}
+              extensions={extensions}
+              theme={editorTheme}
+              onCreateEditor={onCreateEditor}
+              basicSetup={{
+                lineNumbers: true,
+                highlightActiveLineGutter: true,
+                highlightActiveLine: true,
+                foldGutter: true,
+                bracketMatching: true,
+                closeBrackets: true,
+                indentOnInput: true,
+              }}
+            />
+          </div>
+        )}
+        {/* Preview pane — rendered markdown */}
+        {previewMode !== "edit" && (
+          <div
+            className={`overflow-auto ${previewMode === "split" ? "w-1/2" : "flex-1"}`}
+          >
+            <div
+              className="prose max-w-none px-12 py-8"
+              dangerouslySetInnerHTML={{ __html: previewHtml }}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

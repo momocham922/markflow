@@ -31,6 +31,11 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
   --radius: 0.625rem;
+  /* Code block colors */
+  --code-bg: oklch(0.97 0 0);
+  --code-border: oklch(0.9 0 0);
+  --pre-bg: oklch(0.17 0 0);
+  --pre-fg: oklch(0.9 0 0);
 }
 
 .dark {
@@ -61,6 +66,10 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(0.269 0 0);
   --sidebar-ring: oklch(0.439 0 0);
+  --code-bg: oklch(0.22 0 0);
+  --code-border: oklch(0.3 0 0);
+  --pre-bg: oklch(0.12 0 0);
+  --pre-fg: oklch(0.88 0 0);
 }
 
 @theme inline {
@@ -111,9 +120,42 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
+  /* Text selection — consistent, non-inverting */
+  ::selection {
+    background: oklch(0.7 0.15 250 / 0.3);
+    color: inherit;
+  }
+
+  /* Cursor: pointer on all interactive elements */
+  button,
+  [role="button"],
+  a,
+  summary,
+  select,
+  label[for] {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
 }
 
-/* Tiptap Editor Styles */
+/*
+ * ============================================================
+ *  Prose typography — Tiptap editor & preview pane & AI panel
+ *  Using !important to override Tailwind v4 preflight resets
+ * ============================================================
+ */
+
+.tiptap,
+.prose {
+  color: var(--foreground) !important;
+  line-height: 1.75 !important;
+  font-size: 1rem !important;
+}
+
 .tiptap {
   outline: none;
 }
@@ -126,79 +168,156 @@
   height: 0;
 }
 
-.tiptap h1 {
-  font-size: 2em;
-  font-weight: 700;
-  margin-top: 1.5em;
-  margin-bottom: 0.5em;
-  line-height: 1.2;
+/* ---- Headings ---- */
+.tiptap h1,
+.prose h1 {
+  font-size: 1.875em !important;
+  font-weight: 700 !important;
+  margin-top: 1.5em !important;
+  margin-bottom: 0.5em !important;
+  line-height: 1.2 !important;
+  color: var(--foreground) !important;
+  letter-spacing: -0.02em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3em;
 }
 
-.tiptap h2 {
-  font-size: 1.5em;
-  font-weight: 600;
-  margin-top: 1.25em;
-  margin-bottom: 0.4em;
-  line-height: 1.3;
+.tiptap h2,
+.prose h2 {
+  font-size: 1.5em !important;
+  font-weight: 600 !important;
+  margin-top: 1.4em !important;
+  margin-bottom: 0.4em !important;
+  line-height: 1.3 !important;
+  color: var(--foreground) !important;
+  letter-spacing: -0.01em;
 }
 
-.tiptap h3 {
-  font-size: 1.25em;
-  font-weight: 600;
-  margin-top: 1em;
-  margin-bottom: 0.3em;
-  line-height: 1.4;
+.tiptap h3,
+.prose h3 {
+  font-size: 1.25em !important;
+  font-weight: 600 !important;
+  margin-top: 1.2em !important;
+  margin-bottom: 0.3em !important;
+  line-height: 1.4 !important;
+  color: var(--foreground) !important;
 }
 
-.tiptap p {
-  margin-bottom: 0.75em;
-  line-height: 1.7;
+.tiptap h4,
+.prose h4 {
+  font-size: 1.1em !important;
+  font-weight: 600 !important;
+  margin-top: 0.75em !important;
+  margin-bottom: 0.25em !important;
+  color: var(--foreground) !important;
 }
 
-.tiptap blockquote {
-  border-left: 3px solid var(--border);
-  padding-left: 1em;
-  margin-left: 0;
-  color: var(--muted-foreground);
-  font-style: italic;
+/* ---- Paragraphs ---- */
+.tiptap p,
+.prose p {
+  margin-top: 0 !important;
+  margin-bottom: 0.75em !important;
+  line-height: 1.75 !important;
 }
 
-.tiptap code {
-  background: var(--muted);
-  border-radius: 0.25em;
-  padding: 0.15em 0.3em;
-  font-size: 0.875em;
-  font-family: "SF Mono", "Fira Code", monospace;
+/* ---- Blockquotes ---- */
+.tiptap blockquote,
+.prose blockquote {
+  border-left: 4px solid oklch(0.7 0.12 250) !important;
+  padding-left: 1.2em !important;
+  margin-left: 0 !important;
+  margin-top: 0.75em !important;
+  margin-bottom: 0.75em !important;
+  color: var(--muted-foreground) !important;
+  font-style: italic !important;
+  background: oklch(0.7 0.05 250 / 0.06);
+  border-radius: 0 0.375em 0.375em 0;
+  padding-top: 0.5em;
+  padding-bottom: 0.5em;
+  padding-right: 1em;
 }
 
-.tiptap pre {
-  background: var(--muted);
-  border-radius: 0.5em;
-  padding: 1em;
-  overflow-x: auto;
-  margin: 1em 0;
+/* ---- Inline code ---- */
+.tiptap code,
+.prose code {
+  background: var(--code-bg) !important;
+  border: 1px solid var(--code-border) !important;
+  border-radius: 0.3em !important;
+  padding: 0.15em 0.4em !important;
+  font-size: 0.85em !important;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace !important;
+  color: oklch(0.5 0.15 350) !important;
 }
 
-.tiptap pre code {
-  background: none;
-  padding: 0;
-  border-radius: 0;
-  font-size: 0.85em;
+.dark .tiptap code,
+.dark .prose code {
+  color: oklch(0.8 0.12 350) !important;
 }
 
+/* ---- Code blocks ---- */
+.tiptap pre,
+.prose pre {
+  background: var(--pre-bg) !important;
+  color: var(--pre-fg) !important;
+  border-radius: 0.5em !important;
+  padding: 1em 1.25em !important;
+  overflow-x: auto !important;
+  margin: 1.25em 0 !important;
+  border: 1px solid oklch(0.3 0 0 / 0.2);
+  font-size: 0.875rem !important;
+  line-height: 1.6 !important;
+}
+
+.tiptap pre code,
+.prose pre code {
+  background: none !important;
+  border: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  font-size: 0.875em !important;
+  color: inherit !important;
+}
+
+/* ---- Lists ---- */
 .tiptap ul,
-.tiptap ol {
-  padding-left: 1.5em;
-  margin-bottom: 0.75em;
+.prose ul {
+  list-style-type: disc !important;
+  padding-left: 1.75em !important;
+  margin-top: 0.5em !important;
+  margin-bottom: 0.75em !important;
 }
 
-.tiptap li {
-  margin-bottom: 0.25em;
+.tiptap ol,
+.prose ol {
+  list-style-type: decimal !important;
+  padding-left: 1.75em !important;
+  margin-top: 0.5em !important;
+  margin-bottom: 0.75em !important;
 }
 
+.tiptap li,
+.prose li {
+  margin-bottom: 0.35em !important;
+  line-height: 1.7 !important;
+}
+
+.tiptap li > p,
+.prose li > p {
+  margin-bottom: 0.25em !important;
+}
+
+.tiptap li > ul,
+.tiptap li > ol,
+.prose li > ul,
+.prose li > ol {
+  margin-top: 0.25em !important;
+  margin-bottom: 0 !important;
+}
+
+/* Task lists */
 .tiptap ul[data-type="taskList"] {
-  list-style: none;
-  padding-left: 0;
+  list-style: none !important;
+  padding-left: 0 !important;
 }
 
 .tiptap ul[data-type="taskList"] li {
@@ -216,25 +335,192 @@
   color: var(--muted-foreground);
 }
 
-.tiptap hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 1.5em 0;
+/* ---- Horizontal rule ---- */
+.tiptap hr,
+.prose hr {
+  border: none !important;
+  border-top: 1px solid var(--border) !important;
+  margin: 2em 0 !important;
 }
 
-.tiptap a {
-  color: var(--primary);
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
+/* ---- Links ---- */
+.tiptap a,
+.prose a {
+  color: oklch(0.55 0.2 250) !important;
+  text-decoration: underline !important;
+  text-underline-offset: 0.2em !important;
+  text-decoration-color: oklch(0.55 0.2 250 / 0.4) !important;
+  transition: color 0.15s, text-decoration-color 0.15s;
 }
 
-.tiptap strong {
-  font-weight: 700;
+.tiptap a:hover,
+.prose a:hover {
+  color: oklch(0.45 0.22 250) !important;
+  text-decoration-color: oklch(0.45 0.22 250) !important;
 }
 
-.tiptap img {
-  max-width: 100%;
+.dark .tiptap a,
+.dark .prose a {
+  color: oklch(0.75 0.15 250) !important;
+  text-decoration-color: oklch(0.75 0.15 250 / 0.4) !important;
+}
+
+.dark .tiptap a:hover,
+.dark .prose a:hover {
+  color: oklch(0.85 0.12 250) !important;
+  text-decoration-color: oklch(0.85 0.12 250) !important;
+}
+
+/* ---- Bold / Italic ---- */
+.tiptap strong,
+.prose strong {
+  font-weight: 700 !important;
+}
+
+.tiptap em,
+.prose em {
+  font-style: italic !important;
+}
+
+/* ---- Images ---- */
+.tiptap img,
+.prose img {
+  max-width: 100% !important;
   border-radius: 0.5em;
+  margin: 1em 0 !important;
+  box-shadow: 0 2px 8px oklch(0 0 0 / 0.1);
+}
+
+/* ---- Tables ---- */
+.tiptap table,
+.prose table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 1em 0 !important;
+}
+
+.tiptap th,
+.prose th {
+  border-bottom: 2px solid var(--border) !important;
+  padding: 0.6em 0.75em !important;
+  text-align: left !important;
+  font-weight: 600 !important;
+  background: oklch(0 0 0 / 0.02);
+}
+
+.tiptap td,
+.prose td {
+  border-bottom: 1px solid var(--border) !important;
+  padding: 0.5em 0.75em !important;
+}
+
+.dark .tiptap th,
+.dark .prose th {
+  background: oklch(1 1 1 / 0.03);
+}
+
+/*
+ * ============================================================
+ *  Syntax highlighting — works with lowlight / highlight.js
+ * ============================================================
+ */
+
+/* Comments */
+.hljs-comment,
+.hljs-quote {
+  color: oklch(0.55 0 0) !important;
+  font-style: italic;
+}
+
+/* Keywords */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-addition {
+  color: oklch(0.7 0.2 330) !important;
+}
+
+/* Strings */
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp {
+  color: oklch(0.7 0.16 145) !important;
+}
+
+/* Numbers */
+.hljs-number,
+.hljs-literal {
+  color: oklch(0.75 0.15 60) !important;
+}
+
+/* Function/class names */
+.hljs-title,
+.hljs-section,
+.hljs-name {
+  color: oklch(0.72 0.18 250) !important;
+  font-weight: 600;
+}
+
+/* Built-in, type */
+.hljs-built_in,
+.hljs-type {
+  color: oklch(0.72 0.14 200) !important;
+}
+
+/* Attributes, variables */
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable {
+  color: oklch(0.78 0.14 75) !important;
+}
+
+/* Symbols, bullets */
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link {
+  color: oklch(0.72 0.16 30) !important;
+}
+
+/* Meta, deletion */
+.hljs-meta {
+  color: oklch(0.6 0.1 250) !important;
+}
+
+.hljs-deletion {
+  color: oklch(0.65 0.2 25) !important;
+}
+
+/* Emphasis */
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
+
+/*
+ * ============================================================
+ *  AI panel — smaller prose variant
+ * ============================================================
+ */
+.ai-markdown.prose {
+  font-size: 0.8125rem !important;
+  line-height: 1.6 !important;
+}
+
+.ai-markdown.prose h1 { font-size: 1.3em !important; border-bottom: none; padding-bottom: 0; }
+.ai-markdown.prose h2 { font-size: 1.15em !important; }
+.ai-markdown.prose h3 { font-size: 1.05em !important; }
+.ai-markdown.prose p { margin-bottom: 0.5em !important; }
+.ai-markdown.prose pre {
+  font-size: 0.8em !important;
+  padding: 0.75em !important;
+  margin: 0.5em 0 !important;
+}
+.ai-markdown.prose ul,
+.ai-markdown.prose ol {
+  margin-bottom: 0.5em !important;
+  padding-left: 1.25em !important;
 }
 
 /* Collaboration cursor styles */
