@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useState, useMemo, useRef } from "react";
 import CodeMirror from "@uiw/react-codemirror";
+import type { ViewUpdate } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { EditorView } from "@codemirror/view";
@@ -10,6 +11,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
+import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { EditorToolbar } from "./EditorToolbar";
 
 // HTML → Markdown converter for legacy Tiptap content
@@ -51,7 +53,7 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
 marked.use({ renderer });
 
 export function Editor() {
-  const { activeDocId, documents, updateDocument, theme, themeSettings } = useAppStore();
+  const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
   const setView = useEditorStore((s) => s.setView);
@@ -74,6 +76,7 @@ export function Editor() {
     () => [
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       EditorView.lineWrapping,
+      markdownShortcuts,
     ],
     [],
   );
@@ -83,15 +86,37 @@ export function Editor() {
     return theme === "dark" ? preset.dark : preset.light;
   }, [theme, themeSettings.editorTheme]);
 
-  // Convert markdown to HTML for preview
+  // Convert markdown to HTML for preview (with wiki-link support)
   const previewHtml = useMemo(() => {
     if (!activeDoc?.content) return "";
     try {
-      return marked.parse(activeDoc.content) as string;
+      let html = marked.parse(activeDoc.content) as string;
+      // Replace [[doc title]] with clickable links
+      html = html.replace(/\[\[([^\]]+)\]\]/g, (_match, title: string) => {
+        const target = documents.find(
+          (d) => d.title.toLowerCase() === title.trim().toLowerCase(),
+        );
+        if (target) {
+          return `<a href="#" class="wikilink" data-doc-id="${target.id}" title="${target.title}">${title}</a>`;
+        }
+        return `<span class="wikilink-missing" title="Document not found">${title}</span>`;
+      });
+      return html;
     } catch {
       return activeDoc.content;
     }
-  }, [activeDoc?.content]);
+  }, [activeDoc?.content, documents]);
+
+  // Backlinks: documents that link to this one
+  const backlinks = useMemo(() => {
+    if (!activeDoc) return [];
+    const title = activeDoc.title.toLowerCase();
+    return documents.filter(
+      (d) =>
+        d.id !== activeDoc.id &&
+        d.content.match(new RegExp(`\\[\\[${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\]`, "i")),
+    );
+  }, [activeDoc, documents]);
 
   // Build preview theme CSS variables as a <style> tag override
   const previewThemeCss = useMemo(() => {
@@ -132,13 +157,25 @@ export function Editor() {
     [setView],
   );
 
-  // Cleanup on unmount or doc change
+  // Keep the store's view reference in sync on every editor update
+  const onUpdate = useCallback(
+    (update: ViewUpdate) => {
+      if (update.view !== viewRef.current) {
+        viewRef.current = update.view;
+        setView(update.view);
+      }
+    },
+    [setView],
+  );
+
+  // Cleanup on unmount only
   useEffect(() => {
     return () => {
       setView(null);
       viewRef.current = null;
     };
-  }, [activeDocId, setView]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!activeDoc) {
     return (
@@ -160,29 +197,34 @@ export function Editor() {
         onPreviewModeChange={setPreviewMode}
       />
       <div className="flex flex-1 overflow-hidden">
-        {/* Editor pane — raw markdown with syntax highlighting */}
-        {previewMode !== "preview" && (
-          <div
-            className={`overflow-auto editor-scroll ${previewMode === "split" ? "w-1/2 border-r border-border" : "flex-1"}`}
-          >
-            <CodeMirror
-              value={activeDoc.content || ""}
-              onChange={onChange}
-              extensions={extensions}
-              theme={editorTheme}
-              onCreateEditor={onCreateEditor}
-              basicSetup={{
-                lineNumbers: true,
-                highlightActiveLineGutter: true,
-                highlightActiveLine: true,
-                foldGutter: true,
-                bracketMatching: true,
-                closeBrackets: true,
-                indentOnInput: true,
-              }}
-            />
-          </div>
-        )}
+        {/* Editor pane — always mounted, hidden in preview-only mode */}
+        <div
+          className={`overflow-auto editor-scroll ${
+            previewMode === "preview"
+              ? "hidden"
+              : previewMode === "split"
+                ? "w-1/2 border-r border-border"
+                : "flex-1"
+          }`}
+        >
+          <CodeMirror
+            value={activeDoc.content || ""}
+            onChange={onChange}
+            extensions={extensions}
+            theme={editorTheme}
+            onCreateEditor={onCreateEditor}
+            onUpdate={onUpdate}
+            basicSetup={{
+              lineNumbers: true,
+              highlightActiveLineGutter: true,
+              highlightActiveLine: true,
+              foldGutter: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              indentOnInput: true,
+            }}
+          />
+        </div>
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && (
           <div
@@ -195,7 +237,36 @@ export function Editor() {
             <div
               className="prose max-w-none px-12 py-8"
               dangerouslySetInnerHTML={{ __html: previewHtml }}
+              onClick={(e) => {
+                const target = (e.target as HTMLElement).closest(".wikilink");
+                if (target) {
+                  e.preventDefault();
+                  const docId = target.getAttribute("data-doc-id");
+                  if (docId) setActiveDocId(docId);
+                }
+              }}
             />
+            {/* Backlinks */}
+            {backlinks.length > 0 && (
+              <div className="px-12 pb-8">
+                <div className="border-t border-border pt-4 mt-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wider mb-2">
+                    Backlinks ({backlinks.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {backlinks.map((bl) => (
+                      <button
+                        key={bl.id}
+                        onClick={() => setActiveDocId(bl.id)}
+                        className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-1 text-xs text-secondary-foreground hover:bg-accent transition-colors"
+                      >
+                        {bl.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

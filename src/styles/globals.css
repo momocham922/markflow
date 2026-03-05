@@ -614,6 +614,24 @@
   padding-left: 1.25em !important;
 }
 
+/* Wiki links */
+.prose .wikilink {
+  color: var(--prose-links) !important;
+  text-decoration: none !important;
+  border-bottom: 1px dashed var(--prose-links) !important;
+  cursor: pointer;
+  padding-bottom: 1px;
+}
+.prose .wikilink:hover {
+  color: var(--prose-links-hover) !important;
+  border-bottom-style: solid !important;
+}
+.prose .wikilink-missing {
+  color: var(--muted-foreground) !important;
+  border-bottom: 1px dashed var(--destructive) !important;
+  padding-bottom: 1px;
+}
+
 /* Collaboration cursor styles */
 .collaboration-cursor__caret {
   border-left: 1px solid var(--color, #333);

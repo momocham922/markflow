@@ -478,7 +478,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       variant="ghost"
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
-                      onClick={() => replaceSelection(msg.content)}
+                      onClick={() => {
+                        if (!replaceSelection(msg.content)) {
+                          alert("エディタが利用できません。エディタ表示に切り替えてください。");
+                        }
+                      }}
                       title="Replace selection / Insert at cursor"
                     >
                       <Replace className="h-2.5 w-2.5" />
@@ -487,7 +491,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       variant="ghost"
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
-                      onClick={() => appendToDoc(msg.content)}
+                      onClick={() => {
+                        if (!appendToDoc(msg.content)) {
+                          alert("エディタが利用できません。エディタ表示に切り替えてください。");
+                        }
+                      }}
                       title="Append to document"
                     >
                       <CornerDownLeft className="h-2.5 w-2.5" />

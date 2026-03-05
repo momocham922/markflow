@@ -17,6 +17,8 @@ export interface DbDocument {
   updated_at: number;
   is_dirty: number;
   synced_at: number | null;
+  folder: string;
+  tags: string;
 }
 
 export async function getAllDocuments(): Promise<DbDocument[]> {
@@ -41,14 +43,18 @@ export async function upsertDocument(doc: {
   content: string;
   createdAt: number;
   updatedAt: number;
+  folder?: string;
+  tags?: string[];
 }): Promise<void> {
   const database = await getDb();
+  const folder = doc.folder ?? "/";
+  const tags = JSON.stringify(doc.tags ?? []);
   await database.execute(
-    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty)
-     VALUES ($1, $2, $3, $4, $5, 1)
+    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags)
+     VALUES ($1, $2, $3, $4, $5, 1, $6, $7)
      ON CONFLICT(id) DO UPDATE SET
-       title = $2, content = $3, updated_at = $5, is_dirty = 1`,
-    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt],
+       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7`,
+    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags],
   );
 }
 

@@ -123,6 +123,13 @@ pub fn run() {
                             CREATE INDEX IF NOT EXISTS idx_versions_doc ON versions(document_id, created_at DESC);",
                             kind: tauri_plugin_sql::MigrationKind::Up,
                         },
+                        tauri_plugin_sql::Migration {
+                            version: 3,
+                            description: "add folder and tags columns",
+                            sql: "ALTER TABLE documents ADD COLUMN folder TEXT NOT NULL DEFAULT '/';
+                            ALTER TABLE documents ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+                            kind: tauri_plugin_sql::MigrationKind::Up,
+                        },
                     ],
                 )
                 .build(),

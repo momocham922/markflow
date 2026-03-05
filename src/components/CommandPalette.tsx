@@ -69,6 +69,8 @@ export function CommandPalette({
       content: "",
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      folder: "/",
+      tags: [],
     };
     addDocument(doc);
     setActiveDocId(doc.id);

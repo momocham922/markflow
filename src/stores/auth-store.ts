@@ -96,6 +96,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             content: cloudDoc.content,
             createdAt: cloudDoc.createdAt?.toMillis() ?? Date.now(),
             updatedAt: cloudDoc.updatedAt?.toMillis() ?? Date.now(),
+            folder: "/",
+            tags: cloudDoc.tags ?? [],
           };
           await appStore.addDocument(doc);
         }
