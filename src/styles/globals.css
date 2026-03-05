@@ -555,6 +555,50 @@
   background: oklch(0.5 0 0 / 0.5);
 }
 
+/* ---- App-wide custom scrollbars ---- */
+/* Editor pane + CodeMirror scroller */
+.editor-scroll::-webkit-scrollbar,
+.cm-editor .cm-scroller::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.editor-scroll::-webkit-scrollbar-track,
+.cm-editor .cm-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+.editor-scroll::-webkit-scrollbar-thumb,
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb {
+  background: oklch(0.5 0 0 / 0.2);
+  border-radius: 3px;
+}
+.editor-scroll::-webkit-scrollbar-thumb:hover,
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.5 0 0 / 0.4);
+}
+.editor-scroll::-webkit-scrollbar-corner,
+.cm-editor .cm-scroller::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Preview pane scrollbar */
+.preview-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.preview-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.preview-scroll::-webkit-scrollbar-thumb {
+  background: oklch(0.5 0 0 / 0.2);
+  border-radius: 3px;
+}
+.preview-scroll::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.5 0 0 / 0.4);
+}
+.preview-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .ai-markdown.prose h1 { font-size: 1.3em !important; border-bottom: none; padding-bottom: 0; }
 .ai-markdown.prose h2 { font-size: 1.15em !important; }
 .ai-markdown.prose h3 { font-size: 1.05em !important; }

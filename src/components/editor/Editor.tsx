@@ -163,7 +163,7 @@ export function Editor() {
         {/* Editor pane — raw markdown with syntax highlighting */}
         {previewMode !== "preview" && (
           <div
-            className={`overflow-auto ${previewMode === "split" ? "w-1/2 border-r border-border" : "flex-1"}`}
+            className={`overflow-auto editor-scroll ${previewMode === "split" ? "w-1/2 border-r border-border" : "flex-1"}`}
           >
             <CodeMirror
               value={activeDoc.content || ""}
@@ -186,7 +186,7 @@ export function Editor() {
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && (
           <div
-            className={`overflow-auto ${previewMode === "split" ? "w-1/2" : "flex-1"}`}
+            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"}`}
           >
             {previewThemeCss && <style>{previewThemeCss}</style>}
             {themeSettings.customPreviewCss && (
