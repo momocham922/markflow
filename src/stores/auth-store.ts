@@ -86,7 +86,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const appStore = useAppStore.getState();
       const localDocs = appStore.documents;
 
-      // Merge: cloud docs that don't exist locally get added
+      // Claim unclaimed local docs for this user (first login on this device)
+      for (const local of localDocs) {
+        if (!local.ownerId) {
+          appStore.updateDocument(local.id, { ownerId: user.uid });
+        }
+      }
+
+      // Merge: cloud docs that don't exist locally get added,
+      // existing docs get folder/tags updated from cloud
       for (const cloudDoc of cloudDocs) {
         const local = localDocs.find((d) => d.id === cloudDoc.id);
         if (!local) {
@@ -96,10 +104,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             content: cloudDoc.content,
             createdAt: cloudDoc.createdAt?.toMillis() ?? Date.now(),
             updatedAt: cloudDoc.updatedAt?.toMillis() ?? Date.now(),
-            folder: "/",
+            folder: cloudDoc.folder ?? "/",
             tags: cloudDoc.tags ?? [],
+            ownerId: user.uid,
           };
           await appStore.addDocument(doc);
+        } else {
+          // Update ownerId and restore folder from cloud if needed
+          const updates: Partial<Document> = { ownerId: user.uid };
+          if (cloudDoc.folder && cloudDoc.folder !== "/" && local.folder === "/") {
+            updates.folder = cloudDoc.folder;
+          }
+          appStore.updateDocument(local.id, updates);
         }
       }
     } catch (error) {
@@ -126,12 +142,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ syncing: true });
     try {
       const { documents } = useAppStore.getState();
-      for (const doc of documents) {
+      // Only sync docs owned by this user (or unclaimed local docs)
+      const myDocs = documents.filter(
+        (d) => !d.ownerId || d.ownerId === user.uid,
+      );
+      for (const doc of myDocs) {
         const payload = {
           id: doc.id,
           title: doc.title,
           content: doc.content,
           ownerId: user.uid,
+          folder: doc.folder,
+          tags: doc.tags,
         };
         try {
           await saveDocumentToFirestore(payload);

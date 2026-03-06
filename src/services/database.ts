@@ -39,7 +39,10 @@ async function ensureMigrations(database: Database) {
       await database.execute(`ALTER TABLE documents ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`);
     } catch { /* already exists */ }
 
-    console.log("[db] migrations verified OK");
+    // owner_id column (migration v4)
+    try {
+      await database.execute(`ALTER TABLE documents ADD COLUMN owner_id TEXT DEFAULT NULL`);
+    } catch { /* already exists */ }
   } catch (err) {
     console.error("[db] migration repair failed:", err);
   }
@@ -55,6 +58,7 @@ export interface DbDocument {
   synced_at: number | null;
   folder: string;
   tags: string;
+  owner_id: string | null;
 }
 
 export async function getAllDocuments(): Promise<DbDocument[]> {
@@ -81,16 +85,18 @@ export async function upsertDocument(doc: {
   updatedAt: number;
   folder?: string;
   tags?: string[];
+  ownerId?: string | null;
 }): Promise<void> {
   const database = await getDb();
   const folder = doc.folder ?? "/";
   const tags = JSON.stringify(doc.tags ?? []);
+  const ownerId = doc.ownerId ?? null;
   await database.execute(
-    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags)
-     VALUES ($1, $2, $3, $4, $5, 1, $6, $7)
+    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags, owner_id)
+     VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8)
      ON CONFLICT(id) DO UPDATE SET
-       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7`,
-    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags],
+       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7, owner_id = $8`,
+    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags, ownerId],
   );
 }
 

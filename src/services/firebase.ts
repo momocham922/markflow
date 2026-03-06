@@ -152,6 +152,7 @@ export interface FirestoreDocument {
   ownerId: string;
   collaborators: { uid: string; role: "editor" | "viewer"; addedAt: number }[];
   tags: string[];
+  folder: string;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
   shareLink?: { enabled: boolean; token: string; permission: "view" | "edit" };
@@ -186,6 +187,8 @@ export async function saveDocumentToFirestore(docData: {
   title: string;
   content: string;
   ownerId: string;
+  folder?: string;
+  tags?: string[];
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(
@@ -194,6 +197,8 @@ export async function saveDocumentToFirestore(docData: {
       title: docData.title,
       content: docData.content,
       ownerId: docData.ownerId,
+      folder: docData.folder ?? "/",
+      tags: docData.tags ?? [],
       updatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -205,6 +210,8 @@ export async function createDocumentInFirestore(docData: {
   title: string;
   content: string;
   ownerId: string;
+  folder?: string;
+  tags?: string[];
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(ref, {
@@ -212,7 +219,8 @@ export async function createDocumentInFirestore(docData: {
     content: docData.content,
     ownerId: docData.ownerId,
     collaborators: [],
-    tags: [],
+    tags: docData.tags ?? [],
+    folder: docData.folder ?? "/",
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });

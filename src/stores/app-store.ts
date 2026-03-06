@@ -9,6 +9,7 @@ export interface Document {
   updatedAt: number;
   folder: string;
   tags: string[];
+  ownerId: string | null;
 }
 
 export interface ThemeSettings {
@@ -160,6 +161,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           updatedAt: r.updated_at,
           folder: r.folder || "/",
           tags,
+          ownerId: r.owner_id ?? null,
         };
       });
 
