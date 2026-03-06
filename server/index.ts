@@ -27,8 +27,9 @@ const HOST = process.env.HOST || "0.0.0.0";
 const messageSync = 0;
 const messageAwareness = 1;
 
-// Store Yjs documents by room name
+// Store Yjs documents by room name (value is a Promise to prevent race conditions)
 const docs = new Map<string, Y.Doc>();
+const docLoading = new Map<string, Promise<Y.Doc>>();
 // Track connections per document
 const conns = new Map<string, Map<WebSocket, Set<number>>>();
 // Awareness instances per document
@@ -79,32 +80,43 @@ function scheduleSave(docName: string, doc: Y.Doc) {
 
 // ─── Yjs Document Management ────────────────────────────────────
 
-async function getYDoc(docName: string): Promise<Y.Doc> {
-  let doc = docs.get(docName);
-  if (doc) return doc;
+function getYDoc(docName: string): Promise<Y.Doc> {
+  const existing = docs.get(docName);
+  if (existing) return Promise.resolve(existing);
 
-  doc = new Y.Doc();
+  // Deduplicate concurrent loads: return the same promise if already loading
+  const loading = docLoading.get(docName);
+  if (loading) return loading;
 
-  // Restore from Firestore before accepting connections
-  const snapshot = await loadSnapshot(docName);
-  if (snapshot) {
-    Y.applyUpdate(doc, snapshot);
-  }
+  const promise = (async () => {
+    const doc = new Y.Doc();
 
-  doc.on("update", (update: Uint8Array, _origin: unknown) => {
-    // Broadcast to connected clients
-    const encoder = encoding.createEncoder();
-    encoding.writeVarUint(encoder, messageSync);
-    syncProtocol.writeUpdate(encoder, update);
-    const message = encoding.toUint8Array(encoder);
-    broadcastToRoom(docName, message, null);
+    // Restore from Firestore before accepting connections
+    const snapshot = await loadSnapshot(docName);
+    if (snapshot) {
+      Y.applyUpdate(doc, snapshot);
+    }
 
-    // Schedule persistence
-    scheduleSave(docName, doc!);
-  });
+    doc.on("update", (update: Uint8Array, origin: unknown) => {
+      // Broadcast to connected clients, excluding the sender
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, messageSync);
+      syncProtocol.writeUpdate(encoder, update);
+      const message = encoding.toUint8Array(encoder);
+      const exclude = origin instanceof WebSocket ? origin : null;
+      broadcastToRoom(docName, message, exclude);
 
-  docs.set(docName, doc);
-  return doc;
+      // Schedule persistence
+      scheduleSave(docName, doc);
+    });
+
+    docs.set(docName, doc);
+    docLoading.delete(docName);
+    return doc;
+  })();
+
+  docLoading.set(docName, promise);
+  return promise;
 }
 
 function getAwareness(docName: string, doc: Y.Doc): awarenessProtocol.Awareness {
@@ -164,6 +176,7 @@ async function cleanupRoom(docName: string) {
 
   awarenesses.delete(docName);
   conns.delete(docName);
+  docLoading.delete(docName);
   console.log(`Room ${docName} cleaned up and persisted`);
 }
 
@@ -236,7 +249,8 @@ wss.on("connection", async (ws, req) => {
         case messageSync: {
           const encoder = encoding.createEncoder();
           encoding.writeVarUint(encoder, messageSync);
-          syncProtocol.readSyncMessage(decoder, encoder, doc, null);
+          // Pass ws as origin so the update handler can exclude the sender
+          syncProtocol.readSyncMessage(decoder, encoder, doc, ws);
           if (encoding.length(encoder) > 1) {
             ws.send(encoding.toUint8Array(encoder));
           }
@@ -244,6 +258,16 @@ wss.on("connection", async (ws, req) => {
         }
         case messageAwareness: {
           const update = decoding.readVarUint8Array(decoder);
+          // Track which client IDs this connection controls
+          // Format: [len, clientID, clock, stateJSON, clientID, clock, stateJSON, ...]
+          const decoder2 = decoding.createDecoder(update);
+          const len = decoding.readVarUint(decoder2);
+          for (let i = 0; i < len; i++) {
+            const clientId = decoding.readVarUint(decoder2);
+            controlledIds.add(clientId);
+            decoding.readVarUint(decoder2); // skip clock
+            decoding.readVarString(decoder2); // skip state JSON
+          }
           awarenessProtocol.applyAwarenessUpdate(awareness, update, ws);
           break;
         }
