@@ -155,6 +155,7 @@ export interface FirestoreDocument {
   folder: string;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+  teamId?: string | null;
   shareLink?: { enabled: boolean; token: string; permission: "view" | "edit" };
 }
 
