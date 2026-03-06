@@ -44,6 +44,7 @@ import {
   notifySlack,
   type SlackNotifyConfig,
 } from "@/services/slack-notify";
+import { TeamManageDialog } from "@/components/TeamManageDialog";
 
 interface ShareDialogProps {
   open: boolean;
@@ -83,6 +84,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     events: { onEdit: true, onShare: true, onComment: true },
   });
   const [slackSaved, setSlackSaved] = useState(false);
+  const [teamManageOpen, setTeamManageOpen] = useState(false);
 
   // Load existing share data when dialog opens
   useEffect(() => {
@@ -456,40 +458,52 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
             </div>
 
             {/* Share with team */}
-            {teams.length > 0 && (
-              <>
-                <Separator />
-                <div className="space-y-2">
-                  <Label className="text-xs flex items-center gap-1.5">
-                    <Users className="h-3.5 w-3.5" />
-                    Share with Team
-                  </Label>
-                  <div className="space-y-1">
-                    {teams.map((team) => (
-                      <div
-                        key={team.id}
-                        className="flex items-center justify-between rounded-md border border-border p-2"
-                      >
-                        <div>
-                          <div className="text-xs font-medium">{team.name}</div>
-                          <div className="text-[10px] text-muted-foreground">
-                            {team.members.length} members
-                          </div>
+            <Separator />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs flex items-center gap-1.5">
+                  <Users className="h-3.5 w-3.5" />
+                  Teams
+                </Label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-[10px]"
+                  onClick={() => setTeamManageOpen(true)}
+                >
+                  Manage Teams
+                </Button>
+              </div>
+              {teams.length > 0 ? (
+                <div className="space-y-1">
+                  {teams.map((team) => (
+                    <div
+                      key={team.id}
+                      className="flex items-center justify-between rounded-md border border-border p-2"
+                    >
+                      <div>
+                        <div className="text-xs font-medium">{team.name}</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          {team.members.length} members
                         </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={() => handleShareWithTeam(team)}
-                        >
-                          Share
-                        </Button>
                       </div>
-                    ))}
-                  </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => handleShareWithTeam(team)}
+                      >
+                        Share
+                      </Button>
+                    </div>
+                  ))}
                 </div>
-              </>
-            )}
+              ) : (
+                <p className="text-[10px] text-muted-foreground text-center py-2">
+                  No teams yet. Create one to share with groups.
+                </p>
+              )}
+            </div>
 
             <Separator />
 
@@ -629,6 +643,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           </div>
         )}
       </DialogContent>
+      <TeamManageDialog open={teamManageOpen} onOpenChange={setTeamManageOpen} />
     </Dialog>
   );
 }

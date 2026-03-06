@@ -9,6 +9,7 @@ import { VersionPanel, type DiffState } from "@/components/version/VersionPanel"
 import { DiffView } from "@/components/version/DiffView";
 import { AiPanel } from "@/components/ai-panel/AiPanel";
 import { ShareDialog } from "@/components/ShareDialog";
+import { SharedDocView } from "@/components/SharedDocView";
 import { CommandPalette } from "@/components/CommandPalette";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -40,6 +41,20 @@ function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
   const [shareOpen, setShareOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
+  const [shareToken, setShareToken] = useState<string | null>(() => {
+    const match = window.location.hash.match(/^#\/share\/(.+)$/);
+    return match ? match[1] : null;
+  });
+
+  // Listen for hash changes (share links)
+  useEffect(() => {
+    const handleHash = () => {
+      const match = window.location.hash.match(/^#\/share\/(.+)$/);
+      setShareToken(match ? match[1] : null);
+    };
+    window.addEventListener("hashchange", handleHash);
+    return () => window.removeEventListener("hashchange", handleHash);
+  }, []);
 
   useEffect(() => {
     loadDocuments();
@@ -85,6 +100,29 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
       <div className="flex h-screen w-screen items-center justify-center bg-background">
         <div className="text-sm text-muted-foreground">Loading...</div>
       </div>
+    );
+  }
+
+  // Shared document view (via hash route)
+  if (shareToken) {
+    return (
+      <TooltipProvider>
+        <div className="flex h-screen w-screen flex-col overflow-hidden bg-background">
+          <div
+            className="h-7 w-full shrink-0"
+            onMouseDown={() => getCurrentWindow().startDragging()}
+          />
+          <div className="flex-1 overflow-hidden">
+            <SharedDocView
+              token={shareToken}
+              onBack={() => {
+                window.location.hash = "";
+                setShareToken(null);
+              }}
+            />
+          </div>
+        </div>
+      </TooltipProvider>
     );
   }
 

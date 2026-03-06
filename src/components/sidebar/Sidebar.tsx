@@ -11,13 +11,16 @@ import {
   ChevronDown,
   Tag,
   X,
+  Share2,
 } from "lucide-react";
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
+import { useAuthStore } from "@/stores/auth-store";
+import { fetchSharedWithMe } from "@/services/sharing";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -87,6 +90,19 @@ export function Sidebar() {
   const [newFolderName, setNewFolderName] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
+
+  // Shared with me
+  const user = useAuthStore((s) => s.user);
+  const [sharedDocs, setSharedDocs] = useState<{ id: string; title: string; role: "editor" | "viewer" }[]>([]);
+  const [sharedExpanded, setSharedExpanded] = useState(true);
+
+  useEffect(() => {
+    if (!user?.email) {
+      setSharedDocs([]);
+      return;
+    }
+    fetchSharedWithMe(user.email).then(setSharedDocs).catch(() => {});
+  }, [user?.email]);
 
   // Search: filter by title AND content
   const isSearching = search.trim().length > 0;
@@ -442,6 +458,47 @@ export function Sidebar() {
           )}
         </div>
       </ScrollArea>
+
+      {/* Shared with me */}
+      {user && sharedDocs.length > 0 && (
+        <>
+          <Separator />
+          <div className="px-1">
+            <button
+              className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => setSharedExpanded((v) => !v)}
+            >
+              {sharedExpanded ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+              <Share2 className="h-3 w-3" />
+              <span className="font-medium">Shared with me</span>
+              <span className="ml-auto text-[10px]">{sharedDocs.length}</span>
+            </button>
+            {sharedExpanded && (
+              <div className="space-y-0.5 pb-1">
+                {sharedDocs.map((sd) => (
+                  <button
+                    key={sd.id}
+                    onClick={() => {
+                      window.location.hash = `#/shared/${sd.id}`;
+                    }}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                  >
+                    <FileText className="h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1 truncate">{sd.title}</span>
+                    <span className="text-[9px] text-muted-foreground capitalize shrink-0">
+                      {sd.role}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Footer */}
       <Separator />
