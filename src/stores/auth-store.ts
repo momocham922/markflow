@@ -106,6 +106,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       for (const cloudDoc of cloudDocs) {
         const local = localDocs.find((d) => d.id === cloudDoc.id);
         if (!local) {
+          const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
+          const hasShareLink = cloudDoc.shareLink?.enabled === true;
           const doc: Document = {
             id: cloudDoc.id,
             title: cloudDoc.title,
@@ -115,11 +117,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             folder: cloudDoc.folder ?? "/",
             tags: cloudDoc.tags ?? [],
             ownerId: user.uid,
+            isShared: hasCollaborators || hasShareLink,
           };
           await appStore.addDocument(doc);
         } else {
-          // Update ownerId and restore folder from cloud if needed
-          const updates: Partial<Document> = { ownerId: user.uid };
+          // Update ownerId, sharing status, and restore folder from cloud if needed
+          const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
+          const hasShareLink = cloudDoc.shareLink?.enabled === true;
+          const updates: Partial<Document> = {
+            ownerId: user.uid,
+            isShared: hasCollaborators || hasShareLink,
+          };
           if (cloudDoc.folder && cloudDoc.folder !== "/" && local.folder === "/") {
             updates.folder = cloudDoc.folder;
           }

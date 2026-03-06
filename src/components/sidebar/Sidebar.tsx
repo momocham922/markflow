@@ -342,6 +342,9 @@ export function Sidebar() {
     >
       <FileText className="h-3.5 w-3.5 shrink-0" />
       <span className="flex-1 truncate">{doc.title}</span>
+      {doc.isShared && (
+        <Share2 className="h-3 w-3 shrink-0 text-muted-foreground" title="Shared" />
+      )}
       {doc.tags.length > 0 && (
         <span className="text-[9px] text-muted-foreground shrink-0">
           {doc.tags.length}

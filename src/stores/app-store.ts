@@ -11,6 +11,7 @@ export interface Document {
   tags: string[];
   ownerId: string | null;
   teamId?: string | null;
+  isShared?: boolean;
 }
 
 export interface ThemeSettings {

@@ -72,7 +72,7 @@ export function Editor() {
         updateDocument(activeDocId, { content, updatedAt: Date.now() });
         const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
-      }, 300);
+      }, 100);
     },
     [activeDocId, updateDocument],
   );
@@ -263,12 +263,12 @@ export function Editor() {
         >
           <CodeMirror
             // Single key per document — no remount when collab mode changes.
-            // Controlled mode always: value prop kept in sync by both onChange
-            // (local edits) and handleCollabChange (Yjs remote edits).
-            // yCollab extension syncs editor ↔ Yjs via diffs when added.
+            // When yCollab is active: value/onChange are omitted so yCollab
+            // fully owns the document (remote edits flow via CRDT, not value prop).
+            // When yCollab is NOT active: controlled mode with value/onChange.
             key={activeDocId}
-            value={activeDoc.content || ""}
-            onChange={onChange}
+            value={collabExtension ? undefined : (activeDoc.content || "")}
+            onChange={collabExtension ? undefined : onChange}
             extensions={extensions}
             theme={editorTheme}
             onCreateEditor={onCreateEditor}

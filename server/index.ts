@@ -142,7 +142,7 @@ function getAwareness(docName: string, doc: Y.Doc): awarenessProtocol.Awareness 
       "update",
       (
         { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
-        _origin: unknown,
+        origin: unknown,
       ) => {
         const changedClients = added.concat(updated, removed);
         const encoder = encoding.createEncoder();
@@ -152,7 +152,9 @@ function getAwareness(docName: string, doc: Y.Doc): awarenessProtocol.Awareness 
           awarenessProtocol.encodeAwarenessUpdate(awareness!, changedClients),
         );
         const message = encoding.toUint8Array(encoder);
-        broadcastToRoom(docName, message, null);
+        // Exclude the sender — origin is the WebSocket that sent the awareness update
+        const exclude = origin instanceof WebSocket ? origin : null;
+        broadcastToRoom(docName, message, exclude);
       },
     );
     awarenesses.set(docName, awareness);
