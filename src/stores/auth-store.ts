@@ -9,6 +9,8 @@ import {
   saveDocumentToFirestore,
   deleteDocumentFromFirestore,
 } from "@/services/firebase";
+import { saveUserProfile } from "@/services/sharing";
+import { notifySlack } from "@/services/slack-notify";
 import { useAppStore, type Document } from "./app-store";
 
 interface AuthState {
@@ -36,6 +38,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const unsubAuth = onAuthChange((user) => {
       set({ user, loading: false });
       if (user) {
+        // Save user profile for collaborator lookups
+        saveUserProfile({
+          uid: user.uid,
+          email: user.email || "",
+          displayName: user.displayName,
+        }).catch(() => {});
         get().syncFromCloud();
       }
     });
@@ -165,6 +173,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             console.error(`Failed to sync document ${doc.id}:`, saveErr, createErr);
           }
         }
+      }
+      // Notify Slack about edits (once per sync, not per doc)
+      if (myDocs.length > 0) {
+        const titles = myDocs.slice(0, 3).map((d) => d.title).join(", ");
+        const extra = myDocs.length > 3 ? ` +${myDocs.length - 3} more` : "";
+        notifySlack("edit", {
+          docTitle: titles + extra,
+          authorName: user.displayName || user.email || undefined,
+          detail: `${myDocs.length} document(s) synced to cloud`,
+        }).catch(() => {});
       }
     } catch (error) {
       console.error("Sync to cloud failed:", error);

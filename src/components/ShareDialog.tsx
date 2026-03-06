@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -10,182 +10,624 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Send, Link, Copy, Check, MessageSquare } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Send,
+  Link,
+  Copy,
+  Check,
+  Globe,
+  Lock,
+  Users,
+  UserPlus,
+  X,
+  Bell,
+  Settings,
+} from "lucide-react";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { sendToSlack, type SlackConfig } from "@/services/slack";
-import * as db from "@/services/database";
+import {
+  enableShareLink,
+  disableShareLink,
+  addCollaborator,
+  removeCollaborator,
+  type ShareLink,
+  type Collaborator,
+  fetchUserTeams,
+  shareDocWithTeam,
+  type Team,
+} from "@/services/sharing";
+import { fetchDocument } from "@/services/firebase";
+import {
+  loadSlackNotifyConfig,
+  saveSlackNotifyConfig,
+  notifySlack,
+  type SlackNotifyConfig,
+} from "@/services/slack-notify";
 
 interface ShareDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
+type Tab = "link" | "people" | "notifications";
+
 export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
   const { activeDocId, documents } = useAppStore();
   const { user } = useAuthStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
 
-  const [slackWebhook, setSlackWebhook] = useState("");
-  const [slackChannel, setSlackChannel] = useState("");
-  const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [tab, setTab] = useState<Tab>("link");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    db.getSetting("slack_webhook").then((v) => {
-      if (v) setSlackWebhook(v);
-    }).catch(() => {});
-    db.getSetting("slack_channel").then((v) => {
-      if (v) setSlackChannel(v);
-    }).catch(() => {});
-  }, []);
+  // Share link state
+  const [shareLink, setShareLink] = useState<ShareLink | null>(null);
+  const [linkPermission, setLinkPermission] = useState<"view" | "edit">("view");
+  const [linkLoading, setLinkLoading] = useState(false);
 
-  const handleSaveSlackConfig = async () => {
+  // Collaborators state
+  const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"editor" | "viewer">("viewer");
+  const [inviting, setInviting] = useState(false);
+
+  // Teams state
+  const [teams, setTeams] = useState<Team[]>([]);
+
+  // Slack notifications state
+  const [slackConfig, setSlackConfig] = useState<SlackNotifyConfig>({
+    webhookUrl: "",
+    channel: "",
+    enabled: false,
+    events: { onEdit: true, onShare: true, onComment: true },
+  });
+  const [slackSaved, setSlackSaved] = useState(false);
+
+  // Load existing share data when dialog opens
+  useEffect(() => {
+    if (!open || !activeDocId || !user) return;
+
+    // Load share link from Firestore
+    fetchDocument(activeDocId)
+      .then((doc) => {
+        if (doc?.shareLink) {
+          setShareLink(doc.shareLink as ShareLink);
+          setLinkPermission(doc.shareLink.permission);
+        } else {
+          setShareLink(null);
+        }
+        setCollaborators((doc?.collaborators as Collaborator[]) || []);
+      })
+      .catch(() => {});
+
+    // Load teams
+    fetchUserTeams(user.uid).then(setTeams).catch(() => {});
+
+    // Load Slack config
+    loadSlackNotifyConfig().then(setSlackConfig).catch(() => {});
+  }, [open, activeDocId, user]);
+
+  const getShareUrl = useCallback(
+    (token: string) => {
+      const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
+      if (projectId) {
+        return `https://${projectId}.web.app/share/${token}`;
+      }
+      return `markflow://share/${token}`;
+    },
+    [],
+  );
+
+  // ─── Share Link handlers ──────────────────────────────
+
+  const handleEnableLink = async () => {
+    if (!activeDocId) return;
+    setLinkLoading(true);
+    setError("");
     try {
-      await db.setSetting("slack_webhook", slackWebhook);
-      if (slackChannel) await db.setSetting("slack_channel", slackChannel);
-    } catch {}
+      const link = await enableShareLink(activeDocId, linkPermission);
+      setShareLink(link);
+
+      // Notify Slack
+      notifySlack("share", {
+        docTitle: activeDoc?.title || "Untitled",
+        authorName: user?.displayName || user?.email || undefined,
+        shareUrl: getShareUrl(link.token),
+        detail: `Shared with ${linkPermission} access via link`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create link");
+    } finally {
+      setLinkLoading(false);
+    }
   };
 
-  const handleShareToSlack = async () => {
-    if (!activeDoc || !slackWebhook) return;
-    setSending(true);
-    setError("");
-    setSent(false);
-
+  const handleDisableLink = async () => {
+    if (!activeDocId) return;
+    setLinkLoading(true);
     try {
-      await handleSaveSlackConfig();
-      const config: SlackConfig = {
-        webhookUrl: slackWebhook,
-        defaultChannel: slackChannel || undefined,
-      };
-      await sendToSlack(config, {
-        title: activeDoc.title,
-        content: activeDoc.content,
-        channel: slackChannel || undefined,
-        authorName: user?.displayName || user?.email || undefined,
-      });
-      setSent(true);
-      setTimeout(() => setSent(false), 3000);
+      await disableShareLink(activeDocId);
+      setShareLink((prev) => (prev ? { ...prev, enabled: false } : null));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send");
+      setError(err instanceof Error ? err.message : "Failed to disable link");
     } finally {
-      setSending(false);
+      setLinkLoading(false);
     }
   };
 
   const handleCopyLink = async () => {
-    if (!activeDocId) return;
-    try {
-      const link = `markflow://doc/${activeDocId}`;
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setError("Failed to copy to clipboard");
+    if (!shareLink?.token) return;
+    const url = getShareUrl(shareLink.token);
+    await navigator.clipboard.writeText(url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handlePermissionChange = async (perm: "view" | "edit") => {
+    setLinkPermission(perm);
+    if (shareLink?.enabled && activeDocId) {
+      try {
+        const link = await enableShareLink(activeDocId, perm);
+        setShareLink(link);
+      } catch { /* ignore */ }
     }
   };
 
-  const handleCopyMarkdown = async () => {
-    if (!activeDoc) return;
+  // ─── Collaborator handlers ────────────────────────────
+
+  const handleInvite = async () => {
+    if (!activeDocId || !inviteEmail.trim()) return;
+    setInviting(true);
+    setError("");
     try {
-      const parser = new DOMParser();
-      const parsed = parser.parseFromString(activeDoc.content, "text/html");
-      await navigator.clipboard.writeText(parsed.body.textContent || "");
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setError("Failed to copy to clipboard");
+      await addCollaborator(activeDocId, inviteEmail.trim(), inviteRole);
+      setCollaborators((prev) => [
+        ...prev,
+        { uid: "", email: inviteEmail.trim(), role: inviteRole, addedAt: Date.now() },
+      ]);
+      setInviteEmail("");
+
+      // Notify Slack
+      notifySlack("share", {
+        docTitle: activeDoc?.title || "Untitled",
+        authorName: user?.displayName || user?.email || undefined,
+        detail: `Invited ${inviteEmail.trim()} as ${inviteRole}`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to invite");
+    } finally {
+      setInviting(false);
     }
   };
+
+  const handleRemoveCollab = async (collab: Collaborator) => {
+    if (!activeDocId) return;
+    try {
+      await removeCollaborator(activeDocId, collab);
+      setCollaborators((prev) => prev.filter((c) => c.email !== collab.email));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove");
+    }
+  };
+
+  const handleShareWithTeam = async (team: Team) => {
+    if (!activeDocId) return;
+    setError("");
+    try {
+      await shareDocWithTeam(activeDocId, team, "editor");
+      // Refresh collaborators
+      const doc = await fetchDocument(activeDocId);
+      if (doc?.collaborators) {
+        setCollaborators(doc.collaborators as Collaborator[]);
+      }
+
+      notifySlack("share", {
+        docTitle: activeDoc?.title || "Untitled",
+        authorName: user?.displayName || user?.email || undefined,
+        detail: `Shared with team "${team.name}" (${team.members.length} members)`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to share with team");
+    }
+  };
+
+  // ─── Slack notification handlers ──────────────────────
+
+  const handleSaveSlackConfig = async () => {
+    try {
+      await saveSlackNotifyConfig(slackConfig);
+      setSlackSaved(true);
+      setTimeout(() => setSlackSaved(false), 2000);
+    } catch {
+      setError("Failed to save notification settings");
+    }
+  };
+
+  // ─── Copy text ────────────────────────────────────────
+
+  const handleCopyText = async () => {
+    if (!activeDoc) return;
+    const parser = new DOMParser();
+    const parsed = parser.parseFromString(activeDoc.content, "text/html");
+    await navigator.clipboard.writeText(parsed.body.textContent || "");
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (!user) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Share Document</DialogTitle>
+            <DialogDescription>Log in to share documents</DialogDescription>
+          </DialogHeader>
+          <div className="py-6 text-center text-sm text-muted-foreground">
+            <p>Sign in to enable sharing, collaboration, and notifications.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3 gap-2"
+              onClick={handleCopyText}
+            >
+              <Copy className="h-3.5 w-3.5" />
+              Copy as Text
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Send className="h-4 w-4" />
-            Share Document
+            Share "{activeDoc?.title || "Untitled"}"
           </DialogTitle>
           <DialogDescription>
-            Share "{activeDoc?.title || "Untitled"}" with your team
+            Manage access, invite collaborators, and set up notifications
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
-          {/* Copy actions */}
-          <div className="space-y-2">
-            <Label className="text-xs text-muted-foreground">Quick Share</Label>
+        {/* Tab switcher */}
+        <div className="flex border-b border-border">
+          {(
+            [
+              { id: "link", icon: Link, label: "Link" },
+              { id: "people", icon: Users, label: "People" },
+              { id: "notifications", icon: Bell, label: "Notifications" },
+            ] as const
+          ).map((t) => (
+            <button
+              key={t.id}
+              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
+                tab === t.id
+                  ? "border-b-2 border-primary text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setTab(t.id)}
+            >
+              <t.icon className="h-3.5 w-3.5" />
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {error && (
+          <p className="text-xs text-destructive px-1">{error}</p>
+        )}
+
+        {/* ─── Link tab ─── */}
+        {tab === "link" && (
+          <div className="space-y-4 py-2">
+            {/* Quick copy */}
             <div className="flex gap-2">
               <Button
                 variant="outline"
                 size="sm"
                 className="flex-1 gap-2"
-                onClick={handleCopyLink}
-              >
-                {copied ? <Check className="h-3.5 w-3.5" /> : <Link className="h-3.5 w-3.5" />}
-                Copy Link
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1 gap-2"
-                onClick={handleCopyMarkdown}
+                onClick={handleCopyText}
               >
                 <Copy className="h-3.5 w-3.5" />
                 Copy Text
               </Button>
             </div>
-          </div>
 
-          <Separator />
+            <Separator />
 
-          {/* Slack integration */}
-          <div className="space-y-3">
-            <Label className="text-xs text-muted-foreground flex items-center gap-1">
-              <MessageSquare className="h-3 w-3" />
-              Share to Slack
-            </Label>
-            <div className="space-y-2">
-              <Input
-                placeholder="Slack Webhook URL"
-                value={slackWebhook}
-                onChange={(e) => setSlackWebhook(e.target.value)}
-                className="text-xs"
-                type="url"
-              />
-              <Input
-                placeholder="#channel (optional)"
-                value={slackChannel}
-                onChange={(e) => setSlackChannel(e.target.value)}
-                className="text-xs"
-              />
-            </div>
-            {error && (
-              <p className="text-xs text-destructive">{error}</p>
-            )}
-            <Button
-              size="sm"
-              className="w-full gap-2"
-              onClick={handleShareToSlack}
-              disabled={sending || !slackWebhook || !activeDoc}
-            >
-              {sent ? (
-                <>
-                  <Check className="h-3.5 w-3.5" />
-                  Sent!
-                </>
-              ) : (
-                <>
-                  <Send className="h-3.5 w-3.5" />
-                  {sending ? "Sending..." : "Send to Slack"}
-                </>
+            {/* Share link toggle */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs flex items-center gap-1.5">
+                  {shareLink?.enabled ? (
+                    <Globe className="h-3.5 w-3.5 text-emerald-500" />
+                  ) : (
+                    <Lock className="h-3.5 w-3.5" />
+                  )}
+                  Share Link
+                </Label>
+                <div className="flex items-center gap-2">
+                  {/* Permission selector */}
+                  <select
+                    className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+                    value={linkPermission}
+                    onChange={(e) => handlePermissionChange(e.target.value as "view" | "edit")}
+                  >
+                    <option value="view">Can view</option>
+                    <option value="edit">Can edit</option>
+                  </select>
+                  {shareLink?.enabled ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={handleDisableLink}
+                      disabled={linkLoading}
+                    >
+                      Disable
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={handleEnableLink}
+                      disabled={linkLoading}
+                    >
+                      {linkLoading ? "Creating..." : "Create Link"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {shareLink?.enabled && (
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={getShareUrl(shareLink.token)}
+                    className="text-xs font-mono"
+                    onFocus={(e) => e.target.select()}
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 shrink-0"
+                    onClick={handleCopyLink}
+                  >
+                    {copied ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </div>
               )}
-            </Button>
+
+              {shareLink?.enabled && (
+                <p className="text-[10px] text-muted-foreground">
+                  Anyone with this link can {linkPermission === "edit" ? "edit" : "view"} this
+                  document.
+                  {shareLink.expiresAt && (
+                    <> Expires {new Date(shareLink.expiresAt).toLocaleDateString()}.</>
+                  )}
+                </p>
+              )}
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* ─── People tab ─── */}
+        {tab === "people" && (
+          <div className="space-y-4 py-2">
+            {/* Invite by email */}
+            <div className="space-y-2">
+              <Label className="text-xs flex items-center gap-1.5">
+                <UserPlus className="h-3.5 w-3.5" />
+                Invite People
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Email address"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  className="text-xs"
+                  onKeyDown={(e) => { if (e.key === "Enter") handleInvite(); }}
+                />
+                <select
+                  className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value as "editor" | "viewer")}
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                </select>
+                <Button
+                  size="sm"
+                  className="h-9 shrink-0"
+                  onClick={handleInvite}
+                  disabled={inviting || !inviteEmail.trim()}
+                >
+                  {inviting ? "..." : "Invite"}
+                </Button>
+              </div>
+            </div>
+
+            {/* Share with team */}
+            {teams.length > 0 && (
+              <>
+                <Separator />
+                <div className="space-y-2">
+                  <Label className="text-xs flex items-center gap-1.5">
+                    <Users className="h-3.5 w-3.5" />
+                    Share with Team
+                  </Label>
+                  <div className="space-y-1">
+                    {teams.map((team) => (
+                      <div
+                        key={team.id}
+                        className="flex items-center justify-between rounded-md border border-border p-2"
+                      >
+                        <div>
+                          <div className="text-xs font-medium">{team.name}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {team.members.length} members
+                          </div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={() => handleShareWithTeam(team)}
+                        >
+                          Share
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            <Separator />
+
+            {/* Current collaborators */}
+            <div className="space-y-2">
+              <Label className="text-xs">
+                Collaborators ({collaborators.length})
+              </Label>
+              <ScrollArea className="max-h-[200px]">
+                {collaborators.length === 0 ? (
+                  <p className="text-xs text-muted-foreground py-2 text-center">
+                    No collaborators yet
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    {collaborators.map((c, i) => (
+                      <div
+                        key={`${c.email}-${i}`}
+                        className="flex items-center justify-between rounded-md px-2 py-1.5 hover:bg-accent/50"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs truncate">{c.email}</div>
+                          <div className="text-[10px] text-muted-foreground capitalize">
+                            {c.role}
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 shrink-0"
+                          onClick={() => handleRemoveCollab(c)}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </ScrollArea>
+            </div>
+          </div>
+        )}
+
+        {/* ─── Notifications tab ─── */}
+        {tab === "notifications" && (
+          <div className="space-y-4 py-2">
+            <div className="space-y-3">
+              <Label className="text-xs flex items-center gap-1.5">
+                <Settings className="h-3.5 w-3.5" />
+                Slack Notifications
+              </Label>
+              <p className="text-[10px] text-muted-foreground">
+                Get notified in Slack when documents are edited or shared.
+              </p>
+
+              <div className="space-y-2">
+                <Input
+                  placeholder="Slack Webhook URL"
+                  value={slackConfig.webhookUrl}
+                  onChange={(e) =>
+                    setSlackConfig((c) => ({ ...c, webhookUrl: e.target.value }))
+                  }
+                  className="text-xs font-mono"
+                  type="url"
+                />
+                <Input
+                  placeholder="#channel (optional)"
+                  value={slackConfig.channel || ""}
+                  onChange={(e) =>
+                    setSlackConfig((c) => ({ ...c, channel: e.target.value }))
+                  }
+                  className="text-xs"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-[10px] text-muted-foreground">Notify on:</Label>
+                {(
+                  [
+                    { key: "onEdit", label: "Document edits" },
+                    { key: "onShare", label: "Sharing changes" },
+                  ] as const
+                ).map(({ key, label }) => (
+                  <label
+                    key={key}
+                    className="flex items-center gap-2 text-xs cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={slackConfig.events[key]}
+                      onChange={(e) =>
+                        setSlackConfig((c) => ({
+                          ...c,
+                          events: { ...c.events, [key]: e.target.checked },
+                        }))
+                      }
+                      className="rounded"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={slackConfig.enabled}
+                    onChange={(e) =>
+                      setSlackConfig((c) => ({ ...c, enabled: e.target.checked }))
+                    }
+                    className="rounded"
+                  />
+                  Enable notifications
+                </label>
+              </div>
+
+              <Button
+                size="sm"
+                className="w-full gap-2"
+                onClick={handleSaveSlackConfig}
+                disabled={!slackConfig.webhookUrl}
+              >
+                {slackSaved ? (
+                  <>
+                    <Check className="h-3.5 w-3.5" />
+                    Saved!
+                  </>
+                ) : (
+                  <>
+                    <Bell className="h-3.5 w-3.5" />
+                    Save Settings
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
