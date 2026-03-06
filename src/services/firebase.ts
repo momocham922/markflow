@@ -220,6 +220,7 @@ export async function createDocumentInFirestore(docData: {
     content: docData.content,
     ownerId: docData.ownerId,
     collaborators: {},
+    collaboratorUids: [],
     tags: docData.tags ?? [],
     folder: docData.folder ?? "/",
     createdAt: serverTimestamp(),

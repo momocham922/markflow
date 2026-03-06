@@ -117,9 +117,21 @@ export async function addCollaborator(
   const uid = usersSnap.empty ? "" : usersSnap.docs[0].id;
   const key = uid || email.replace(/[.#$/\[\]]/g, "_");
 
-  await updateDoc(doc(firestore, "documents", docId), {
+  const ref = doc(firestore, "documents", docId);
+  const updates: Record<string, unknown> = {
     [`collaborators.${key}`]: { email, role, addedAt: Date.now() },
-  });
+  };
+
+  // Maintain collaboratorUids array for efficient querying
+  if (uid) {
+    const snap = await getDoc(ref);
+    const existing = (snap.data()?.collaboratorUids || []) as string[];
+    if (!existing.includes(uid)) {
+      updates.collaboratorUids = [...existing, uid];
+    }
+  }
+
+  await updateDoc(ref, updates);
 }
 
 /** Remove a collaborator from a document */
@@ -128,9 +140,20 @@ export async function removeCollaborator(
   collaborator: Collaborator,
 ): Promise<void> {
   const key = collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
-  await updateDoc(doc(firestore, "documents", docId), {
+  const ref = doc(firestore, "documents", docId);
+
+  const updates: Record<string, unknown> = {
     [`collaborators.${key}`]: deleteField(),
-  });
+  };
+
+  // Also remove from collaboratorUids array
+  if (collaborator.uid) {
+    const snap = await getDoc(ref);
+    const existing = (snap.data()?.collaboratorUids || []) as string[];
+    updates.collaboratorUids = existing.filter((u) => u !== collaborator.uid);
+  }
+
+  await updateDoc(ref, updates);
 }
 
 /** Update a collaborator's role */
@@ -165,10 +188,9 @@ export async function getCollaborators(docId: string): Promise<Collaborator[]> {
 export async function fetchSharedWithMe(
   uid: string,
 ): Promise<{ id: string; title: string; role: "editor" | "viewer" }[]> {
-  // Query using the collaborators map key
   const q = query(
     collection(firestore, "documents"),
-    where(`collaborators.${uid}.email`, "!=", ""),
+    where("collaboratorUids", "array-contains", uid),
   );
 
   try {
@@ -182,9 +204,8 @@ export async function fetchSharedWithMe(
         role: collabData?.role ?? "viewer",
       };
     });
-  } catch {
-    // Fallback: if index doesn't exist yet, return empty
-    console.warn("fetchSharedWithMe query failed — Firestore index may be needed");
+  } catch (err) {
+    console.warn("fetchSharedWithMe query failed:", err);
     return [];
   }
 }
@@ -323,6 +344,7 @@ export async function createTeamDocument(
     ownerId,
     teamId,
     collaborators: {},
+    collaboratorUids: [],
     tags: [],
     folder: "/",
     createdAt: serverTimestamp(),

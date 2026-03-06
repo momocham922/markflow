@@ -21,15 +21,22 @@ service cloud.firestore {
       }
 
       allow create: if request.auth != null;
+      // Check collaborator access via map keys or collaboratorUids array
+      function isCollaborator() {
+        return request.auth.uid in resource.data.collaborators.keys()
+          || (resource.data.collaboratorUids != null
+              && request.auth.uid in resource.data.collaboratorUids);
+      }
+
       allow read: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
-        request.auth.uid in resource.data.collaborators.keys() ||
+        isCollaborator() ||
         isTeamMember() ||
         (resource.data.shareLink != null && resource.data.shareLink.enabled == true)
       );
       allow update, delete: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
-        request.auth.uid in resource.data.collaborators.keys() ||
+        isCollaborator() ||
         isTeamMember()
       );
 

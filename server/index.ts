@@ -62,6 +62,21 @@ async function saveSnapshot(docName: string, doc: Y.Doc): Promise<void> {
       snapshot: Buffer.from(state).toString("base64"),
       updatedAt: new Date(),
     });
+
+    // Also update the documents collection content so Firestore stays current
+    // docName format: "markflow-{docId}"
+    const docId = docName.replace(/^markflow-/, "");
+    if (docId && docId !== docName) {
+      const content = doc.getText("codemirror").toString();
+      const docRef = db.collection("documents").doc(docId);
+      const snap = await docRef.get();
+      if (snap.exists) {
+        await docRef.update({
+          content,
+          updatedAt: new Date(),
+        });
+      }
+    }
   } catch (err) {
     console.error(`Failed to save snapshot for ${docName}:`, err);
   }

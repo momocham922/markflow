@@ -134,9 +134,10 @@ export function Sidebar() {
     fetchSharedWithMe(user.uid).then(setSharedDocs).catch(() => {});
     refreshTeams(user.uid);
 
-    // Poll team docs every 15s to pick up changes from other members
+    // Poll every 15s to pick up changes from other members
     teamsRefreshTimer.current = setInterval(() => {
       refreshTeams(user.uid);
+      fetchSharedWithMe(user.uid).then(setSharedDocs).catch(() => {});
     }, 15_000);
 
     return () => {
