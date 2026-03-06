@@ -10,6 +10,7 @@ export interface Document {
   folder: string;
   tags: string[];
   ownerId: string | null;
+  teamId?: string | null;
 }
 
 export interface ThemeSettings {

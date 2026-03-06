@@ -266,6 +266,9 @@ export function Editor() {
           }`}
         >
           <CodeMirror
+            // Force remount when switching between local and collab modes
+            // to avoid the controlled→uncontrolled transition clearing content
+            key={collabOwnsDoc ? `collab-${activeDocId}` : `local-${activeDocId}`}
             // When collab is active, Yjs owns the doc — don't set value
             {...(collabOwnsDoc ? {} : { value: activeDoc.content || "" })}
             // When collab is active, Yjs observer handles store sync

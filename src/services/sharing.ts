@@ -291,23 +291,44 @@ export async function deleteTeam(teamId: string): Promise<void> {
   await deleteDoc(doc(firestore, TEAMS_COLLECTION, teamId));
 }
 
-/** Share a document with an entire team */
-export async function shareDocWithTeam(
-  docId: string,
-  team: Team,
-  role: "editor" | "viewer",
-): Promise<void> {
-  const ref = doc(firestore, "documents", docId);
-  const updates: Record<string, unknown> = {};
-  for (const member of team.members) {
-    const key = member.uid || member.email.replace(/[.#$/\[\]]/g, "_");
-    updates[`collaborators.${key}`] = {
-      email: member.email,
-      role,
-      addedAt: Date.now(),
+/** Fetch all documents belonging to a team */
+export async function fetchTeamDocuments(
+  teamId: string,
+): Promise<{ id: string; title: string; updatedAt: number }[]> {
+  const q = query(
+    collection(firestore, "documents"),
+    where("teamId", "==", teamId),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => {
+    const data = d.data();
+    return {
+      id: d.id,
+      title: data.title || "Untitled",
+      updatedAt: data.updatedAt?.toMillis?.() ?? Date.now(),
     };
-  }
-  await updateDoc(ref, updates);
+  });
+}
+
+/** Create a document within a team */
+export async function createTeamDocument(
+  teamId: string,
+  ownerId: string,
+): Promise<string> {
+  const docId = crypto.randomUUID();
+  const ref = doc(firestore, "documents", docId);
+  await setDoc(ref, {
+    title: "Untitled",
+    content: "",
+    ownerId,
+    teamId,
+    collaborators: {},
+    tags: [],
+    folder: "/",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return docId;
 }
 
 // ─── User Profile (for looking up users by email) ──────────────

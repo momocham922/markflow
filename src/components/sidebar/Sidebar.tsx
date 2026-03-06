@@ -12,6 +12,7 @@ import {
   Tag,
   X,
   Share2,
+  Users,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,7 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { fetchSharedWithMe } from "@/services/sharing";
+import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
 
 // ── Folder tree helpers ──────────────────────────────────────
@@ -97,12 +98,28 @@ export function Sidebar() {
   const [sharedDocs, setSharedDocs] = useState<{ id: string; title: string; role: "editor" | "viewer" }[]>([]);
   const [sharedExpanded, setSharedExpanded] = useState(true);
 
+  // Teams
+  const [teams, setTeams] = useState<(Team & { docs: { id: string; title: string }[] })[]>([]);
+  const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
+  const [teamsExpanded, setTeamsExpanded] = useState(true);
+
   useEffect(() => {
     if (!user?.uid) {
       setSharedDocs([]);
+      setTeams([]);
       return;
     }
     fetchSharedWithMe(user.uid).then(setSharedDocs).catch(() => {});
+    // Load teams and their docs
+    fetchUserTeams(user.uid).then(async (userTeams) => {
+      const teamsWithDocs = await Promise.all(
+        userTeams.map(async (team) => {
+          const docs = await fetchTeamDocuments(team.id).catch(() => []);
+          return { ...team, docs };
+        }),
+      );
+      setTeams(teamsWithDocs);
+    }).catch(() => {});
   }, [user?.uid]);
 
   // Search: filter by title AND content
@@ -459,6 +476,109 @@ export function Sidebar() {
           )}
         </div>
       </ScrollArea>
+
+      {/* Teams */}
+      {user && teams.length > 0 && (
+        <>
+          <Separator />
+          <div className="px-1">
+            <button
+              className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => setTeamsExpanded((v) => !v)}
+            >
+              {teamsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              <Users className="h-3 w-3" />
+              <span className="font-medium">Teams</span>
+              <span className="ml-auto text-[10px]">{teams.length}</span>
+            </button>
+            {teamsExpanded && (
+              <div className="space-y-0.5 pb-1">
+                {teams.map((team) => (
+                  <div key={team.id}>
+                    <button
+                      className="flex w-full items-center gap-1.5 px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                      onClick={() => setExpandedTeams((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(team.id)) next.delete(team.id);
+                        else next.add(team.id);
+                        return next;
+                      })}
+                    >
+                      {expandedTeams.has(team.id) ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                      <span className="flex-1 truncate font-medium">{team.name}</span>
+                      <Plus
+                        className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!user) return;
+                          const newDocId = await createTeamDocument(team.id, user.uid);
+                          addDocument({
+                            id: newDocId,
+                            title: "Untitled",
+                            content: "",
+                            createdAt: Date.now(),
+                            updatedAt: Date.now(),
+                            folder: "/",
+                            tags: [],
+                            ownerId: user.uid,
+                            teamId: team.id,
+                          });
+                          setActiveDocId(newDocId);
+                          setExpandedTeams((prev) => new Set([...prev, team.id]));
+                        }}
+                      />
+                    </button>
+                    {expandedTeams.has(team.id) && (
+                      <div className="space-y-0.5 pl-4">
+                        {team.docs.length === 0 ? (
+                          <p className="text-[10px] text-muted-foreground italic px-2 py-1">No documents</p>
+                        ) : (
+                          team.docs.map((td) => (
+                            <button
+                              key={td.id}
+                              onClick={async () => {
+                                const existing = documents.find((d) => d.id === td.id);
+                                if (existing) {
+                                  setActiveDocId(td.id);
+                                  return;
+                                }
+                                const firestoreDoc = await fetchDocument(td.id);
+                                if (firestoreDoc) {
+                                  addDocument({
+                                    id: firestoreDoc.id,
+                                    title: firestoreDoc.title,
+                                    content: firestoreDoc.content,
+                                    createdAt: firestoreDoc.createdAt?.toMillis() ?? Date.now(),
+                                    updatedAt: firestoreDoc.updatedAt?.toMillis() ?? Date.now(),
+                                    folder: firestoreDoc.folder || "/",
+                                    tags: firestoreDoc.tags || [],
+                                    ownerId: firestoreDoc.ownerId,
+                                    teamId: team.id,
+                                  });
+                                  setActiveDocId(td.id);
+                                }
+                              }}
+                              className={cn(
+                                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                                activeDocId === td.id
+                                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                                  : "text-sidebar-foreground hover:bg-sidebar-accent/50",
+                              )}
+                            >
+                              <FileText className="h-3.5 w-3.5 shrink-0" />
+                              <span className="flex-1 truncate">{td.title}</span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Shared with me */}
       {user && sharedDocs.length > 0 && (

@@ -34,9 +34,6 @@ import {
   getCollaborators,
   type ShareLink,
   type Collaborator,
-  fetchUserTeams,
-  shareDocWithTeam,
-  type Team,
 } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
 import {
@@ -45,7 +42,6 @@ import {
   notifySlack,
   type SlackNotifyConfig,
 } from "@/services/slack-notify";
-import { TeamManageDialog } from "@/components/TeamManageDialog";
 
 interface ShareDialogProps {
   open: boolean;
@@ -74,9 +70,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
   const [inviteRole, setInviteRole] = useState<"editor" | "viewer">("viewer");
   const [inviting, setInviting] = useState(false);
 
-  // Teams state
-  const [teams, setTeams] = useState<Team[]>([]);
-
   // Slack notifications state
   const [slackConfig, setSlackConfig] = useState<SlackNotifyConfig>({
     webhookUrl: "",
@@ -85,7 +78,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     events: { onEdit: true, onShare: true, onComment: true },
   });
   const [slackSaved, setSlackSaved] = useState(false);
-  const [teamManageOpen, setTeamManageOpen] = useState(false);
 
   // Load existing share data when dialog opens
   useEffect(() => {
@@ -105,9 +97,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
     // Load collaborators (map → array)
     getCollaborators(activeDocId).then(setCollaborators).catch(() => {});
-
-    // Load teams
-    fetchUserTeams(user.uid).then(setTeams).catch(() => {});
 
     // Load Slack config
     loadSlackNotifyConfig().then(setSlackConfig).catch(() => {});
@@ -213,25 +202,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       setCollaborators((prev) => prev.filter((c) => c.email !== collab.email));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to remove");
-    }
-  };
-
-  const handleShareWithTeam = async (team: Team) => {
-    if (!activeDocId) return;
-    setError("");
-    try {
-      await shareDocWithTeam(activeDocId, team, "editor");
-      // Refresh collaborators
-      const collabs = await getCollaborators(activeDocId);
-      setCollaborators(collabs);
-
-      notifySlack("share", {
-        docTitle: activeDoc?.title || "Untitled",
-        authorName: user?.displayName || user?.email || undefined,
-        detail: `Shared with team "${team.name}" (${team.members.length} members)`,
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to share with team");
     }
   };
 
@@ -458,54 +428,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
               </div>
             </div>
 
-            {/* Share with team */}
-            <Separator />
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs flex items-center gap-1.5">
-                  <Users className="h-3.5 w-3.5" />
-                  Teams
-                </Label>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-6 text-[10px]"
-                  onClick={() => setTeamManageOpen(true)}
-                >
-                  Manage Teams
-                </Button>
-              </div>
-              {teams.length > 0 ? (
-                <div className="space-y-1">
-                  {teams.map((team) => (
-                    <div
-                      key={team.id}
-                      className="flex items-center justify-between rounded-md border border-border p-2"
-                    >
-                      <div>
-                        <div className="text-xs font-medium">{team.name}</div>
-                        <div className="text-[10px] text-muted-foreground">
-                          {team.members.length} members
-                        </div>
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs"
-                        onClick={() => handleShareWithTeam(team)}
-                      >
-                        Share
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-[10px] text-muted-foreground text-center py-2">
-                  No teams yet. Create one to share with groups.
-                </p>
-              )}
-            </div>
-
             <Separator />
 
             {/* Current collaborators */}
@@ -644,7 +566,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           </div>
         )}
       </DialogContent>
-      <TeamManageDialog open={teamManageOpen} onOpenChange={setTeamManageOpen} />
     </Dialog>
   );
 }

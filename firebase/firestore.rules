@@ -1,4 +1,6 @@
 rules_version = '2';
+
+// Helper function to check if user is a member of a team
 service cloud.firestore {
   match /databases/{database}/documents {
     // Users can read/write their own user document
@@ -8,17 +10,27 @@ service cloud.firestore {
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // Documents: owner has full access, collaborators can read/write
+    // Documents: owner, collaborators, or team members have access
     match /documents/{docId} {
+      // Check if user is a member of the document's team
+      function isTeamMember() {
+        return resource.data.teamId != null
+          && resource.data.teamId != ""
+          && exists(/databases/$(database)/documents/teams/$(resource.data.teamId))
+          && request.auth.uid in get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.memberUids;
+      }
+
       allow create: if request.auth != null;
       allow read: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
         request.auth.uid in resource.data.collaborators.keys() ||
+        isTeamMember() ||
         (resource.data.shareLink != null && resource.data.shareLink.enabled == true)
       );
       allow update, delete: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
-        request.auth.uid in resource.data.collaborators.keys()
+        request.auth.uid in resource.data.collaborators.keys() ||
+        isTeamMember()
       );
 
       // Versions subcollection
@@ -38,15 +50,13 @@ service cloud.firestore {
       }
     }
 
-    // Teams: members can read, owner can update/delete
+    // Teams: members can read/update, owner can delete
     match /teams/{teamId} {
       allow create: if request.auth != null;
       allow read: if request.auth != null &&
         request.auth.uid in resource.data.memberUids;
-      allow update: if request.auth != null && (
-        resource.data.ownerId == request.auth.uid ||
-        request.auth.uid in resource.data.memberUids
-      );
+      allow update: if request.auth != null &&
+        request.auth.uid in resource.data.memberUids;
       allow delete: if request.auth != null &&
         resource.data.ownerId == request.auth.uid;
     }
