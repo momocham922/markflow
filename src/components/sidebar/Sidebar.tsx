@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { fetchSharedWithMe } from "@/services/sharing";
+import { fetchDocument } from "@/services/firebase";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -482,10 +483,35 @@ export function Sidebar() {
                 {sharedDocs.map((sd) => (
                   <button
                     key={sd.id}
-                    onClick={() => {
-                      window.location.hash = `#/shared/${sd.id}`;
+                    onClick={async () => {
+                      // If doc is already in local store, just open it
+                      const existing = documents.find((d) => d.id === sd.id);
+                      if (existing) {
+                        setActiveDocId(sd.id);
+                        return;
+                      }
+                      // Fetch from Firestore and add to local store
+                      const firestoreDoc = await fetchDocument(sd.id);
+                      if (firestoreDoc) {
+                        addDocument({
+                          id: firestoreDoc.id,
+                          title: firestoreDoc.title,
+                          content: firestoreDoc.content,
+                          createdAt: firestoreDoc.createdAt?.toMillis() ?? Date.now(),
+                          updatedAt: firestoreDoc.updatedAt?.toMillis() ?? Date.now(),
+                          folder: firestoreDoc.folder || "/",
+                          tags: firestoreDoc.tags || [],
+                          ownerId: firestoreDoc.ownerId,
+                        });
+                        setActiveDocId(sd.id);
+                      }
                     }}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                      activeDocId === sd.id
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                        : "text-sidebar-foreground hover:bg-sidebar-accent/50",
+                    )}
                   >
                     <FileText className="h-3.5 w-3.5 shrink-0" />
                     <span className="flex-1 truncate">{sd.title}</span>
