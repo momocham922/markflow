@@ -6,7 +6,6 @@ dist/
 src-tauri/target/
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -15,11 +14,6 @@ src-tauri/target/
 # OS
 .DS_Store
 Thumbs.db
-
-# Environment
-.env
-.env.local
-.env.*.local
 
 # Debug
 npm-debug.log*
