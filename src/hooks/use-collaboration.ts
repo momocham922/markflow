@@ -13,10 +13,13 @@ export interface CollabUser {
 }
 
 export interface CollabState {
-  /** CodeMirror extension — null when collab is off */
+  /**
+   * CodeMirror extension — null when collab is off or not yet synced.
+   * When non-null, Yjs owns the document: do NOT set CodeMirror's value prop.
+   * The extension is only set AFTER initial sync completes, so there is
+   * never a frame where both value prop and yCollab coexist.
+   */
   extension: Extension | null;
-  /** True when Yjs owns the document (editor must NOT set value prop) */
-  active: boolean;
   /** Whether WebSocket is connected */
   connected: boolean;
   /** Active peers (not including self) */
@@ -29,10 +32,13 @@ const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
  * Manages Yjs collaboration for a document.
  *
  * Contract with the Editor:
- * - When `active` is true, Yjs owns the content. Do NOT set CodeMirror value prop.
- * - `onContentChange` is called on every Yjs change so the local store stays in sync
- *   (for preview, auto-save, cloud sync, etc.)
- * - `initialContent` seeds the Y.Doc when the server has no prior state for this doc.
+ * - `extension` is null until the first sync completes. While null, the editor
+ *   operates in local-only mode with its normal `value` prop.
+ * - Once `extension` is set (after sync), Yjs owns the doc. The editor must
+ *   stop setting `value` and let yCollab drive the content.
+ * - `onContentChange` syncs Yjs → local store for preview/auto-save.
+ * - `initialContent` is pre-loaded into the Y.Doc BEFORE connecting, so the
+ *   y-websocket sync protocol merges it naturally (no post-sync insertion race).
  */
 export function useCollaboration(
   docId: string | null,
@@ -41,110 +47,119 @@ export function useCollaboration(
 ): CollabState {
   const user = useAuthStore((s) => s.user);
   const [connected, setConnected] = useState(false);
-  const [active, setActive] = useState(false);
   const [peers, setPeers] = useState<CollabUser[]>([]);
   const [extension, setExtension] = useState<Extension | null>(null);
 
   const providerRef = useRef<WebsocketProvider | null>(null);
   const ydocRef = useRef<Y.Doc | null>(null);
   const colorRef = useRef(getRandomColor());
-  // Refs to avoid stale closures in Yjs callbacks
   const onContentChangeRef = useRef(onContentChange);
   onContentChangeRef.current = onContentChange;
-  const initialContentRef = useRef(initialContent);
-  initialContentRef.current = initialContent;
 
   const enabled = Boolean(WS_URL && docId && user);
 
   useEffect(() => {
     if (!enabled || !docId || !user) {
       setExtension(null);
-      setActive(false);
       setConnected(false);
       setPeers([]);
       return;
     }
 
-    const ydoc = new Y.Doc();
-    const ytext = ydoc.getText("codemirror");
-    ydocRef.current = ydoc;
+    let cancelled = false;
 
-    // Don't auto-connect — set up handlers first
-    const provider = new WebsocketProvider(WS_URL, `markflow-${docId}`, ydoc, {
-      connect: false,
-    });
-    providerRef.current = provider;
+    // Async: get Firebase auth token before connecting
+    const setup = async () => {
+      const token = await user.getIdToken().catch(() => "");
+      if (cancelled) return;
 
-    // Awareness: user info + cursor color
-    const color = colorRef.current;
-    provider.awareness.setLocalStateField("user", {
-      name: user.displayName || user.email || "Anonymous",
-      color,
-      colorLight: color + "33",
-    });
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("codemirror");
+      ydocRef.current = ydoc;
 
-    // On first sync: seed Y.Doc with local content if server has no state
-    let seeded = false;
-    const onSync = (isSynced: boolean) => {
-      if (!isSynced || seeded) return;
-      seeded = true;
-      if (ytext.length === 0 && initialContentRef.current) {
+      // Seed Y.Doc with local content BEFORE connecting.
+      // The sync protocol merges with server state (server wins via CRDT).
+      // If server is empty, this client's state becomes the initial content.
+      if (initialContent) {
         ydoc.transact(() => {
-          ytext.insert(0, initialContentRef.current);
+          ytext.insert(0, initialContent);
         });
       }
-      // From now on, Yjs owns the content
-      setActive(true);
-    };
-    provider.on("sync", onSync);
 
-    // Connection status
-    const onStatus = ({ status }: { status: string }) => {
-      setConnected(status === "connected");
-    };
-    provider.on("status", onStatus);
+      const params: Record<string, string> = {};
+      if (token) params.token = token;
 
-    // Peer tracking
-    const updatePeers = () => {
-      const states = provider.awareness.getStates();
-      const users: CollabUser[] = [];
-      states.forEach((state, clientId) => {
-        if (clientId === ydoc.clientID) return;
-        if (state.user) users.push(state.user as CollabUser);
+      const provider = new WebsocketProvider(WS_URL, `markflow-${docId}`, ydoc, {
+        connect: false,
+        params,
       });
-      setPeers(users);
+      providerRef.current = provider;
+
+      // Awareness
+      const color = colorRef.current;
+      provider.awareness.setLocalStateField("user", {
+        name: user.displayName || user.email || "Anonymous",
+        color,
+        colorLight: color + "33",
+      });
+
+      // Only expose the extension AFTER first sync completes.
+      // This guarantees zero overlap between value-prop and yCollab modes.
+      let synced = false;
+      const onSync = (isSynced: boolean) => {
+        if (!isSynced || synced) return;
+        synced = true;
+        const undoManager = new Y.UndoManager(ytext);
+        setExtension(yCollab(ytext, provider.awareness, { undoManager }));
+      };
+      provider.on("sync", onSync);
+
+      // Connection status
+      const onStatus = ({ status }: { status: string }) => {
+        setConnected(status === "connected");
+      };
+      provider.on("status", onStatus);
+
+      // Peer tracking
+      const updatePeers = () => {
+        const states = provider.awareness.getStates();
+        const users: CollabUser[] = [];
+        states.forEach((state, clientId) => {
+          if (clientId === ydoc.clientID) return;
+          if (state.user) users.push(state.user as CollabUser);
+        });
+        setPeers(users);
+      };
+      provider.awareness.on("change", updatePeers);
+
+      // Sync Yjs → local store on every change
+      const observer = () => {
+        onContentChangeRef.current(ytext.toString());
+      };
+      ytext.observe(observer);
+
+      // Connect
+      provider.connect();
     };
-    provider.awareness.on("change", updatePeers);
 
-    // Sync Yjs -> local store on every change (for preview, auto-save, etc.)
-    const observer = () => {
-      onContentChangeRef.current(ytext.toString());
-    };
-    ytext.observe(observer);
-
-    // CodeMirror extension with shared undo
-    const undoManager = new Y.UndoManager(ytext);
-    setExtension(yCollab(ytext, provider.awareness, { undoManager }));
-
-    // Now connect
-    provider.connect();
+    setup();
 
     return () => {
-      ytext.unobserve(observer);
-      provider.off("sync", onSync);
-      provider.off("status", onStatus);
-      provider.awareness.off("change", updatePeers);
-      provider.disconnect();
-      provider.destroy();
-      ydoc.destroy();
+      cancelled = true;
+      const provider = providerRef.current;
+      const ydoc = ydocRef.current;
+      if (provider) {
+        provider.disconnect();
+        provider.destroy();
+      }
+      if (ydoc) ydoc.destroy();
       ydocRef.current = null;
       providerRef.current = null;
       setExtension(null);
-      setActive(false);
       setConnected(false);
       setPeers([]);
     };
   }, [enabled, docId, user]);
 
-  return { extension, active, connected, peers };
+  return { extension, connected, peers };
 }

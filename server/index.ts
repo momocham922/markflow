@@ -6,6 +6,7 @@ import * as decoding from "lib0/decoding";
 import * as syncProtocol from "y-protocols/sync";
 import * as awarenessProtocol from "y-protocols/awareness";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 
 // ─── Firebase Admin ─────────────────────────────────────────────
@@ -15,6 +16,7 @@ try {
 } catch {
   // Already initialized
 }
+const auth = getAuth();
 const db = getFirestore();
 const COLLECTION = "yjs_snapshots";
 
@@ -175,7 +177,22 @@ const server = http.createServer((_req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", async (ws, req) => {
-  const docName = req.url?.slice(1) || "default";
+  // Verify Firebase Auth token from query params
+  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+  const token = url.searchParams.get("token");
+  const docName = url.pathname.slice(1) || "default";
+
+  if (token) {
+    try {
+      await auth.verifyIdToken(token);
+    } catch {
+      ws.close(4401, "Invalid auth token");
+      return;
+    }
+  } else {
+    ws.close(4401, "Authentication required");
+    return;
+  }
 
   // getYDoc is now async (loads from Firestore on first access)
   const doc = await getYDoc(docName);
