@@ -97,12 +97,12 @@ export function Sidebar() {
   const [sharedExpanded, setSharedExpanded] = useState(true);
 
   useEffect(() => {
-    if (!user?.email) {
+    if (!user?.uid) {
       setSharedDocs([]);
       return;
     }
-    fetchSharedWithMe(user.email).then(setSharedDocs).catch(() => {});
-  }, [user?.email]);
+    fetchSharedWithMe(user.uid).then(setSharedDocs).catch(() => {});
+  }, [user?.uid]);
 
   // Search: filter by title AND content
   const isSearching = search.trim().length > 0;

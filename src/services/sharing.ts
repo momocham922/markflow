@@ -7,10 +7,9 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   query,
   where,
-  arrayUnion,
-  arrayRemove,
   serverTimestamp,
   type Timestamp,
 } from "firebase/firestore";
@@ -92,6 +91,8 @@ export async function fetchDocumentByToken(
 }
 
 // ─── Collaborators ─────────────────────────────────────────────
+// Stored as a map: { [uid]: { email, role, addedAt } }
+// This matches Firestore security rules: `request.auth.uid in resource.data.collaborators.keys()`
 
 export interface Collaborator {
   uid: string;
@@ -113,15 +114,11 @@ export async function addCollaborator(
   );
   const usersSnap = await getDocs(usersQ);
 
-  const collab: Collaborator = {
-    uid: usersSnap.empty ? "" : usersSnap.docs[0].id,
-    email,
-    role,
-    addedAt: Date.now(),
-  };
+  const uid = usersSnap.empty ? "" : usersSnap.docs[0].id;
+  const key = uid || email.replace(/[.#$/\[\]]/g, "_");
 
   await updateDoc(doc(firestore, "documents", docId), {
-    collaborators: arrayUnion(collab),
+    [`collaborators.${key}`]: { email, role, addedAt: Date.now() },
   });
 }
 
@@ -130,8 +127,9 @@ export async function removeCollaborator(
   docId: string,
   collaborator: Collaborator,
 ): Promise<void> {
+  const key = collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
   await updateDoc(doc(firestore, "documents", docId), {
-    collaborators: arrayRemove(collaborator),
+    [`collaborators.${key}`]: deleteField(),
   });
 }
 
@@ -141,31 +139,54 @@ export async function updateCollaboratorRole(
   oldCollab: Collaborator,
   newRole: "editor" | "viewer",
 ): Promise<void> {
-  await removeCollaborator(docId, oldCollab);
-  await addCollaborator(docId, oldCollab.email, newRole);
+  const key = oldCollab.uid || oldCollab.email.replace(/[.#$/\[\]]/g, "_");
+  await updateDoc(doc(firestore, "documents", docId), {
+    [`collaborators.${key}.role`]: newRole,
+  });
+}
+
+/** Get collaborators for a document (returns array for UI compatibility) */
+export async function getCollaborators(docId: string): Promise<Collaborator[]> {
+  const ref = doc(firestore, "documents", docId);
+  const snap = await getDoc(ref);
+  const data = snap.data();
+  if (!data?.collaborators) return [];
+
+  const collabMap = data.collaborators as Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
+  return Object.entries(collabMap).map(([uid, val]) => ({
+    uid,
+    email: val.email,
+    role: val.role,
+    addedAt: val.addedAt,
+  }));
 }
 
 /** Fetch documents shared with a user (as collaborator) */
 export async function fetchSharedWithMe(
-  email: string,
+  uid: string,
 ): Promise<{ id: string; title: string; role: "editor" | "viewer" }[]> {
-  // Firestore doesn't support array-contains on nested fields well,
-  // so we query all docs and filter client-side for now
-  // TODO: For scale, denormalize into a separate collection
-  const q = query(collection(firestore, "documents"));
-  const snap = await getDocs(q);
-  const results: { id: string; title: string; role: "editor" | "viewer" }[] = [];
+  // Query using the collaborators map key
+  const q = query(
+    collection(firestore, "documents"),
+    where(`collaborators.${uid}.email`, "!=", ""),
+  );
 
-  for (const d of snap.docs) {
-    const data = d.data();
-    const collabs = (data.collaborators || []) as Collaborator[];
-    const match = collabs.find((c) => c.email === email);
-    if (match) {
-      results.push({ id: d.id, title: data.title, role: match.role });
-    }
+  try {
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data();
+      const collabData = data.collaborators?.[uid] as { role: "editor" | "viewer" } | undefined;
+      return {
+        id: d.id,
+        title: data.title,
+        role: collabData?.role ?? "viewer",
+      };
+    });
+  } catch {
+    // Fallback: if index doesn't exist yet, return empty
+    console.warn("fetchSharedWithMe query failed — Firestore index may be needed");
+    return [];
   }
-
-  return results;
 }
 
 // ─── Teams ─────────────────────────────────────────────────────
@@ -197,6 +218,7 @@ export async function createTeam(
   await setDoc(ref, {
     name,
     ownerId: owner.uid,
+    memberUids: [owner.uid],
     members: [
       { uid: owner.uid, email: owner.email, role: "owner", joinedAt: Date.now() },
     ],
@@ -207,11 +229,12 @@ export async function createTeam(
 
 /** Fetch teams a user belongs to */
 export async function fetchUserTeams(uid: string): Promise<Team[]> {
-  // Firestore: query teams where user is a member
-  const allTeams = await getDocs(collection(firestore, TEAMS_COLLECTION));
-  return allTeams.docs
-    .map((d) => ({ id: d.id, ...d.data() }) as Team)
-    .filter((t) => t.members.some((m) => m.uid === uid));
+  const q = query(
+    collection(firestore, TEAMS_COLLECTION),
+    where("memberUids", "array-contains", uid),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Team);
 }
 
 /** Add a member to a team */
@@ -219,15 +242,33 @@ export async function addTeamMember(
   teamId: string,
   member: { email: string; uid?: string; role: "admin" | "member" },
 ): Promise<void> {
+  // Look up the user by email
+  const usersQ = query(
+    collection(firestore, "users"),
+    where("email", "==", member.email),
+  );
+  const usersSnap = await getDocs(usersQ);
+  const uid = member.uid || (usersSnap.empty ? "" : usersSnap.docs[0].id);
+
   const teamMember: TeamMember = {
-    uid: member.uid || "",
+    uid,
     email: member.email,
     role: member.role,
     joinedAt: Date.now(),
   };
-  await updateDoc(doc(firestore, TEAMS_COLLECTION, teamId), {
-    members: arrayUnion(teamMember),
-  });
+
+  const ref = doc(firestore, TEAMS_COLLECTION, teamId);
+  // Get current members, add new one
+  const snap = await getDoc(ref);
+  const data = snap.data();
+  const members = (data?.members || []) as TeamMember[];
+  const memberUids = (data?.memberUids || []) as string[];
+
+  if (!members.some((m) => m.email === member.email)) {
+    members.push(teamMember);
+    if (uid && !memberUids.includes(uid)) memberUids.push(uid);
+    await updateDoc(ref, { members, memberUids });
+  }
 }
 
 /** Remove a member from a team */
@@ -235,9 +276,14 @@ export async function removeTeamMember(
   teamId: string,
   member: TeamMember,
 ): Promise<void> {
-  await updateDoc(doc(firestore, TEAMS_COLLECTION, teamId), {
-    members: arrayRemove(member),
-  });
+  const ref = doc(firestore, TEAMS_COLLECTION, teamId);
+  const snap = await getDoc(ref);
+  const data = snap.data();
+  const members = ((data?.members || []) as TeamMember[]).filter(
+    (m) => m.email !== member.email,
+  );
+  const memberUids = members.map((m) => m.uid).filter(Boolean);
+  await updateDoc(ref, { members, memberUids });
 }
 
 /** Delete a team */
@@ -252,18 +298,16 @@ export async function shareDocWithTeam(
   role: "editor" | "viewer",
 ): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  // Add all team members as collaborators
+  const updates: Record<string, unknown> = {};
   for (const member of team.members) {
-    const collab: Collaborator = {
-      uid: member.uid,
+    const key = member.uid || member.email.replace(/[.#$/\[\]]/g, "_");
+    updates[`collaborators.${key}`] = {
       email: member.email,
       role,
       addedAt: Date.now(),
     };
-    await updateDoc(ref, {
-      collaborators: arrayUnion(collab),
-    });
   }
+  await updateDoc(ref, updates);
 }
 
 // ─── User Profile (for looking up users by email) ──────────────

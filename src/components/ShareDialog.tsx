@@ -31,6 +31,7 @@ import {
   disableShareLink,
   addCollaborator,
   removeCollaborator,
+  getCollaborators,
   type ShareLink,
   type Collaborator,
   fetchUserTeams,
@@ -99,9 +100,11 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
         } else {
           setShareLink(null);
         }
-        setCollaborators((doc?.collaborators as Collaborator[]) || []);
       })
       .catch(() => {});
+
+    // Load collaborators (map → array)
+    getCollaborators(activeDocId).then(setCollaborators).catch(() => {});
 
     // Load teams
     fetchUserTeams(user.uid).then(setTeams).catch(() => {});
@@ -219,10 +222,8 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     try {
       await shareDocWithTeam(activeDocId, team, "editor");
       // Refresh collaborators
-      const doc = await fetchDocument(activeDocId);
-      if (doc?.collaborators) {
-        setCollaborators(doc.collaborators as Collaborator[]);
-      }
+      const collabs = await getCollaborators(activeDocId);
+      setCollaborators(collabs);
 
       notifySlack("share", {
         docTitle: activeDoc?.title || "Untitled",

@@ -150,7 +150,7 @@ export interface FirestoreDocument {
   title: string;
   content: string;
   ownerId: string;
-  collaborators: { uid: string; role: "editor" | "viewer"; addedAt: number }[];
+  collaborators: Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
   tags: string[];
   folder: string;
   createdAt: Timestamp | null;
@@ -218,7 +218,7 @@ export async function createDocumentInFirestore(docData: {
     title: docData.title,
     content: docData.content,
     ownerId: docData.ownerId,
-    collaborators: [],
+    collaborators: {},
     tags: docData.tags ?? [],
     folder: docData.folder ?? "/",
     createdAt: serverTimestamp(),
