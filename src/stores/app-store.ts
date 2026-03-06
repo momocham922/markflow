@@ -244,7 +244,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   createFolder: (path) => {
     set((s) => {
       const folders = deriveFolders(s.documents, [...s.folders, path]);
-      db.setSetting("folders", JSON.stringify(folders.filter((f) => f !== "/"))).catch(console.error);
+      const toSave = folders.filter((f) => f !== "/");
+      db.setSetting("folders", JSON.stringify(toSave))
+        .catch(() => {});
       return { folders };
     });
   },

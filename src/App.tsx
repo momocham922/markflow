@@ -5,13 +5,14 @@ import { Sidebar } from "@/components/sidebar/Sidebar";
 import { Editor } from "@/components/editor/Editor";
 import { StatusBar } from "@/components/StatusBar";
 import { UserMenu } from "@/components/UserMenu";
-import { VersionPanel } from "@/components/version/VersionPanel";
+import { VersionPanel, type DiffState } from "@/components/version/VersionPanel";
+import { DiffView } from "@/components/version/DiffView";
 import { AiPanel } from "@/components/ai-panel/AiPanel";
 import { ShareDialog } from "@/components/ShareDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { PanelLeft, History, PenLine, LayoutGrid, Bot, Share2 } from "lucide-react";
+import { PanelLeft, History, PenLine, LayoutGrid, Bot, Share2, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +39,7 @@ function App() {
   const [rightPanel, setRightPanel] = useState<RightPanel>("none");
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
   const [shareOpen, setShareOpen] = useState(false);
+  const [diffState, setDiffState] = useState<DiffState | null>(null);
 
   useEffect(() => {
     loadDocuments();
@@ -184,7 +186,27 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
             </div>
             <div className="flex flex-1 overflow-hidden">
               <div className="flex-1 overflow-hidden">
-                {viewMode === "editor" ? (
+                {diffState ? (
+                  <div className="flex h-full flex-col">
+                    <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1.5 text-xs"
+                        onClick={() => setDiffState(null)}
+                      >
+                        <ArrowLeft className="h-3.5 w-3.5" />
+                        Back to editor
+                      </Button>
+                      <div className="h-4 w-px bg-border" />
+                      <span className="text-sm font-medium">{diffState.title}</span>
+                      <span className="text-xs text-muted-foreground">{diffState.time}</span>
+                    </div>
+                    <div className="flex-1 overflow-auto px-6 py-4">
+                      <DiffView oldText={diffState.oldText} newText={diffState.newText} fullPage />
+                    </div>
+                  </div>
+                ) : viewMode === "editor" ? (
                   <Editor />
                 ) : (
                   <Suspense
@@ -199,7 +221,10 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
                 )}
               </div>
               {viewMode === "editor" && rightPanel === "versions" && (
-                <VersionPanel onClose={() => setRightPanel("none")} />
+                <VersionPanel
+                  onClose={() => setRightPanel("none")}
+                  onViewDiff={setDiffState}
+                />
               )}
               {viewMode === "editor" && rightPanel === "ai" && (
                 <AiPanel onClose={() => setRightPanel("none")} />

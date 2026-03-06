@@ -1,12 +1,48 @@
 import Database from "@tauri-apps/plugin-sql";
 
 let db: Database | null = null;
+let migrated = false;
 
 export async function getDb(): Promise<Database> {
   if (!db) {
     db = await Database.load("sqlite:markflow.db");
   }
+  if (!migrated) {
+    migrated = true;
+    await ensureMigrations(db);
+  }
   return db;
+}
+
+/** Ensure all tables and columns exist (fixes missed Tauri migrations) */
+async function ensureMigrations(database: Database) {
+  try {
+    // versions table (migration v2)
+    await database.execute(`CREATE TABLE IF NOT EXISTS versions (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    )`);
+    await database.execute(
+      `CREATE INDEX IF NOT EXISTS idx_versions_doc ON versions(document_id, created_at DESC)`
+    );
+
+    // folder and tags columns (migration v3) - ADD COLUMN fails if already exists
+    try {
+      await database.execute(`ALTER TABLE documents ADD COLUMN folder TEXT NOT NULL DEFAULT '/'`);
+    } catch { /* already exists */ }
+    try {
+      await database.execute(`ALTER TABLE documents ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`);
+    } catch { /* already exists */ }
+
+    console.log("[db] migrations verified OK");
+  } catch (err) {
+    console.error("[db] migration repair failed:", err);
+  }
 }
 
 export interface DbDocument {

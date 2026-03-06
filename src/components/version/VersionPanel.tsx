@@ -6,11 +6,12 @@ import {
   X,
   ChevronDown,
   ChevronRight,
+  Maximize2,
 } from "lucide-react";
-import { diffLines, type Change } from "diff";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { DiffView } from "./DiffView";
 import { useAppStore } from "@/stores/app-store";
 import * as db from "@/services/database";
 
@@ -23,57 +24,19 @@ interface Version {
   createdAt: number;
 }
 
+export interface DiffState {
+  oldText: string;
+  newText: string;
+  title: string;
+  time: string;
+}
+
 interface VersionPanelProps {
   onClose: () => void;
+  onViewDiff?: (diff: DiffState) => void;
 }
 
-function DiffView({ oldText, newText }: { oldText: string; newText: string }) {
-  const changes = diffLines(oldText, newText);
-  const stats = changes.reduce(
-    (acc, c) => {
-      const lines = c.count ?? 0;
-      if (c.added) acc.added += lines;
-      if (c.removed) acc.removed += lines;
-      return acc;
-    },
-    { added: 0, removed: 0 },
-  );
-
-  return (
-    <div className="mt-2">
-      <div className="flex gap-2 text-[10px] mb-1.5">
-        <span className="text-green-600 dark:text-green-400">+{stats.added}</span>
-        <span className="text-red-600 dark:text-red-400">-{stats.removed}</span>
-      </div>
-      <div className="rounded-md border border-border overflow-hidden text-[11px] font-mono leading-relaxed max-h-[300px] overflow-y-auto">
-        {changes.map((change: Change, i: number) => {
-          const lines = change.value.replace(/\n$/, "").split("\n");
-          return lines.map((line, j) => (
-            <div
-              key={`${i}-${j}`}
-              className={
-                change.added
-                  ? "bg-green-500/10 text-green-700 dark:text-green-300"
-                  : change.removed
-                    ? "bg-red-500/10 text-red-700 dark:text-red-300"
-                    : "text-muted-foreground"
-              }
-            >
-              <span className="inline-block w-5 text-center text-[9px] opacity-50 select-none">
-                {change.added ? "+" : change.removed ? "-" : " "}
-              </span>
-              <span className="whitespace-pre-wrap break-all">
-                {line || "\u00A0"}
-              </span>
-            </div>
-          ));
-        })}
-      </div>
-    </div>
-  );
-}
-
-export function VersionPanel({ onClose }: VersionPanelProps) {
+export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
   const { activeDocId, documents, updateDocument } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [versions, setVersions] = useState<Version[]>([]);
@@ -102,6 +65,9 @@ export function VersionPanel({ onClose }: VersionPanelProps) {
 
   useEffect(() => {
     loadVersions();
+    // Poll for new versions every 5s (auto-versioning saves in background)
+    const interval = setInterval(loadVersions, 5000);
+    return () => clearInterval(interval);
   }, [loadVersions]);
 
   const handleSave = async () => {
@@ -251,6 +217,25 @@ export function VersionPanel({ onClose }: VersionPanelProps) {
                   <div className="mt-2">
                     <DiffView oldText={oldContent} newText={v.content} />
                     <div className="mt-2 flex gap-1">
+                      {onViewDiff && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-6 gap-1 text-[10px]"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onViewDiff({
+                              oldText: oldContent,
+                              newText: v.content,
+                              title: v.message || v.title,
+                              time: formatTime(v.createdAt),
+                            });
+                          }}
+                        >
+                          <Maximize2 className="h-3 w-3" />
+                          Open diff
+                        </Button>
+                      )}
                       <Button
                         variant="outline"
                         size="sm"
@@ -261,7 +246,7 @@ export function VersionPanel({ onClose }: VersionPanelProps) {
                         }}
                       >
                         <RotateCcw className="h-3 w-3" />
-                        Restore this version
+                        Restore
                       </Button>
                     </div>
                   </div>
