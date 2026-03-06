@@ -62,8 +62,24 @@ export function Editor() {
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
 
+  // Collab: sync Yjs changes → local store (throttled to avoid thrashing)
+  const collabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleCollabChange = useCallback(
+    (content: string) => {
+      if (!activeDocId) return;
+      if (collabTimerRef.current) clearTimeout(collabTimerRef.current);
+      collabTimerRef.current = setTimeout(() => {
+        updateDocument(activeDocId, { content, updatedAt: Date.now() });
+        const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+        if (firstLine) updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
+      }, 300);
+    },
+    [activeDocId, updateDocument],
+  );
+
   // Real-time collaboration via Yjs
-  const { extension: collabExtension, connected: collabConnected, peers } = useCollaboration(activeDocId);
+  const { extension: collabExtension, active: collabActive, connected: collabConnected, peers } =
+    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange);
 
   // Auto-save versions when content changes significantly
   useAutoVersion({
@@ -247,8 +263,10 @@ export function Editor() {
           }`}
         >
           <CodeMirror
-            value={activeDoc.content || ""}
-            onChange={onChange}
+            // When collab is active, Yjs owns the doc — don't set value
+            {...(collabActive ? {} : { value: activeDoc.content || "" })}
+            // When collab is active, Yjs observer handles store sync
+            onChange={collabActive ? undefined : onChange}
             extensions={extensions}
             theme={editorTheme}
             onCreateEditor={onCreateEditor}

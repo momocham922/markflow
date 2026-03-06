@@ -5,6 +5,18 @@ import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import * as syncProtocol from "y-protocols/sync";
 import * as awarenessProtocol from "y-protocols/awareness";
+import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+
+// ─── Firebase Admin ─────────────────────────────────────────────
+// Uses GOOGLE_APPLICATION_CREDENTIALS or default credentials on Cloud Run
+try {
+  initializeApp();
+} catch {
+  // Already initialized
+}
+const db = getFirestore();
+const COLLECTION = "yjs_snapshots";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -19,27 +31,83 @@ const docs = new Map<string, Y.Doc>();
 const conns = new Map<string, Map<WebSocket, Set<number>>>();
 // Awareness instances per document
 const awarenesses = new Map<string, awarenessProtocol.Awareness>();
+// Debounce timers for persistence
+const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function getYDoc(docName: string): Y.Doc {
-  let doc = docs.get(docName);
-  if (!doc) {
-    doc = new Y.Doc();
-    doc.on("update", (update: Uint8Array, _origin: unknown) => {
-      const encoder = encoding.createEncoder();
-      encoding.writeVarUint(encoder, messageSync);
-      syncProtocol.writeUpdate(encoder, update);
-      const message = encoding.toUint8Array(encoder);
-      broadcastToRoom(docName, message, null);
-    });
-    docs.set(docName, doc);
+// ─── Firestore Persistence ──────────────────────────────────────
+
+async function loadSnapshot(docName: string): Promise<Uint8Array | null> {
+  try {
+    const snap = await db.collection(COLLECTION).doc(docName).get();
+    if (snap.exists) {
+      const data = snap.data();
+      if (data?.snapshot) {
+        // Firestore stores as base64 string
+        return new Uint8Array(Buffer.from(data.snapshot, "base64"));
+      }
+    }
+  } catch (err) {
+    console.error(`Failed to load snapshot for ${docName}:`, err);
   }
+  return null;
+}
+
+async function saveSnapshot(docName: string, doc: Y.Doc): Promise<void> {
+  try {
+    const state = Y.encodeStateAsUpdate(doc);
+    await db.collection(COLLECTION).doc(docName).set({
+      snapshot: Buffer.from(state).toString("base64"),
+      updatedAt: new Date(),
+    });
+  } catch (err) {
+    console.error(`Failed to save snapshot for ${docName}:`, err);
+  }
+}
+
+function scheduleSave(docName: string, doc: Y.Doc) {
+  const existing = saveTimers.get(docName);
+  if (existing) clearTimeout(existing);
+  // Debounce: save 2s after the last update
+  const timer = setTimeout(() => {
+    saveTimers.delete(docName);
+    saveSnapshot(docName, doc);
+  }, 2000);
+  saveTimers.set(docName, timer);
+}
+
+// ─── Yjs Document Management ────────────────────────────────────
+
+async function getYDoc(docName: string): Promise<Y.Doc> {
+  let doc = docs.get(docName);
+  if (doc) return doc;
+
+  doc = new Y.Doc();
+
+  // Restore from Firestore before accepting connections
+  const snapshot = await loadSnapshot(docName);
+  if (snapshot) {
+    Y.applyUpdate(doc, snapshot);
+  }
+
+  doc.on("update", (update: Uint8Array, _origin: unknown) => {
+    // Broadcast to connected clients
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, messageSync);
+    syncProtocol.writeUpdate(encoder, update);
+    const message = encoding.toUint8Array(encoder);
+    broadcastToRoom(docName, message, null);
+
+    // Schedule persistence
+    scheduleSave(docName, doc!);
+  });
+
+  docs.set(docName, doc);
   return doc;
 }
 
-function getAwareness(docName: string): awarenessProtocol.Awareness {
+function getAwareness(docName: string, doc: Y.Doc): awarenessProtocol.Awareness {
   let awareness = awarenesses.get(docName);
   if (!awareness) {
-    const doc = getYDoc(docName);
     awareness = new awarenessProtocol.Awareness(doc);
     awareness.on(
       "update",
@@ -73,6 +141,32 @@ function broadcastToRoom(docName: string, message: Uint8Array, exclude: WebSocke
   }
 }
 
+// Clean up a room when the last client disconnects
+async function cleanupRoom(docName: string) {
+  const roomConns = conns.get(docName);
+  if (roomConns && roomConns.size > 0) return; // still has clients
+
+  // Flush any pending save
+  const timer = saveTimers.get(docName);
+  if (timer) {
+    clearTimeout(timer);
+    saveTimers.delete(docName);
+  }
+
+  const doc = docs.get(docName);
+  if (doc) {
+    await saveSnapshot(docName, doc);
+    doc.destroy();
+    docs.delete(docName);
+  }
+
+  awarenesses.delete(docName);
+  conns.delete(docName);
+  console.log(`Room ${docName} cleaned up and persisted`);
+}
+
+// ─── HTTP + WebSocket Server ────────────────────────────────────
+
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("MarkFlow y-websocket server");
@@ -80,10 +174,12 @@ const server = http.createServer((_req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-wss.on("connection", (ws, req) => {
+wss.on("connection", async (ws, req) => {
   const docName = req.url?.slice(1) || "default";
-  const doc = getYDoc(docName);
-  const awareness = getAwareness(docName);
+
+  // getYDoc is now async (loads from Firestore on first access)
+  const doc = await getYDoc(docName);
+  const awareness = getAwareness(docName, doc);
 
   if (!conns.has(docName)) {
     conns.set(docName, new Map());
@@ -144,13 +240,13 @@ wss.on("connection", (ws, req) => {
     const roomConns = conns.get(docName);
     if (roomConns) {
       roomConns.delete(ws);
-      if (roomConns.size === 0) {
-        conns.delete(docName);
-      }
     }
 
     // Remove awareness states for this connection
     awarenessProtocol.removeAwarenessStates(awareness, Array.from(controlledIds), null);
+
+    // If last client, persist and clean up
+    cleanupRoom(docName);
   });
 });
 
