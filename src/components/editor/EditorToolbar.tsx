@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, type ReactNode } from "react";
 import { PenLine, Columns2, Eye, Paintbrush, Tag, X, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeCustomizer } from "@/components/ThemeCustomizer";
@@ -8,11 +8,13 @@ import type { PreviewMode } from "./Editor";
 interface EditorToolbarProps {
   previewMode: PreviewMode;
   onPreviewModeChange: (mode: PreviewMode) => void;
+  collabSlot?: ReactNode;
 }
 
 export function EditorToolbar({
   previewMode,
   onPreviewModeChange,
+  collabSlot,
 }: EditorToolbarProps) {
   const [themeOpen, setThemeOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
@@ -86,6 +88,7 @@ export function EditorToolbar({
       </div>
 
       <div className="flex items-center gap-2">
+        {collabSlot}
         {/* Theme customizer */}
         <Button
           variant="ghost"

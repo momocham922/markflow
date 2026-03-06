@@ -14,6 +14,7 @@ import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
+import { useCollaboration } from "@/hooks/use-collaboration";
 
 // HTML → Markdown converter for legacy Tiptap content
 const turndown = new TurndownService({
@@ -61,6 +62,9 @@ export function Editor() {
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
 
+  // Real-time collaboration via Yjs
+  const { extension: collabExtension, connected: collabConnected, peers } = useCollaboration(activeDocId);
+
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
@@ -79,14 +83,15 @@ export function Editor() {
     }
   }, [activeDocId, activeDoc?.content, updateDocument]);
 
-  // Memoize extensions
+  // Memoize extensions (include collab when connected)
   const extensions = useMemo(
     () => [
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       EditorView.lineWrapping,
       markdownShortcuts,
+      ...(collabExtension ? [collabExtension] : []),
     ],
-    [],
+    [collabExtension],
   );
 
   const editorTheme = useMemo(() => {
@@ -203,6 +208,32 @@ export function Editor() {
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
+        collabSlot={
+          collabConnected ? (
+            <div className="flex items-center gap-1 shrink-0">
+              {peers.length > 0 && (
+                <div className="flex -space-x-1.5">
+                  {peers.slice(0, 5).map((peer, i) => (
+                    <div
+                      key={i}
+                      className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold text-white ring-2 ring-background"
+                      style={{ backgroundColor: peer.color }}
+                      title={peer.name}
+                    >
+                      {peer.name.charAt(0).toUpperCase()}
+                    </div>
+                  ))}
+                  {peers.length > 5 && (
+                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[9px] font-medium text-muted-foreground ring-2 ring-background">
+                      +{peers.length - 5}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 ml-1" title="Live collaboration active" />
+            </div>
+          ) : undefined
+        }
       />
       <div className="flex flex-1 overflow-hidden">
         {/* Editor pane — always mounted, hidden in preview-only mode */}
