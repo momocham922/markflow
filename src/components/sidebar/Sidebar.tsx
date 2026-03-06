@@ -17,12 +17,11 @@ import {
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, type Team } from "@/services/sharing";
+import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
 
 // ── Folder tree helpers ──────────────────────────────────────
@@ -105,6 +104,9 @@ export function Sidebar() {
   const [sharedDocs, setSharedDocs] = useState<{ id: string; title: string; role: "editor" | "viewer" }[]>([]);
   const [sharedExpanded, setSharedExpanded] = useState(true);
 
+  // My Documents collapsible
+  const [myDocsExpanded, setMyDocsExpanded] = useState(true);
+
   // Teams
   const [teams, setTeams] = useState<TeamWithDocs[]>([]);
   const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
@@ -122,6 +124,10 @@ export function Sidebar() {
         }),
       );
       setTeams(teamsWithDocs);
+      // Auto-expand if there's only one team
+      if (teamsWithDocs.length === 1) {
+        setExpandedTeams(new Set([teamsWithDocs[0].id]));
+      }
     } catch { /* ignore */ }
   }, []);
 
@@ -266,6 +272,24 @@ export function Sidebar() {
       prev.map((t) =>
         t.id === team.id
           ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled" }] }
+          : t,
+      ),
+    );
+  };
+
+  const handleDeleteTeamDoc = async (docId: string, team: TeamWithDocs) => {
+    // Remove from local store
+    deleteDocument(docId);
+    // Remove from Firestore
+    try {
+      const { deleteDocumentFromFirestore } = await import("@/services/firebase");
+      await deleteDocumentFromFirestore(docId);
+    } catch { /* ignore */ }
+    // Update local teams state immediately
+    setTeams((prev) =>
+      prev.map((t) =>
+        t.id === team.id
+          ? { ...t, docs: t.docs.filter((d) => d.id !== docId) }
           : t,
       ),
     );
@@ -527,7 +551,7 @@ export function Sidebar() {
         </div>
       )}
 
-      <ScrollArea className="flex-1 px-1">
+      <div className="flex-1 px-1 overflow-y-auto">
         {/* ─── Search results ─── */}
         {isSearching ? (
           <div className="space-y-0.5 p-2">
@@ -542,38 +566,44 @@ export function Sidebar() {
             {searchResults.map(renderSearchMatch)}
           </div>
         ) : (
-          <>
+          <div>
             {/* ─── My Documents ─── */}
-            <div className="p-2 pb-0">
-              <div className="flex items-center justify-between px-2 pb-1">
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <div className="px-1 pb-0">
+              <div className="flex items-center justify-between">
+                <button
+                  className="flex flex-1 items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setMyDocsExpanded((v) => !v)}
+                >
+                  {myDocsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
                   <Lock className="h-3 w-3" />
                   <span className="font-medium">My Documents</span>
-                  <span className="text-[10px]">({personalDocs.length})</span>
-                </div>
-                <div className="flex gap-0.5">
+                  <span className="ml-auto text-[10px]">{personalDocs.length}</span>
+                </button>
+                <div className="flex gap-0.5 pr-2">
                   <Plus
                     className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer"
-                    onClick={() => handleNew()}
+                    onClick={() => { handleNew(); setMyDocsExpanded(true); }}
                   />
                   <FolderPlus
                     className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer"
-                    onClick={() => { setCreatingFolderIn("/"); setNewFolderName(""); }}
+                    onClick={() => { setCreatingFolderIn("/"); setNewFolderName(""); setMyDocsExpanded(true); }}
                   />
                 </div>
               </div>
-              <div className="space-y-0.5">
-                {personalDocs.length === 0 && (
-                  <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-                    No documents yet
-                  </p>
-                )}
-                {renderFolder(tree)}
-              </div>
+              {myDocsExpanded && (
+                <div className="space-y-0.5 pl-3">
+                  {personalDocs.length === 0 && (
+                    <p className="px-2 py-2 text-[10px] text-muted-foreground italic">
+                      No documents yet
+                    </p>
+                  )}
+                  {renderFolder(tree)}
+                </div>
+              )}
             </div>
 
             {/* ─── Teams ─── */}
-            {user && teams.length > 0 && (
+            {user && (
               <>
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
@@ -587,7 +617,12 @@ export function Sidebar() {
                     <span className="ml-auto text-[10px]">{teams.length}</span>
                   </button>
                   {teamsExpanded && (
-                    <div className="space-y-0.5">
+                    <div className="space-y-0.5 pl-3">
+                      {teams.length === 0 && (
+                        <p className="px-2 py-2 text-[10px] text-muted-foreground italic">
+                          No teams yet. Create one from Settings.
+                        </p>
+                      )}
                       {teams.map((team) => {
                         const isExpanded = expandedTeams.has(team.id);
                         // Merge: show Firestore docs + any locally-added docs not yet in Firestore list
@@ -603,7 +638,7 @@ export function Sidebar() {
                         return (
                           <div key={team.id}>
                             <button
-                              className="flex w-full items-center gap-1.5 px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
                               onClick={() => setExpandedTeams((prev) => {
                                 const next = new Set(prev);
                                 if (next.has(team.id)) next.delete(team.id);
@@ -611,8 +646,9 @@ export function Sidebar() {
                                 return next;
                               })}
                             >
-                              {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                              <span className="flex-1 truncate font-medium">{team.name}</span>
+                              {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+                              <Users className="h-3 w-3 shrink-0" />
+                              <span className="flex-1 truncate">{team.name || "(no name)"}</span>
                               <span className="text-[10px] text-muted-foreground mr-1">{allTeamDocs.length}</span>
                               <Plus
                                 className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0"
@@ -623,20 +659,20 @@ export function Sidebar() {
                               />
                             </button>
                             {isExpanded && (
-                              <div className="space-y-0.5 pl-4">
+                              <div className="space-y-0.5 pl-3">
                                 {allTeamDocs.length === 0 ? (
                                   <p className="text-[10px] text-muted-foreground italic px-2 py-1">No documents</p>
                                 ) : (
                                   allTeamDocs.map((td) => {
-                                    // Use local title if available (may be more up-to-date)
                                     const localDoc = documents.find((d) => d.id === td.id);
                                     const title = localDoc?.title || td.title;
+                                    const isOwnDoc = localDoc?.ownerId === user?.uid;
                                     return (
                                       <button
                                         key={td.id}
                                         onClick={() => openTeamOrSharedDoc(td.id, team.id)}
                                         className={cn(
-                                          "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                                          "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
                                           activeDocId === td.id
                                             ? "bg-sidebar-accent text-sidebar-accent-foreground"
                                             : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -644,6 +680,18 @@ export function Sidebar() {
                                       >
                                         <FileText className="h-3.5 w-3.5 shrink-0" />
                                         <span className="flex-1 truncate">{title}</span>
+                                        {!isOwnDoc && localDoc?.ownerId && (
+                                          <span className="text-[9px] text-muted-foreground shrink-0" title="Created by another member">
+                                            shared
+                                          </span>
+                                        )}
+                                        <Trash2
+                                          className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteTeamDoc(td.id, team);
+                                          }}
+                                        />
                                       </button>
                                     );
                                   })
@@ -660,7 +708,7 @@ export function Sidebar() {
             )}
 
             {/* ─── Shared with me ─── */}
-            {user && sharedDocs.length > 0 && (
+            {user && (
               <>
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
@@ -678,13 +726,18 @@ export function Sidebar() {
                     <span className="ml-auto text-[10px]">{sharedDocs.length}</span>
                   </button>
                   {sharedExpanded && (
-                    <div className="space-y-0.5">
+                    <div className="space-y-0.5 pl-3">
+                      {sharedDocs.length === 0 && (
+                        <p className="px-2 py-2 text-[10px] text-muted-foreground italic">
+                          No shared documents yet.
+                        </p>
+                      )}
                       {sharedDocs.map((sd) => (
                         <button
                           key={sd.id}
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
-                            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -695,6 +748,19 @@ export function Sidebar() {
                           <span className="text-[9px] text-muted-foreground capitalize shrink-0">
                             {sd.role}
                           </span>
+                          <X
+                            className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                            title="Leave shared document"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!user) return;
+                              try {
+                                await removeCollaborator(sd.id, { uid: user.uid, email: user.email || "", role: sd.role, addedAt: 0 });
+                              } catch { /* ignore */ }
+                              setSharedDocs((prev) => prev.filter((d) => d.id !== sd.id));
+                              if (activeDocId === sd.id) setActiveDocId(null);
+                            }}
+                          />
                         </button>
                       ))}
                     </div>
@@ -702,9 +768,9 @@ export function Sidebar() {
                 </div>
               </>
             )}
-          </>
+          </div>
         )}
-      </ScrollArea>
+      </div>
 
       {/* Footer */}
       <Separator />

@@ -77,14 +77,9 @@ export function useCollaboration(
       const ytext = ydoc.getText("codemirror");
       ydocRef.current = ydoc;
 
-      // Seed Y.Doc with local content BEFORE connecting.
-      // The sync protocol merges with server state (server wins via CRDT).
-      // If server is empty, this client's state becomes the initial content.
-      if (initialContent) {
-        ydoc.transact(() => {
-          ytext.insert(0, initialContent);
-        });
-      }
+      // Do NOT seed content before connecting — the server snapshot would
+      // merge with the local insert and duplicate everything (CRDT is additive).
+      // Instead, seed only after sync if the server had no content.
 
       const params: Record<string, string> = {};
       if (token) params.token = token;
@@ -109,6 +104,28 @@ export function useCollaboration(
       const onSync = (isSynced: boolean) => {
         if (!isSynced || synced) return;
         synced = true;
+
+        const serverContent = ytext.toString();
+        if (ytext.length === 0 && initialContent) {
+          // Server had no content — seed with local content
+          ydoc.transact(() => {
+            ytext.insert(0, initialContent);
+          });
+        } else if (serverContent.length > 0 && initialContent.length > 0) {
+          // Fix corrupted snapshots: if server content is exactly the local
+          // content repeated N times, replace with single copy
+          const halfLen = serverContent.length / 2;
+          if (
+            serverContent.length >= initialContent.length * 2 &&
+            serverContent.slice(0, halfLen) === serverContent.slice(halfLen)
+          ) {
+            ydoc.transact(() => {
+              ytext.delete(0, ytext.length);
+              ytext.insert(0, serverContent.slice(0, halfLen));
+            });
+          }
+        }
+
         const undoManager = new Y.UndoManager(ytext);
         setExtension(yCollab(ytext, provider.awareness, { undoManager }));
       };

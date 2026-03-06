@@ -80,10 +80,6 @@ export function Editor() {
   // Real-time collaboration via Yjs
   const { extension: collabExtension, connected: collabConnected, peers } =
     useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange);
-  // When collabExtension is non-null, Yjs owns the doc (post-sync).
-  // The editor must not set value prop to avoid fighting with yCollab.
-  const collabOwnsDoc = collabExtension !== null;
-
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
@@ -266,13 +262,13 @@ export function Editor() {
           }`}
         >
           <CodeMirror
-            // Force remount when switching between local and collab modes
-            // to avoid the controlled→uncontrolled transition clearing content
-            key={collabOwnsDoc ? `collab-${activeDocId}` : `local-${activeDocId}`}
-            // When collab is active, Yjs owns the doc — don't set value
-            {...(collabOwnsDoc ? {} : { value: activeDoc.content || "" })}
-            // When collab is active, Yjs observer handles store sync
-            onChange={collabOwnsDoc ? undefined : onChange}
+            // Single key per document — no remount when collab mode changes.
+            // Controlled mode always: value prop kept in sync by both onChange
+            // (local edits) and handleCollabChange (Yjs remote edits).
+            // yCollab extension syncs editor ↔ Yjs via diffs when added.
+            key={activeDocId}
+            value={activeDoc.content || ""}
+            onChange={onChange}
             extensions={extensions}
             theme={editorTheme}
             onCreateEditor={onCreateEditor}
