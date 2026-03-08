@@ -36,8 +36,9 @@ const firebaseConfig = {
 };
 
 const GOOGLE_CLIENT_ID =
-  "636447248627-d24omgnl2flv7jd8msasgnea5cc2pte8.apps.googleusercontent.com";
-const GOOGLE_CLIENT_SECRET = "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";
+  import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET =
+  import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
@@ -239,4 +240,46 @@ export async function updateShareLink(
   shareLink: { enabled: boolean; token: string; permission: "view" | "edit" },
 ): Promise<void> {
   await updateDoc(doc(firestore, DOCS_COLLECTION, docId), { shareLink });
+}
+
+// ─── Version history cloud sync ─────────────────────────────
+
+const VERSIONS_COLLECTION = "versions";
+
+export interface FirestoreVersion {
+  id: string;
+  documentId: string;
+  content: string;
+  title: string;
+  message: string | null;
+  createdAt: number;
+  ownerId: string;
+}
+
+export async function syncVersionsToCloud(
+  documentId: string,
+  versions: { id: string; content: string; title: string; message: string | null; createdAt: number },
+  ownerId: string,
+): Promise<void> {
+  const ref = doc(firestore, VERSIONS_COLLECTION, versions.id);
+  await setDoc(ref, {
+    documentId,
+    content: versions.content,
+    title: versions.title,
+    message: versions.message,
+    createdAt: versions.createdAt,
+    ownerId,
+  }, { merge: true });
+}
+
+export async function fetchVersionsFromCloud(
+  documentId: string,
+): Promise<FirestoreVersion[]> {
+  const q = query(
+    collection(firestore, VERSIONS_COLLECTION),
+    where("documentId", "==", documentId),
+    orderBy("createdAt", "desc"),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as FirestoreVersion);
 }

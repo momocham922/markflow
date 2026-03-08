@@ -1,7 +1,17 @@
-import { useState, useEffect } from "react";
-import { FileText, AlertCircle, ArrowLeft, Copy, Check } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { FileText, AlertCircle, ArrowLeft, Copy, Check, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { fetchDocumentByToken } from "@/services/sharing";
+import { marked } from "marked";
+import hljs from "highlight.js";
+
+// Configure marked for preview
+const sharedRenderer = new marked.Renderer();
+sharedRenderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+  const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
+  const highlighted = hljs.highlight(text, { language }).value;
+  return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
+};
 
 interface SharedDocViewProps {
   token: string;
@@ -18,6 +28,8 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     permission: "view" | "edit";
   } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
 
   useEffect(() => {
     setLoading(true);
@@ -26,6 +38,7 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
       .then((result) => {
         if (result) {
           setDoc(result);
+          setEditContent(result.content);
         } else {
           setError("Document not found or link has expired");
         }
@@ -36,14 +49,38 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
       .finally(() => setLoading(false));
   }, [token]);
 
+  const previewHtml = useMemo(() => {
+    if (!doc) return "";
+    const content = editing ? editContent : doc.content;
+    try {
+      return marked.parse(content, { renderer: sharedRenderer, gfm: true, breaks: true }) as string;
+    } catch {
+      return content;
+    }
+  }, [doc, editing, editContent]);
+
   const handleCopy = async () => {
     if (!doc) return;
-    const div = document.createElement("div");
-    div.innerHTML = doc.content;
-    await navigator.clipboard.writeText(div.textContent || "");
+    await navigator.clipboard.writeText(doc.content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const handleSave = useCallback(async () => {
+    if (!doc) return;
+    try {
+      const { updateDoc, doc: firestoreDoc } = await import("firebase/firestore");
+      const { firestore } = await import("@/services/firebase");
+      await updateDoc(firestoreDoc(firestore, "documents", doc.id), {
+        content: editContent,
+        title: editContent.split("\n")[0]?.replace(/^#+\s*/, "").trim().slice(0, 50) || doc.title,
+      });
+      setDoc((prev) => prev ? { ...prev, content: editContent } : null);
+      setEditing(false);
+    } catch {
+      // Silently fail
+    }
+  }, [doc, editContent]);
 
   if (loading) {
     return (
@@ -92,23 +129,62 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
             {doc.permission === "edit" ? "Can edit" : "View only"}
           </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 gap-1.5 text-xs"
-          onClick={handleCopy}
-        >
-          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-          Copy
-        </Button>
+        <div className="flex items-center gap-1.5">
+          {doc.permission === "edit" && (
+            editing ? (
+              <Button
+                variant="default"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={handleSave}
+              >
+                <Check className="h-3 w-3" />
+                Save
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => setEditing(true)}
+              >
+                <Pencil className="h-3 w-3" />
+                Edit
+              </Button>
+            )
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 text-xs"
+            onClick={handleCopy}
+          >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            Copy
+          </Button>
+        </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-auto">
-        <div
-          className="prose prose-sm dark:prose-invert mx-auto max-w-3xl px-6 py-8"
-          dangerouslySetInnerHTML={{ __html: doc.content }}
-        />
+        {editing ? (
+          <div className="flex h-full">
+            <textarea
+              className="flex-1 resize-none border-r border-border bg-background p-6 font-mono text-sm outline-none"
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+            />
+            <div
+              className="flex-1 overflow-auto prose prose-sm dark:prose-invert mx-auto max-w-3xl px-6 py-8"
+              dangerouslySetInnerHTML={{ __html: previewHtml }}
+            />
+          </div>
+        ) : (
+          <div
+            className="prose prose-sm dark:prose-invert mx-auto max-w-3xl px-6 py-8"
+            dangerouslySetInnerHTML={{ __html: previewHtml }}
+          />
+        )}
       </div>
     </div>
   );

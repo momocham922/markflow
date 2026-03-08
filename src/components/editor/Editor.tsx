@@ -67,6 +67,9 @@ export function Editor() {
   const handleCollabChange = useCallback(
     (content: string) => {
       if (!activeDocId) return;
+      // Guard: Yjs can fire with empty content during reconnect/disconnect
+      if (!content.trim()) return;
+
       if (collabTimerRef.current) clearTimeout(collabTimerRef.current);
       collabTimerRef.current = setTimeout(() => {
         updateDocument(activeDocId, { content, updatedAt: Date.now() });
@@ -77,9 +80,9 @@ export function Editor() {
     [activeDocId, updateDocument],
   );
 
-  // Real-time collaboration via Yjs
+  // Real-time collaboration via Yjs — only for shared documents
   const { extension: collabExtension, connected: collabConnected, peers } =
-    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange);
+    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false);
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
@@ -94,7 +97,13 @@ export function Editor() {
     if (isHtmlContent(activeDoc.content)) {
       const md = ensureMarkdown(activeDoc.content);
       convertedRef.current.add(activeDocId);
-      updateDocument(activeDocId, { content: md, updatedAt: Date.now() });
+      // Only update if conversion produced non-empty content
+      if (md.trim()) {
+        updateDocument(activeDocId, { content: md, updatedAt: Date.now() });
+      }
+    } else {
+      // Mark as processed even if not HTML to prevent re-checking
+      convertedRef.current.add(activeDocId);
     }
   }, [activeDocId, activeDoc?.content, updateDocument]);
 
@@ -162,16 +171,18 @@ export function Editor() {
 
   const onChange = useCallback(
     (value: string) => {
-      if (activeDocId) {
-        updateDocument(activeDocId, {
-          content: value,
-          updatedAt: Date.now(),
-        });
-        // Auto-update title from first line
-        const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
-        if (firstLine) {
-          updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
-        }
+      if (!activeDocId) return;
+      // Guard: never save empty content (can happen during CodeMirror remount)
+      if (!value.trim()) return;
+
+      updateDocument(activeDocId, {
+        content: value,
+        updatedAt: Date.now(),
+      });
+      // Auto-update title from first line
+      const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+      if (firstLine) {
+        updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
       }
     },
     [activeDocId, updateDocument],
@@ -224,28 +235,37 @@ export function Editor() {
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
         collabSlot={
-          collabConnected ? (
-            <div className="flex items-center gap-1 shrink-0">
-              {peers.length > 0 && (
-                <div className="flex -space-x-1.5">
-                  {peers.slice(0, 5).map((peer, i) => (
-                    <div
-                      key={i}
-                      className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold text-white ring-2 ring-background"
-                      style={{ backgroundColor: peer.color }}
-                      title={peer.name}
-                    >
-                      {peer.name.charAt(0).toUpperCase()}
-                    </div>
-                  ))}
-                  {peers.length > 5 && (
-                    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[9px] font-medium text-muted-foreground ring-2 ring-background">
-                      +{peers.length - 5}
-                    </div>
-                  )}
-                </div>
+          (collabConnected || collabExtension) ? (
+            <div className="flex items-center gap-1.5 shrink-0 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5">
+              <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" title="Live collaboration active" />
+              {peers.length > 0 ? (
+                <>
+                  <div className="flex -space-x-1.5">
+                    {peers.slice(0, 5).map((peer, i) => (
+                      <div
+                        key={i}
+                        className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold text-white ring-2 ring-background"
+                        style={{ backgroundColor: peer.color }}
+                        title={peer.name}
+                      >
+                        {peer.name.charAt(0).toUpperCase()}
+                      </div>
+                    ))}
+                    {peers.length > 5 && (
+                      <div className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[9px] font-medium text-muted-foreground ring-2 ring-background">
+                        +{peers.length - 5}
+                      </div>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">
+                    {peers.length} online
+                  </span>
+                </>
+              ) : (
+                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">
+                  Live
+                </span>
               )}
-              <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 ml-1" title="Live collaboration active" />
             </div>
           ) : undefined
         }
@@ -261,28 +281,32 @@ export function Editor() {
                 : "flex-1"
           }`}
         >
-          <CodeMirror
-            // Single key per document — no remount when collab mode changes.
-            // When yCollab is active: value/onChange are omitted so yCollab
-            // fully owns the document (remote edits flow via CRDT, not value prop).
-            // When yCollab is NOT active: controlled mode with value/onChange.
-            key={activeDocId}
-            value={collabExtension ? undefined : (activeDoc.content || "")}
-            onChange={collabExtension ? undefined : onChange}
-            extensions={extensions}
-            theme={editorTheme}
-            onCreateEditor={onCreateEditor}
-            onUpdate={onUpdate}
-            basicSetup={{
-              lineNumbers: true,
-              highlightActiveLineGutter: true,
-              highlightActiveLine: true,
-              foldGutter: true,
-              bracketMatching: true,
-              closeBrackets: true,
-              indentOnInput: true,
-            }}
-          />
+          {/* Shared docs: wait for yCollab to be ready before mounting editor.
+              This avoids the controlled→uncontrolled transition that clears content. */}
+          {activeDoc.isShared && !collabExtension ? (
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              <p className="text-sm">Syncing document…</p>
+            </div>
+          ) : (
+            <CodeMirror
+              key={`${activeDocId}-${collabExtension ? "collab" : "local"}`}
+              value={collabExtension ? undefined : (activeDoc.content || "")}
+              onChange={collabExtension ? undefined : onChange}
+              extensions={extensions}
+              theme={editorTheme}
+              onCreateEditor={onCreateEditor}
+              onUpdate={onUpdate}
+              basicSetup={{
+                lineNumbers: true,
+                highlightActiveLineGutter: true,
+                highlightActiveLine: true,
+                foldGutter: true,
+                bracketMatching: true,
+                closeBrackets: true,
+                indentOnInput: true,
+              }}
+            />
+          )}
         </div>
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && (

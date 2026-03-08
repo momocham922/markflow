@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
+import { IndexeddbPersistence } from "y-indexeddb";
 import { yCollab } from "y-codemirror.next";
 import type { Extension } from "@codemirror/state";
 import { useAuthStore } from "@/stores/auth-store";
@@ -13,37 +14,35 @@ export interface CollabUser {
 }
 
 export interface CollabState {
-  /**
-   * CodeMirror extension — null when collab is off or not yet synced.
-   * When non-null, Yjs owns the document: do NOT set CodeMirror's value prop.
-   * The extension is only set AFTER initial sync completes, so there is
-   * never a frame where both value prop and yCollab coexist.
-   */
   extension: Extension | null;
-  /** Whether WebSocket is connected */
   connected: boolean;
-  /** Active peers (not including self) */
   peers: CollabUser[];
 }
 
 const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
 
 /**
- * Manages Yjs collaboration for a document.
+ * Yjs-based real-time collaboration following established best practices:
  *
- * Contract with the Editor:
- * - `extension` is null until the first sync completes. While null, the editor
- *   operates in local-only mode with its normal `value` prop.
- * - Once `extension` is set (after sync), Yjs owns the doc. The editor must
- *   stop setting `value` and let yCollab drive the content.
- * - `onContentChange` syncs Yjs → local store for preview/auto-save.
- * - `initialContent` is pre-loaded into the Y.Doc BEFORE connecting, so the
- *   y-websocket sync protocol merges it naturally (no post-sync insertion race).
+ * Architecture (same pattern as Google Docs / Notion):
+ *  1. Y.Doc is the SINGLE source of truth for shared document content.
+ *  2. y-indexeddb persists the Y.Doc locally (offline support, instant load).
+ *  3. y-websocket syncs Y.Doc between peers in real-time.
+ *  4. Local SQLite content is only used as a ONE-TIME seed when a document
+ *     is first shared. After that, Y.Doc owns the content entirely.
+ *
+ * Flow:
+ *  - y-indexeddb loads persisted Y.Doc from IndexedDB (instant, offline-safe).
+ *  - y-websocket connects for real-time peer sync.
+ *  - If Y.Doc is empty after both providers sync, seed from local content.
+ *  - yCollab extension is ALWAYS active for shared docs — it drives the editor.
+ *  - Content changes in Y.Doc propagate to the local store for preview/search.
  */
 export function useCollaboration(
   docId: string | null,
   initialContent: string,
   onContentChange: (content: string) => void,
+  isShared: boolean = false,
 ): CollabState {
   const user = useAuthStore((s) => s.user);
   const [connected, setConnected] = useState(false);
@@ -51,12 +50,15 @@ export function useCollaboration(
   const [extension, setExtension] = useState<Extension | null>(null);
 
   const providerRef = useRef<WebsocketProvider | null>(null);
+  const idbRef = useRef<IndexeddbPersistence | null>(null);
   const ydocRef = useRef<Y.Doc | null>(null);
   const colorRef = useRef(getRandomColor());
   const onContentChangeRef = useRef(onContentChange);
   onContentChangeRef.current = onContentChange;
+  const initialContentRef = useRef(initialContent);
+  initialContentRef.current = initialContent;
 
-  const enabled = Boolean(WS_URL && docId && user);
+  const enabled = Boolean(WS_URL && docId && user && isShared);
 
   useEffect(() => {
     if (!enabled || !docId || !user) {
@@ -68,7 +70,6 @@ export function useCollaboration(
 
     let cancelled = false;
 
-    // Async: get Firebase auth token before connecting
     const setup = async () => {
       const token = await user.getIdToken().catch(() => "");
       if (cancelled) return;
@@ -77,10 +78,12 @@ export function useCollaboration(
       const ytext = ydoc.getText("codemirror");
       ydocRef.current = ydoc;
 
-      // Do NOT seed content before connecting — the server snapshot would
-      // merge with the local insert and duplicate everything (CRDT is additive).
-      // Instead, seed only after sync if the server had no content.
+      // --- Provider 1: IndexedDB (local persistence) ---
+      // Loads previously persisted Y.Doc state instantly.
+      const idb = new IndexeddbPersistence(`markflow-${docId}`, ydoc);
+      idbRef.current = idb;
 
+      // --- Provider 2: WebSocket (real-time peer sync) ---
       const params: Record<string, string> = {};
       if (token) params.token = token;
 
@@ -90,7 +93,7 @@ export function useCollaboration(
       });
       providerRef.current = provider;
 
-      // Awareness
+      // Awareness (cursor/presence)
       const color = colorRef.current;
       provider.awareness.setLocalStateField("user", {
         name: user.displayName || user.email || "Anonymous",
@@ -98,44 +101,72 @@ export function useCollaboration(
         colorLight: color + "33",
       });
 
-      // Only expose the extension AFTER first sync completes.
-      // This guarantees zero overlap between value-prop and yCollab modes.
-      let synced = false;
-      const onSync = (isSynced: boolean) => {
-        if (!isSynced || synced) return;
-        synced = true;
+      // --- Wait for IndexedDB to load, then connect WS ---
+      // This ensures local persisted state is loaded BEFORE merging with server.
+      let idbSynced = false;
+      let idbHadData = false;
+      let wsSynced = false;
+      let finalized = false;
 
-        const serverContent = ytext.toString();
-        if (ytext.length === 0 && initialContent) {
-          // Server had no content — seed with local content
+      const tryFinalize = () => {
+        if (finalized || !idbSynced || !wsSynced || cancelled) return;
+        finalized = true;
+
+        const ydocContent = ytext.toString();
+        const localContent = initialContentRef.current;
+
+        if (!ydocContent.trim() && localContent.trim()) {
+          // Y.Doc is empty — seed from local (first share or corrupted state)
           ydoc.transact(() => {
-            ytext.insert(0, initialContent);
+            ytext.insert(0, localContent);
           });
-        } else if (serverContent.length > 0 && initialContent.length > 0) {
-          // Fix corrupted snapshots: if server content is exactly the local
-          // content repeated N times, replace with single copy
-          const halfLen = serverContent.length / 2;
-          if (
-            serverContent.length >= initialContent.length * 2 &&
-            serverContent.slice(0, halfLen) === serverContent.slice(halfLen)
-          ) {
-            ydoc.transact(() => {
-              ytext.delete(0, ytext.length);
-              ytext.insert(0, serverContent.slice(0, halfLen));
-            });
-          }
+        } else if (
+          !idbHadData &&
+          localContent.trim() &&
+          ydocContent.trim() !== localContent.trim()
+        ) {
+          // MIGRATION: IndexedDB was empty (first time using y-indexeddb).
+          // Y.Doc state came entirely from WS server, which may be stale.
+          // Trust local SQLite content as the latest version.
+          // After this session, IndexedDB will persist the correct state.
+          ydoc.transact(() => {
+            if (ytext.length > 0) ytext.delete(0, ytext.length);
+            ytext.insert(0, localContent);
+          });
         }
 
+        // Activate yCollab — Y.Doc is now the source of truth
         const undoManager = new Y.UndoManager(ytext);
         setExtension(yCollab(ytext, provider.awareness, { undoManager }));
       };
-      provider.on("sync", onSync);
+
+      idb.once("synced", () => {
+        idbSynced = true;
+        // Check if IndexedDB had previously persisted data
+        idbHadData = ytext.toString().trim().length > 0;
+        // Connect WS after IndexedDB is ready
+        provider.connect();
+      });
+
+      provider.on("sync", (isSynced: boolean) => {
+        if (!isSynced) return;
+        wsSynced = true;
+        tryFinalize();
+      });
+
+      // Fallback: if WS never syncs (server down), still activate after IDB
+      const wsTimeout = setTimeout(() => {
+        if (!wsSynced && idbSynced && !cancelled) {
+          console.warn("[collab] WS sync timeout — using IndexedDB state only");
+          wsSynced = true;
+          tryFinalize();
+        }
+      }, 5000);
 
       // Connection status
-      const onStatus = ({ status }: { status: string }) => {
+      provider.on("status", ({ status }: { status: string }) => {
         setConnected(status === "connected");
-      };
-      provider.on("status", onStatus);
+      });
 
       // Peer tracking
       const updatePeers = () => {
@@ -149,29 +180,37 @@ export function useCollaboration(
       };
       provider.awareness.on("change", updatePeers);
 
-      // Sync Yjs → local store on every change
+      // Propagate Y.Doc changes → local store (for preview, search, auto-save)
       const observer = () => {
-        onContentChangeRef.current(ytext.toString());
+        if (!finalized) return;
+        const text = ytext.toString();
+        if (!text.trim()) return;
+        onContentChangeRef.current(text);
       };
       ytext.observe(observer);
 
-      // Connect
-      provider.connect();
+      // Cleanup timeout ref
+      return () => clearTimeout(wsTimeout);
     };
 
-    setup();
+    let cleanupTimeout: (() => void) | undefined;
+    setup().then((fn) => { cleanupTimeout = fn; });
 
     return () => {
       cancelled = true;
+      cleanupTimeout?.();
       const provider = providerRef.current;
+      const idb = idbRef.current;
       const ydoc = ydocRef.current;
       if (provider) {
         provider.disconnect();
         provider.destroy();
       }
+      if (idb) idb.destroy();
       if (ydoc) ydoc.destroy();
       ydocRef.current = null;
       providerRef.current = null;
+      idbRef.current = null;
       setExtension(null);
       setConnected(false);
       setPeers([]);

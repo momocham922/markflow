@@ -13,7 +13,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { DiffView } from "./DiffView";
 import { useAppStore } from "@/stores/app-store";
+import { useAuthStore } from "@/stores/auth-store";
 import * as db from "@/services/database";
+import { syncVersionsToCloud, fetchVersionsFromCloud } from "@/services/firebase";
 
 interface Version {
   id: string;
@@ -44,24 +46,49 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [snapshotMsg, setSnapshotMsg] = useState("");
 
+  const user = useAuthStore((s) => s.user);
+
   const loadVersions = useCallback(async () => {
     if (!activeDocId) return;
     try {
       const rows = await db.getVersions(activeDocId);
-      setVersions(
-        rows.map((r) => ({
-          id: r.id,
-          documentId: r.document_id,
-          content: r.content,
-          title: r.title,
-          message: r.message,
-          createdAt: r.created_at,
-        })),
-      );
+      const localVersions = rows.map((r) => ({
+        id: r.id,
+        documentId: r.document_id,
+        content: r.content,
+        title: r.title,
+        message: r.message,
+        createdAt: r.created_at,
+      }));
+
+      // Merge cloud versions if user is logged in
+      if (user) {
+        try {
+          const cloudVersions = await fetchVersionsFromCloud(activeDocId);
+          const localIds = new Set(localVersions.map((v) => v.id));
+          for (const cv of cloudVersions) {
+            if (!localIds.has(cv.id)) {
+              localVersions.push({
+                id: cv.id,
+                documentId: cv.documentId,
+                content: cv.content,
+                title: cv.title,
+                message: cv.message,
+                createdAt: cv.createdAt,
+              });
+            }
+          }
+          localVersions.sort((a, b) => b.createdAt - a.createdAt);
+        } catch {
+          // Cloud fetch failed, use local only
+        }
+      }
+
+      setVersions(localVersions);
     } catch {
       // No DB available (browser mode)
     }
-  }, [activeDocId]);
+  }, [activeDocId, user]);
 
   useEffect(() => {
     loadVersions();
@@ -73,14 +100,23 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
   const handleSave = async () => {
     if (!activeDoc) return;
     setSaving(true);
+    const versionId = crypto.randomUUID();
+    const versionData = {
+      id: versionId,
+      documentId: activeDoc.id,
+      content: activeDoc.content,
+      title: activeDoc.title,
+      message: snapshotMsg.trim() || null,
+    };
     try {
-      await db.createVersion({
-        id: crypto.randomUUID(),
-        documentId: activeDoc.id,
-        content: activeDoc.content,
-        title: activeDoc.title,
-        message: snapshotMsg.trim() || null,
-      });
+      await db.createVersion(versionData);
+      // Sync to cloud
+      if (user) {
+        syncVersionsToCloud(activeDoc.id, {
+          ...versionData,
+          createdAt: Date.now(),
+        }, user.uid).catch(() => {});
+      }
       setSnapshotMsg("");
       await loadVersions();
     } catch (err) {
@@ -132,7 +168,7 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
   };
 
   return (
-    <div className="flex h-full w-80 flex-col border-l border-border bg-background">
+    <div className="flex h-full w-full flex-col border-l border-border bg-background">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <div className="flex items-center gap-2">

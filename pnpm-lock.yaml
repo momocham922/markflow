@@ -32,6 +32,9 @@ importers:
       '@tauri-apps/plugin-shell':
         specifier: ^2.0.0
         version: 2.3.5
+      '@tauri-apps/plugin-sql':
+        specifier: ^2.3.2
+        version: 2.3.2
       '@tiptap/extension-code-block-lowlight':
         specifier: ^3.20.0
         version: 3.20.0(@tiptap/core@3.20.0(@tiptap/pm@3.20.0))(@tiptap/extension-code-block@3.20.0(@tiptap/core@3.20.0(@tiptap/pm@3.20.0))(@tiptap/pm@3.20.0))(@tiptap/pm@3.20.0)(highlight.js@11.11.1)(lowlight@3.3.0)
@@ -131,6 +134,9 @@ importers:
       y-codemirror.next:
         specifier: ^0.3.5
         version: 0.3.5(@codemirror/state@6.5.4)(@codemirror/view@6.39.16)(yjs@13.6.29)
+      y-indexeddb:
+        specifier: ^9.0.12
+        version: 9.0.12(yjs@13.6.29)
       y-websocket:
         specifier: ^3.0.0
         version: 3.0.0(yjs@13.6.29)
@@ -1845,6 +1851,9 @@ packages:
   '@tauri-apps/plugin-shell@2.3.5':
     resolution: {integrity: sha512-jewtULhiQ7lI7+owCKAjc8tYLJr92U16bPOeAa472LHJdgaibLP83NcfAF2e+wkEcA53FxKQAZ7byDzs2eeizg==}
 
+  '@tauri-apps/plugin-sql@2.3.2':
+    resolution: {integrity: sha512-4VDXhcKXVpyh5KKpnTGAn6q2DikPHH+TXGh9ZDQzULmG/JEz1RDvzQStgBJKddiukRbYEZ8CGIA2kskx+T+PpA==}
+
   '@tiptap/core@3.20.0':
     resolution: {integrity: sha512-aC9aROgia/SpJqhsXFiX9TsligL8d+oeoI8W3u00WI45s0VfsqjgeKQLDLF7Tu7hC+7F02teC84SAHuup003VQ==}
     peerDependencies:
@@ -3107,6 +3116,12 @@ packages:
       '@codemirror/state': ^6.0.0
       '@codemirror/view': ^6.0.0
       yjs: ^13.5.6
+
+  y-indexeddb@9.0.12:
+    resolution: {integrity: sha512-9oCFRSPPzBK7/w5vOkJBaVCQZKHXB/v6SIT+WYhnJxlEC61juqG0hBrAf+y3gmSMLFLwICNH9nQ53uscuse6Hg==}
+    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
+    peerDependencies:
+      yjs: ^13.0.0
 
   y-prosemirror@1.3.7:
     resolution: {integrity: sha512-NpM99WSdD4Fx4if5xOMDpPtU3oAmTSjlzh5U4353ABbRHl1HtAFUx6HlebLZfyFxXN9jzKMDkVbcRjqOZVkYQg==}
@@ -5067,6 +5082,10 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.10.1
 
+  '@tauri-apps/plugin-sql@2.3.2':
+    dependencies:
+      '@tauri-apps/api': 2.10.1
+
   '@tiptap/core@3.20.0(@tiptap/pm@3.20.0)':
     dependencies:
       '@tiptap/pm': 3.20.0
@@ -6721,6 +6740,11 @@ snapshots:
     dependencies:
       '@codemirror/state': 6.5.4
       '@codemirror/view': 6.39.16
+      lib0: 0.2.117
+      yjs: 13.6.29
+
+  y-indexeddb@9.0.12(yjs@13.6.29):
+    dependencies:
       lib0: 0.2.117
       yjs: 13.6.29
 

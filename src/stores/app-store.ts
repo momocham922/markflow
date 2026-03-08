@@ -61,6 +61,12 @@ const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingDocs = new Map<string, Document>();
 
 function debouncedSave(doc: Document) {
+  // Never persist a document with empty content — this is almost always a bug
+  if (!doc.content.trim()) {
+    console.warn(`[app-store] Skipped saving doc ${doc.id} with empty content`);
+    return;
+  }
+
   const existing = saveTimers.get(doc.id);
   if (existing) clearTimeout(existing);
   pendingDocs.set(doc.id, doc);
@@ -164,6 +170,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           folder: r.folder || "/",
           tags,
           ownerId: r.owner_id ?? null,
+          isShared: r.is_shared === 1,
         };
       });
 
@@ -214,8 +221,28 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateDocument: (id, updates) => {
     set((s) => {
+      const existing = s.documents.find((d) => d.id === id);
+      if (!existing) return {};
+
+      // CRITICAL: Never overwrite non-empty content with empty content.
+      // This prevents data loss from Yjs reconnect, CodeMirror remount,
+      // cloud sync race conditions, etc.
+      let safeUpdates = updates;
+      if (
+        "content" in updates &&
+        !updates.content?.trim() &&
+        existing.content.trim()
+      ) {
+        // Strip the empty content from the update — keep everything else
+        const { content: _dropped, ...rest } = updates;
+        safeUpdates = rest;
+        console.warn(`[app-store] Blocked empty content overwrite for doc ${id}`);
+      }
+
+      if (Object.keys(safeUpdates).length === 0) return {};
+
       const documents = s.documents.map((d) =>
-        d.id === id ? { ...d, ...updates } : d,
+        d.id === id ? { ...d, ...safeUpdates } : d,
       );
       const updated = documents.find((d) => d.id === id);
       if (updated) debouncedSave(updated);

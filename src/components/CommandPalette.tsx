@@ -19,6 +19,9 @@ import {
   Bot,
   Share2,
   Download,
+  Upload,
+  Printer,
+  Keyboard,
 } from "lucide-react";
 import { useAppStore, type Document } from "@/stores/app-store";
 
@@ -28,6 +31,10 @@ interface CommandPaletteProps {
   onShare: () => void;
   onExportHtml: () => void;
   onExportText: () => void;
+  onExportMarkdown?: () => void;
+  onImportMarkdown?: () => void;
+  onPrint?: () => void;
+  onShowShortcuts?: () => void;
 }
 
 export function CommandPalette({
@@ -36,6 +43,10 @@ export function CommandPalette({
   onShare,
   onExportHtml,
   onExportText,
+  onExportMarkdown,
+  onImportMarkdown,
+  onPrint,
+  onShowShortcuts,
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const {
@@ -88,6 +99,12 @@ export function CommandPalette({
             <Plus className="mr-2 h-4 w-4" />
             New Document
           </CommandItem>
+          {onImportMarkdown && (
+            <CommandItem onSelect={() => handleSelect(onImportMarkdown)}>
+              <Upload className="mr-2 h-4 w-4" />
+              Import Markdown File
+            </CommandItem>
+          )}
           {documents.map((doc) => (
             <CommandItem
               key={doc.id}
@@ -140,6 +157,18 @@ export function CommandPalette({
             <Download className="mr-2 h-4 w-4" />
             Export as Text
           </CommandItem>
+          {onExportMarkdown && (
+            <CommandItem onSelect={() => handleSelect(onExportMarkdown)}>
+              <Download className="mr-2 h-4 w-4" />
+              Export as Markdown
+            </CommandItem>
+          )}
+          {onPrint && (
+            <CommandItem onSelect={() => handleSelect(onPrint)}>
+              <Printer className="mr-2 h-4 w-4" />
+              Print / Save as PDF
+            </CommandItem>
+          )}
           <CommandItem onSelect={() => handleSelect(toggleTheme)}>
             {theme === "light" ? (
               <Moon className="mr-2 h-4 w-4" />
@@ -148,6 +177,12 @@ export function CommandPalette({
             )}
             Toggle {theme === "light" ? "Dark" : "Light"} Mode
           </CommandItem>
+          {onShowShortcuts && (
+            <CommandItem onSelect={() => handleSelect(onShowShortcuts)}>
+              <Keyboard className="mr-2 h-4 w-4" />
+              Keyboard Shortcuts
+            </CommandItem>
+          )}
         </CommandGroup>
       </CommandList>
     </CommandDialog>

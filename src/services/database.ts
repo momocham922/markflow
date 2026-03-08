@@ -43,6 +43,11 @@ async function ensureMigrations(database: Database) {
     try {
       await database.execute(`ALTER TABLE documents ADD COLUMN owner_id TEXT DEFAULT NULL`);
     } catch { /* already exists */ }
+
+    // is_shared column (migration v5)
+    try {
+      await database.execute(`ALTER TABLE documents ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0`);
+    } catch { /* already exists */ }
   } catch (err) {
     console.error("[db] migration repair failed:", err);
   }
@@ -59,6 +64,7 @@ export interface DbDocument {
   folder: string;
   tags: string;
   owner_id: string | null;
+  is_shared: number;
 }
 
 export async function getAllDocuments(): Promise<DbDocument[]> {
@@ -86,17 +92,19 @@ export async function upsertDocument(doc: {
   folder?: string;
   tags?: string[];
   ownerId?: string | null;
+  isShared?: boolean;
 }): Promise<void> {
   const database = await getDb();
   const folder = doc.folder ?? "/";
   const tags = JSON.stringify(doc.tags ?? []);
   const ownerId = doc.ownerId ?? null;
+  const isShared = doc.isShared ? 1 : 0;
   await database.execute(
-    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags, owner_id)
-     VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8)
+    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags, owner_id, is_shared)
+     VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9)
      ON CONFLICT(id) DO UPDATE SET
-       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7, owner_id = $8`,
-    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags, ownerId],
+       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7, owner_id = $8, is_shared = $9`,
+    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags, ownerId, isShared],
   );
 }
 

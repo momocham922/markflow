@@ -157,6 +157,8 @@
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   /* Text selection — consistent, non-inverting */
@@ -186,6 +188,16 @@
  *  Using !important to override Tailwind v4 preflight resets
  * ============================================================
  */
+
+/* Allow text selection in editable/content areas */
+.cm-editor,
+.prose,
+.select-text,
+textarea,
+input {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
 
 .tiptap,
 .prose {
@@ -632,28 +644,59 @@
   padding-bottom: 1px;
 }
 
-/* Collaboration cursor styles */
+/* Collaboration cursor styles (y-codemirror.next) */
+.yRemoteSelection {
+  opacity: 0.3;
+}
+
+.yRemoteSelectionHead {
+  position: absolute;
+  border-left: 2px solid var(--user-color, oklch(0.6 0.2 250));
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.yRemoteSelectionHead::after {
+  content: attr(data-user);
+  position: absolute;
+  top: -1.4em;
+  left: -2px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px 4px 4px 0;
+  color: #fff;
+  background-color: var(--user-color, oklch(0.6 0.2 250));
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+  opacity: 0.9;
+  z-index: 10;
+}
+
+/* Legacy Tiptap collaboration cursor styles */
 .collaboration-cursor__caret {
-  border-left: 1px solid var(--color, #333);
-  border-right: 1px solid var(--color, #333);
+  border-left: 2px solid var(--color, #333);
   margin-left: -1px;
-  margin-right: -1px;
   pointer-events: none;
   position: relative;
   word-break: normal;
 }
 
 .collaboration-cursor__label {
-  border-radius: 3px 3px 3px 0;
+  border-radius: 4px 4px 4px 0;
   color: #fff;
-  font-size: 11px;
-  font-weight: 500;
-  left: -1px;
-  line-height: normal;
-  padding: 0.1rem 0.3rem;
+  font-size: 10px;
+  font-weight: 600;
+  left: -2px;
+  line-height: 1;
+  padding: 2px 6px;
   position: absolute;
-  top: -1.4em;
+  top: -1.5em;
   user-select: none;
   white-space: nowrap;
   background-color: var(--color, #333);
+  opacity: 0.9;
+  z-index: 10;
 }

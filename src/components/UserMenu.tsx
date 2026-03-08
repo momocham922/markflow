@@ -1,10 +1,37 @@
-import { LogIn, LogOut, Cloud, CloudOff, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { LogIn, LogOut, Cloud, CloudOff, RefreshCw, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
+import { TeamManageDialog } from "@/components/TeamManageDialog";
+
+function UserAvatar({ user }: { user: { photoURL: string | null; displayName: string | null; email: string | null } }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const initial = (user.displayName || user.email || "?").charAt(0).toUpperCase();
+
+  if (user.photoURL && !imgFailed) {
+    return (
+      <img
+        src={user.photoURL}
+        alt=""
+        className="h-5 w-5 rounded-full shrink-0"
+        referrerPolicy="no-referrer"
+        crossOrigin="anonymous"
+        onError={() => setImgFailed(true)}
+      />
+    );
+  }
+
+  return (
+    <div className="flex h-5 w-5 rounded-full bg-primary text-primary-foreground items-center justify-center text-[10px] font-bold shrink-0">
+      {initial}
+    </div>
+  );
+}
 
 export function UserMenu() {
   const { user, loading, isOnline, syncing, loginError, login, logout, syncToCloud } =
     useAuthStore();
+  const [teamOpen, setTeamOpen] = useState(false);
 
   if (loading) return null;
 
@@ -35,6 +62,15 @@ export function UserMenu() {
         variant="ghost"
         size="icon"
         className="h-7 w-7"
+        onClick={() => setTeamOpen(true)}
+        title="Manage Teams"
+      >
+        <Users className="h-3.5 w-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7"
         onClick={syncToCloud}
         disabled={syncing || !isOnline}
         title="Sync to cloud"
@@ -48,13 +84,7 @@ export function UserMenu() {
         )}
       </Button>
       <div className="flex items-center gap-1.5">
-        {user.photoURL && (
-          <img
-            src={user.photoURL}
-            alt=""
-            className="h-5 w-5 rounded-full"
-          />
-        )}
+        <UserAvatar user={user} />
         <span className="text-xs text-muted-foreground max-w-[100px] truncate">
           {user.displayName || user.email}
         </span>
@@ -68,6 +98,7 @@ export function UserMenu() {
       >
         <LogOut className="h-3.5 w-3.5" />
       </Button>
+      <TeamManageDialog open={teamOpen} onOpenChange={setTeamOpen} />
     </div>
   );
 }

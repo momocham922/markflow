@@ -116,10 +116,22 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
   // ─── Share Link handlers ──────────────────────────────
 
   const handleEnableLink = async () => {
-    if (!activeDocId) return;
+    if (!activeDocId || !user) return;
     setLinkLoading(true);
     setError("");
     try {
+      // Ensure latest content is synced to Firestore before sharing
+      if (activeDoc) {
+        const { saveDocumentToFirestore } = await import("@/services/firebase");
+        await saveDocumentToFirestore({
+          id: activeDoc.id,
+          title: activeDoc.title,
+          content: activeDoc.content,
+          ownerId: user.uid,
+          folder: activeDoc.folder,
+          tags: activeDoc.tags,
+        });
+      }
       const link = await enableShareLink(activeDocId, linkPermission);
       setShareLink(link);
 

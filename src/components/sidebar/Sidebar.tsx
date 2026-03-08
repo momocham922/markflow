@@ -343,7 +343,7 @@ export function Sidebar() {
       <FileText className="h-3.5 w-3.5 shrink-0" />
       <span className="flex-1 truncate">{doc.title}</span>
       {doc.isShared && (
-        <Share2 className="h-3 w-3 shrink-0 text-muted-foreground" title="Shared" />
+        <span title="Shared"><Share2 className="h-3 w-3 shrink-0 text-muted-foreground" /></span>
       )}
       {doc.tags.length > 0 && (
         <span className="text-[9px] text-muted-foreground shrink-0">
@@ -497,7 +497,7 @@ export function Sidebar() {
   };
 
   return (
-    <div className="flex h-full w-60 flex-col border-r border-border bg-sidebar-background">
+    <div className="flex h-full w-full flex-col border-r border-border bg-sidebar-background">
       {/* Header */}
       <div className="flex items-center justify-between px-3 pt-2 pb-2">
         <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">
@@ -751,9 +751,10 @@ export function Sidebar() {
                           <span className="text-[9px] text-muted-foreground capitalize shrink-0">
                             {sd.role}
                           </span>
-                          <X
-                            className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                          <span
+                            className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive cursor-pointer"
                             title="Leave shared document"
+                            role="button"
                             onClick={async (e) => {
                               e.stopPropagation();
                               if (!user) return;
@@ -763,7 +764,9 @@ export function Sidebar() {
                               setSharedDocs((prev) => prev.filter((d) => d.id !== sd.id));
                               if (activeDocId === sd.id) setActiveDocId(null);
                             }}
-                          />
+                          >
+                            <X className="h-3 w-3" />
+                          </span>
                         </button>
                       ))}
                     </div>

@@ -104,6 +104,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Merge: cloud docs that don't exist locally get added,
       // existing docs get folder/tags updated from cloud
       for (const cloudDoc of cloudDocs) {
+        // Skip cloud docs with empty content — don't import data loss
+        if (!cloudDoc.content?.trim()) continue;
+
         const local = localDocs.find((d) => d.id === cloudDoc.id);
         if (!local) {
           const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
@@ -159,8 +162,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const { documents } = useAppStore.getState();
       // Only sync docs owned by this user (or unclaimed local docs)
+      // CRITICAL: Never sync docs with empty content to cloud
       const myDocs = documents.filter(
-        (d) => !d.ownerId || d.ownerId === user.uid,
+        (d) => (!d.ownerId || d.ownerId === user.uid) && d.content.trim(),
       );
       for (const doc of myDocs) {
         const payload = {
