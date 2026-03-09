@@ -4,7 +4,6 @@ import type { ViewUpdate } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { EditorView } from "@codemirror/view";
-import { Compartment } from "@codemirror/state";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
@@ -62,7 +61,6 @@ export function Editor() {
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
-  const collabCompartment = useRef(new Compartment());
 
   // For shared docs: freeze value per-mount so @uiw/react-codemirror
   // never dispatches value-driven transactions that fight yCollab.
@@ -97,8 +95,9 @@ export function Editor() {
   );
 
   // Real-time collaboration via Yjs — only for shared documents
-  const { extension: collabExtension, connected: collabConnected, peers } =
+  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled } =
     useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
+  const isCollabReady = Boolean(activeDocId && collabExtension && collabDocId === activeDocId);
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
@@ -135,27 +134,17 @@ export function Editor() {
     indentOnInput: true,
   }), []);
 
-  // Memoize extensions — collab managed via Compartment so @uiw/react-codemirror's
-  // StateEffect.reconfigure never destroys yCollab's ViewPlugin / Y.Text observer.
+  // Memoize extensions — yCollab only included when isCollabReady so it's part of
+  // the initial EditorState (no reconfigure needed, ySync ViewPlugin stays stable).
   const extensions = useMemo(
     () => [
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       EditorView.lineWrapping,
       markdownShortcuts,
-      collabCompartment.current.of(collabExtension ?? []),
+      ...(isCollabReady && collabExtension ? [collabExtension] : []),
     ],
-    [collabExtension],
+    [collabExtension, isCollabReady],
   );
-
-  // Also dispatch compartment reconfigure directly on the view — ensures yCollab
-  // activates immediately without waiting for @uiw/react-codemirror's render cycle.
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: collabCompartment.current.reconfigure(collabExtension ?? []),
-    });
-  }, [collabExtension]);
 
   const editorTheme = useMemo(() => {
     const preset = editorThemes[themeSettings.editorTheme] ?? editorThemes.default;
@@ -316,16 +305,22 @@ export function Editor() {
                 : "flex-1"
           }`}
         >
-          <CodeMirror
-            key={activeDocId}
-            value={activeDoc.isShared ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
-            onChange={activeDoc.isShared ? undefined : onChange}
-            extensions={extensions}
-            theme={editorTheme}
-            onCreateEditor={onCreateEditor}
-            onUpdate={onUpdate}
-            basicSetup={basicSetupConfig}
-          />
+          {collabEnabled && !isCollabReady ? (
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              <p className="text-sm">Syncing document...</p>
+            </div>
+          ) : (
+            <CodeMirror
+              key={activeDocId}
+              value={activeDoc.isShared ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
+              onChange={activeDoc.isShared ? undefined : onChange}
+              extensions={extensions}
+              theme={editorTheme}
+              onCreateEditor={onCreateEditor}
+              onUpdate={onUpdate}
+              basicSetup={basicSetupConfig}
+            />
+          )}
         </div>
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && (

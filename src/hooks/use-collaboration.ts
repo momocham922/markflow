@@ -17,6 +17,8 @@ export interface CollabState {
   extension: Extension | null;
   connected: boolean;
   peers: CollabUser[];
+  docId: string | null;
+  enabled: boolean;
 }
 
 const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
@@ -44,6 +46,7 @@ export function useCollaboration(
   const [connected, setConnected] = useState(false);
   const [peers, setPeers] = useState<CollabUser[]>([]);
   const [extension, setExtension] = useState<Extension | null>(null);
+  const [collabDocId, setCollabDocId] = useState<string | null>(null);
 
   const providerRef = useRef<WebsocketProvider | null>(null);
   const idbRef = useRef<IndexeddbPersistence | null>(null);
@@ -60,6 +63,7 @@ export function useCollaboration(
   useEffect(() => {
     if (!enabled || !docId || !user) {
       setExtension(null);
+      setCollabDocId(null);
       setConnected(false);
       setPeers([]);
       return;
@@ -135,6 +139,7 @@ export function useCollaboration(
         // Activate yCollab — Y.Doc is now the source of truth
         const undoManager = new Y.UndoManager(ytext);
         setExtension(yCollab(ytext, provider.awareness, { undoManager }));
+        setCollabDocId(docId);
       };
 
       // IDB synced → connect WS
@@ -263,10 +268,11 @@ export function useCollaboration(
       providerRef.current = null;
       idbRef.current = null;
       setExtension(null);
+      setCollabDocId(null);
       setConnected(false);
       setPeers([]);
     };
   }, [enabled, docId, user]);
 
-  return { extension, connected, peers };
+  return { extension, connected, peers, docId: collabDocId, enabled };
 }
