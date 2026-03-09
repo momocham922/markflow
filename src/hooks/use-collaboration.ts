@@ -43,6 +43,7 @@ export function useCollaboration(
   initialContent: string,
   onContentChange: (content: string) => void,
   isShared: boolean = false,
+  onBeforeCollab?: (docId: string, ytextContent: string) => void,
 ): CollabState {
   const user = useAuthStore((s) => s.user);
   const [connected, setConnected] = useState(false);
@@ -57,6 +58,8 @@ export function useCollaboration(
   onContentChangeRef.current = onContentChange;
   const initialContentRef = useRef(initialContent);
   initialContentRef.current = initialContent;
+  const onBeforeCollabRef = useRef(onBeforeCollab);
+  onBeforeCollabRef.current = onBeforeCollab;
 
   const enabled = Boolean(WS_URL && docId && user && isShared);
 
@@ -122,6 +125,14 @@ export function useCollaboration(
         }
         // Note: when Y.Doc has content from WS (e.g. collaborator edits),
         // we respect it — do NOT overwrite with local content.
+
+        // Sync Y.Text content to frozen value BEFORE activating yCollab.
+        // This prevents @uiw/react-codemirror's value prop from conflicting
+        // with yCollab's initial sync (which would cause content duplication).
+        const finalContent = ytext.toString();
+        if (finalContent.trim() && docId) {
+          onBeforeCollabRef.current?.(docId, finalContent);
+        }
 
         // Activate yCollab — Y.Doc is now the source of truth
         const undoManager = new Y.UndoManager(ytext);

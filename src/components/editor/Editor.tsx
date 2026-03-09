@@ -90,9 +90,18 @@ export function Editor() {
     [activeDocId, updateDocument],
   );
 
+  // Callback: sync Y.Text content → frozen value BEFORE yCollab activates.
+  // This ensures value prop matches Y.Text, preventing content duplication.
+  const handleBeforeCollab = useCallback(
+    (docId: string, ytextContent: string) => {
+      frozenContentRef.current[docId] = ytextContent;
+    },
+    [],
+  );
+
   // Real-time collaboration via Yjs — only for shared documents
   const { extension: collabExtension, connected: collabConnected, peers } =
-    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false);
+    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
