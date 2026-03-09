@@ -282,9 +282,9 @@ export function Editor() {
           }`}
         >
           <CodeMirror
-            key={`${activeDocId}-${collabExtension ? "collab" : "local"}`}
-            value={collabExtension ? undefined : (activeDoc.content || "")}
-            onChange={collabExtension ? undefined : onChange}
+            key={activeDocId}
+            value={activeDoc.content || ""}
+            onChange={onChange}
             extensions={extensions}
             theme={editorTheme}
             onCreateEditor={onCreateEditor}
