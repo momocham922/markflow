@@ -5,11 +5,12 @@ import {
   signOut,
   onAuthChange,
   fetchUserDocuments,
+  fetchDocument,
   createDocumentInFirestore,
   saveDocumentToFirestore,
   deleteDocumentFromFirestore,
 } from "@/services/firebase";
-import { saveUserProfile } from "@/services/sharing";
+import { saveUserProfile, fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments } from "@/services/sharing";
 import { notifySlack } from "@/services/slack-notify";
 import { useAppStore, type Document } from "./app-store";
 
@@ -111,7 +112,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (!local) {
           const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
           const hasShareLink = cloudDoc.shareLink?.enabled === true;
-          const doc: Document = {
+          const newDoc: Document = {
             id: cloudDoc.id,
             title: cloudDoc.title,
             content: cloudDoc.content,
@@ -122,7 +123,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             ownerId: user.uid,
             isShared: hasCollaborators || hasShareLink,
           };
-          await appStore.addDocument(doc);
+          await appStore.addDocument(newDoc);
         } else {
           // Update ownerId, sharing status, and restore folder from cloud if needed
           const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
@@ -136,6 +137,68 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
           appStore.updateDocument(local.id, updates);
         }
+      }
+
+      // Fetch documents shared with this user (as collaborator)
+      try {
+        const sharedDocs = await fetchSharedWithMe(user.uid);
+        for (const shared of sharedDocs) {
+          const currentDocs = useAppStore.getState().documents;
+          if (currentDocs.find((d) => d.id === shared.id)) {
+            // Already in local store — ensure isShared is set
+            appStore.updateDocument(shared.id, { isShared: true });
+            continue;
+          }
+          // Fetch full document content
+          const fullDoc = await fetchDocument(shared.id);
+          if (!fullDoc || !fullDoc.content?.trim()) continue;
+          const newDoc: Document = {
+            id: fullDoc.id,
+            title: fullDoc.title,
+            content: fullDoc.content,
+            createdAt: fullDoc.createdAt?.toMillis() ?? Date.now(),
+            updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
+            folder: fullDoc.folder ?? "/",
+            tags: fullDoc.tags ?? [],
+            ownerId: fullDoc.ownerId,
+            isShared: true,
+          };
+          await appStore.addDocument(newDoc);
+        }
+      } catch (err) {
+        console.error("Fetch shared docs failed:", err);
+      }
+
+      // Fetch team documents
+      try {
+        const teams = await fetchUserTeams(user.uid);
+        for (const team of teams) {
+          const teamDocs = await fetchTeamDocuments(team.id);
+          for (const td of teamDocs) {
+            const currentDocs = useAppStore.getState().documents;
+            if (currentDocs.find((d) => d.id === td.id)) {
+              appStore.updateDocument(td.id, { isShared: true, teamId: team.id });
+              continue;
+            }
+            const fullDoc = await fetchDocument(td.id);
+            if (!fullDoc || !fullDoc.content?.trim()) continue;
+            const newDoc: Document = {
+              id: fullDoc.id,
+              title: fullDoc.title,
+              content: fullDoc.content,
+              createdAt: fullDoc.createdAt?.toMillis() ?? Date.now(),
+              updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
+              folder: fullDoc.folder ?? "/",
+              tags: fullDoc.tags ?? [],
+              ownerId: fullDoc.ownerId,
+              teamId: team.id,
+              isShared: true,
+            };
+            await appStore.addDocument(newDoc);
+          }
+        }
+      } catch (err) {
+        console.error("Fetch team docs failed:", err);
       }
     } catch (error) {
       console.error("Sync from cloud failed:", error);
@@ -161,39 +224,40 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ syncing: true });
     try {
       const { documents } = useAppStore.getState();
-      // Only sync docs owned by this user (or unclaimed local docs)
-      // CRITICAL: Never sync docs with empty content to cloud
-      const myDocs = documents.filter(
-        (d) => (!d.ownerId || d.ownerId === user.uid) && d.content.trim(),
+      // Sync: owned docs + shared docs with non-empty content
+      const syncableDocs = documents.filter(
+        (d) => d.content.trim() && (!d.ownerId || d.ownerId === user.uid || d.isShared),
       );
-      for (const doc of myDocs) {
+      for (const d of syncableDocs) {
         const payload = {
-          id: doc.id,
-          title: doc.title,
-          content: doc.content,
-          ownerId: user.uid,
-          folder: doc.folder,
-          tags: doc.tags,
+          id: d.id,
+          title: d.title,
+          content: d.content,
+          ownerId: d.ownerId || user.uid,
+          folder: d.folder,
+          tags: d.tags,
         };
         try {
           await saveDocumentToFirestore(payload);
         } catch (saveErr) {
-          // Only create if it's a not-found error; rethrow others
-          try {
-            await createDocumentInFirestore(payload);
-          } catch (createErr) {
-            console.error(`Failed to sync document ${doc.id}:`, saveErr, createErr);
+          // Only create if owned — collaborators shouldn't create docs
+          if (!d.ownerId || d.ownerId === user.uid) {
+            try {
+              await createDocumentInFirestore(payload);
+            } catch (createErr) {
+              console.error(`Failed to sync document ${d.id}:`, saveErr, createErr);
+            }
           }
         }
       }
       // Notify Slack about edits (once per sync, not per doc)
-      if (myDocs.length > 0) {
-        const titles = myDocs.slice(0, 3).map((d) => d.title).join(", ");
-        const extra = myDocs.length > 3 ? ` +${myDocs.length - 3} more` : "";
+      if (syncableDocs.length > 0) {
+        const titles = syncableDocs.slice(0, 3).map((d) => d.title).join(", ");
+        const extra = syncableDocs.length > 3 ? ` +${syncableDocs.length - 3} more` : "";
         notifySlack("edit", {
           docTitle: titles + extra,
           authorName: user.displayName || user.email || undefined,
-          detail: `${myDocs.length} document(s) synced to cloud`,
+          detail: `${syncableDocs.length} document(s) synced to cloud`,
         }).catch(() => {});
       }
     } catch (error) {

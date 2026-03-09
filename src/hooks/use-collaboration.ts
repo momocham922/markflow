@@ -104,7 +104,6 @@ export function useCollaboration(
       // --- Wait for IndexedDB to load, then connect WS ---
       // This ensures local persisted state is loaded BEFORE merging with server.
       let idbSynced = false;
-      let idbHadData = false;
       let wsSynced = false;
       let finalized = false;
 
@@ -131,8 +130,6 @@ export function useCollaboration(
 
       idb.once("synced", () => {
         idbSynced = true;
-        // Check if IndexedDB had previously persisted data
-        idbHadData = ytext.toString().trim().length > 0;
         // Connect WS after IndexedDB is ready
         provider.connect();
       });

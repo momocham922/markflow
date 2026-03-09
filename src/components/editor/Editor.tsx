@@ -281,33 +281,24 @@ export function Editor() {
                 : "flex-1"
           }`}
         >
-          {activeDoc.isShared && !collabExtension ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">
-              <div className="text-center space-y-1">
-                <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse mx-auto mb-2" />
-                <p className="text-sm">Connecting to collaboration server...</p>
-              </div>
-            </div>
-          ) : (
-            <CodeMirror
-              key={`${activeDocId}-${collabExtension ? "collab" : "local"}`}
-              value={collabExtension ? undefined : (activeDoc.content || "")}
-              onChange={collabExtension ? undefined : onChange}
-              extensions={extensions}
-              theme={editorTheme}
-              onCreateEditor={onCreateEditor}
-              onUpdate={onUpdate}
-              basicSetup={{
-                lineNumbers: true,
-                highlightActiveLineGutter: true,
-                highlightActiveLine: true,
-                foldGutter: true,
-                bracketMatching: true,
-                closeBrackets: true,
-                indentOnInput: true,
-              }}
-            />
-          )}
+          <CodeMirror
+            key={`${activeDocId}-${collabExtension ? "collab" : "local"}`}
+            value={collabExtension ? undefined : (activeDoc.content || "")}
+            onChange={collabExtension ? undefined : onChange}
+            extensions={extensions}
+            theme={editorTheme}
+            onCreateEditor={onCreateEditor}
+            onUpdate={onUpdate}
+            basicSetup={{
+              lineNumbers: true,
+              highlightActiveLineGutter: true,
+              highlightActiveLine: true,
+              foldGutter: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              indentOnInput: true,
+            }}
+          />
         </div>
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && (
