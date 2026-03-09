@@ -83,6 +83,7 @@ export function Sidebar() {
     activeDocId,
     setActiveDocId,
     addDocument,
+    updateDocument,
     deleteDocument,
     toggleSidebar,
     folders,
@@ -263,6 +264,7 @@ export function Sidebar() {
       tags: [],
       ownerId: user.uid,
       teamId: team.id,
+      isShared: true,
     };
     addDocument(newDoc);
     setActiveDocId(newDocId);
@@ -298,6 +300,10 @@ export function Sidebar() {
   const openTeamOrSharedDoc = async (docIdToOpen: string, teamId?: string) => {
     const existing = documents.find((d) => d.id === docIdToOpen);
     if (existing) {
+      // Ensure team/shared docs have isShared flag for yCollab activation
+      if (!existing.isShared && (teamId || existing.teamId)) {
+        updateDocument(docIdToOpen, { isShared: true, teamId: teamId || existing.teamId });
+      }
       setActiveDocId(docIdToOpen);
       return;
     }
@@ -313,6 +319,7 @@ export function Sidebar() {
         tags: firestoreDoc.tags || [],
         ownerId: firestoreDoc.ownerId,
         teamId: teamId || firestoreDoc.teamId || null,
+        isShared: true,
       });
       setActiveDocId(docIdToOpen);
     }
