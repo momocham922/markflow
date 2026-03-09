@@ -4,7 +4,6 @@ import { WebsocketProvider } from "y-websocket";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { yCollab } from "y-codemirror.next";
 import type { Extension } from "@codemirror/state";
-import type { EditorView } from "@codemirror/view";
 import { useAuthStore } from "@/stores/auth-store";
 import { getRandomColor } from "@/services/yjs";
 
@@ -40,7 +39,6 @@ export function useCollaboration(
   onContentChange: (content: string) => void,
   isShared: boolean = false,
   onBeforeCollab?: (docId: string, ytextContent: string) => void,
-  editorViewRef?: React.RefObject<EditorView | null>,
 ): CollabState {
   const user = useAuthStore((s) => s.user);
   const [connected, setConnected] = useState(false);
@@ -57,8 +55,6 @@ export function useCollaboration(
   initialContentRef.current = initialContent;
   const onBeforeCollabRef = useRef(onBeforeCollab);
   onBeforeCollabRef.current = onBeforeCollab;
-  const editorViewRefCurrent = editorViewRef;
-
   const enabled = Boolean(WS_URL && docId && user && isShared);
 
   useEffect(() => {
@@ -190,34 +186,42 @@ export function useCollaboration(
       };
       provider.awareness.on("change", updatePeers);
 
-      // Y.Text observer → store updates (preview, search, auto-save)
-      // Also: fallback editor sync when yCollab binding is stale
+      // Y.Text observer → throttled store updates (preview, search, auto-save).
+      // Throttle prevents heavy docs from triggering marked.parse() on every keystroke.
+      let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+      let pendingText: string | null = null;
+
+      const flushPending = () => {
+        throttleTimer = null;
+        if (pendingText !== null && !cancelled) {
+          onContentChangeRef.current(pendingText);
+          pendingText = null;
+        }
+      };
+
       const observer = () => {
         if (!finalized || cancelled) return;
         const text = ytext.toString();
-        if (!text.trim()) {
-          seedIfEmpty();
-          return;
-        }
-        // Update store immediately for preview/search sync
-        onContentChangeRef.current(text);
+        if (!text.trim()) return;
 
-        // Fallback: if yCollab's binding is stale (e.g., after reconnection),
-        // the editor might not reflect Y.Text changes. Detect and fix.
-        const view = editorViewRefCurrent?.current;
-        if (view && view.dom?.isConnected) {
-          const editorContent = view.state.doc.toString();
-          if (editorContent !== text) {
-            // Editor is out of sync — force update
-            view.dispatch({
-              changes: { from: 0, to: editorContent.length, insert: text },
-            });
-          }
+        pendingText = text;
+        if (!throttleTimer) {
+          // Fire immediately on first change, then throttle subsequent ones
+          onContentChangeRef.current(text);
+          pendingText = null;
+          throttleTimer = setTimeout(flushPending, 300);
         }
       };
       ytext.observe(observer);
 
-      return () => clearTimeout(wsTimeout);
+      return () => {
+        clearTimeout(wsTimeout);
+        if (throttleTimer) clearTimeout(throttleTimer);
+        // Flush any pending update on cleanup
+        if (pendingText !== null) {
+          onContentChangeRef.current(pendingText);
+        }
+      };
     };
 
     let cleanupTimeout: (() => void) | undefined;

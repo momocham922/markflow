@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState, useMemo, useRef } from "react";
+import { useEffect, useCallback, useState, useMemo, useRef, useDeferredValue } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import type { ViewUpdate } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
@@ -72,14 +72,15 @@ export function Editor() {
   }
   prevActiveDocRef.current = activeDocId ?? null;
 
-  // Collab: sync Yjs changes → local store (immediate for preview/search sync)
+  // Collab: sync Yjs changes → local store (already throttled by observer)
   const handleCollabChange = useCallback(
     (content: string) => {
       if (!activeDocId) return;
       if (!content.trim()) return;
-      updateDocument(activeDocId, { content, updatedAt: Date.now() });
+      const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
       const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
-      if (firstLine) updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
+      if (firstLine) updates.title = firstLine.slice(0, 50);
+      updateDocument(activeDocId, updates);
     },
     [activeDocId, updateDocument],
   );
@@ -95,7 +96,7 @@ export function Editor() {
 
   // Real-time collaboration via Yjs — only for shared documents
   const { extension: collabExtension, connected: collabConnected, peers } =
-    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab, viewRef);
+    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
@@ -136,11 +137,14 @@ export function Editor() {
     return theme === "dark" ? preset.dark : preset.light;
   }, [theme, themeSettings.editorTheme]);
 
+  // Defer preview content so marked.parse() doesn't block editor input on heavy docs
+  const deferredContent = useDeferredValue(activeDoc?.content ?? "");
+
   // Convert markdown to HTML for preview (with wiki-link support)
   const previewHtml = useMemo(() => {
-    if (!activeDoc?.content) return "";
+    if (!deferredContent) return "";
     try {
-      let html = marked.parse(activeDoc.content) as string;
+      let html = marked.parse(deferredContent) as string;
       // Replace [[doc title]] with clickable links
       html = html.replace(/\[\[([^\]]+)\]\]/g, (_match, title: string) => {
         const target = documents.find(
@@ -153,9 +157,9 @@ export function Editor() {
       });
       return html;
     } catch {
-      return activeDoc.content;
+      return deferredContent;
     }
-  }, [activeDoc?.content, documents]);
+  }, [deferredContent, documents]);
 
   // Backlinks: documents that link to this one
   const backlinks = useMemo(() => {
@@ -185,18 +189,11 @@ export function Editor() {
   const onChange = useCallback(
     (value: string) => {
       if (!activeDocId) return;
-      // Guard: never save empty content (can happen during CodeMirror remount)
       if (!value.trim()) return;
-
-      updateDocument(activeDocId, {
-        content: value,
-        updatedAt: Date.now(),
-      });
-      // Auto-update title from first line
+      const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
       const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
-      if (firstLine) {
-        updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
-      }
+      if (firstLine) updates.title = firstLine.slice(0, 50);
+      updateDocument(activeDocId, updates);
     },
     [activeDocId, updateDocument],
   );
