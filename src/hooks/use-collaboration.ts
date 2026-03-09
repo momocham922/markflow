@@ -120,20 +120,9 @@ export function useCollaboration(
           ydoc.transact(() => {
             ytext.insert(0, localContent);
           });
-        } else if (
-          !idbHadData &&
-          localContent.trim() &&
-          ydocContent.trim() !== localContent.trim()
-        ) {
-          // MIGRATION: IndexedDB was empty (first time using y-indexeddb).
-          // Y.Doc state came entirely from WS server, which may be stale.
-          // Trust local SQLite content as the latest version.
-          // After this session, IndexedDB will persist the correct state.
-          ydoc.transact(() => {
-            if (ytext.length > 0) ytext.delete(0, ytext.length);
-            ytext.insert(0, localContent);
-          });
         }
+        // Note: when Y.Doc has content from WS (e.g. collaborator edits),
+        // we respect it — do NOT overwrite with local content.
 
         // Activate yCollab — Y.Doc is now the source of truth
         const undoManager = new Y.UndoManager(ytext);
