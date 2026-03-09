@@ -220,7 +220,7 @@ export function Sidebar() {
     const doc: Document = {
       id: crypto.randomUUID(),
       title: "Untitled",
-      content: "",
+      content: "# Untitled\n",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       folder,
@@ -256,7 +256,7 @@ export function Sidebar() {
     const newDoc: Document = {
       id: newDocId,
       title: "Untitled",
-      content: "",
+      content: "# Untitled\n",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       folder: "/",

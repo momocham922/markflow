@@ -279,11 +279,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addDocument: async (doc) => {
-    // Never add a document with empty content
-    if (!doc.content.trim()) {
-      console.warn(`[app-store] Blocked adding doc ${doc.id} with empty content`);
-      return;
-    }
     set((s) => ({
       documents: [...s.documents, doc],
       folders: deriveFolders([...s.documents, doc], s.folders),

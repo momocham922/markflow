@@ -220,15 +220,10 @@ export async function createDocumentInFirestore(docData: {
   folder?: string;
   tags?: string[];
 }): Promise<void> {
-  // Never create a cloud doc with empty content
-  if (!docData.content?.trim()) {
-    console.warn(`[firebase] Blocked create of doc ${docData.id} with empty content`);
-    return;
-  }
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(ref, {
     title: docData.title,
-    content: docData.content,
+    content: docData.content || "",
     ownerId: docData.ownerId,
     collaborators: {},
     collaboratorUids: [],

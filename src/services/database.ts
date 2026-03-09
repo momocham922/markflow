@@ -102,27 +102,30 @@ export async function upsertDocument(doc: {
   ownerId?: string | null;
   isShared?: boolean;
 }): Promise<void> {
-  // LAYER 2: Block empty content writes — this is always a bug
-  if (!doc.content.trim()) {
-    console.warn(`[db] Blocked upsert of doc ${doc.id} with empty content`);
-    return;
-  }
   const database = await getDb();
 
-  // LAYER 1: Write-ahead snapshot — save current DB content before overwriting.
-  // If anything goes wrong, we can always recover from this snapshot.
+  // LAYER 1: Write-ahead snapshot + empty overwrite protection.
+  // Check if doc already exists in DB before writing.
   try {
     const existing = await database.select<{ content: string; title: string }[]>(
       "SELECT content, title FROM documents WHERE id = $1",
       [doc.id],
     );
-    if (existing[0]?.content?.trim()) {
-      await database.execute(
-        `INSERT INTO document_snapshots (document_id, content, title, updated_at)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT(document_id) DO UPDATE SET content = $2, title = $3, updated_at = $4`,
-        [doc.id, existing[0].content, existing[0].title, Date.now()],
-      );
+    if (existing[0]) {
+      // LAYER 2: Block overwriting existing non-empty content with empty content
+      if (!doc.content.trim() && existing[0].content?.trim()) {
+        console.warn(`[db] Blocked empty overwrite of doc ${doc.id}`);
+        return;
+      }
+      // Save snapshot of current content before overwriting
+      if (existing[0].content?.trim()) {
+        await database.execute(
+          `INSERT INTO document_snapshots (document_id, content, title, updated_at)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT(document_id) DO UPDATE SET content = $2, title = $3, updated_at = $4`,
+          [doc.id, existing[0].content, existing[0].title, Date.now()],
+        );
+      }
     }
   } catch (e) {
     // Snapshot failure must never block the write
