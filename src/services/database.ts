@@ -48,6 +48,14 @@ async function ensureMigrations(database: Database) {
     try {
       await database.execute(`ALTER TABLE documents ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0`);
     } catch { /* already exists */ }
+
+    // document_snapshots table (migration v6) — last-known-good content backup
+    await database.execute(`CREATE TABLE IF NOT EXISTS document_snapshots (
+      document_id TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      title TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`);
   } catch (err) {
     console.error("[db] migration repair failed:", err);
   }
@@ -94,7 +102,33 @@ export async function upsertDocument(doc: {
   ownerId?: string | null;
   isShared?: boolean;
 }): Promise<void> {
+  // LAYER 2: Block empty content writes — this is always a bug
+  if (!doc.content.trim()) {
+    console.warn(`[db] Blocked upsert of doc ${doc.id} with empty content`);
+    return;
+  }
   const database = await getDb();
+
+  // LAYER 1: Write-ahead snapshot — save current DB content before overwriting.
+  // If anything goes wrong, we can always recover from this snapshot.
+  try {
+    const existing = await database.select<{ content: string; title: string }[]>(
+      "SELECT content, title FROM documents WHERE id = $1",
+      [doc.id],
+    );
+    if (existing[0]?.content?.trim()) {
+      await database.execute(
+        `INSERT INTO document_snapshots (document_id, content, title, updated_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT(document_id) DO UPDATE SET content = $2, title = $3, updated_at = $4`,
+        [doc.id, existing[0].content, existing[0].title, Date.now()],
+      );
+    }
+  } catch (e) {
+    // Snapshot failure must never block the write
+    console.error("[db] Snapshot save failed:", e);
+  }
+
   const folder = doc.folder ?? "/";
   const tags = JSON.stringify(doc.tags ?? []);
   const ownerId = doc.ownerId ?? null;
@@ -170,4 +204,45 @@ export async function deleteVersionsForDocument(documentId: string): Promise<voi
     "DELETE FROM versions WHERE document_id = $1",
     [documentId],
   );
+}
+
+// Snapshot management — last-known-good content backup
+export async function getSnapshot(documentId: string): Promise<{ content: string; title: string } | null> {
+  const database = await getDb();
+  const rows = await database.select<{ content: string; title: string }[]>(
+    "SELECT content, title FROM document_snapshots WHERE document_id = $1",
+    [documentId],
+  );
+  const row = rows[0];
+  return row?.content?.trim() ? row : null;
+}
+
+export async function deleteSnapshot(documentId: string): Promise<void> {
+  const database = await getDb();
+  await database.execute(
+    "DELETE FROM document_snapshots WHERE document_id = $1",
+    [documentId],
+  );
+}
+
+/**
+ * LAYER 3: Multi-source content recovery.
+ * Tries to recover content for an empty document from (in order):
+ *   1. document_snapshots (write-ahead backup)
+ *   2. versions (auto-save history)
+ * Returns recovered content+title, or null if unrecoverable locally.
+ */
+export async function recoverContent(
+  documentId: string,
+): Promise<{ content: string; title: string; source: string } | null> {
+  // Source 1: snapshot
+  const snapshot = await getSnapshot(documentId);
+  if (snapshot) return { ...snapshot, source: "snapshot" };
+
+  // Source 2: version history
+  const versions = await getVersions(documentId);
+  const goodVersion = versions.find((v) => v.content.trim());
+  if (goodVersion) return { content: goodVersion.content, title: goodVersion.title, source: "version" };
+
+  return null;
 }

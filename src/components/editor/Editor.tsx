@@ -281,32 +281,24 @@ export function Editor() {
                 : "flex-1"
           }`}
         >
-          {/* Shared docs: wait for yCollab to be ready before mounting editor.
-              This avoids the controlled→uncontrolled transition that clears content. */}
-          {activeDoc.isShared && !collabExtension ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">
-              <p className="text-sm">Syncing document…</p>
-            </div>
-          ) : (
-            <CodeMirror
-              key={`${activeDocId}-${collabExtension ? "collab" : "local"}`}
-              value={collabExtension ? undefined : (activeDoc.content || "")}
-              onChange={collabExtension ? undefined : onChange}
-              extensions={extensions}
-              theme={editorTheme}
-              onCreateEditor={onCreateEditor}
-              onUpdate={onUpdate}
-              basicSetup={{
-                lineNumbers: true,
-                highlightActiveLineGutter: true,
-                highlightActiveLine: true,
-                foldGutter: true,
-                bracketMatching: true,
-                closeBrackets: true,
-                indentOnInput: true,
-              }}
-            />
-          )}
+          <CodeMirror
+            key={activeDocId}
+            value={activeDoc.content || ""}
+            onChange={onChange}
+            extensions={extensions}
+            theme={editorTheme}
+            onCreateEditor={onCreateEditor}
+            onUpdate={onUpdate}
+            basicSetup={{
+              lineNumbers: true,
+              highlightActiveLineGutter: true,
+              highlightActiveLine: true,
+              foldGutter: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              indentOnInput: true,
+            }}
+          />
         </div>
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && (

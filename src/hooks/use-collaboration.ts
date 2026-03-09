@@ -181,10 +181,21 @@ export function useCollaboration(
       provider.awareness.on("change", updatePeers);
 
       // Propagate Y.Doc changes → local store (for preview, search, auto-save)
+      // Also: protect against Y.Doc being emptied after finalization (stale WS data)
       const observer = () => {
         if (!finalized) return;
         const text = ytext.toString();
-        if (!text.trim()) return;
+        if (!text.trim()) {
+          // Y.Doc was emptied — re-seed from local content to prevent data loss
+          const localContent = initialContentRef.current;
+          if (localContent.trim()) {
+            console.warn("[collab] Y.Doc emptied after finalize — re-seeding from local");
+            ydoc.transact(() => {
+              ytext.insert(0, localContent);
+            });
+          }
+          return;
+        }
         onContentChangeRef.current(text);
       };
       ytext.observe(observer);

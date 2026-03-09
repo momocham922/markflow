@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as db from "@/services/database";
+import { fetchDocument } from "@/services/firebase";
 
 export interface Document {
   id: string;
@@ -122,6 +123,45 @@ function deriveFolders(documents: Document[], extra: string[]): string[] {
   return [...set].sort();
 }
 
+/**
+ * Cloud recovery for documents that have empty content and no local backup.
+ * Waits for auth, then tries to fetch content from Firestore.
+ */
+function scheduleCloudRecovery(docIds: string[]) {
+  // Retry with backoff until auth is ready
+  let attempts = 0;
+  const tryRecover = async () => {
+    attempts++;
+    if (attempts > 10) return; // give up after ~30s
+
+    // Dynamic import to avoid circular dep
+    const { useAuthStore } = await import("@/stores/auth-store");
+    const user = useAuthStore.getState().user;
+    if (!user) {
+      setTimeout(tryRecover, 3000);
+      return;
+    }
+
+    for (const docId of docIds) {
+      try {
+        const cloudDoc = await fetchDocument(docId);
+        if (cloudDoc?.content?.trim()) {
+          console.warn(`[app-store] Recovered doc ${docId} from cloud`);
+          const appStore = useAppStore.getState();
+          appStore.updateDocument(docId, {
+            content: cloudDoc.content,
+            title: cloudDoc.title || undefined,
+            updatedAt: Date.now(),
+          });
+        }
+      } catch (e) {
+        console.error(`[app-store] Cloud recovery failed for ${docId}:`, e);
+      }
+    }
+  };
+  setTimeout(tryRecover, 2000);
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   sidebarOpen: true,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -158,21 +198,52 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadDocuments: async () => {
     try {
       const rows = await db.getAllDocuments();
-      const documents: Document[] = rows.map((r) => {
+      const documents: Document[] = [];
+      const docsNeedingCloudRecovery: string[] = [];
+
+      for (const r of rows) {
         let tags: string[] = [];
         try { tags = JSON.parse(r.tags || "[]"); } catch { /* ignore */ }
-        return {
+        let content = r.content;
+        let title = r.title;
+
+        // LAYER 3: Recovery cascade for empty content
+        if (!content.trim()) {
+          const recovered = await db.recoverContent(r.id);
+          if (recovered) {
+            content = recovered.content;
+            title = recovered.title || r.title;
+            console.warn(`[app-store] Recovered doc ${r.id} from ${recovered.source}`);
+            // Persist the recovery back to documents table
+            db.upsertDocument({
+              id: r.id, title, content,
+              createdAt: r.created_at, updatedAt: Date.now(),
+              folder: r.folder || "/", tags: JSON.parse(r.tags || "[]"),
+              ownerId: r.owner_id ?? null, isShared: r.is_shared === 1,
+            }).catch(console.error);
+          } else {
+            // No local recovery possible — try cloud after auth init
+            docsNeedingCloudRecovery.push(r.id);
+          }
+        }
+
+        documents.push({
           id: r.id,
-          title: r.title,
-          content: r.content,
+          title,
+          content,
           createdAt: r.created_at,
           updatedAt: r.updated_at,
           folder: r.folder || "/",
           tags,
           ownerId: r.owner_id ?? null,
           isShared: r.is_shared === 1,
-        };
-      });
+        });
+      }
+
+      // Schedule cloud recovery for docs that couldn't be recovered locally
+      if (docsNeedingCloudRecovery.length > 0) {
+        scheduleCloudRecovery(docsNeedingCloudRecovery);
+      }
 
       const savedTheme = await db.getSetting("theme");
       const savedThemeSettings = await db.getSetting("themeSettings");
@@ -208,6 +279,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addDocument: async (doc) => {
+    // Never add a document with empty content
+    if (!doc.content.trim()) {
+      console.warn(`[app-store] Blocked adding doc ${doc.id} with empty content`);
+      return;
+    }
     set((s) => ({
       documents: [...s.documents, doc],
       folders: deriveFolders([...s.documents, doc], s.folders),

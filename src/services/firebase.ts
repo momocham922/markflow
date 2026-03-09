@@ -192,6 +192,11 @@ export async function saveDocumentToFirestore(docData: {
   folder?: string;
   tags?: string[];
 }): Promise<void> {
+  // Never sync empty content to cloud — protects against data loss propagation
+  if (!docData.content?.trim()) {
+    console.warn(`[firebase] Blocked save of doc ${docData.id} with empty content`);
+    return;
+  }
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(
     ref,
@@ -215,6 +220,11 @@ export async function createDocumentInFirestore(docData: {
   folder?: string;
   tags?: string[];
 }): Promise<void> {
+  // Never create a cloud doc with empty content
+  if (!docData.content?.trim()) {
+    console.warn(`[firebase] Blocked create of doc ${docData.id} with empty content`);
+    return;
+  }
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(ref, {
     title: docData.title,
