@@ -139,17 +139,37 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       }
 
+      // Track all cloud doc IDs for deletion reconciliation
+      const cloudDocIds = new Set(cloudDocs.map((d) => d.id));
+
       // Fetch documents shared with this user (as collaborator)
       try {
         const sharedDocs = await fetchSharedWithMe(user.uid);
         for (const shared of sharedDocs) {
+          cloudDocIds.add(shared.id);
           const currentDocs = useAppStore.getState().documents;
-          if (currentDocs.find((d) => d.id === shared.id)) {
-            // Already in local store — ensure isShared is set
-            appStore.updateDocument(shared.id, { isShared: true });
+          const local = currentDocs.find((d) => d.id === shared.id);
+          if (local) {
+            // Already in local store — update isShared + content from Firestore
+            // (ensures collaborator sees the owner's latest content)
+            if (local.ownerId !== user.uid) {
+              const fullDoc = await fetchDocument(shared.id);
+              if (fullDoc?.content?.trim()) {
+                appStore.updateDocument(shared.id, {
+                  isShared: true,
+                  content: fullDoc.content,
+                  title: fullDoc.title,
+                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
+                });
+              } else {
+                appStore.updateDocument(shared.id, { isShared: true });
+              }
+            } else {
+              appStore.updateDocument(shared.id, { isShared: true });
+            }
             continue;
           }
-          // Fetch full document content
+          // Fetch full document content for new shared docs
           const fullDoc = await fetchDocument(shared.id);
           if (!fullDoc || !fullDoc.content?.trim()) continue;
           const newDoc: Document = {
@@ -175,9 +195,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         for (const team of teams) {
           const teamDocs = await fetchTeamDocuments(team.id);
           for (const td of teamDocs) {
+            cloudDocIds.add(td.id);
             const currentDocs = useAppStore.getState().documents;
-            if (currentDocs.find((d) => d.id === td.id)) {
-              appStore.updateDocument(td.id, { isShared: true, teamId: team.id });
+            const local = currentDocs.find((d) => d.id === td.id);
+            if (local) {
+              // Update content for non-owned team docs
+              if (local.ownerId !== user.uid) {
+                const fullDoc = await fetchDocument(td.id);
+                if (fullDoc?.content?.trim()) {
+                  appStore.updateDocument(td.id, {
+                    isShared: true,
+                    teamId: team.id,
+                    content: fullDoc.content,
+                    title: fullDoc.title,
+                    updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
+                  });
+                } else {
+                  appStore.updateDocument(td.id, { isShared: true, teamId: team.id });
+                }
+              } else {
+                appStore.updateDocument(td.id, { isShared: true, teamId: team.id });
+              }
               continue;
             }
             const fullDoc = await fetchDocument(td.id);
@@ -199,6 +237,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       } catch (err) {
         console.error("Fetch team docs failed:", err);
+      }
+
+      // Reconcile deletions: remove local shared/team docs that no longer exist in cloud.
+      // Only remove docs NOT owned by the current user (owned docs are source of truth locally).
+      const finalDocs = useAppStore.getState().documents;
+      for (const local of finalDocs) {
+        if (local.ownerId === user.uid) continue; // never delete own docs
+        if (!local.isShared && !local.teamId) continue; // only shared/team docs
+        if (!cloudDocIds.has(local.id)) {
+          console.warn(`[sync] Removing locally-cached doc ${local.id} (deleted from cloud)`);
+          await appStore.deleteDocument(local.id);
+        }
       }
     } catch (error) {
       console.error("Sync from cloud failed:", error);

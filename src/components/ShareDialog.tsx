@@ -35,7 +35,7 @@ import {
   type ShareLink,
   type Collaborator,
 } from "@/services/sharing";
-import { fetchDocument } from "@/services/firebase";
+import { fetchDocument, saveDocumentToFirestore } from "@/services/firebase";
 import {
   loadSlackNotifyConfig,
   saveSlackNotifyConfig,
@@ -187,6 +187,18 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     setInviting(true);
     setError("");
     try {
+      // Save current content to Firestore before sharing — ensures
+      // the collaborator gets the latest content, not a stale version.
+      if (activeDoc) {
+        await saveDocumentToFirestore({
+          id: activeDocId,
+          title: activeDoc.title,
+          content: activeDoc.content,
+          ownerId: activeDoc.ownerId || user?.uid || "",
+          folder: activeDoc.folder,
+          tags: activeDoc.tags,
+        });
+      }
       await addCollaborator(activeDocId, inviteEmail.trim(), inviteRole);
       setCollaborators((prev) => [
         ...prev,
