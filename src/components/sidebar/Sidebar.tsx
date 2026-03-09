@@ -129,6 +129,20 @@ export function Sidebar() {
       if (teamsWithDocs.length === 1) {
         setExpandedTeams(new Set([teamsWithDocs[0].id]));
       }
+
+      // Reconcile: remove local team docs that were deleted from Firestore
+      const firestoreTeamDocIds = new Set<string>();
+      for (const team of teamsWithDocs) {
+        for (const doc of team.docs) firestoreTeamDocIds.add(doc.id);
+      }
+      const appStore = useAppStore.getState();
+      for (const doc of appStore.documents) {
+        if (!doc.teamId) continue;
+        if (firestoreTeamDocIds.has(doc.id)) continue;
+        // Grace period: skip docs created in the last 30s (might not be indexed yet)
+        if (Date.now() - doc.createdAt < 30_000) continue;
+        appStore.deleteDocument(doc.id);
+      }
     } catch { /* ignore */ }
   }, []);
 
