@@ -62,12 +62,15 @@ export function Editor() {
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
 
-  // For shared docs: freeze value at first render so @uiw/react-codemirror
+  // For shared docs: freeze value per-mount so @uiw/react-codemirror
   // never dispatches value-driven transactions that fight yCollab.
+  // Update frozen content when switching docs (activeDocId changes → CodeMirror remounts).
   const frozenContentRef = useRef<Record<string, string>>({});
-  if (activeDocId && activeDoc?.isShared && !(activeDocId in frozenContentRef.current)) {
+  const prevActiveDocRef = useRef<string | null>(null);
+  if (activeDocId && activeDoc?.isShared && activeDocId !== prevActiveDocRef.current) {
     frozenContentRef.current[activeDocId] = activeDoc.content || "";
   }
+  prevActiveDocRef.current = activeDocId ?? null;
 
   // Collab: sync Yjs changes → local store (throttled to avoid thrashing)
   const collabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
