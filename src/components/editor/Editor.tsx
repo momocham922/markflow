@@ -4,6 +4,7 @@ import type { ViewUpdate } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { EditorView } from "@codemirror/view";
+import { Compartment } from "@codemirror/state";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
@@ -61,6 +62,7 @@ export function Editor() {
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
+  const collabCompartment = useRef(new Compartment());
 
   // For shared docs: freeze value per-mount so @uiw/react-codemirror
   // never dispatches value-driven transactions that fight yCollab.
@@ -121,16 +123,39 @@ export function Editor() {
     }
   }, [activeDocId, activeDoc?.content, updateDocument]);
 
-  // Memoize extensions (include collab when connected)
+  // Stable reference prevents @uiw/react-codemirror from reconfiguring on every render
+  // (inline object literal → new ref each render → StateEffect.reconfigure on every render)
+  const basicSetupConfig = useMemo(() => ({
+    lineNumbers: true,
+    highlightActiveLineGutter: true,
+    highlightActiveLine: true,
+    foldGutter: true,
+    bracketMatching: true,
+    closeBrackets: true,
+    indentOnInput: true,
+  }), []);
+
+  // Memoize extensions — collab managed via Compartment so @uiw/react-codemirror's
+  // StateEffect.reconfigure never destroys yCollab's ViewPlugin / Y.Text observer.
   const extensions = useMemo(
     () => [
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       EditorView.lineWrapping,
       markdownShortcuts,
-      ...(collabExtension ? [collabExtension] : []),
+      collabCompartment.current.of(collabExtension ?? []),
     ],
     [collabExtension],
   );
+
+  // Also dispatch compartment reconfigure directly on the view — ensures yCollab
+  // activates immediately without waiting for @uiw/react-codemirror's render cycle.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: collabCompartment.current.reconfigure(collabExtension ?? []),
+    });
+  }, [collabExtension]);
 
   const editorTheme = useMemo(() => {
     const preset = editorThemes[themeSettings.editorTheme] ?? editorThemes.default;
@@ -299,15 +324,7 @@ export function Editor() {
             theme={editorTheme}
             onCreateEditor={onCreateEditor}
             onUpdate={onUpdate}
-            basicSetup={{
-              lineNumbers: true,
-              highlightActiveLineGutter: true,
-              highlightActiveLine: true,
-              foldGutter: true,
-              bracketMatching: true,
-              closeBrackets: true,
-              indentOnInput: true,
-            }}
+            basicSetup={basicSetupConfig}
           />
         </div>
         {/* Preview pane — rendered markdown */}
