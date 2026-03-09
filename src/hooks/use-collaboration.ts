@@ -4,6 +4,7 @@ import { WebsocketProvider } from "y-websocket";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { yCollab } from "y-codemirror.next";
 import type { Extension } from "@codemirror/state";
+import type { EditorView } from "@codemirror/view";
 import { useAuthStore } from "@/stores/auth-store";
 import { getRandomColor } from "@/services/yjs";
 
@@ -22,21 +23,16 @@ export interface CollabState {
 const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
 
 /**
- * Yjs-based real-time collaboration following established best practices:
+ * Yjs real-time collaboration hook.
  *
- * Architecture (same pattern as Google Docs / Notion):
- *  1. Y.Doc is the SINGLE source of truth for shared document content.
- *  2. y-indexeddb persists the Y.Doc locally (offline support, instant load).
- *  3. y-websocket syncs Y.Doc between peers in real-time.
- *  4. Local SQLite content is only used as a ONE-TIME seed when a document
- *     is first shared. After that, Y.Doc owns the content entirely.
+ * Architecture:
+ *  Y.Doc ← single source of truth for shared doc content
+ *  y-indexeddb ← local Y.Doc persistence (offline, instant load)
+ *  y-websocket ← real-time peer sync
+ *  yCollab ← binds Y.Text ↔ CodeMirror editor
  *
- * Flow:
- *  - y-indexeddb loads persisted Y.Doc from IndexedDB (instant, offline-safe).
- *  - y-websocket connects for real-time peer sync.
- *  - If Y.Doc is empty after both providers sync, seed from local content.
- *  - yCollab extension is ALWAYS active for shared docs — it drives the editor.
- *  - Content changes in Y.Doc propagate to the local store for preview/search.
+ * onContentChange: called when Y.Text changes → updates store (for preview/search/save)
+ * onBeforeCollab: called right before yCollab activates → sync frozen value to Y.Text content
  */
 export function useCollaboration(
   docId: string | null,
@@ -44,6 +40,7 @@ export function useCollaboration(
   onContentChange: (content: string) => void,
   isShared: boolean = false,
   onBeforeCollab?: (docId: string, ytextContent: string) => void,
+  editorViewRef?: React.RefObject<EditorView | null>,
 ): CollabState {
   const user = useAuthStore((s) => s.user);
   const [connected, setConnected] = useState(false);
@@ -60,6 +57,7 @@ export function useCollaboration(
   initialContentRef.current = initialContent;
   const onBeforeCollabRef = useRef(onBeforeCollab);
   onBeforeCollabRef.current = onBeforeCollab;
+  const editorViewRefCurrent = editorViewRef;
 
   const enabled = Boolean(WS_URL && docId && user && isShared);
 
@@ -82,7 +80,6 @@ export function useCollaboration(
       ydocRef.current = ydoc;
 
       // --- Provider 1: IndexedDB (local persistence) ---
-      // Loads previously persisted Y.Doc state instantly.
       const idb = new IndexeddbPersistence(`markflow-${docId}`, ydoc);
       idbRef.current = idb;
 
@@ -104,29 +101,29 @@ export function useCollaboration(
         colorLight: color + "33",
       });
 
-      // --- Wait for IndexedDB to load, then connect WS ---
-      // This ensures local persisted state is loaded BEFORE merging with server.
+      // --- Sync state machine ---
       let idbSynced = false;
       let wsSynced = false;
       let finalized = false;
+
+      /** Seed Y.Text from local content if Y.Doc is empty */
+      const seedIfEmpty = () => {
+        const ydocContent = ytext.toString();
+        const localContent = initialContentRef.current;
+        if (!ydocContent.trim() && localContent.trim()) {
+          ydoc.transact(() => {
+            ytext.insert(0, localContent);
+          });
+        }
+      };
 
       const tryFinalize = () => {
         if (finalized || !idbSynced || !wsSynced || cancelled) return;
         finalized = true;
 
-        const ydocContent = ytext.toString();
-        const localContent = initialContentRef.current;
+        seedIfEmpty();
 
-        if (!ydocContent.trim() && localContent.trim()) {
-          // Y.Doc is empty — seed from local (first share or corrupted state)
-          ydoc.transact(() => {
-            ytext.insert(0, localContent);
-          });
-        }
-        // Note: when Y.Doc has content from WS (e.g. collaborator edits),
-        // we respect it — do NOT overwrite with local content.
-
-        // Sync Y.Text content to frozen value BEFORE activating yCollab.
+        // Sync Y.Text content → frozen value BEFORE activating yCollab.
         // This prevents @uiw/react-codemirror's value prop from conflicting
         // with yCollab's initial sync (which would cause content duplication).
         const finalContent = ytext.toString();
@@ -134,24 +131,38 @@ export function useCollaboration(
           onBeforeCollabRef.current?.(docId, finalContent);
         }
 
+        // Also push Y.Text content to store immediately for preview sync
+        if (finalContent.trim()) {
+          onContentChangeRef.current(finalContent);
+        }
+
         // Activate yCollab — Y.Doc is now the source of truth
         const undoManager = new Y.UndoManager(ytext);
         setExtension(yCollab(ytext, provider.awareness, { undoManager }));
       };
 
+      // IDB synced → connect WS
       idb.once("synced", () => {
         idbSynced = true;
-        // Connect WS after IndexedDB is ready
         provider.connect();
       });
 
+      // WS sync — handles both initial sync and reconnections
       provider.on("sync", (isSynced: boolean) => {
         if (!isSynced) return;
-        wsSynced = true;
-        tryFinalize();
+
+        if (!finalized) {
+          // First sync: complete initialization
+          wsSynced = true;
+          tryFinalize();
+        } else {
+          // Reconnection sync: WS server may have restarted (Cloud Run scale-to-zero).
+          // If Y.Doc is now empty, re-seed from local content.
+          seedIfEmpty();
+        }
       });
 
-      // Fallback: if WS never syncs (server down), still activate after IDB
+      // Fallback: if WS never syncs (server down), activate after IDB only
       const wsTimeout = setTimeout(() => {
         if (!wsSynced && idbSynced && !cancelled) {
           console.warn("[collab] WS sync timeout — using IndexedDB state only");
@@ -162,11 +173,13 @@ export function useCollaboration(
 
       // Connection status
       provider.on("status", ({ status }: { status: string }) => {
+        if (cancelled) return;
         setConnected(status === "connected");
       });
 
       // Peer tracking
       const updatePeers = () => {
+        if (cancelled) return;
         const states = provider.awareness.getStates();
         const users: CollabUser[] = [];
         states.forEach((state, clientId) => {
@@ -177,27 +190,33 @@ export function useCollaboration(
       };
       provider.awareness.on("change", updatePeers);
 
-      // Propagate Y.Doc changes → local store (for preview, search, auto-save)
-      // Also: protect against Y.Doc being emptied after finalization (stale WS data)
+      // Y.Text observer → store updates (preview, search, auto-save)
+      // Also: fallback editor sync when yCollab binding is stale
       const observer = () => {
-        if (!finalized) return;
+        if (!finalized || cancelled) return;
         const text = ytext.toString();
         if (!text.trim()) {
-          // Y.Doc was emptied — re-seed from local content to prevent data loss
-          const localContent = initialContentRef.current;
-          if (localContent.trim()) {
-            console.warn("[collab] Y.Doc emptied after finalize — re-seeding from local");
-            ydoc.transact(() => {
-              ytext.insert(0, localContent);
-            });
-          }
+          seedIfEmpty();
           return;
         }
+        // Update store immediately for preview/search sync
         onContentChangeRef.current(text);
+
+        // Fallback: if yCollab's binding is stale (e.g., after reconnection),
+        // the editor might not reflect Y.Text changes. Detect and fix.
+        const view = editorViewRefCurrent?.current;
+        if (view && view.dom?.isConnected) {
+          const editorContent = view.state.doc.toString();
+          if (editorContent !== text) {
+            // Editor is out of sync — force update
+            view.dispatch({
+              changes: { from: 0, to: editorContent.length, insert: text },
+            });
+          }
+        }
       };
       ytext.observe(observer);
 
-      // Cleanup timeout ref
       return () => clearTimeout(wsTimeout);
     };
 
@@ -207,15 +226,35 @@ export function useCollaboration(
     return () => {
       cancelled = true;
       cleanupTimeout?.();
+
       const provider = providerRef.current;
       const idb = idbRef.current;
       const ydoc = ydocRef.current;
+
+      // Disconnect WS first (stops receiving updates)
       if (provider) {
         provider.disconnect();
         provider.destroy();
       }
-      if (idb) idb.destroy();
-      if (ydoc) ydoc.destroy();
+
+      // Flush Y.Doc state to IDB before destroying.
+      // y-indexeddb writes are async; store a final snapshot to ensure persistence.
+      if (idb && ydoc) {
+        try {
+          const update = Y.encodeStateAsUpdate(ydoc);
+          // Apply the update back to trigger IDB write, then destroy after a tick
+          Y.applyUpdate(ydoc, update);
+        } catch { /* best effort */ }
+        // Small delay to let IDB flush the final write
+        setTimeout(() => {
+          idb.destroy();
+          ydoc.destroy();
+        }, 50);
+      } else {
+        if (idb) idb.destroy();
+        if (ydoc) ydoc.destroy();
+      }
+
       ydocRef.current = null;
       providerRef.current = null;
       idbRef.current = null;

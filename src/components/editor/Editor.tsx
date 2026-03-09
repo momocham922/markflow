@@ -72,20 +72,14 @@ export function Editor() {
   }
   prevActiveDocRef.current = activeDocId ?? null;
 
-  // Collab: sync Yjs changes → local store (throttled to avoid thrashing)
-  const collabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Collab: sync Yjs changes → local store (immediate for preview/search sync)
   const handleCollabChange = useCallback(
     (content: string) => {
       if (!activeDocId) return;
-      // Guard: Yjs can fire with empty content during reconnect/disconnect
       if (!content.trim()) return;
-
-      if (collabTimerRef.current) clearTimeout(collabTimerRef.current);
-      collabTimerRef.current = setTimeout(() => {
-        updateDocument(activeDocId, { content, updatedAt: Date.now() });
-        const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
-        if (firstLine) updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
-      }, 100);
+      updateDocument(activeDocId, { content, updatedAt: Date.now() });
+      const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+      if (firstLine) updateDocument(activeDocId, { title: firstLine.slice(0, 50) });
     },
     [activeDocId, updateDocument],
   );
@@ -101,7 +95,7 @@ export function Editor() {
 
   // Real-time collaboration via Yjs — only for shared documents
   const { extension: collabExtension, connected: collabConnected, peers } =
-    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
+    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab, viewRef);
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
