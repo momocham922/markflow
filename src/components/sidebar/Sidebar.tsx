@@ -15,6 +15,7 @@ import {
   Users,
   Lock,
   PenLine,
+  EllipsisVertical,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
@@ -484,6 +485,15 @@ export function Sidebar() {
           <Tag className="inline h-2 w-2 ml-0.5" />
         </span>
       )}
+      <EllipsisVertical
+        data-context-trigger=""
+        className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-foreground cursor-pointer"
+        onClick={(e) => {
+          e.stopPropagation();
+          const rect = e.currentTarget.getBoundingClientRect();
+          setContextMenu({ docId: doc.id, x: rect.right, y: rect.bottom });
+        }}
+      />
       <Trash2
         className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
         onClick={(e) => {
@@ -788,21 +798,22 @@ export function Sidebar() {
     );
   };
 
-  // Dismiss context menu on click/mousedown outside (no backdrop needed — WKWebView compat)
+  // Dismiss context menu on pointerdown outside (WKWebView compat — pointer events are reliable)
   useEffect(() => {
     if (!contextMenu) return;
-    const dismiss = (e: MouseEvent) => {
+    const dismiss = (e: PointerEvent) => {
       const target = e.target as HTMLElement;
       if (target?.closest?.("[data-context-menu]")) return;
+      if (target?.closest?.("[data-context-trigger]")) return;
       setContextMenu(null);
     };
-    // Delay listener attachment to prevent immediate dismissal from the same click
+    // Delay to avoid immediate dismissal from the triggering click
     const timer = setTimeout(() => {
-      document.addEventListener("mousedown", dismiss);
-    }, 0);
+      document.addEventListener("pointerdown", dismiss);
+    }, 10);
     return () => {
       clearTimeout(timer);
-      document.removeEventListener("mousedown", dismiss);
+      document.removeEventListener("pointerdown", dismiss);
     };
   }, [contextMenu]);
 
