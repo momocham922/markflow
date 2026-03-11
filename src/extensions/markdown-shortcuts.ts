@@ -63,27 +63,6 @@ const markdownKeybindings: KeyBinding[] = [
   { key: "Mod-e", run: (view) => wrapSelection(view, "`", "`") },
   { key: "Mod-Shift-k", run: (view) => wrapSelection(view, "[[", "]]") },
 
-  // Links
-  {
-    key: "Mod-k",
-    run: (view) => {
-      const { from, to } = view.state.selection.main;
-      const selected = view.state.sliceDoc(from, to);
-      if (from === to) {
-        view.dispatch({
-          changes: { from, insert: "[](url)" },
-          selection: { anchor: from + 1 },
-        });
-      } else {
-        view.dispatch({
-          changes: { from, to, insert: `[${selected}](url)` },
-          selection: { anchor: from + selected.length + 3, head: from + selected.length + 6 },
-        });
-      }
-      return true;
-    },
-  },
-
   // Block formatting
   { key: "Mod-Shift-1", run: (view) => linePrefix(view, "# ") },
   { key: "Mod-Shift-2", run: (view) => linePrefix(view, "## ") },

@@ -315,7 +315,7 @@ export async function deleteTeam(teamId: string): Promise<void> {
 /** Fetch all documents belonging to a team */
 export async function fetchTeamDocuments(
   teamId: string,
-): Promise<{ id: string; title: string; updatedAt: number }[]> {
+): Promise<{ id: string; title: string; folder: string; updatedAt: number }[]> {
   const q = query(
     collection(firestore, "documents"),
     where("teamId", "==", teamId),
@@ -326,9 +326,29 @@ export async function fetchTeamDocuments(
     return {
       id: d.id,
       title: data.title || "Untitled",
+      folder: data.folder || "/",
       updatedAt: data.updatedAt?.toMillis?.() ?? Date.now(),
     };
   });
+}
+
+/** Get team-level folders list */
+export async function getTeamFolders(teamId: string): Promise<string[]> {
+  const ref = doc(firestore, TEAMS_COLLECTION, teamId);
+  const snap = await getDoc(ref);
+  return (snap.data()?.folders as string[]) || [];
+}
+
+/** Save team-level folders list */
+export async function setTeamFolders(teamId: string, folders: string[]): Promise<void> {
+  const ref = doc(firestore, TEAMS_COLLECTION, teamId);
+  await updateDoc(ref, { folders });
+}
+
+/** Move a team document to a different folder */
+export async function moveTeamDocument(docId: string, folder: string): Promise<void> {
+  const ref = doc(firestore, "documents", docId);
+  await updateDoc(ref, { folder });
 }
 
 /** Create a document within a team */

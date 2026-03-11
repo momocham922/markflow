@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -7,10 +7,12 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { useAppStore } from "@/stores/app-store";
+import { useAppStore, type CustomPreviewTheme } from "@/stores/app-store";
 import { previewThemeList } from "@/styles/preview-themes";
 import { editorThemeList } from "@/styles/editor-themes";
-import { Check } from "lucide-react";
+import { Check, Upload, Download, X } from "lucide-react";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 
 type Tab = "presets" | "custom";
 
@@ -19,9 +21,55 @@ interface ThemeCustomizerProps {
   onOpenChange: (open: boolean) => void;
 }
 
+/** Validate that an object looks like a valid PreviewTheme */
+function validateThemeFile(obj: unknown): obj is CustomPreviewTheme {
+  if (!obj || typeof obj !== "object") return false;
+  const t = obj as Record<string, unknown>;
+  return typeof t.id === "string" && typeof t.name === "string"
+    && typeof t.variables === "object" && t.variables !== null;
+}
+
 export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
-  const { themeSettings, setThemeSettings } = useAppStore();
+  const { themeSettings, setThemeSettings, customPreviewThemes, addCustomPreviewTheme, removeCustomPreviewTheme } = useAppStore();
   const [tab, setTab] = useState<Tab>("presets");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  const handleImportTheme = useCallback(() => {
+    setImportError(null);
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        if (!validateThemeFile(parsed)) {
+          setImportError("無効なテーマファイル: id, name, variables が必要です");
+          return;
+        }
+        addCustomPreviewTheme(parsed);
+        setThemeSettings({ previewTheme: parsed.id });
+        setImportError(null);
+      } catch {
+        setImportError("JSONの解析に失敗しました");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }, [addCustomPreviewTheme, setThemeSettings]);
+
+  const handleExportTheme = useCallback(async (theme: CustomPreviewTheme) => {
+    const json = JSON.stringify(theme, null, 2);
+    const path = await save({
+      defaultPath: `${theme.id}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (path) await writeTextFile(path, json);
+  }, []);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -61,9 +109,18 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
           <div className="space-y-4">
             {/* Preview theme */}
             <div>
-              <label className="mb-2 block text-sm font-medium">
-                プレビューテーマ
-              </label>
+              <div className="mb-2 flex items-center justify-between">
+                <label className="block text-sm font-medium">
+                  プレビューテーマ
+                </label>
+                <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleImportTheme}>
+                  <Upload className="h-3 w-3" />
+                  インポート
+                </Button>
+              </div>
+              {importError && (
+                <p className="mb-2 text-xs text-destructive">{importError}</p>
+              )}
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {previewThemeList.map((t) => (
                   <button
@@ -80,6 +137,39 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
                       <Check className="absolute top-1 right-1 h-3 w-3 text-primary" />
                     )}
                   </button>
+                ))}
+                {customPreviewThemes.map((t) => (
+                  <div key={t.id} className="group relative">
+                    <button
+                      onClick={() => setThemeSettings({ previewTheme: t.id })}
+                      className={`w-full rounded-md border px-3 py-2 text-sm transition-colors ${
+                        themeSettings.previewTheme === t.id
+                          ? "border-primary bg-primary/5 text-foreground"
+                          : "border-border text-muted-foreground hover:border-foreground/30"
+                      }`}
+                    >
+                      {t.name}
+                      {themeSettings.previewTheme === t.id && (
+                        <Check className="absolute top-1 right-1 h-3 w-3 text-primary" />
+                      )}
+                    </button>
+                    <div className="absolute -top-1 -right-1 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        className="flex h-4 w-4 items-center justify-center rounded-full bg-muted text-muted-foreground hover:text-foreground"
+                        title="エクスポート"
+                        onClick={(e) => { e.stopPropagation(); handleExportTheme(t); }}
+                      >
+                        <Download className="h-2.5 w-2.5" />
+                      </button>
+                      <button
+                        className="flex h-4 w-4 items-center justify-center rounded-full bg-muted text-muted-foreground hover:text-destructive"
+                        title="削除"
+                        onClick={(e) => { e.stopPropagation(); removeCustomPreviewTheme(t.id); }}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -144,6 +234,13 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
             リセット
           </Button>
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json"
+          className="hidden"
+          onChange={handleFileChange}
+        />
       </DialogContent>
     </Dialog>
   );

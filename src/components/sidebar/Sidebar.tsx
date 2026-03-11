@@ -14,6 +14,7 @@ import {
   Share2,
   Users,
   Lock,
+  PenLine,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
@@ -21,7 +22,7 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, type Team } from "@/services/sharing";
+import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
 
 // ── Folder tree helpers ──────────────────────────────────────
@@ -72,7 +73,8 @@ function buildTree(folders: string[], docs: Document[]): FolderNode {
 // ── Types ────────────────────────────────────────────────────
 
 interface TeamWithDocs extends Team {
-  docs: { id: string; title: string }[];
+  docs: { id: string; title: string; folder: string }[];
+  folders: string[];
 }
 
 // ── Main component ───────────────────────────────────────────
@@ -99,6 +101,8 @@ export function Sidebar() {
   const [newFolderName, setNewFolderName] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
+  const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   // Shared with me
   const user = useAuthStore((s) => s.user);
@@ -113,6 +117,10 @@ export function Sidebar() {
   const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
   const [teamsExpanded, setTeamsExpanded] = useState(true);
   const teamsRefreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [expandedTeamFolders, setExpandedTeamFolders] = useState<Set<string>>(new Set());
+  const [creatingTeamFolderIn, setCreatingTeamFolderIn] = useState<{ teamId: string; parent: string } | null>(null);
+  const [newTeamFolderName, setNewTeamFolderName] = useState("");
+  const [dragOverTeamFolder, setDragOverTeamFolder] = useState<string | null>(null);
 
   // Load shared docs & teams, with periodic refresh for team docs
   const refreshTeams = useCallback(async (uid: string) => {
@@ -120,8 +128,11 @@ export function Sidebar() {
       const userTeams = await fetchUserTeams(uid);
       const teamsWithDocs = await Promise.all(
         userTeams.map(async (team) => {
-          const docs = await fetchTeamDocuments(team.id).catch(() => []);
-          return { ...team, docs } as TeamWithDocs;
+          const [docs, folders] = await Promise.all([
+            fetchTeamDocuments(team.id).catch(() => []),
+            getTeamFolders(team.id).catch(() => []),
+          ]);
+          return { ...team, docs, folders } as TeamWithDocs;
         }),
       );
       setTeams(teamsWithDocs);
@@ -202,14 +213,14 @@ export function Sidebar() {
     );
   }, [documents, search, isSearching]);
 
-  // All unique tags
+  // All unique tags (from personal docs only — matches filteredDocs scope)
   const allTags = useMemo(() => {
     const tagSet = new Set<string>();
-    for (const doc of documents) {
+    for (const doc of personalDocs) {
       for (const tag of doc.tags) tagSet.add(tag);
     }
     return [...tagSet].sort();
-  }, [documents]);
+  }, [personalDocs]);
 
   // Filtered docs for tree (tag filter only, search is separate view)
   const filteredDocs = useMemo(() => {
@@ -250,7 +261,7 @@ export function Sidebar() {
 
   const handleCreateFolder = (parentPath: string) => {
     const name = newFolderName.trim();
-    if (!name) return;
+    if (!name || /[/\\]/.test(name)) return;
     const path = parentPath === "/" ? `/${name}` : `${parentPath}/${name}`;
     createFolder(path);
     setExpandedFolders((prev) => new Set([...prev, parentPath, path]));
@@ -265,16 +276,20 @@ export function Sidebar() {
     if (docId) moveDocument(docId, folder);
   };
 
-  const handleCreateTeamDoc = async (team: TeamWithDocs) => {
+  const handleCreateTeamDoc = async (team: TeamWithDocs, folder = "/") => {
     if (!user) return;
     const newDocId = await createTeamDocument(team.id, user.uid);
+    // Update folder in Firestore if not root
+    if (folder !== "/") {
+      await moveTeamDocument(newDocId, folder).catch(console.error);
+    }
     const newDoc: Document = {
       id: newDocId,
       title: "Untitled",
       content: "# Untitled\n",
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      folder: "/",
+      folder,
       tags: [],
       ownerId: user.uid,
       teamId: team.id,
@@ -287,7 +302,7 @@ export function Sidebar() {
     setTeams((prev) =>
       prev.map((t) =>
         t.id === team.id
-          ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled" }] }
+          ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled", folder }] }
           : t,
       ),
     );
@@ -309,6 +324,54 @@ export function Sidebar() {
           : t,
       ),
     );
+  };
+
+  const handleCreateTeamFolder = async (teamId: string, parentPath: string) => {
+    const name = newTeamFolderName.trim();
+    if (!name || /[/\\]/.test(name)) return;
+    const path = parentPath === "/" ? `/${name}` : `${parentPath}/${name}`;
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return;
+    const updated = [...new Set([...team.folders, path])].sort();
+    await setTeamFolders(teamId, updated).catch(console.error);
+    setTeams((prev) => prev.map((t) => t.id === teamId ? { ...t, folders: updated } : t));
+    setExpandedTeamFolders((prev) => new Set([...prev, `${teamId}:${parentPath}`, `${teamId}:${path}`]));
+    setCreatingTeamFolderIn(null);
+    setNewTeamFolderName("");
+  };
+
+  const handleDeleteTeamFolder = async (teamId: string, folderPath: string) => {
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return;
+    // Delete docs in the folder
+    const docsInFolder = team.docs.filter(
+      (d) => d.folder === folderPath || d.folder.startsWith(folderPath + "/"),
+    );
+    for (const td of docsInFolder) {
+      await handleDeleteTeamDoc(td.id, team);
+    }
+    // Remove the folder and subfolders
+    const updated = team.folders.filter(
+      (f) => f !== folderPath && !f.startsWith(folderPath + "/"),
+    );
+    await setTeamFolders(teamId, updated).catch(console.error);
+    setTeams((prev) => prev.map((t) => t.id === teamId ? { ...t, folders: updated } : t));
+  };
+
+  const handleMoveTeamDoc = async (docId: string, folder: string) => {
+    await moveTeamDocument(docId, folder).catch(console.error);
+    // Update local state
+    setTeams((prev) =>
+      prev.map((t) => ({
+        ...t,
+        docs: t.docs.map((d) => d.id === docId ? { ...d, folder } : d),
+      })),
+    );
+    // Also update local document store if loaded
+    const existing = documents.find((d) => d.id === docId);
+    if (existing) {
+      updateDocument(docId, { folder, updatedAt: Date.now() });
+    }
   };
 
   const openTeamOrSharedDoc = async (docIdToOpen: string, teamId?: string) => {
@@ -341,15 +404,28 @@ export function Sidebar() {
 
   // ── Render helpers ───────────────────────────────────────
 
+  const commitRename = (docId: string) => {
+    const trimmed = renameValue.trim();
+    if (trimmed && trimmed !== documents.find((d) => d.id === docId)?.title) {
+      updateDocument(docId, { title: trimmed, updatedAt: Date.now() });
+    }
+    setRenamingDocId(null);
+  };
+
   const renderDoc = (doc: Document) => (
     <button
       key={doc.id}
-      draggable
+      draggable={renamingDocId !== doc.id}
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", doc.id);
         e.dataTransfer.effectAllowed = "move";
       }}
       onClick={() => setActiveDocId(doc.id)}
+      onDoubleClick={(e) => {
+        e.preventDefault();
+        setRenamingDocId(doc.id);
+        setRenameValue(doc.title);
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
@@ -362,7 +438,22 @@ export function Sidebar() {
       )}
     >
       <FileText className="h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1 truncate">{doc.title}</span>
+      {renamingDocId === doc.id ? (
+        <input
+          autoFocus
+          className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs"
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onBlur={() => commitRename(doc.id)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitRename(doc.id);
+            if (e.key === "Escape") setRenamingDocId(null);
+          }}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <span className="flex-1 truncate">{doc.title}</span>
+      )}
       {doc.isShared && (
         <span title="Shared"><Share2 className="h-3 w-3 shrink-0 text-muted-foreground" /></span>
       )}
@@ -463,7 +554,16 @@ export function Sidebar() {
               />
               <Trash2
                 className="h-3 w-3 text-muted-foreground hover:text-destructive"
-                onClick={(e) => { e.stopPropagation(); deleteFolder(node.path); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const docCount = documents.filter(
+                    (d) => d.folder === node.path || d.folder.startsWith(node.path + "/"),
+                  ).length;
+                  const msg = docCount > 0
+                    ? `「${node.name}」とその中の ${docCount} 件のドキュメントを削除しますか？`
+                    : `「${node.name}」を削除しますか？`;
+                  if (confirm(msg)) deleteFolder(node.path);
+                }}
               />
             </div>
           </div>
@@ -502,6 +602,169 @@ export function Sidebar() {
                   {renderDoc(doc)}
                 </div>
               ))}
+            </div>
+            {!hasContent && isExpanded && !isRoot && (
+              <p
+                className="text-[10px] text-muted-foreground italic px-2 py-1"
+                style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}
+              >
+                Empty
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderTeamDoc = (td: { id: string; title: string; folder: string }, team: TeamWithDocs, depth: number) => {
+    const localDoc = documents.find((d) => d.id === td.id);
+    const title = localDoc?.title || td.title;
+    const isOwnDoc = localDoc?.ownerId === user?.uid;
+    return (
+      <div key={td.id} style={{ paddingLeft: `${depth * 12}px` }}>
+        <button
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData("text/plain", td.id);
+            e.dataTransfer.setData("team-id", team.id);
+            e.dataTransfer.effectAllowed = "move";
+          }}
+          onClick={() => openTeamOrSharedDoc(td.id, team.id)}
+          className={cn(
+            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+            activeDocId === td.id
+              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+              : "text-sidebar-foreground hover:bg-sidebar-accent/50",
+          )}
+        >
+          <FileText className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1 truncate">{title}</span>
+          {!isOwnDoc && localDoc?.ownerId && (
+            <span className="text-[9px] text-muted-foreground shrink-0" title="Created by another member">
+              shared
+            </span>
+          )}
+          <Trash2
+            className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDeleteTeamDoc(td.id, team);
+            }}
+          />
+        </button>
+      </div>
+    );
+  };
+
+  const renderTeamFolder = (node: FolderNode, team: TeamWithDocs, allTeamDocs: { id: string; title: string; folder: string }[], depth = 0) => {
+    const key = `${team.id}:${node.path}`;
+    const isExpanded = expandedTeamFolders.has(key);
+    const isRoot = node.path === "/";
+    const hasContent = node.docs.length > 0 || node.children.length > 0;
+    const isDragOver = dragOverTeamFolder === key;
+
+    const toggleExpand = () => {
+      setExpandedTeamFolders((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+    };
+
+    const handleTeamDrop = (e: React.DragEvent, folder: string) => {
+      e.preventDefault();
+      setDragOverTeamFolder(null);
+      const docId = e.dataTransfer.getData("text/plain");
+      const srcTeam = e.dataTransfer.getData("team-id");
+      if (docId && srcTeam === team.id) {
+        handleMoveTeamDoc(docId, folder);
+      }
+    };
+
+    return (
+      <div key={node.path}>
+        {!isRoot && (
+          <div
+            className={cn(
+              "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
+            )}
+            style={{ paddingLeft: `${depth * 12 + 8}px` }}
+            onClick={toggleExpand}
+            onDragOver={(e) => { e.preventDefault(); setDragOverTeamFolder(key); }}
+            onDragLeave={() => setDragOverTeamFolder(null)}
+            onDrop={(e) => handleTeamDrop(e, node.path)}
+          >
+            {isExpanded ? (
+              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+            )}
+            {isExpanded ? (
+              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            )}
+            <span className="flex-1 truncate">{node.name}</span>
+            <div className="flex gap-0.5 opacity-0 group-hover:opacity-100">
+              <Plus
+                className="h-3 w-3 text-muted-foreground hover:text-foreground"
+                onClick={(e) => { e.stopPropagation(); handleCreateTeamDoc(team, node.path); }}
+              />
+              <FolderPlus
+                className="h-3 w-3 text-muted-foreground hover:text-foreground"
+                onClick={(e) => { e.stopPropagation(); setCreatingTeamFolderIn({ teamId: team.id, parent: node.path }); setNewTeamFolderName(""); }}
+              />
+              <Trash2
+                className="h-3 w-3 text-muted-foreground hover:text-destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const docCount = allTeamDocs.filter(
+                    (d) => d.folder === node.path || d.folder.startsWith(node.path + "/"),
+                  ).length;
+                  const msg = docCount > 0
+                    ? `「${node.name}」とその中の ${docCount} 件のドキュメントを削除しますか？`
+                    : `「${node.name}」を削除しますか？`;
+                  if (confirm(msg)) handleDeleteTeamFolder(team.id, node.path);
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {creatingTeamFolderIn?.teamId === team.id && creatingTeamFolderIn?.parent === node.path && (
+          <div className="flex items-center gap-1 px-2 py-1" style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}>
+            <Folder className="h-3 w-3 text-muted-foreground shrink-0" />
+            <input
+              autoFocus
+              className="flex-1 bg-transparent text-xs outline-none border-b border-input"
+              placeholder="Folder name"
+              value={newTeamFolderName}
+              onChange={(e) => setNewTeamFolderName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleCreateTeamFolder(team.id, node.path);
+                if (e.key === "Escape") setCreatingTeamFolderIn(null);
+              }}
+              onBlur={() => { if (newTeamFolderName.trim()) handleCreateTeamFolder(team.id, node.path); else setCreatingTeamFolderIn(null); }}
+            />
+          </div>
+        )}
+
+        {(isRoot || isExpanded) && (
+          <>
+            {node.children.map((child) => renderTeamFolder(child, team, allTeamDocs, isRoot ? depth : depth + 1))}
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOverTeamFolder(key); }}
+              onDragLeave={() => setDragOverTeamFolder(null)}
+              onDrop={(e) => handleTeamDrop(e, node.path)}
+            >
+              {node.docs.map((doc) => {
+                const td = allTeamDocs.find((d) => d.id === doc.id);
+                if (!td) return null;
+                return renderTeamDoc(td, team, isRoot ? depth : depth + 1);
+              })}
             </div>
             {!hasContent && isExpanded && !isRoot && (
               <p
@@ -654,71 +917,60 @@ export function Sidebar() {
                         const localTeamDocs = documents.filter(
                           (d) => d.teamId === team.id && !firestoreIds.has(d.id),
                         );
-                        const allTeamDocs = [
+                        const allTeamDocs: { id: string; title: string; folder: string }[] = [
                           ...team.docs,
-                          ...localTeamDocs.map((d) => ({ id: d.id, title: d.title })),
+                          ...localTeamDocs.map((d) => ({ id: d.id, title: d.title, folder: d.folder || "/" })),
                         ];
+                        // Build folder tree for this team's docs
+                        const teamFolders = ["/", ...(team.folders || [])];
+                        const teamTree = buildTree(teamFolders, allTeamDocs.map((td) => {
+                          const localDoc = documents.find((d) => d.id === td.id);
+                          return {
+                            id: td.id,
+                            title: localDoc?.title || td.title,
+                            content: localDoc?.content || "",
+                            createdAt: localDoc?.createdAt || 0,
+                            updatedAt: localDoc?.updatedAt || 0,
+                            folder: td.folder || "/",
+                            tags: localDoc?.tags || [],
+                            ownerId: localDoc?.ownerId || null,
+                          };
+                        }));
 
                         return (
                           <div key={team.id}>
-                            <button
-                              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
-                              onClick={() => setExpandedTeams((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(team.id)) next.delete(team.id);
-                                else next.add(team.id);
-                                return next;
-                              })}
-                            >
-                              {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-                              <Users className="h-3 w-3 shrink-0" />
-                              <span className="flex-1 truncate">{team.name || "(no name)"}</span>
-                              <span className="text-[10px] text-muted-foreground mr-1">{allTeamDocs.length}</span>
-                              <Plus
-                                className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleCreateTeamDoc(team);
-                                }}
-                              />
-                            </button>
+                            <div className="flex items-center">
+                              <button
+                                className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                                onClick={() => setExpandedTeams((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(team.id)) next.delete(team.id);
+                                  else next.add(team.id);
+                                  return next;
+                                })}
+                              >
+                                {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+                                <Users className="h-3 w-3 shrink-0" />
+                                <span className="flex-1 truncate">{team.name || "(no name)"}</span>
+                                <span className="text-[10px] text-muted-foreground">{allTeamDocs.length}</span>
+                              </button>
+                              <div className="flex gap-0.5 pr-1">
+                                <Plus
+                                  className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                                  onClick={() => handleCreateTeamDoc(team)}
+                                />
+                                <FolderPlus
+                                  className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                                  onClick={() => { setCreatingTeamFolderIn({ teamId: team.id, parent: "/" }); setNewTeamFolderName(""); setExpandedTeams((prev) => new Set([...prev, team.id])); }}
+                                />
+                              </div>
+                            </div>
                             {isExpanded && (
                               <div className="space-y-0.5 pl-3">
-                                {allTeamDocs.length === 0 ? (
+                                {allTeamDocs.length === 0 && (team.folders || []).length === 0 ? (
                                   <p className="text-[10px] text-muted-foreground italic px-2 py-1">No documents</p>
                                 ) : (
-                                  allTeamDocs.map((td) => {
-                                    const localDoc = documents.find((d) => d.id === td.id);
-                                    const title = localDoc?.title || td.title;
-                                    const isOwnDoc = localDoc?.ownerId === user?.uid;
-                                    return (
-                                      <button
-                                        key={td.id}
-                                        onClick={() => openTeamOrSharedDoc(td.id, team.id)}
-                                        className={cn(
-                                          "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
-                                          activeDocId === td.id
-                                            ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                                            : "text-sidebar-foreground hover:bg-sidebar-accent/50",
-                                        )}
-                                      >
-                                        <FileText className="h-3.5 w-3.5 shrink-0" />
-                                        <span className="flex-1 truncate">{title}</span>
-                                        {!isOwnDoc && localDoc?.ownerId && (
-                                          <span className="text-[9px] text-muted-foreground shrink-0" title="Created by another member">
-                                            shared
-                                          </span>
-                                        )}
-                                        <Trash2
-                                          className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleDeleteTeamDoc(td.id, team);
-                                          }}
-                                        />
-                                      </button>
-                                    );
-                                  })
+                                  renderTeamFolder(teamTree, team, allTeamDocs)
                                 )}
                               </div>
                             )}
@@ -845,6 +1097,20 @@ export function Sidebar() {
               );
             })}
             <Separator className="my-1" />
+            <button
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent transition-colors"
+              onClick={() => {
+                const doc = documents.find((d) => d.id === contextMenu.docId);
+                if (doc) {
+                  setRenamingDocId(doc.id);
+                  setRenameValue(doc.title);
+                }
+                setContextMenu(null);
+              }}
+            >
+              <PenLine className="h-3 w-3 shrink-0" />
+              Rename
+            </button>
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent transition-colors"
               onClick={() => {

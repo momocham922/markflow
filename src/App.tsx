@@ -19,6 +19,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -154,36 +156,40 @@ function App() {
 
   // ─── Export functions ────────────────────────────────────
 
-  const exportHtml = useCallback(() => {
+  const escTitle = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const exportHtml = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
-        const htmlContent = marked.parse(doc.content) as string;
+    const htmlContent = marked.parse(doc.content) as string;
     const html = `<!DOCTYPE html>
 <html lang="ja">
-<head><meta charset="UTF-8"><title>${doc.title}</title>
+<head><meta charset="UTF-8"><title>${escTitle(doc.title)}</title>
 <style>body{font-family:-apple-system,sans-serif;max-width:700px;margin:2em auto;padding:0 1em;line-height:1.7;}
 code{background:#f3f3f3;padding:0.1em 0.3em;border-radius:3px;}
 pre{background:#f3f3f3;padding:1em;border-radius:6px;overflow-x:auto;}
 blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;}</style>
 </head><body>${htmlContent}</body></html>`;
-    downloadFile(html, `${doc.title}.html`, "text/html");
+    const path = await save({ defaultPath: `${doc.title}.html`, filters: [{ name: "HTML", extensions: ["html"] }] });
+    if (path) await writeTextFile(path, html);
   }, [activeDocId, documents]);
 
-  const exportText = useCallback(() => {
+  const exportText = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
-    downloadFile(doc.content, `${doc.title}.txt`, "text/plain");
+    const path = await save({ defaultPath: `${doc.title}.txt`, filters: [{ name: "Text", extensions: ["txt"] }] });
+    if (path) await writeTextFile(path, doc.content);
   }, [activeDocId, documents]);
 
-  const exportMarkdown = useCallback(() => {
+  const exportMarkdown = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
-    // Content is already markdown (CodeMirror editor), but handle legacy HTML
     let md = doc.content;
     if (/^\s*<[a-z][\s\S]*>/i.test(md)) {
       md = turndown.turndown(md);
     }
-    downloadFile(md, `${doc.title}.md`, "text/markdown");
+    const path = await save({ defaultPath: `${doc.title}.md`, filters: [{ name: "Markdown", extensions: ["md"] }] });
+    if (path) await writeTextFile(path, md);
   }, [activeDocId, documents]);
 
   // ─── Import Markdown ─────────────────────────────────────
@@ -229,7 +235,7 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
     const printWindow = window.open("", "_blank");
     if (!printWindow) return;
     printWindow.document.write(`<!DOCTYPE html>
-<html><head><title>${doc.title}</title>
+<html><head><title>${escTitle(doc.title)}</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222;}
 h1{font-size:1.8em;margin-top:1em;} h2{font-size:1.4em;} h3{font-size:1.2em;}
@@ -305,9 +311,16 @@ img{max-width:100%;}
 
           {/* Main content */}
           <div className="flex flex-1 flex-col overflow-hidden">
-            {/* Top bar */}
+            {/* Top bar — draggable title bar region */}
             <div
               className="flex items-center justify-between border-b border-border px-3 pb-1.5"
+              data-tauri-drag-region
+              onDoubleClick={() => {
+                const win = getCurrentWindow();
+                win.isMaximized().then((maximized) =>
+                  maximized ? win.unmaximize() : win.maximize(),
+                );
+              }}
             >
               <div className="flex items-center gap-1">
                 {!sidebarOpen && (
@@ -475,16 +488,6 @@ img{max-width:100%;}
       </div>
     </TooltipProvider>
   );
-}
-
-function downloadFile(content: string, filename: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 export default App;

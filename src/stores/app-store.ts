@@ -15,6 +15,13 @@ export interface Document {
   isShared?: boolean;
 }
 
+export interface CustomPreviewTheme {
+  id: string;
+  name: string;
+  variables: Record<string, string>;
+  dark?: Record<string, string>;
+}
+
 export interface ThemeSettings {
   previewTheme: string;
   editorTheme: string;
@@ -53,6 +60,11 @@ interface AppState {
   createFolder: (path: string) => void;
   deleteFolder: (path: string) => void;
   moveDocument: (docId: string, folder: string) => void;
+
+  // Custom themes
+  customPreviewThemes: CustomPreviewTheme[];
+  addCustomPreviewTheme: (theme: CustomPreviewTheme) => void;
+  removeCustomPreviewTheme: (id: string) => void;
 }
 
 // Debounce save to avoid excessive writes
@@ -194,6 +206,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   documents: [],
   folders: ["/"],
+  customPreviewThemes: [],
 
   loadDocuments: async () => {
     try {
@@ -263,14 +276,21 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const folders = deriveFolders(documents, extraFolders);
 
+      // Load custom preview themes
+      let customPreviewThemes: CustomPreviewTheme[] = [];
+      const savedCustomThemes = await db.getSetting("customPreviewThemes");
+      if (savedCustomThemes) {
+        try { customPreviewThemes = JSON.parse(savedCustomThemes); } catch { /* ignore */ }
+      }
+
       if (savedTheme === "light" || savedTheme === "dark") {
         document.documentElement.classList.toggle(
           "dark",
           savedTheme === "dark",
         );
-        set({ documents, folders, theme: savedTheme, themeSettings, initialized: true });
+        set({ documents, folders, theme: savedTheme, themeSettings, customPreviewThemes, initialized: true });
       } else {
-        set({ documents, folders, themeSettings, initialized: true });
+        set({ documents, folders, themeSettings, customPreviewThemes, initialized: true });
       }
     } catch {
       // Running in browser without Tauri — skip DB
@@ -354,28 +374,51 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteFolder: (path) => {
-    // Move all docs in this folder to parent
-    const parent = path.replace(/\/[^/]+$/, "") || "/";
+    const { deleteDocument } = get();
+    const state = get();
+
+    // Delete all documents inside this folder (and subfolders)
+    const docsToDelete = state.documents.filter(
+      (d) => d.folder === path || d.folder.startsWith(path + "/"),
+    );
+    for (const doc of docsToDelete) {
+      deleteDocument(doc.id);
+    }
+
+    // Remove the folder and its subfolders
     set((s) => {
-      const documents = s.documents.map((d) =>
-        d.folder === path || d.folder.startsWith(path + "/")
-          ? { ...d, folder: parent }
-          : d,
-      );
       const folders = s.folders.filter(
         (f) => f !== path && !f.startsWith(path + "/"),
       );
-      // Save moved docs
-      for (const doc of documents) {
-        if (doc.folder === parent) debouncedSave(doc);
-      }
       db.setSetting("folders", JSON.stringify(folders.filter((f) => f !== "/"))).catch(console.error);
-      return { documents, folders };
+      return { folders };
     });
   },
 
   moveDocument: (docId, folder) => {
     const { updateDocument } = get();
     updateDocument(docId, { folder, updatedAt: Date.now() });
+  },
+
+  addCustomPreviewTheme: (theme) => {
+    set((s) => {
+      const customPreviewThemes = [...s.customPreviewThemes.filter((t) => t.id !== theme.id), theme];
+      db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      return { customPreviewThemes };
+    });
+  },
+
+  removeCustomPreviewTheme: (id) => {
+    set((s) => {
+      const customPreviewThemes = s.customPreviewThemes.filter((t) => t.id !== id);
+      db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      // Reset to default if the removed theme was active
+      if (s.themeSettings.previewTheme === id) {
+        const themeSettings = { ...s.themeSettings, previewTheme: "github" };
+        db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(console.error);
+        return { customPreviewThemes, themeSettings };
+      }
+      return { customPreviewThemes };
+    });
   },
 }));
