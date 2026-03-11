@@ -5,12 +5,28 @@ import { fetchDocumentByToken } from "@/services/sharing";
 import { marked } from "marked";
 import hljs from "highlight.js";
 
-// Configure marked for preview
+/** Escape HTML special characters to prevent XSS */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Configure marked for preview — with XSS protections for external content
 const sharedRenderer = new marked.Renderer();
 sharedRenderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
   const highlighted = hljs.highlight(text, { language }).value;
   return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
+};
+sharedRenderer.link = function ({ href, text }: { href: string; text: string }) {
+  if (/^(javascript|data|vbscript):/i.test(href.trim())) {
+    return escapeHtml(text);
+  }
+  return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
 };
 
 interface SharedDocViewProps {

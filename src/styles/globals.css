@@ -567,6 +567,16 @@ input {
   background: oklch(0.5 0 0 / 0.5);
 }
 
+/* ---- CodeMirror gutter selection fix ---- */
+/* Prevent selection highlight from sticking on gutters after deselection */
+.cm-editor .cm-gutters {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+.cm-editor .cm-gutters ::selection {
+  background: transparent !important;
+}
+
 /* ---- App-wide custom scrollbars ---- */
 /* Editor pane + CodeMirror scroller */
 .editor-scroll::-webkit-scrollbar,
@@ -624,6 +634,98 @@ input {
 .ai-markdown.prose ol {
   margin-bottom: 0.5em !important;
   padding-left: 1.25em !important;
+}
+
+/* YouTube embed */
+.prose .youtube-embed {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  margin: 1.25em 0;
+  border-radius: 0.75em;
+  overflow: hidden;
+  box-shadow: 0 2px 12px oklch(0 0 0 / 0.12);
+  background: oklch(0.1 0 0);
+}
+.prose .youtube-embed iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: none;
+}
+.prose .youtube-embed .youtube-embed-title:empty {
+  display: none;
+}
+.prose .youtube-embed .youtube-embed-title {
+  padding: 0.5em 0.75em;
+  font-size: 0.8rem;
+  color: oklch(0.85 0 0);
+  background: oklch(0.12 0 0);
+  margin: 0 !important;
+}
+
+/* OGP link cards */
+.prose .link-card {
+  margin: 1em 0;
+  max-width: 640px;
+}
+.prose .link-card .link-card-fallback {
+  word-break: break-all;
+}
+.prose .link-card .link-card-inner {
+  display: flex !important;
+  text-decoration: none !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 0.75em;
+  overflow: hidden;
+  transition: box-shadow 0.2s, border-color 0.2s;
+  background: var(--card);
+}
+.prose .link-card .link-card-inner:hover {
+  border-color: var(--prose-links) !important;
+  box-shadow: 0 2px 12px oklch(0 0 0 / 0.08);
+}
+.prose .link-card-image {
+  width: 200px;
+  min-height: 100px;
+  object-fit: cover;
+  flex-shrink: 0;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+.prose .link-card-body {
+  flex: 1;
+  padding: 0.75em 1em;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.25em;
+}
+.prose .link-card-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--prose-headings);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.prose .link-card-desc {
+  font-size: 0.8rem;
+  color: var(--muted-foreground);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.prose .link-card-url {
+  font-size: 0.7rem;
+  color: var(--prose-links);
+  margin-top: auto;
 }
 
 /* Wiki links */

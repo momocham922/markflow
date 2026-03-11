@@ -7,6 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
@@ -15,6 +16,7 @@ import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
+import mermaid from "mermaid";
 
 // HTML → Markdown converter for legacy Tiptap content
 const turndown = new TurndownService({
@@ -46,16 +48,104 @@ marked.setOptions({
   breaks: true,
 });
 
+/** Extract YouTube video ID from various URL formats */
+function extractYouTubeId(url: string): string | null {
+  const patterns = [
+    /(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([a-zA-Z0-9_-]{11})/,
+  ];
+  for (const p of patterns) {
+    const m = url.match(p);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 const renderer = new marked.Renderer();
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+  if (lang === "mermaid") {
+    return `<div class="mermaid">${escapeHtml(text)}</div>`;
+  }
   const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
   const highlighted = hljs.highlight(text, { language }).value;
   return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
 };
+
+// YouTube & OGP link card rendering
+renderer.link = function ({ href, text }: { href: string; text: string }) {
+  // Block dangerous protocols (javascript:, data:, vbscript:)
+  if (/^(javascript|data|vbscript):/i.test(href.trim())) {
+    return escapeHtml(text);
+  }
+  const videoId = extractYouTubeId(href);
+  if (videoId) {
+    // videoId is validated as [a-zA-Z0-9_-]{11} by regex — safe to embed
+    return `<div class="youtube-embed">
+      <iframe src="https://www.youtube.com/embed/${videoId}" frameborder="0"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowfullscreen></iframe>
+      <p class="youtube-embed-title">${text !== href ? escapeHtml(text) : ""}</p>
+    </div>`;
+  }
+  // Bare URL (text matches href) → render as OGP link card placeholder
+  if (text === href && /^https?:\/\//i.test(href)) {
+    const escaped = escapeHtml(href);
+    return `<div class="link-card" data-url="${escaped}">
+      <a href="${escaped}" class="link-card-fallback" target="_blank" rel="noopener noreferrer">${escaped}</a>
+    </div>`;
+  }
+  return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+};
+
 marked.use({ renderer });
 
+// OGP data cache (persists across re-renders, cleared on page reload)
+interface OgpData {
+  title: string;
+  description: string;
+  image: string;
+  site_name: string;
+  url: string;
+}
+const ogpCache = new Map<string, OgpData | "loading" | "error">();
+
+/** Render OGP data into a link card DOM element */
+function renderLinkCard(el: HTMLElement, data: OgpData, url: string) {
+  let domain: string;
+  try {
+    domain = new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    domain = url;
+  }
+  const safeUrl = escapeHtml(url);
+  const safeImage = data.image ? escapeHtml(data.image) : "";
+  const safeTitle = escapeHtml(data.title || domain);
+  const desc = data.description ? data.description.slice(0, 120) + (data.description.length > 120 ? "…" : "") : "";
+  const safeSite = escapeHtml(data.site_name || domain);
+  el.innerHTML = `<a href="${safeUrl}" class="link-card-inner" target="_blank" rel="noopener noreferrer">
+    ${safeImage ? `<img class="link-card-image" src="${safeImage}" alt="" loading="lazy" />` : ""}
+    <div class="link-card-body">
+      <div class="link-card-title">${safeTitle}</div>
+      ${desc ? `<div class="link-card-desc">${escapeHtml(desc)}</div>` : ""}
+      <div class="link-card-url">${safeSite}</div>
+    </div>
+  </a>`;
+}
+
+/** Escape HTML special characters to prevent XSS */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Initialize mermaid — render on demand, not on load
+mermaid.initialize({ startOnLoad: false, theme: "default" });
+
 export function Editor() {
-  const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings } = useAppStore();
+  const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
   const setView = useEditorStore((s) => s.setView);
@@ -95,7 +185,7 @@ export function Editor() {
   );
 
   // Real-time collaboration via Yjs — only for shared documents
-  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled } =
+  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled, wsTimedOut } =
     useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
   const isCollabReady = Boolean(activeDocId && collabExtension && collabDocId === activeDocId);
   // Auto-save versions when content changes significantly
@@ -159,21 +249,96 @@ export function Editor() {
     if (!deferredContent) return "";
     try {
       let html = marked.parse(deferredContent) as string;
+      // Protect code/pre blocks from wiki-link replacement
+      const codeBlocks: string[] = [];
+      html = html.replace(/<(pre|code)[^>]*>[\s\S]*?<\/\1>/gi, (match) => {
+        codeBlocks.push(match);
+        return `\x00CB${codeBlocks.length - 1}\x00`;
+      });
       // Replace [[doc title]] with clickable links
       html = html.replace(/\[\[([^\]]+)\]\]/g, (_match, title: string) => {
         const target = documents.find(
           (d) => d.title.toLowerCase() === title.trim().toLowerCase(),
         );
         if (target) {
-          return `<a href="#" class="wikilink" data-doc-id="${target.id}" title="${target.title}">${title}</a>`;
+          return `<a href="#" class="wikilink" data-doc-id="${escapeHtml(target.id)}" title="${escapeHtml(target.title)}">${escapeHtml(title)}</a>`;
         }
-        return `<span class="wikilink-missing" title="Document not found">${title}</span>`;
+        return `<span class="wikilink-missing" title="Document not found">${escapeHtml(title)}</span>`;
       });
+      // Restore code/pre blocks
+      html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
       return html;
     } catch {
       return deferredContent;
     }
   }, [deferredContent, documents]);
+
+  // Render mermaid diagrams after preview HTML updates or theme change
+  const previewRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const container = previewRef.current;
+    if (!container) return;
+    const mermaidDivs = container.querySelectorAll<HTMLElement>(".mermaid");
+    if (mermaidDivs.length === 0) return;
+    // Reset processed state so mermaid re-renders on content/theme change
+    mermaidDivs.forEach((el) => el.removeAttribute("data-processed"));
+    mermaid.run({ nodes: Array.from(mermaidDivs) }).catch(() => {});
+  }, [previewHtml, theme]);
+
+  // Populate OGP link cards after preview HTML updates
+  useEffect(() => {
+    const container = previewRef.current;
+    if (!container) return;
+    const cards = container.querySelectorAll<HTMLElement>(".link-card[data-url]");
+    if (cards.length === 0) return;
+
+    let cancelled = false;
+    cards.forEach(async (el) => {
+      const url = el.getAttribute("data-url");
+      if (!url || el.hasAttribute("data-ogp-loaded")) return;
+      el.setAttribute("data-ogp-loaded", "1");
+
+      // Check cache
+      const cached = ogpCache.get(url);
+      if (cached === "error") return; // Already failed
+      if (cached && cached !== "loading") {
+        renderLinkCard(el, cached, url);
+        return;
+      }
+      if (cached === "loading") {
+        // Another request is in-flight — poll until it resolves
+        const poll = setInterval(() => {
+          if (cancelled) { clearInterval(poll); return; }
+          const r = ogpCache.get(url);
+          if (r && r !== "loading") {
+            clearInterval(poll);
+            if (r !== "error") renderLinkCard(el, r as OgpData, url);
+          }
+        }, 200);
+        return;
+      }
+
+      ogpCache.set(url, "loading");
+      try {
+        const data = await invoke<OgpData>("fetch_ogp", { url });
+        if (cancelled) return;
+        ogpCache.set(url, data);
+        renderLinkCard(el, data, url);
+      } catch {
+        ogpCache.set(url, "error");
+      }
+    });
+
+    return () => { cancelled = true; };
+  }, [previewHtml]);
+
+  // Sync mermaid theme with app theme
+  useEffect(() => {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: theme === "dark" ? "dark" : "default",
+    });
+  }, [theme]);
 
   // Backlinks: documents that link to this one
   const backlinks = useMemo(() => {
@@ -188,7 +353,9 @@ export function Editor() {
 
   // Build preview theme CSS variables as a <style> tag override
   const previewThemeCss = useMemo(() => {
-    const preset = previewThemes[themeSettings.previewTheme];
+    // Check built-in themes first, then custom themes
+    const preset = previewThemes[themeSettings.previewTheme]
+      ?? customPreviewThemes.find((t) => t.id === themeSettings.previewTheme);
     if (!preset) return "";
     const vars = { ...preset.variables };
     if (theme === "dark" && preset.dark) {
@@ -198,7 +365,7 @@ export function Editor() {
       .map(([k, v]) => `  ${k}: ${v};`)
       .join("\n");
     return `:root {\n${entries}\n}`;
-  }, [themeSettings.previewTheme, theme]);
+  }, [themeSettings.previewTheme, theme, customPreviewThemes]);
 
   const onChange = useCallback(
     (value: string) => {
@@ -305,15 +472,15 @@ export function Editor() {
                 : "flex-1"
           }`}
         >
-          {collabEnabled && !isCollabReady ? (
+          {collabEnabled && !isCollabReady && !wsTimedOut ? (
             <div className="flex h-full items-center justify-center text-muted-foreground">
               <p className="text-sm">Syncing document...</p>
             </div>
           ) : (
             <CodeMirror
               key={activeDocId}
-              value={activeDoc.isShared ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
-              onChange={activeDoc.isShared ? undefined : onChange}
+              value={isCollabReady ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
+              onChange={isCollabReady ? undefined : onChange}
               extensions={extensions}
               theme={editorTheme}
               onCreateEditor={onCreateEditor}
@@ -332,6 +499,7 @@ export function Editor() {
               <style>{themeSettings.customPreviewCss}</style>
             )}
             <div
+              ref={previewRef}
               className="prose max-w-none px-12 py-8"
               dangerouslySetInnerHTML={{ __html: previewHtml }}
               onClick={(e) => {

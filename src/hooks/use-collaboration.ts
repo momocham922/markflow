@@ -19,6 +19,7 @@ export interface CollabState {
   peers: CollabUser[];
   docId: string | null;
   enabled: boolean;
+  wsTimedOut: boolean;
 }
 
 const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
@@ -47,6 +48,7 @@ export function useCollaboration(
   const [peers, setPeers] = useState<CollabUser[]>([]);
   const [extension, setExtension] = useState<Extension | null>(null);
   const [collabDocId, setCollabDocId] = useState<string | null>(null);
+  const [wsTimedOut, setWsTimedOut] = useState(false);
 
   const providerRef = useRef<WebsocketProvider | null>(null);
   const idbRef = useRef<IndexeddbPersistence | null>(null);
@@ -66,12 +68,14 @@ export function useCollaboration(
       setCollabDocId(null);
       setConnected(false);
       setPeers([]);
+      setWsTimedOut(false);
       return;
     }
 
     let cancelled = false;
 
     const setup = async () => {
+      setWsTimedOut(false);
       const token = await user.getIdToken().catch(() => "");
       if (cancelled) return;
 
@@ -142,9 +146,15 @@ export function useCollaboration(
         setCollabDocId(docId);
       };
 
-      // IDB synced → connect WS
+      // IDB synced → if Y.Text already has content from IDB, finalize immediately
+      // (no risk of duplication — these are persisted operations from previous sessions).
+      // Otherwise, connect WS and wait for server state.
       idb.once("synced", () => {
         idbSynced = true;
+        if (ytext.toString().trim()) {
+          wsSynced = true;
+          tryFinalize();
+        }
         provider.connect();
       });
 
@@ -163,12 +173,14 @@ export function useCollaboration(
         }
       });
 
-      // Fallback: if WS never syncs (server down), activate after IDB only
+      // Fallback: if WS never syncs (server down), allow non-collab editing.
+      // Do NOT seed Y.Text here — seeding creates new Yjs operations that can
+      // conflict with operations arriving later from the WS server, causing
+      // content duplication. Instead, Editor renders without yCollab.
       const wsTimeout = setTimeout(() => {
-        if (!wsSynced && idbSynced && !cancelled) {
-          console.warn("[collab] WS sync timeout — using IndexedDB state only");
-          wsSynced = true;
-          tryFinalize();
+        if (!wsSynced && idbSynced && !cancelled && !finalized) {
+          console.warn("[collab] WS sync timeout — fallback to non-collab mode");
+          setWsTimedOut(true);
         }
       }, 5000);
 
@@ -271,8 +283,9 @@ export function useCollaboration(
       setCollabDocId(null);
       setConnected(false);
       setPeers([]);
+      setWsTimedOut(false);
     };
   }, [enabled, docId, user]);
 
-  return { extension, connected, peers, docId: collabDocId, enabled };
+  return { extension, connected, peers, docId: collabDocId, enabled, wsTimedOut };
 }
