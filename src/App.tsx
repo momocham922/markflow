@@ -133,6 +133,30 @@ function App() {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
 
+  // Suppress native WebKit context menu (custom menus handle right-click)
+  useEffect(() => {
+    const suppress = (e: MouseEvent) => {
+      // Allow native context menu inside CodeMirror editor for copy/paste
+      if ((e.target as HTMLElement)?.closest?.(".cm-editor")) return;
+      e.preventDefault();
+    };
+    document.addEventListener("contextmenu", suppress);
+    return () => document.removeEventListener("contextmenu", suppress);
+  }, []);
+
+  // Clear lingering WebKit selection artifacts on deselection
+  useEffect(() => {
+    const handler = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        document.body.style.opacity = "0.999";
+        requestAnimationFrame(() => { document.body.style.opacity = ""; });
+      }
+    };
+    document.addEventListener("selectionchange", handler);
+    return () => document.removeEventListener("selectionchange", handler);
+  }, []);
+
   // Keyboard shortcut: Cmd+Shift+?
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -235,33 +259,49 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
     const htmlContent = marked.parse(doc.content) as string;
-    // Use hidden iframe — window.open doesn't work in Tauri's WKWebView
-    const iframe = document.createElement("iframe");
-    iframe.style.cssText = "position:fixed;left:-9999px;width:700px;height:0;border:none;";
-    document.body.appendChild(iframe);
-    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!iframeDoc) { document.body.removeChild(iframe); return; }
-    iframeDoc.open();
-    iframeDoc.write(`<!DOCTYPE html>
-<html><head><title>${escTitle(doc.title)}</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:0 auto;padding:1em;line-height:1.7;color:#222;}
-h1{font-size:1.8em;margin-top:1em;} h2{font-size:1.4em;} h3{font-size:1.2em;}
-code{background:#f3f3f3;padding:0.1em 0.3em;border-radius:3px;font-size:0.9em;}
-pre{background:#f3f3f3;padding:1em;border-radius:6px;overflow-x:auto;}
-blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;}
-table{border-collapse:collapse;width:100%;}
-th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
-img{max-width:100%;height:auto;}
-@media print{body{margin:0;padding:1cm;}}
-</style>
-</head><body>${htmlContent}</body></html>`);
-    iframeDoc.close();
-    // Wait for content to render, then print
-    setTimeout(() => {
-      iframe.contentWindow?.print();
-      setTimeout(() => document.body.removeChild(iframe), 1000);
-    }, 300);
+
+    // Use window.print() with a temporary print container + @media print CSS.
+    // WKWebView blocks iframe.contentWindow.print(), so we inject content
+    // into the main document and hide everything else during print.
+    const container = document.createElement("div");
+    container.id = "print-container";
+    container.innerHTML = htmlContent;
+    document.body.appendChild(container);
+
+    const style = document.createElement("style");
+    style.id = "print-styles";
+    style.textContent = `
+      #print-container { display: none; }
+      @media print {
+        body > *:not(#print-container) { display: none !important; }
+        #print-container {
+          display: block !important;
+          position: static !important;
+          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+          max-width: 700px; margin: 0 auto; padding: 1cm;
+          line-height: 1.7; color: #222;
+        }
+        #print-container h1 { font-size: 1.8em; margin-top: 1em; }
+        #print-container h2 { font-size: 1.4em; }
+        #print-container h3 { font-size: 1.2em; }
+        #print-container code { background: #f3f3f3; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
+        #print-container pre { background: #f3f3f3; padding: 1em; border-radius: 6px; overflow-x: auto; }
+        #print-container blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1em; color: #666; }
+        #print-container table { border-collapse: collapse; width: 100%; }
+        #print-container th, #print-container td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; }
+        #print-container img { max-width: 100%; height: auto; }
+      }`;
+    document.head.appendChild(style);
+
+    const cleanup = () => {
+      container.remove();
+      style.remove();
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    window.print();
+    // Fallback cleanup if afterprint doesn't fire
+    setTimeout(cleanup, 5000);
   }, [activeDocId, documents]);
 
   if (!initialized) {

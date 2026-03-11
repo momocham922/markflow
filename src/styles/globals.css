@@ -166,7 +166,7 @@
      user-select:none elements — making them transparent prevents
      any visible artifact even if the browser fails to repaint. */
   ::selection {
-    background: transparent;
+    background: transparent !important;
   }
 
   /* Cursor: pointer on all interactive elements */
@@ -577,6 +577,11 @@ input::selection {
 }
 .ai-panel-scroll [data-slot='scroll-area-viewport']::-webkit-scrollbar-thumb:hover {
   background: oklch(0.5 0 0 / 0.5);
+}
+
+/* Enable WebKit drag on elements with draggable attribute */
+[draggable="true"] {
+  -webkit-user-drag: element;
 }
 
 /* ---- CodeMirror gutter selection fix ---- */

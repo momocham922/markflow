@@ -418,14 +418,17 @@ export function Sidebar() {
   };
 
   const renderDoc = (doc: Document) => (
-    <button
+    <div
       key={doc.id}
+      role="button"
+      tabIndex={0}
       draggable={renamingDocId !== doc.id}
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", doc.id);
         e.dataTransfer.effectAllowed = "move";
       }}
       onClick={() => setActiveDocId(doc.id)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveDocId(doc.id); }}
       onDoubleClick={(e) => {
         e.preventDefault();
         setRenamingDocId(doc.id);
@@ -436,7 +439,7 @@ export function Sidebar() {
         setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
       }}
       className={cn(
-        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -478,7 +481,7 @@ export function Sidebar() {
           deleteDocument(doc.id);
         }}
       />
-    </button>
+    </div>
   );
 
   const renderSearchMatch = (doc: Document) => {
