@@ -161,10 +161,12 @@
     -webkit-user-select: none;
   }
 
-  /* Text selection — consistent, non-inverting */
+  /* Suppress selection highlight on non-editable chrome.
+     WebKit/WKWebView can leave phantom ::selection renders on
+     user-select:none elements — making them transparent prevents
+     any visible artifact even if the browser fails to repaint. */
   ::selection {
-    background: oklch(0.7 0.15 250 / 0.3);
-    color: inherit;
+    background: transparent;
   }
 
   /* Cursor: pointer on all interactive elements */
@@ -197,6 +199,16 @@ textarea,
 input {
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+
+/* Visible selection highlight — only in content areas */
+.cm-editor ::selection,
+.prose ::selection,
+.select-text ::selection,
+textarea::selection,
+input::selection {
+  background: oklch(0.7 0.15 250 / 0.3);
+  color: inherit;
 }
 
 .tiptap,

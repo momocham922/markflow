@@ -270,7 +270,13 @@ img{max-width:100%;}
         <div className="flex h-screen w-screen flex-col overflow-hidden bg-background">
           <div
             className="h-7 w-full shrink-0"
-            onMouseDown={() => getCurrentWindow().startDragging()}
+            data-tauri-drag-region
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              window.getSelection()?.removeAllRanges();
+              const win = getCurrentWindow();
+              win.isMaximized().then((m) => (m ? win.unmaximize() : win.maximize()));
+            }}
           />
           <div className="flex-1 overflow-hidden">
             <SharedDocView
@@ -292,7 +298,13 @@ img{max-width:100%;}
         {/* Window drag region — full width, topmost element */}
         <div
           className="h-7 w-full shrink-0"
-          onMouseDown={() => getCurrentWindow().startDragging()}
+          data-tauri-drag-region
+          onDoubleClick={(e) => {
+            e.preventDefault();
+            window.getSelection()?.removeAllRanges();
+            const win = getCurrentWindow();
+            win.isMaximized().then((m) => (m ? win.unmaximize() : win.maximize()));
+          }}
         />
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
@@ -315,7 +327,9 @@ img{max-width:100%;}
             <div
               className="flex items-center justify-between border-b border-border px-3 pb-1.5"
               data-tauri-drag-region
-              onDoubleClick={() => {
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                window.getSelection()?.removeAllRanges();
                 const win = getCurrentWindow();
                 win.isMaximized().then((maximized) =>
                   maximized ? win.unmaximize() : win.maximize(),
