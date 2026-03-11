@@ -431,7 +431,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
                   className="text-xs"
-                  onKeyDown={(e) => { if (e.key === "Enter") handleInvite(); }}
+                  onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleInvite(); }}
                 />
                 <select
                   className="rounded-md border border-input bg-background px-2 py-1 text-xs"

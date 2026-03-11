@@ -449,6 +449,7 @@ export function Sidebar() {
           onChange={(e) => setRenameValue(e.target.value)}
           onBlur={() => commitRename(doc.id)}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Enter") commitRename(doc.id);
             if (e.key === "Escape") setRenamingDocId(null);
           }}
@@ -583,6 +584,7 @@ export function Sidebar() {
               value={newFolderName}
               onChange={(e) => setNewFolderName(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
                 if (e.key === "Enter") handleCreateFolder(node.path);
                 if (e.key === "Escape") setCreatingFolderIn(null);
               }}
@@ -747,6 +749,7 @@ export function Sidebar() {
               value={newTeamFolderName}
               onChange={(e) => setNewTeamFolderName(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
                 if (e.key === "Enter") handleCreateTeamFolder(team.id, node.path);
                 if (e.key === "Escape") setCreatingTeamFolderIn(null);
               }}

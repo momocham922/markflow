@@ -187,7 +187,7 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
           placeholder="Snapshot message (optional)"
           value={snapshotMsg}
           onChange={(e) => setSnapshotMsg(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+          onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleSave(); }}
         />
         <Button
           variant="outline"

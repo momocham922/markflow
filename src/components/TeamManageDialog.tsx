@@ -164,7 +164,7 @@ export function TeamManageDialog({ open, onOpenChange }: TeamManageDialogProps) 
             value={newTeamName}
             onChange={(e) => setNewTeamName(e.target.value)}
             className="text-xs"
-            onKeyDown={(e) => { if (e.key === "Enter") handleCreateTeam(); }}
+            onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleCreateTeam(); }}
           />
           <Button
             size="sm"
@@ -229,7 +229,7 @@ export function TeamManageDialog({ open, onOpenChange }: TeamManageDialogProps) 
                         value={memberEmail}
                         onChange={(e) => setMemberEmail(e.target.value)}
                         className="text-xs h-7"
-                        onKeyDown={(e) => { if (e.key === "Enter") handleAddMember(team.id); }}
+                        onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleAddMember(team.id); }}
                       />
                       <select
                         className="rounded-md border border-input bg-background px-1.5 text-[10px] h-7"

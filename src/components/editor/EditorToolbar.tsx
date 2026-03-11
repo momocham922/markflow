@@ -128,6 +128,7 @@ export function EditorToolbar({
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
                 onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing) return;
                   if (e.key === "Enter") handleFinishRename();
                   if (e.key === "Escape") setRenaming(false);
                 }}
@@ -175,6 +176,7 @@ export function EditorToolbar({
             value={tagInput}
             onChange={(e) => setTagInput(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
               if (e.key === "Enter" || e.key === ",") {
                 e.preventDefault();
                 addTag(tagInput);
