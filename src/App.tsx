@@ -271,8 +271,11 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
 img{max-width:100%;height:auto;}
 table{border-collapse:collapse;width:100%;}
 th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
+@media print { body { margin: 0; } }
 </style></head>
-<body>${htmlContent}</body></html>`;
+<body>${htmlContent}</body>
+<script>window.onload = function() { window.print(); }</script>
+</html>`;
 
     try {
       await invoke("print_html", { html });
