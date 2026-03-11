@@ -15,7 +15,6 @@ import {
   Users,
   Lock,
   PenLine,
-  EllipsisVertical,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
@@ -238,9 +237,18 @@ export function Sidebar() {
     return personalDocs.filter((d) => d.tags.includes(selectedTag));
   }, [personalDocs, selectedTag]);
 
+  // Exclude team folder paths from personal folder list
+  const personalFolders = useMemo(() => {
+    const teamFolderPaths = new Set<string>();
+    for (const team of teams) {
+      for (const f of team.folders || []) teamFolderPaths.add(f);
+    }
+    return folders.filter((f) => !teamFolderPaths.has(f));
+  }, [folders, teams]);
+
   const tree = useMemo(
-    () => buildTree(folders, filteredDocs),
-    [folders, filteredDocs],
+    () => buildTree(personalFolders, filteredDocs),
+    [personalFolders, filteredDocs],
   );
 
   const toggleFolder = useCallback((path: string) => {
@@ -429,13 +437,15 @@ export function Sidebar() {
           role="button"
           tabIndex={0}
           onPointerDown={(e) => {
-            if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
+            if (e.button === 2) {
+              e.preventDefault();
+              setContextMenuDocId(isMenuOpen ? null : doc.id);
+            } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
               dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
             }
           }}
           onContextMenu={(e) => {
             e.preventDefault();
-            setContextMenuDocId(isMenuOpen ? null : doc.id);
           }}
           onClick={() => { if (!dragHappenedRef.current) setActiveDocId(doc.id); }}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveDocId(doc.id); }}
@@ -489,11 +499,9 @@ export function Sidebar() {
             onPointerDown={(e) => {
               e.stopPropagation();
             }}
-            style={{ background: "none", border: "none", padding: 0, margin: 0, cursor: "pointer", display: "flex", alignItems: "center" }}
+            style={{ background: "none", border: "none", padding: "0 2px", margin: 0, cursor: "pointer", flexShrink: 0, fontSize: 14, lineHeight: 1, color: "var(--muted-foreground, #888)" }}
           >
-            <EllipsisVertical
-              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-            />
+            ⋮
           </button>
           <Trash2
             className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
@@ -526,7 +534,7 @@ export function Sidebar() {
             <p style={{ padding: "2px 10px", fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: "0.05em" }}>
               Move to
             </p>
-            {folders.map((f) => {
+            {personalFolders.map((f) => {
               const isCurrent = doc.folder === f;
               return (
                 <button

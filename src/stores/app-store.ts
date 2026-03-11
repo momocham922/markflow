@@ -131,7 +131,7 @@ window.addEventListener("beforeunload", flushPendingSaves);
 function deriveFolders(documents: Document[], extra: string[]): string[] {
   const set = new Set<string>(["/", ...extra]);
   for (const doc of documents) {
-    if (doc.folder && doc.folder !== "/") set.add(doc.folder);
+    if (doc.folder && doc.folder !== "/" && !doc.teamId) set.add(doc.folder);
   }
   return [...set].sort();
 }
