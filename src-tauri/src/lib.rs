@@ -1,6 +1,117 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
 
+#[derive(serde::Serialize, Default)]
+struct OgpData {
+    title: String,
+    description: String,
+    image: String,
+    site_name: String,
+    url: String,
+}
+
+/// Extract content from an OGP meta tag: <meta property="og:X" content="Y">
+fn extract_og_tag(html: &str, property: &str) -> String {
+    let patterns = [
+        format!(r#"property="{}" content=""#, property),
+        format!(r#"property='{}' content='"#, property),
+        format!(r#"content=" property="{}""#, property),
+        // name= variant (used by some sites for description)
+        format!(r#"name="{}" content=""#, property),
+    ];
+    for pat in &patterns {
+        if let Some(start) = html.find(pat.as_str()) {
+            let after = &html[start + pat.len()..];
+            let quote = if pat.contains('"') { '"' } else { '\'' };
+            if let Some(end) = after.find(quote) {
+                return html_decode(&after[..end]);
+            }
+        }
+    }
+    String::new()
+}
+
+/// Decode basic HTML entities
+fn html_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
+/// Extract <title> tag content as fallback
+fn extract_title(html: &str) -> String {
+    if let Some(start) = html.find("<title") {
+        let after = &html[start..];
+        if let Some(tag_end) = after.find('>') {
+            let content = &after[tag_end + 1..];
+            if let Some(close) = content.find("</title") {
+                return html_decode(content[..close].trim());
+            }
+        }
+    }
+    String::new()
+}
+
+#[tauri::command]
+async fn fetch_ogp(url: String) -> Result<OgpData, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "MarkFlow/1.0 (OGP Fetcher)")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    // Only parse HTML responses
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    if !content_type.contains("text/html") {
+        return Err("Not an HTML page".into());
+    }
+
+    // Read up to 100KB to find OGP tags (they're in <head>)
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let html = String::from_utf8_lossy(&bytes[..bytes.len().min(100_000)]);
+
+    let og_title = extract_og_tag(&html, "og:title");
+    let og_desc = extract_og_tag(&html, "og:description");
+    let og_image = extract_og_tag(&html, "og:image");
+    let og_site = extract_og_tag(&html, "og:site_name");
+    let og_url = extract_og_tag(&html, "og:url");
+
+    // Fallbacks
+    let title = if og_title.is_empty() { extract_title(&html) } else { og_title };
+    let description = if og_desc.is_empty() {
+        extract_og_tag(&html, "description")
+    } else {
+        og_desc
+    };
+
+    Ok(OgpData {
+        title,
+        description,
+        image: og_image,
+        site_name: og_site,
+        url: if og_url.is_empty() { url } else { og_url },
+    })
+}
+
 #[tauri::command]
 async fn oauth_listen(app: tauri::AppHandle) -> Result<u16, String> {
     let port: u16 = 19847;
@@ -79,6 +190,8 @@ p{color:#666;margin:0;font-size:0.95em;}
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations(
@@ -134,7 +247,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen])
+        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

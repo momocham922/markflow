@@ -8,9 +8,16 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-is-maximized",
     "shell:allow-open",
     "sql:default",
     "sql:allow-execute",
-    "sql:allow-select"
+    "sql:allow-select",
+    "dialog:default",
+    "dialog:allow-save",
+    "fs:default",
+    "fs:allow-write-text-file"
   ]
 }
