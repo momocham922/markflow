@@ -99,11 +99,18 @@ export function EditorToolbar({
   };
 
   const handleFinishRename = () => {
-    if (!activeDocId || !renameValue.trim()) {
+    if (!activeDocId) {
       setRenaming(false);
       return;
     }
-    updateDocument(activeDocId, { title: renameValue.trim(), updatedAt: Date.now() });
+    const trimmed = renameValue.trim();
+    if (!trimmed) {
+      // Cleared title → unpin, immediately derive from content
+      const derived = activeDoc?.content?.split("\n")[0]?.replace(/^#+\s*/, "").trim().slice(0, 50) || "Untitled";
+      updateDocument(activeDocId, { title: derived, titlePinned: false, updatedAt: Date.now() });
+    } else {
+      updateDocument(activeDocId, { title: trimmed, titlePinned: true, updatedAt: Date.now() });
+    }
     setRenaming(false);
   };
 

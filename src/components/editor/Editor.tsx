@@ -168,11 +168,13 @@ export function Editor() {
       if (!activeDocId) return;
       if (!content.trim()) return;
       const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
-      const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
-      if (firstLine) updates.title = firstLine.slice(0, 50);
+      if (!activeDoc?.titlePinned) {
+        const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+        if (firstLine) updates.title = firstLine.slice(0, 50);
+      }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, updateDocument],
   );
 
   // Callback: sync Y.Text content → frozen value BEFORE yCollab activates.
@@ -372,11 +374,13 @@ export function Editor() {
       if (!activeDocId) return;
       if (!value.trim()) return;
       const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
-      const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
-      if (firstLine) updates.title = firstLine.slice(0, 50);
+      if (!activeDoc?.titlePinned) {
+        const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+        if (firstLine) updates.title = firstLine.slice(0, 50);
+      }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, updateDocument],
   );
 
   const onCreateEditor = useCallback(

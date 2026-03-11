@@ -406,8 +406,11 @@ export function Sidebar() {
 
   const commitRename = (docId: string) => {
     const trimmed = renameValue.trim();
-    if (trimmed && trimmed !== documents.find((d) => d.id === docId)?.title) {
-      updateDocument(docId, { title: trimmed, updatedAt: Date.now() });
+    if (!trimmed) {
+      // Cleared title → unpin, revert to auto-derivation
+      updateDocument(docId, { titlePinned: false, updatedAt: Date.now() });
+    } else if (trimmed !== documents.find((d) => d.id === docId)?.title) {
+      updateDocument(docId, { title: trimmed, titlePinned: true, updatedAt: Date.now() });
     }
     setRenamingDocId(null);
   };

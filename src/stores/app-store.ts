@@ -13,6 +13,7 @@ export interface Document {
   ownerId: string | null;
   teamId?: string | null;
   isShared?: boolean;
+  titlePinned?: boolean;
 }
 
 export interface CustomPreviewTheme {
@@ -233,6 +234,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               createdAt: r.created_at, updatedAt: Date.now(),
               folder: r.folder || "/", tags: JSON.parse(r.tags || "[]"),
               ownerId: r.owner_id ?? null, isShared: r.is_shared === 1,
+              titlePinned: r.title_pinned === 1,
             }).catch(console.error);
           } else {
             // No local recovery possible — try cloud after auth init
@@ -250,6 +252,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           tags,
           ownerId: r.owner_id ?? null,
           isShared: r.is_shared === 1,
+          titlePinned: r.title_pinned === 1,
         });
       }
 
