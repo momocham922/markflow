@@ -168,7 +168,10 @@ function App() {
 <style>body{font-family:-apple-system,sans-serif;max-width:700px;margin:2em auto;padding:0 1em;line-height:1.7;}
 code{background:#f3f3f3;padding:0.1em 0.3em;border-radius:3px;}
 pre{background:#f3f3f3;padding:1em;border-radius:6px;overflow-x:auto;}
-blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;}</style>
+blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;}
+img{max-width:100%;height:auto;}
+table{border-collapse:collapse;width:100%;}
+th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
 </head><body>${htmlContent}</body></html>`;
     const path = await save({ defaultPath: `${doc.title}.html`, filters: [{ name: "HTML", extensions: ["html"] }] });
     if (path) await writeTextFile(path, html);
@@ -231,28 +234,34 @@ blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;
   const handlePrint = useCallback(() => {
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
-        const htmlContent = marked.parse(doc.content) as string;
-    const printWindow = window.open("", "_blank");
-    if (!printWindow) return;
-    printWindow.document.write(`<!DOCTYPE html>
+    const htmlContent = marked.parse(doc.content) as string;
+    // Use hidden iframe — window.open doesn't work in Tauri's WKWebView
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText = "position:fixed;left:-9999px;width:700px;height:0;border:none;";
+    document.body.appendChild(iframe);
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) { document.body.removeChild(iframe); return; }
+    iframeDoc.open();
+    iframeDoc.write(`<!DOCTYPE html>
 <html><head><title>${escTitle(doc.title)}</title>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222;}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:0 auto;padding:1em;line-height:1.7;color:#222;}
 h1{font-size:1.8em;margin-top:1em;} h2{font-size:1.4em;} h3{font-size:1.2em;}
 code{background:#f3f3f3;padding:0.1em 0.3em;border-radius:3px;font-size:0.9em;}
 pre{background:#f3f3f3;padding:1em;border-radius:6px;overflow-x:auto;}
 blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;}
 table{border-collapse:collapse;width:100%;}
 th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
-img{max-width:100%;}
+img{max-width:100%;height:auto;}
 @media print{body{margin:0;padding:1cm;}}
 </style>
 </head><body>${htmlContent}</body></html>`);
-    printWindow.document.close();
-    printWindow.onload = () => {
-      printWindow.print();
-      printWindow.close();
-    };
+    iframeDoc.close();
+    // Wait for content to render, then print
+    setTimeout(() => {
+      iframe.contentWindow?.print();
+      setTimeout(() => document.body.removeChild(iframe), 1000);
+    }, 300);
   }, [activeDocId, documents]);
 
   if (!initialized) {

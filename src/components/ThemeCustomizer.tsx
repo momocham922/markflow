@@ -71,6 +71,37 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
     if (path) await writeTextFile(path, json);
   }, []);
 
+  const handleDownloadTemplate = useCallback(async () => {
+    const template: CustomPreviewTheme = {
+      id: "my-custom-theme",
+      name: "My Custom Theme",
+      variables: {
+        "--prose-body": "#333",
+        "--prose-headings": "#111",
+        "--prose-links": "#2563eb",
+        "--prose-code-bg": "#f3f3f3",
+        "--prose-quote-border": "#ddd",
+        "--prose-font-size": "1rem",
+        "--prose-line-height": "1.75",
+        "--prose-font": "-apple-system, BlinkMacSystemFont, sans-serif",
+        "--prose-letter-spacing": "0",
+      },
+      dark: {
+        "--prose-body": "#ddd",
+        "--prose-headings": "#fff",
+        "--prose-links": "#60a5fa",
+        "--prose-code-bg": "#1e293b",
+        "--prose-quote-border": "#475569",
+      },
+    };
+    const json = JSON.stringify(template, null, 2);
+    const path = await save({
+      defaultPath: "theme-template.json",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (path) await writeTextFile(path, json);
+  }, []);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
@@ -113,10 +144,16 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
                 <label className="block text-sm font-medium">
                   プレビューテーマ
                 </label>
-                <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleImportTheme}>
-                  <Upload className="h-3 w-3" />
-                  インポート
-                </Button>
+                <div className="flex gap-1">
+                  <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleDownloadTemplate}>
+                    <Download className="h-3 w-3" />
+                    テンプレート
+                  </Button>
+                  <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleImportTheme}>
+                    <Upload className="h-3 w-3" />
+                    インポート
+                  </Button>
+                </div>
               </div>
               {importError && (
                 <p className="mb-2 text-xs text-destructive">{importError}</p>
