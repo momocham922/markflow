@@ -20,7 +20,9 @@ import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile, BaseDirectory } from "@tauri-apps/plugin-fs";
+import { open } from "@tauri-apps/plugin-shell";
+import { appDataDir } from "@tauri-apps/api/path";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -255,58 +257,34 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
 
   // ─── Print / PDF ─────────────────────────────────────────
 
-  const handlePrint = useCallback(() => {
+  const handlePrint = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
     const htmlContent = marked.parse(doc.content) as string;
 
-    // Use window.print() with a temporary print container + @media print CSS.
-    // WKWebView blocks iframe.contentWindow.print(), so we inject content
-    // into the main document and hide everything else during print.
-    const container = document.createElement("div");
-    container.id = "print-container";
-    container.innerHTML = htmlContent;
-    document.body.appendChild(container);
+    // WKWebView does not support window.print().
+    // Write HTML to app data dir and open in the system browser for printing.
+    const html = `<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"><title>${escTitle(doc.title)}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:700px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222;}
+code{background:#f3f3f3;padding:0.1em 0.3em;border-radius:3px;font-size:0.9em;}
+pre{background:#f3f3f3;padding:1em;border-radius:6px;overflow-x:auto;}
+blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#666;}
+img{max-width:100%;height:auto;}
+table{border-collapse:collapse;width:100%;}
+th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
+</style></head>
+<body>${htmlContent}</body></html>`;
 
-    const style = document.createElement("style");
-    style.id = "print-styles";
-    style.textContent = `
-      #print-container { display: none; }
-      @media print {
-        body > *:not(#print-container) { display: none !important; }
-        #print-container {
-          display: block !important;
-          position: static !important;
-          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-          max-width: 700px; margin: 0 auto; padding: 1cm;
-          line-height: 1.7; color: #222;
-        }
-        #print-container h1 { font-size: 1.8em; margin-top: 1em; }
-        #print-container h2 { font-size: 1.4em; }
-        #print-container h3 { font-size: 1.2em; }
-        #print-container code { background: #f3f3f3; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
-        #print-container pre { background: #f3f3f3; padding: 1em; border-radius: 6px; overflow-x: auto; }
-        #print-container blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1em; color: #666; }
-        #print-container table { border-collapse: collapse; width: 100%; }
-        #print-container th, #print-container td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; }
-        #print-container img { max-width: 100%; height: auto; }
-      }`;
-    document.head.appendChild(style);
-
-    const cleanup = () => {
-      container.remove();
-      style.remove();
-      window.removeEventListener("afterprint", cleanup);
-    };
-    window.addEventListener("afterprint", cleanup);
-    // Wait for styles to be applied before triggering print
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        window.print();
-        // Fallback cleanup if afterprint doesn't fire
-        setTimeout(cleanup, 5000);
-      }, 100);
-    });
+    try {
+      await writeTextFile("print-preview.html", html, { baseDir: BaseDirectory.AppData });
+      const dir = await appDataDir();
+      const filePath = dir.endsWith("/") ? `${dir}print-preview.html` : `${dir}/print-preview.html`;
+      await open(filePath);
+    } catch (e) {
+      console.error("Print failed:", e);
+    }
   }, [activeDocId, documents]);
 
   if (!initialized) {

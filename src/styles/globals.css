@@ -579,10 +579,6 @@ input::selection {
   background: oklch(0.5 0 0 / 0.5);
 }
 
-/* Enable WebKit drag on elements with draggable attribute */
-[draggable="true"] {
-  -webkit-user-drag: element;
-}
 
 /* ---- CodeMirror gutter selection fix ---- */
 /* Prevent selection highlight from sticking on gutters after deselection */

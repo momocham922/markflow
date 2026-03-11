@@ -102,6 +102,12 @@ export function Sidebar() {
   const [creatingFolderIn, setCreatingFolderIn] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
+  const dragRef = useRef<{ docId: string; teamId?: string; startX: number; startY: number; active: boolean } | null>(null);
+  const dragHappenedRef = useRef(false);
+  const [dragIndicator, setDragIndicator] = useState<{ docId: string; x: number; y: number } | null>(null);
+  const moveDocRef = useRef(moveDocument);
+  moveDocRef.current = moveDocument;
+  const moveTeamDocFnRef = useRef<(docId: string, folder: string) => void>(() => {});
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
   const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -272,13 +278,6 @@ export function Sidebar() {
     setNewFolderName("");
   };
 
-  const handleDrop = (e: React.DragEvent, folder: string) => {
-    e.preventDefault();
-    setDragOverFolder(null);
-    const docId = e.dataTransfer.getData("text/plain");
-    if (docId) moveDocument(docId, folder);
-  };
-
   const handleCreateTeamDoc = async (team: TeamWithDocs, folder = "/") => {
     if (!user) return;
     const newDocId = await createTeamDocument(team.id, user.uid);
@@ -376,6 +375,7 @@ export function Sidebar() {
       updateDocument(docId, { folder, updatedAt: Date.now() });
     }
   };
+  moveTeamDocFnRef.current = handleMoveTeamDoc;
 
   const openTeamOrSharedDoc = async (docIdToOpen: string, teamId?: string) => {
     const existing = documents.find((d) => d.id === docIdToOpen);
@@ -423,22 +423,29 @@ export function Sidebar() {
       key={doc.id}
       role="button"
       tabIndex={0}
-      draggable={renamingDocId !== doc.id}
-      style={{ WebkitUserSelect: "auto", userSelect: "auto" }}
-      onDragStart={(e) => {
-        e.dataTransfer.setData("text/plain", doc.id);
-        e.dataTransfer.effectAllowed = "move";
+      onPointerDown={(e) => {
+        // Right-click or Ctrl+click → context menu
+        if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
+          e.preventDefault();
+          setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
+          return;
+        }
+        // Left-click → potential drag
+        if (e.button === 0 && renamingDocId !== doc.id) {
+          dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
+        }
       }}
-      onClick={() => setActiveDocId(doc.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // Fallback: also trigger from contextmenu event
+        setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
+      }}
+      onClick={() => { if (!dragHappenedRef.current) setActiveDocId(doc.id); }}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveDocId(doc.id); }}
       onDoubleClick={(e) => {
         e.preventDefault();
         setRenamingDocId(doc.id);
         setRenameValue(doc.title);
-      }}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
       }}
       className={cn(
         "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
@@ -535,15 +542,13 @@ export function Sidebar() {
         {/* Folder header */}
         {!isRoot && (
           <div
+            data-folder-path={node.path}
             className={cn(
               "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
             onClick={() => toggleFolder(node.path)}
-            onDragOver={(e) => { e.preventDefault(); setDragOverFolder(node.path); }}
-            onDragLeave={() => setDragOverFolder(null)}
-            onDrop={(e) => handleDrop(e, node.path)}
           >
             {isExpanded ? (
               <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -608,11 +613,7 @@ export function Sidebar() {
         {(isRoot || isExpanded) && (
           <>
             {node.children.map((child) => renderFolder(child, isRoot ? depth : depth + 1))}
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOverFolder(node.path); }}
-              onDragLeave={() => setDragOverFolder(null)}
-              onDrop={(e) => handleDrop(e, node.path)}
-            >
+            <div data-folder-path={node.path}>
               {node.docs.map((doc) => (
                 <div key={doc.id} style={{ paddingLeft: `${(isRoot ? depth : depth + 1) * 12}px` }}>
                   {renderDoc(doc)}
@@ -642,14 +643,12 @@ export function Sidebar() {
         <div
           role="button"
           tabIndex={0}
-          draggable
-          style={{ WebkitUserSelect: "auto", userSelect: "auto" }}
-          onDragStart={(e) => {
-            e.dataTransfer.setData("text/plain", td.id);
-            e.dataTransfer.setData("team-id", team.id);
-            e.dataTransfer.effectAllowed = "move";
+          onPointerDown={(e) => {
+            if (e.button === 0 && !e.ctrlKey) {
+              dragRef.current = { docId: td.id, teamId: team.id, startX: e.clientX, startY: e.clientY, active: false };
+            }
           }}
-          onClick={() => openTeamOrSharedDoc(td.id, team.id)}
+          onClick={() => { if (!dragHappenedRef.current) openTeamOrSharedDoc(td.id, team.id); }}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") openTeamOrSharedDoc(td.id, team.id); }}
           className={cn(
             "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
@@ -693,29 +692,18 @@ export function Sidebar() {
       });
     };
 
-    const handleTeamDrop = (e: React.DragEvent, folder: string) => {
-      e.preventDefault();
-      setDragOverTeamFolder(null);
-      const docId = e.dataTransfer.getData("text/plain");
-      const srcTeam = e.dataTransfer.getData("team-id");
-      if (docId && srcTeam === team.id) {
-        handleMoveTeamDoc(docId, folder);
-      }
-    };
-
     return (
       <div key={node.path}>
         {!isRoot && (
           <div
+            data-folder-path={node.path}
+            data-team-id={team.id}
             className={cn(
               "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
             onClick={toggleExpand}
-            onDragOver={(e) => { e.preventDefault(); setDragOverTeamFolder(key); }}
-            onDragLeave={() => setDragOverTeamFolder(null)}
-            onDrop={(e) => handleTeamDrop(e, node.path)}
           >
             {isExpanded ? (
               <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -778,11 +766,7 @@ export function Sidebar() {
         {(isRoot || isExpanded) && (
           <>
             {node.children.map((child) => renderTeamFolder(child, team, allTeamDocs, isRoot ? depth : depth + 1))}
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOverTeamFolder(key); }}
-              onDragLeave={() => setDragOverTeamFolder(null)}
-              onDrop={(e) => handleTeamDrop(e, node.path)}
-            >
+            <div data-folder-path={node.path} data-team-id={team.id}>
               {node.docs.map((doc) => {
                 const td = allTeamDocs.find((d) => d.id === doc.id);
                 if (!td) return null;
@@ -802,6 +786,64 @@ export function Sidebar() {
       </div>
     );
   };
+
+  // Pointer-based drag & drop (replaces HTML5 drag API for WKWebView compatibility)
+  useEffect(() => {
+    const handleMove = (e: PointerEvent) => {
+      if (!dragRef.current) return;
+      const { startX, startY, docId } = dragRef.current;
+      const dist = Math.sqrt((e.clientX - startX) ** 2 + (e.clientY - startY) ** 2);
+      if (!dragRef.current.active && dist > 5) {
+        dragRef.current.active = true;
+      }
+      if (dragRef.current.active) {
+        setDragIndicator({ docId, x: e.clientX, y: e.clientY });
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const folderEl = (el as HTMLElement)?.closest?.("[data-folder-path]") as HTMLElement | null;
+        const fp = folderEl?.dataset.folderPath || null;
+        const tid = folderEl?.dataset.teamId;
+        if (tid && fp) {
+          setDragOverTeamFolder(`${tid}:${fp}`);
+          setDragOverFolder(null);
+        } else if (fp) {
+          setDragOverFolder(fp);
+          setDragOverTeamFolder(null);
+        } else {
+          setDragOverFolder(null);
+          setDragOverTeamFolder(null);
+        }
+      }
+    };
+
+    const handleUp = (e: PointerEvent) => {
+      if (dragRef.current?.active) {
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const folderEl = (el as HTMLElement)?.closest?.("[data-folder-path]") as HTMLElement | null;
+        const targetFolder = folderEl?.dataset.folderPath;
+        const targetTeamId = folderEl?.dataset.teamId;
+        if (targetFolder) {
+          if (dragRef.current.teamId && targetTeamId) {
+            moveTeamDocFnRef.current(dragRef.current.docId, targetFolder);
+          } else if (!dragRef.current.teamId && !targetTeamId) {
+            moveDocRef.current(dragRef.current.docId, targetFolder);
+          }
+        }
+        dragHappenedRef.current = true;
+        setTimeout(() => { dragHappenedRef.current = false; }, 100);
+      }
+      dragRef.current = null;
+      setDragIndicator(null);
+      setDragOverFolder(null);
+      setDragOverTeamFolder(null);
+    };
+
+    document.addEventListener("pointermove", handleMove);
+    document.addEventListener("pointerup", handleUp);
+    return () => {
+      document.removeEventListener("pointermove", handleMove);
+      document.removeEventListener("pointerup", handleUp);
+    };
+  }, []);
 
   return (
     <div className="flex h-full w-full flex-col border-r border-border bg-sidebar-background">
@@ -1082,19 +1124,30 @@ export function Sidebar() {
         {sharedDocs.length > 0 && ` / ${sharedDocs.length} shared`}
       </div>
 
-      {/* Context menu — portaled to body to escape overflow:hidden */}
+      {/* Context menu — portaled to body with inline styles (no Tailwind) */}
       {contextMenu && createPortal(
         <div
-          className="fixed inset-0 z-[9999]"
+          style={{ position: "fixed", inset: 0, zIndex: 99999 }}
           onClick={() => setContextMenu(null)}
           onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
         >
           <div
-            className="absolute rounded-md border border-border bg-popover shadow-md py-1 min-w-35"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            style={{
+              position: "absolute",
+              left: contextMenu.x,
+              top: contextMenu.y,
+              background: document.documentElement.classList.contains("dark") ? "#262626" : "#fff",
+              color: document.documentElement.classList.contains("dark") ? "#e5e5e5" : "#333",
+              border: `1px solid ${document.documentElement.classList.contains("dark") ? "#404040" : "#e5e5e5"}`,
+              borderRadius: 8,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+              padding: "4px 0",
+              minWidth: 160,
+              fontSize: 12,
+            }}
             onClick={(e) => e.stopPropagation()}
           >
-            <p className="px-3 py-1 text-[10px] text-muted-foreground uppercase tracking-wider">
+            <p style={{ padding: "4px 12px", fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: "0.05em" }}>
               Move to
             </p>
             {folders.map((f) => {
@@ -1103,25 +1156,35 @@ export function Sidebar() {
               return (
                 <button
                   key={f}
-                  className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent transition-colors",
-                    isCurrent && "text-muted-foreground",
-                  )}
+                  style={{
+                    display: "flex", width: "100%", alignItems: "center", gap: 8,
+                    padding: "6px 12px", fontSize: 12, textAlign: "left", border: "none",
+                    background: "transparent", cursor: isCurrent ? "default" : "pointer",
+                    color: isCurrent ? "#999" : "inherit",
+                  }}
                   disabled={isCurrent}
+                  onMouseOver={(e) => { if (!isCurrent) (e.currentTarget.style.background = document.documentElement.classList.contains("dark") ? "#333" : "#f5f5f5"); }}
+                  onMouseOut={(e) => { e.currentTarget.style.background = "transparent"; }}
                   onClick={() => {
                     moveDocument(contextMenu.docId, f);
                     setContextMenu(null);
                   }}
                 >
-                  <Folder className="h-3 w-3 shrink-0" />
+                  <Folder style={{ width: 12, height: 12, flexShrink: 0 }} />
                   {f === "/" ? "Root" : f.split("/").pop()}
-                  {isCurrent && <span className="text-[10px] ml-auto">(current)</span>}
+                  {isCurrent && <span style={{ fontSize: 10, marginLeft: "auto" }}>(current)</span>}
                 </button>
               );
             })}
-            <Separator className="my-1" />
+            <hr style={{ margin: "4px 0", border: "none", borderTop: `1px solid ${document.documentElement.classList.contains("dark") ? "#404040" : "#e5e5e5"}` }} />
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent transition-colors"
+              style={{
+                display: "flex", width: "100%", alignItems: "center", gap: 8,
+                padding: "6px 12px", fontSize: 12, textAlign: "left", border: "none",
+                background: "transparent", cursor: "pointer", color: "inherit",
+              }}
+              onMouseOver={(e) => { e.currentTarget.style.background = document.documentElement.classList.contains("dark") ? "#333" : "#f5f5f5"; }}
+              onMouseOut={(e) => { e.currentTarget.style.background = "transparent"; }}
               onClick={() => {
                 const doc = documents.find((d) => d.id === contextMenu.docId);
                 if (doc) {
@@ -1131,20 +1194,50 @@ export function Sidebar() {
                 setContextMenu(null);
               }}
             >
-              <PenLine className="h-3 w-3 shrink-0" />
+              <PenLine style={{ width: 12, height: 12, flexShrink: 0 }} />
               Rename
             </button>
             <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left text-destructive hover:bg-accent transition-colors"
+              style={{
+                display: "flex", width: "100%", alignItems: "center", gap: 8,
+                padding: "6px 12px", fontSize: 12, textAlign: "left", border: "none",
+                background: "transparent", cursor: "pointer", color: "#ef4444",
+              }}
+              onMouseOver={(e) => { e.currentTarget.style.background = document.documentElement.classList.contains("dark") ? "#333" : "#f5f5f5"; }}
+              onMouseOut={(e) => { e.currentTarget.style.background = "transparent"; }}
               onClick={() => {
                 deleteDocument(contextMenu.docId);
                 setContextMenu(null);
               }}
             >
-              <Trash2 className="h-3 w-3 shrink-0" />
+              <Trash2 style={{ width: 12, height: 12, flexShrink: 0 }} />
               Delete
             </button>
           </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* Drag indicator — follows pointer during drag */}
+      {dragIndicator && createPortal(
+        <div
+          style={{
+            position: "fixed",
+            left: dragIndicator.x + 16,
+            top: dragIndicator.y - 10,
+            pointerEvents: "none",
+            zIndex: 99999,
+            background: "rgba(0,0,0,0.8)",
+            color: "#fff",
+            padding: "3px 10px",
+            borderRadius: 6,
+            fontSize: 11,
+            whiteSpace: "nowrap",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+            fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif",
+          }}
+        >
+          {documents.find((d) => d.id === dragIndicator.docId)?.title || ""}
         </div>,
         document.body,
       )}
