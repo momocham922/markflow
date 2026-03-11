@@ -480,13 +480,21 @@ export function Sidebar() {
               <Tag className="inline h-2 w-2 ml-0.5" />
             </span>
           )}
-          <EllipsisVertical
-            className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-foreground cursor-pointer"
+          <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               setContextMenuDocId(isMenuOpen ? null : doc.id);
             }}
-          />
+            onPointerDown={(e) => {
+              e.stopPropagation();
+            }}
+            style={{ background: "none", border: "none", padding: 0, margin: 0, cursor: "pointer", display: "flex", alignItems: "center" }}
+          >
+            <EllipsisVertical
+              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+            />
+          </button>
           <Trash2
             className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
             onClick={(e) => {
@@ -496,9 +504,17 @@ export function Sidebar() {
           />
         </div>
         {isMenuOpen && (
+          <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 50 }}
+            onClick={() => setContextMenuDocId(null)}
+            onPointerDown={() => setContextMenuDocId(null)}
+          />
           <div
             data-context-menu
             style={{
+              position: "relative",
+              zIndex: 51,
               margin: "2px 4px",
               background: isDark ? "#262626" : "#fff",
               border: `1px solid ${isDark ? "#404040" : "#e5e5e5"}`,
@@ -558,6 +574,7 @@ export function Sidebar() {
               Delete
             </button>
           </div>
+          </>
         )}
       </>
     );
@@ -857,22 +874,7 @@ export function Sidebar() {
     );
   };
 
-  // Dismiss inline context menu on pointerdown outside
-  useEffect(() => {
-    if (!contextMenuDocId) return;
-    const dismiss = (e: PointerEvent) => {
-      const target = e.target as HTMLElement;
-      if (target?.closest?.("[data-context-menu]")) return;
-      setContextMenuDocId(null);
-    };
-    const timer = setTimeout(() => {
-      document.addEventListener("pointerdown", dismiss);
-    }, 10);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener("pointerdown", dismiss);
-    };
-  }, [contextMenuDocId]);
+  // Dismiss handled by inline backdrop rendered in renderDoc
 
   // Pointer-based drag & drop (replaces HTML5 drag API for WKWebView compatibility)
   useEffect(() => {
