@@ -299,9 +299,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
       window.removeEventListener("afterprint", cleanup);
     };
     window.addEventListener("afterprint", cleanup);
-    window.print();
-    // Fallback cleanup if afterprint doesn't fire
-    setTimeout(cleanup, 5000);
+    // Wait for styles to be applied before triggering print
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        window.print();
+        // Fallback cleanup if afterprint doesn't fire
+        setTimeout(cleanup, 5000);
+      }, 100);
+    });
   }, [activeDocId, documents]);
 
   if (!initialized) {

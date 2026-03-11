@@ -17,6 +17,7 @@ import {
   PenLine,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useIMEGuard } from "@/hooks/use-ime-guard";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -423,6 +424,7 @@ export function Sidebar() {
       role="button"
       tabIndex={0}
       draggable={renamingDocId !== doc.id}
+      style={{ WebkitUserSelect: "auto", userSelect: "auto" }}
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", doc.id);
         e.dataTransfer.effectAllowed = "move";
@@ -637,16 +639,20 @@ export function Sidebar() {
     const isOwnDoc = localDoc?.ownerId === user?.uid;
     return (
       <div key={td.id} style={{ paddingLeft: `${depth * 12}px` }}>
-        <button
+        <div
+          role="button"
+          tabIndex={0}
           draggable
+          style={{ WebkitUserSelect: "auto", userSelect: "auto" }}
           onDragStart={(e) => {
             e.dataTransfer.setData("text/plain", td.id);
             e.dataTransfer.setData("team-id", team.id);
             e.dataTransfer.effectAllowed = "move";
           }}
           onClick={() => openTeamOrSharedDoc(td.id, team.id)}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") openTeamOrSharedDoc(td.id, team.id); }}
           className={cn(
-            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -666,7 +672,7 @@ export function Sidebar() {
               handleDeleteTeamDoc(td.id, team);
             }}
           />
-        </button>
+        </div>
       </div>
     );
   };
@@ -1076,15 +1082,15 @@ export function Sidebar() {
         {sharedDocs.length > 0 && ` / ${sharedDocs.length} shared`}
       </div>
 
-      {/* Context menu for "Move to folder" */}
-      {contextMenu && (
+      {/* Context menu — portaled to body to escape overflow:hidden */}
+      {contextMenu && createPortal(
         <div
-          className="fixed inset-0 z-50"
+          className="fixed inset-0 z-[9999]"
           onClick={() => setContextMenu(null)}
           onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
         >
           <div
-            className="absolute rounded-md border border-border bg-popover shadow-md py-1 min-w-[140px]"
+            className="absolute rounded-md border border-border bg-popover shadow-md py-1 min-w-35"
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1139,7 +1145,8 @@ export function Sidebar() {
               Delete
             </button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
