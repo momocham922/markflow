@@ -423,21 +423,22 @@ export function Sidebar() {
       key={doc.id}
       role="button"
       tabIndex={0}
-      onPointerDown={(e) => {
-        // Right-click or Ctrl+click → context menu
+      onMouseDown={(e) => {
+        // Right-click or Ctrl+click → context menu (mousedown fires for all buttons in WebKit)
         if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
           e.preventDefault();
           setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
           return;
         }
+      }}
+      onPointerDown={(e) => {
         // Left-click → potential drag
-        if (e.button === 0 && renamingDocId !== doc.id) {
+        if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
           dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
         }
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        // Fallback: also trigger from contextmenu event
         setContextMenu({ docId: doc.id, x: e.clientX, y: e.clientY });
       }}
       onClick={() => { if (!dragHappenedRef.current) setActiveDocId(doc.id); }}
@@ -787,6 +788,24 @@ export function Sidebar() {
     );
   };
 
+  // Dismiss context menu on click/mousedown outside (no backdrop needed — WKWebView compat)
+  useEffect(() => {
+    if (!contextMenu) return;
+    const dismiss = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target?.closest?.("[data-context-menu]")) return;
+      setContextMenu(null);
+    };
+    // Delay listener attachment to prevent immediate dismissal from the same click
+    const timer = setTimeout(() => {
+      document.addEventListener("mousedown", dismiss);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("mousedown", dismiss);
+    };
+  }, [contextMenu]);
+
   // Pointer-based drag & drop (replaces HTML5 drag API for WKWebView compatibility)
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
@@ -1124,18 +1143,15 @@ export function Sidebar() {
         {sharedDocs.length > 0 && ` / ${sharedDocs.length} shared`}
       </div>
 
-      {/* Context menu — portaled to body with inline styles (no Tailwind) */}
+      {/* Context menu — portaled to body, no backdrop (WKWebView compat) */}
       {contextMenu && createPortal(
-        <div
-          style={{ position: "fixed", inset: 0, zIndex: 99999 }}
-          onClick={() => setContextMenu(null)}
-          onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
-        >
           <div
+            data-context-menu
             style={{
-              position: "absolute",
+              position: "fixed",
               left: contextMenu.x,
               top: contextMenu.y,
+              zIndex: 99999,
               background: document.documentElement.classList.contains("dark") ? "#262626" : "#fff",
               color: document.documentElement.classList.contains("dark") ? "#e5e5e5" : "#333",
               border: `1px solid ${document.documentElement.classList.contains("dark") ? "#404040" : "#e5e5e5"}`,
@@ -1145,7 +1161,6 @@ export function Sidebar() {
               minWidth: 160,
               fontSize: 12,
             }}
-            onClick={(e) => e.stopPropagation()}
           >
             <p style={{ padding: "4px 12px", fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: "0.05em" }}>
               Move to
@@ -1213,8 +1228,7 @@ export function Sidebar() {
               <Trash2 style={{ width: 12, height: 12, flexShrink: 0 }} />
               Delete
             </button>
-          </div>
-        </div>,
+          </div>,
         document.body,
       )}
 

@@ -20,9 +20,8 @@ import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile, BaseDirectory } from "@tauri-apps/plugin-fs";
-import { open } from "@tauri-apps/plugin-shell";
-import { appDataDir } from "@tauri-apps/api/path";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -262,8 +261,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
     if (!doc) return;
     const htmlContent = marked.parse(doc.content) as string;
 
-    // WKWebView does not support window.print().
-    // Write HTML to app data dir and open in the system browser for printing.
     const html = `<!DOCTYPE html>
 <html lang="ja">
 <head><meta charset="UTF-8"><title>${escTitle(doc.title)}</title>
@@ -278,10 +275,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 <body>${htmlContent}</body></html>`;
 
     try {
-      await writeTextFile("print-preview.html", html, { baseDir: BaseDirectory.AppData });
-      const dir = await appDataDir();
-      const filePath = dir.endsWith("/") ? `${dir}print-preview.html` : `${dir}/print-preview.html`;
-      await open(filePath);
+      await invoke("print_html", { html });
     } catch (e) {
       console.error("Print failed:", e);
     }

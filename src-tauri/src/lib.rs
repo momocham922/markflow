@@ -186,6 +186,18 @@ p{color:#666;margin:0;font-size:0.95em;}
     Ok(port)
 }
 
+#[tauri::command]
+async fn print_html(html: String) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir();
+    let path = temp_dir.join("markflow-print.html");
+    std::fs::write(&path, &html).map_err(|e| e.to_string())?;
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -247,7 +259,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp])
+        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

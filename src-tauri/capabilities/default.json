@@ -18,9 +18,6 @@
     "dialog:default",
     "dialog:allow-save",
     "fs:default",
-    {
-      "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$APPDATA/*" }]
-    }
+    "fs:allow-write-text-file"
   ]
 }
