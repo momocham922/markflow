@@ -17,6 +17,7 @@ import {
   PenLine,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { useIMEGuard } from "@/hooks/use-ime-guard";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -103,6 +104,7 @@ export function Sidebar() {
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
   const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const ime = useIMEGuard();
 
   // Shared with me
   const user = useAuthStore((s) => s.user);
@@ -447,9 +449,11 @@ export function Sidebar() {
           className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs"
           value={renameValue}
           onChange={(e) => setRenameValue(e.target.value)}
+          onCompositionStart={ime.onCompositionStart}
+          onCompositionEnd={ime.onCompositionEnd}
           onBlur={() => commitRename(doc.id)}
           onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
+            if (ime.isComposing()) return;
             if (e.key === "Enter") commitRename(doc.id);
             if (e.key === "Escape") setRenamingDocId(null);
           }}
@@ -583,8 +587,10 @@ export function Sidebar() {
               placeholder="Folder name"
               value={newFolderName}
               onChange={(e) => setNewFolderName(e.target.value)}
+              onCompositionStart={ime.onCompositionStart}
+              onCompositionEnd={ime.onCompositionEnd}
               onKeyDown={(e) => {
-                if (e.nativeEvent.isComposing) return;
+                if (ime.isComposing()) return;
                 if (e.key === "Enter") handleCreateFolder(node.path);
                 if (e.key === "Escape") setCreatingFolderIn(null);
               }}
@@ -748,8 +754,10 @@ export function Sidebar() {
               placeholder="Folder name"
               value={newTeamFolderName}
               onChange={(e) => setNewTeamFolderName(e.target.value)}
+              onCompositionStart={ime.onCompositionStart}
+              onCompositionEnd={ime.onCompositionEnd}
               onKeyDown={(e) => {
-                if (e.nativeEvent.isComposing) return;
+                if (ime.isComposing()) return;
                 if (e.key === "Enter") handleCreateTeamFolder(team.id, node.path);
                 if (e.key === "Escape") setCreatingTeamFolderIn(null);
               }}

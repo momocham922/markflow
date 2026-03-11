@@ -1,4 +1,5 @@
 import { useState, useRef, type ReactNode } from "react";
+import { useIMEGuard } from "@/hooks/use-ime-guard";
 import {
   PenLine,
   Columns2,
@@ -45,6 +46,7 @@ export function EditorToolbar({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const tagInputRef = useRef<HTMLInputElement>(null);
+  const ime = useIMEGuard();
 
   const { activeDocId, documents, updateDocument } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
@@ -127,8 +129,10 @@ export function EditorToolbar({
                 className="bg-transparent text-xs font-medium outline-none border-b border-input w-32"
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
+                onCompositionStart={ime.onCompositionStart}
+                onCompositionEnd={ime.onCompositionEnd}
                 onKeyDown={(e) => {
-                  if (e.nativeEvent.isComposing) return;
+                  if (ime.isComposing()) return;
                   if (e.key === "Enter") handleFinishRename();
                   if (e.key === "Escape") setRenaming(false);
                 }}
@@ -175,8 +179,10 @@ export function EditorToolbar({
             placeholder="tag"
             value={tagInput}
             onChange={(e) => setTagInput(e.target.value)}
+            onCompositionStart={ime.onCompositionStart}
+            onCompositionEnd={ime.onCompositionEnd}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if (ime.isComposing()) return;
               if (e.key === "Enter" || e.key === ",") {
                 e.preventDefault();
                 addTag(tagInput);

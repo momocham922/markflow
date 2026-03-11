@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useIMEGuard } from "@/hooks/use-ime-guard";
 import {
   Dialog,
   DialogContent,
@@ -69,6 +70,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"editor" | "viewer">("viewer");
   const [inviting, setInviting] = useState(false);
+  const ime = useIMEGuard();
 
   // Slack notifications state
   const [slackConfig, setSlackConfig] = useState<SlackNotifyConfig>({
@@ -431,7 +433,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
                   className="text-xs"
-                  onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleInvite(); }}
+                  onCompositionStart={ime.onCompositionStart}
+                  onCompositionEnd={ime.onCompositionEnd}
+                  onKeyDown={(e) => { if (!ime.isComposing() && e.key === "Enter") handleInvite(); }}
                 />
                 <select
                   className="rounded-md border border-input bg-background px-2 py-1 text-xs"

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useIMEGuard } from "@/hooks/use-ime-guard";
 import {
   History,
   Save,
@@ -45,6 +46,7 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
   const [saving, setSaving] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [snapshotMsg, setSnapshotMsg] = useState("");
+  const ime = useIMEGuard();
 
   const user = useAuthStore((s) => s.user);
 
@@ -187,7 +189,9 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
           placeholder="Snapshot message (optional)"
           value={snapshotMsg}
           onChange={(e) => setSnapshotMsg(e.target.value)}
-          onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleSave(); }}
+          onCompositionStart={ime.onCompositionStart}
+          onCompositionEnd={ime.onCompositionEnd}
+          onKeyDown={(e) => { if (!ime.isComposing() && e.key === "Enter") handleSave(); }}
         />
         <Button
           variant="outline"

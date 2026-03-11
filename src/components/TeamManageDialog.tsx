@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useIMEGuard } from "@/hooks/use-ime-guard";
 import {
   Dialog,
   DialogContent,
@@ -41,6 +42,7 @@ export function TeamManageDialog({ open, onOpenChange }: TeamManageDialogProps) 
   const [addingTo, setAddingTo] = useState<string | null>(null);
   const [memberEmail, setMemberEmail] = useState("");
   const [memberRole, setMemberRole] = useState<"admin" | "member">("member");
+  const ime = useIMEGuard();
 
   useEffect(() => {
     if (!open || !user) return;
@@ -164,7 +166,9 @@ export function TeamManageDialog({ open, onOpenChange }: TeamManageDialogProps) 
             value={newTeamName}
             onChange={(e) => setNewTeamName(e.target.value)}
             className="text-xs"
-            onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleCreateTeam(); }}
+            onCompositionStart={ime.onCompositionStart}
+            onCompositionEnd={ime.onCompositionEnd}
+            onKeyDown={(e) => { if (!ime.isComposing() && e.key === "Enter") handleCreateTeam(); }}
           />
           <Button
             size="sm"
@@ -229,7 +233,9 @@ export function TeamManageDialog({ open, onOpenChange }: TeamManageDialogProps) 
                         value={memberEmail}
                         onChange={(e) => setMemberEmail(e.target.value)}
                         className="text-xs h-7"
-                        onKeyDown={(e) => { if (!e.nativeEvent.isComposing && e.key === "Enter") handleAddMember(team.id); }}
+                        onCompositionStart={ime.onCompositionStart}
+                        onCompositionEnd={ime.onCompositionEnd}
+                        onKeyDown={(e) => { if (!ime.isComposing() && e.key === "Enter") handleAddMember(team.id); }}
                       />
                       <select
                         className="rounded-md border border-input bg-background px-1.5 text-[10px] h-7"
