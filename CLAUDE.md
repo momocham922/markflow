@@ -43,6 +43,9 @@ Shared documents use the Google Docs/Notion pattern:
 Editor.tsx: shared docs show "Syncing document..." until yCollab is ready,
 then mount CodeMirror in uncontrolled mode (no value prop transition).
 
+## Roadmap
+See `ROADMAP.md` for product vision, planned features, known bugs, and priorities.
+
 ## Ongoing Work: Collab Content-Loss Fix
 
 ### Problem
