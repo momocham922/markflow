@@ -52,6 +52,15 @@ function App() {
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
   const syncing = useAuthStore((s) => s.syncing);
+  // Only show blocking overlay for the very first sync (login/startup)
+  const prevSyncingRef = useRef(false);
+  const initialSyncDoneRef = useRef(false);
+  useEffect(() => {
+    if (prevSyncingRef.current && !syncing) {
+      initialSyncDoneRef.current = true;
+    }
+    prevSyncingRef.current = syncing;
+  }, [syncing]);
   const [rightPanel, setRightPanel] = useState<RightPanel>("none");
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
   const [updateInfo, setUpdateInfo] = useState<{ version: string; update: unknown } | null>(null);
@@ -535,8 +544,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         </div>
 
-        {/* Syncing overlay — blocks interaction during cloud sync */}
-        {syncing && (
+        {/* Syncing overlay — blocks interaction only during initial cloud sync */}
+        {syncing && !initialSyncDoneRef.current && (
           <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
             <div className="flex items-center gap-3 rounded-lg bg-card border border-border px-5 py-3 shadow-lg">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />

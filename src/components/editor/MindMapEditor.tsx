@@ -287,6 +287,8 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const handleTabInEdit = useCallback(() => {
     const nodeId = editingNodeId;
     if (!nodeId) return;
+    // Prevent stale onBlur from overwriting new data
+    editCancelledRef.current = true;
     const nodes = applyEdit();
     setEditingNodeId(null);
     addChildTo(nodeId, nodes);
@@ -296,6 +298,8 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const handleEnterInEdit = useCallback(() => {
     const nodeId = editingNodeId;
     if (!nodeId) return;
+    // Prevent stale onBlur from overwriting new data
+    editCancelledRef.current = true;
     const nodes = applyEdit();
     if (nodeId === "root") {
       // Root can't have siblings, just finish edit
@@ -346,7 +350,8 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     }
   }, [selectedNodeId, nodeMap, findParent]);
 
-  // Document-level keyboard handler (bypasses ReactFlow event capture)
+  // Document-level keyboard handler — uses capture phase to fire BEFORE
+  // ReactFlow's internal keyboard handlers that may intercept events
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Don't intercept when editing or when an input/textarea is focused
@@ -356,9 +361,11 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
 
       if (e.key === "Tab") {
         e.preventDefault();
+        e.stopPropagation();
         handleAddChild();
       } else if (e.key === "Enter") {
         e.preventDefault();
+        e.stopPropagation();
         if (selectedNodeId && selectedNodeId !== "root") {
           handleAddSibling();
         } else {
@@ -366,9 +373,11 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
         }
       } else if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId && selectedNodeId !== "root") {
         e.preventDefault();
+        e.stopPropagation();
         handleDelete();
       } else if (e.key === "F2" && selectedNodeId) {
         e.preventDefault();
+        e.stopPropagation();
         handleStartEdit();
       } else if (e.key === "Escape") {
         setSelectedNodeId(null);
@@ -387,11 +396,12 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       } else if (selectedNodeId && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         // Printable character — start editing immediately (Xmind style)
         e.preventDefault();
+        e.stopPropagation();
         handleStartEditWithChar(e.key);
       }
     };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
+    document.addEventListener("keydown", handler, true);
+    return () => document.removeEventListener("keydown", handler, true);
   }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit, handleStartEditWithChar, navigateTo]);
 
 
