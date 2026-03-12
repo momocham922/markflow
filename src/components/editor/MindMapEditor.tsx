@@ -192,7 +192,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
 
   const addChildTo = useCallback((parentId: string, baseNodes?: MindMapTreeNode[]) => {
     const nodes = baseNodes ?? data.nodes;
-    const newId = `n-${Date.now()}`;
+    const newId = `n-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const newNode: MindMapTreeNode = { id: newId, label: "New topic", children: [] };
     const updatedNodes = nodes.map((n) =>
       n.id === parentId ? { ...n, children: [...n.children, newId] } : n,
@@ -203,6 +203,9 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     setEditingNodeId(newId);
     selectAllRef.current = true;
     updateEditLabel("New topic");
+    // Reset editCancelled so the new node's eventual onBlur works normally
+    // (setTimeout ensures this runs AFTER React processes the stale onBlur from the old input)
+    setTimeout(() => { editCancelledRef.current = false; }, 0);
   }, [data, save, updateEditLabel]);
 
   const handleAddChild = useCallback(() => {

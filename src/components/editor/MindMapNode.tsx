@@ -134,17 +134,24 @@ export const MindMapNode = memo(function MindMapNode({
   const isUnderline = theme.nodeShape === "underline";
   const inputRef = useRef<HTMLInputElement>(null);
   const composingRef = useRef(false);
+  // Suppress onBlur when Tab/Enter/Escape caused the blur (prevents stale save)
+  const suppressBlurRef = useRef(false);
 
   useEffect(() => {
     if (nodeData.editing && inputRef.current) {
-      inputRef.current.value = nodeData.editLabel ?? "";
-      inputRef.current.focus();
-      if (nodeData.selectAll) {
-        inputRef.current.select();
-      } else {
-        const len = inputRef.current.value.length;
-        inputRef.current.setSelectionRange(len, len);
-      }
+      const input = inputRef.current;
+      input.value = nodeData.editLabel ?? "";
+      // Defer focus to next frame — ReactFlow may steal focus during commit
+      setTimeout(() => {
+        if (!inputRef.current) return;
+        inputRef.current.focus();
+        if (nodeData.selectAll) {
+          inputRef.current.select();
+        } else {
+          const len = inputRef.current.value.length;
+          inputRef.current.setSelectionRange(len, len);
+        }
+      }, 0);
     }
     // Only run when editing state starts — not on every editLabel change
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -184,14 +191,21 @@ export const MindMapNode = memo(function MindMapNode({
             if (composingRef.current) return;
             if (e.key === "Tab") {
               e.preventDefault();
+              suppressBlurRef.current = true;
               nodeData.onTabInEdit?.();
             } else if (e.key === "Enter") {
+              suppressBlurRef.current = true;
               nodeData.onEnterInEdit?.();
             } else if (e.key === "Escape") {
+              suppressBlurRef.current = true;
               nodeData.onEditCancel?.();
             }
           }}
           onBlur={() => {
+            if (suppressBlurRef.current) {
+              suppressBlurRef.current = false;
+              return;
+            }
             if (!composingRef.current) nodeData.onEditFinish?.();
           }}
         />
