@@ -1,6 +1,6 @@
 import { EditorView } from "@codemirror/view";
-import { invoke } from "@tauri-apps/api/core";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { uploadImage } from "@/services/firebase";
+import { useAuthStore } from "@/stores/auth-store";
 
 /**
  * Extract file extension from a MIME type or filename.
@@ -24,22 +24,34 @@ function extFromName(name: string): string {
 }
 
 /**
- * Save an image file via Tauri backend and return the markdown to insert.
+ * Upload an image to Firebase Storage and return the markdown to insert.
+ * Falls back to local save via Tauri if not logged in.
  */
 async function processImageFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
-  const data = Array.from(new Uint8Array(buffer));
+  const bytes = new Uint8Array(buffer);
   const ext = file.name ? extFromName(file.name) : extFromMime(file.type);
+  const altText = file.name?.replace(/\.[^.]+$/, "") || "image";
 
+  // Cloud-first: upload to Firebase Storage if logged in
+  const user = useAuthStore.getState().user;
+  if (user) {
+    const url = await uploadImage(user.uid, bytes, ext);
+    return `![${altText}](${url})`;
+  }
+
+  // Fallback: save locally via Tauri backend
+  const { invoke } = await import("@tauri-apps/api/core");
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  const data = Array.from(bytes);
   const savedPath = await invoke<string>("save_image", { data, ext });
   const assetUrl = convertFileSrc(savedPath);
-  const altText = file.name?.replace(/\.[^.]+$/, "") || "image";
   return `![${altText}](${assetUrl})`;
 }
 
 /**
  * CodeMirror extension that handles image paste and drag-and-drop.
- * Saves images to the app data directory and inserts markdown image syntax.
+ * Uploads images to Firebase Storage (cloud-first) and inserts markdown image syntax.
  */
 export const imagePaste = EditorView.domEventHandlers({
   paste(event, view) {
@@ -53,7 +65,6 @@ export const imagePaste = EditorView.domEventHandlers({
         if (!file) return true;
 
         const pos = view.state.selection.main.head;
-        // Insert placeholder while saving
         const placeholder = "![Uploading...]()";
         view.dispatch({
           changes: { from: pos, insert: placeholder },
@@ -61,7 +72,6 @@ export const imagePaste = EditorView.domEventHandlers({
 
         processImageFile(file)
           .then((md) => {
-            // Replace placeholder with actual image markdown
             const doc = view.state.doc.toString();
             const idx = doc.indexOf(placeholder);
             if (idx >= 0) {
@@ -71,7 +81,6 @@ export const imagePaste = EditorView.domEventHandlers({
             }
           })
           .catch(() => {
-            // Remove placeholder on failure
             const doc = view.state.doc.toString();
             const idx = doc.indexOf(placeholder);
             if (idx >= 0) {
@@ -99,7 +108,6 @@ export const imagePaste = EditorView.domEventHandlers({
     event.preventDefault();
     const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
 
-    // Process all dropped images
     Promise.all(imageFiles.map(processImageFile))
       .then((markdowns) => {
         const insert = markdowns.join("\n");
