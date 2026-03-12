@@ -240,6 +240,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               folder: r.folder || "/", tags: JSON.parse(r.tags || "[]"),
               ownerId: r.owner_id ?? null, isShared: r.is_shared === 1,
               titlePinned: r.title_pinned === 1,
+              docType: (r.doc_type as DocType) || "markdown",
             }).catch(console.error);
           } else {
             // No local recovery possible — try cloud after auth init

@@ -157,6 +157,7 @@ export interface FirestoreDocument {
   title: string;
   content: string;
   ownerId: string;
+  docType?: string;
   collaborators: Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
   tags: string[];
   folder: string;
@@ -197,6 +198,7 @@ export async function saveDocumentToFirestore(docData: {
   ownerId: string;
   folder?: string;
   tags?: string[];
+  docType?: string;
 }): Promise<void> {
   // Never sync empty content to cloud — protects against data loss propagation
   if (!docData.content?.trim()) {
@@ -212,6 +214,7 @@ export async function saveDocumentToFirestore(docData: {
       ownerId: docData.ownerId,
       folder: docData.folder ?? "/",
       tags: docData.tags ?? [],
+      ...(docData.docType ? { docType: docData.docType } : {}),
       updatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -225,6 +228,7 @@ export async function createDocumentInFirestore(docData: {
   ownerId: string;
   folder?: string;
   tags?: string[];
+  docType?: string;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(ref, {
@@ -235,6 +239,7 @@ export async function createDocumentInFirestore(docData: {
     collaboratorUids: [],
     tags: docData.tags ?? [],
     folder: docData.folder ?? "/",
+    ...(docData.docType ? { docType: docData.docType } : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });

@@ -166,7 +166,10 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const data = useMemo(() => parseMindMapData(content) ?? createInitialMindMapData(title), [content]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [editLabel, setEditLabel] = useState("");
+  const editLabelRef = useRef("");
+  const updateEditLabel = useCallback((v: string) => {
+    editLabelRef.current = v;
+  }, []);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const editCancelledRef = useRef(false);
   const { themeSettings, setThemeSettings } = useAppStore();
@@ -196,7 +199,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     save({ ...data, nodes: updatedNodes });
     setSelectedNodeId(newId);
     setEditingNodeId(newId);
-    setEditLabel("New topic");
+    updateEditLabel("New topic");
   }, [data, save]);
 
   const handleAddChild = useCallback(() => {
@@ -234,8 +237,15 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     const node = nodeMap.get(selectedNodeId);
     if (!node) return;
     setEditingNodeId(selectedNodeId);
-    setEditLabel(node.label);
-  }, [selectedNodeId, nodeMap]);
+    updateEditLabel(node.label);
+  }, [selectedNodeId, nodeMap, updateEditLabel]);
+
+  // Start editing with a typed character (replaces label, Xmind style)
+  const handleStartEditWithChar = useCallback((char: string) => {
+    if (!selectedNodeId) return;
+    setEditingNodeId(selectedNodeId);
+    updateEditLabel(char);
+  }, [selectedNodeId, updateEditLabel]);
 
   const handleEditCancel = useCallback(() => {
     editCancelledRef.current = true;
@@ -247,16 +257,17 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       editCancelledRef.current = false;
       return;
     }
-    if (!editingNodeId || !editLabel.trim()) {
+    const label = editLabelRef.current;
+    if (!editingNodeId || !label.trim()) {
       setEditingNodeId(null);
       return;
     }
     const updatedNodes = data.nodes.map((n) =>
-      n.id === editingNodeId ? { ...n, label: editLabel.trim() } : n,
+      n.id === editingNodeId ? { ...n, label: label.trim() } : n,
     );
     save({ ...data, nodes: updatedNodes });
     setEditingNodeId(null);
-  }, [editingNodeId, editLabel, data, save]);
+  }, [editingNodeId, data, save]);
 
   const handleThemeChange = useCallback((themeId: MindMapThemeId) => {
     setThemeSettings({ mindMapTheme: themeId });
@@ -299,10 +310,10 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
 
-      if (e.key === "Enter") {
+      if (e.key === "Tab") {
         e.preventDefault();
         handleAddChild();
-      } else if (e.key === "Tab") {
+      } else if (e.key === "Enter") {
         e.preventDefault();
         if (selectedNodeId && selectedNodeId !== "root") {
           handleAddSibling();
@@ -312,7 +323,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       } else if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId && selectedNodeId !== "root") {
         e.preventDefault();
         handleDelete();
-      } else if ((e.key === "F2" || e.key === " ") && selectedNodeId) {
+      } else if (e.key === "F2" && selectedNodeId) {
         e.preventDefault();
         handleStartEdit();
       } else if (e.key === "Escape") {
@@ -329,16 +340,30 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         navigateTo("down");
+      } else if (selectedNodeId && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Printable character — start editing immediately (Xmind style)
+        e.preventDefault();
+        handleStartEditWithChar(e.key);
       }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit, navigateTo]);
+  }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit, handleStartEditWithChar, navigateTo]);
 
 
   // Layout
   const layoutRoot = useMemo(() => buildLayoutTree(data), [data]);
   const { nodes, edges } = useMemo(() => layoutTree(layoutRoot, currentTheme), [layoutRoot, currentTheme]);
+
+  // Stable refs for editing callbacks — avoids re-rendering all nodes on every keystroke
+  const handleFinishEditRef = useRef(handleFinishEdit);
+  handleFinishEditRef.current = handleFinishEdit;
+  const handleEditCancelRef = useRef(handleEditCancel);
+  handleEditCancelRef.current = handleEditCancel;
+
+  const stableOnEditChange = useCallback((v: string) => updateEditLabel(v), [updateEditLabel]);
+  const stableOnEditFinish = useCallback(() => handleFinishEditRef.current(), []);
+  const stableOnEditCancel = useCallback(() => handleEditCancelRef.current(), []);
 
   // Make selected node visually distinct + inject editing state
   const nodesWithSelection = useMemo(() =>
@@ -349,14 +374,14 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
         ...n.data,
         ...(n.id === editingNodeId ? {
           editing: true,
-          editLabel,
-          onEditChange: setEditLabel,
-          onEditFinish: handleFinishEdit,
-          onEditCancel: handleEditCancel,
+          editLabel: editLabelRef.current,
+          onEditChange: stableOnEditChange,
+          onEditFinish: stableOnEditFinish,
+          onEditCancel: stableOnEditCancel,
         } : {}),
       },
     })),
-    [nodes, selectedNodeId, editingNodeId, editLabel, handleFinishEdit, handleEditCancel],
+    [nodes, selectedNodeId, editingNodeId, stableOnEditChange, stableOnEditFinish, stableOnEditCancel],
   );
 
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
@@ -421,7 +446,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           )}
         </div>
         <span className="ml-auto text-[10px] text-muted-foreground truncate">
-          {selectedNode ? selectedNode.label : "Enter: child / Tab: sibling / Arrows: navigate"}
+          {selectedNode ? selectedNode.label : "Tab: child / Enter: sibling / Arrows: navigate"}
         </span>
       </div>
 
@@ -447,7 +472,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
             const n = nodeMap.get(node.id);
             if (n) {
               setEditingNodeId(node.id);
-              setEditLabel(n.label);
+              updateEditLabel(n.label);
             }
           }}
           panOnDrag

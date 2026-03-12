@@ -130,12 +130,16 @@ export const MindMapNode = memo(function MindMapNode({
   const shape = shapeClass[theme.nodeShape];
   const isUnderline = theme.nodeShape === "underline";
   const inputRef = useRef<HTMLInputElement>(null);
+  const composingRef = useRef(false);
 
   useEffect(() => {
     if (nodeData.editing && inputRef.current) {
+      inputRef.current.value = nodeData.editLabel ?? "";
       inputRef.current.focus();
       inputRef.current.select();
     }
+    // Only run when editing state starts — not on every editLabel change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeData.editing]);
 
   return (
@@ -152,16 +156,30 @@ export const MindMapNode = memo(function MindMapNode({
       {nodeData.editing ? (
         <input
           ref={inputRef}
-          className="bg-transparent outline-none border-none text-inherit font-inherit whitespace-nowrap min-w-[3ch]"
-          style={{ width: `${Math.max((nodeData.editLabel ?? "").length, 3)}ch` }}
-          value={nodeData.editLabel ?? ""}
-          onChange={(e) => nodeData.onEditChange?.(e.target.value)}
+          className="bg-transparent outline-none border-none text-inherit font-inherit whitespace-nowrap min-w-[3ch] w-[8ch]"
+          defaultValue={nodeData.editLabel ?? ""}
+          onCompositionStart={() => { composingRef.current = true; }}
+          onCompositionEnd={(e) => {
+            composingRef.current = false;
+            nodeData.onEditChange?.((e.target as HTMLInputElement).value);
+          }}
+          onInput={(e) => {
+            if (!composingRef.current) {
+              nodeData.onEditChange?.((e.target as HTMLInputElement).value);
+            }
+            // Auto-size input width
+            const el = e.target as HTMLInputElement;
+            el.style.width = `${Math.max(el.value.length + 1, 3)}ch`;
+          }}
           onKeyDown={(e) => {
             e.stopPropagation();
+            if (composingRef.current) return;
             if (e.key === "Enter") nodeData.onEditFinish?.();
             if (e.key === "Escape") nodeData.onEditCancel?.();
           }}
-          onBlur={() => nodeData.onEditFinish?.()}
+          onBlur={() => {
+            if (!composingRef.current) nodeData.onEditFinish?.();
+          }}
         />
       ) : (
         <span className="whitespace-nowrap">{nodeData.label}</span>

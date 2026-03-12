@@ -12,7 +12,7 @@ import {
 } from "@/services/firebase";
 import { saveUserProfile, fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments } from "@/services/sharing";
 import { notifySlack } from "@/services/slack-notify";
-import { useAppStore, type Document } from "./app-store";
+import { useAppStore, type Document, type DocType } from "./app-store";
 
 interface AuthState {
   user: User | null;
@@ -122,6 +122,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             tags: cloudDoc.tags ?? [],
             ownerId: user.uid,
             isShared: hasCollaborators || hasShareLink,
+            docType: (cloudDoc.docType as DocType) || "markdown",
           };
           await appStore.addDocument(newDoc);
         } else {
@@ -182,6 +183,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             tags: fullDoc.tags ?? [],
             ownerId: fullDoc.ownerId,
             isShared: true,
+            docType: (fullDoc.docType as DocType) || "markdown",
           };
           await appStore.addDocument(newDoc);
         }
@@ -231,6 +233,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               ownerId: fullDoc.ownerId,
               teamId: team.id,
               isShared: true,
+              docType: (fullDoc.docType as DocType) || "markdown",
             };
             await appStore.addDocument(newDoc);
           }
@@ -286,6 +289,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           ownerId: d.ownerId || user.uid,
           folder: d.folder,
           tags: d.tags,
+          docType: d.docType,
         };
         try {
           await saveDocumentToFirestore(payload);
