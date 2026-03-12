@@ -130,6 +130,29 @@ function App() {
     return cleanup;
   }, [initAuth]);
 
+  // Auto-update check on startup
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      try {
+        const { check } = await import("@tauri-apps/plugin-updater");
+        const update = await check();
+        if (update) {
+          const yes = confirm(
+            `MarkFlow v${update.version} が利用可能です。今すぐアップデートしますか？`,
+          );
+          if (yes) {
+            await update.downloadAndInstall();
+            const { relaunch } = await import("@tauri-apps/plugin-process");
+            await relaunch();
+          }
+        }
+      } catch {
+        // Silently ignore update check failures (offline, dev mode, etc.)
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, []);
+
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
