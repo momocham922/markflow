@@ -20,12 +20,8 @@
     "dialog:allow-ask",
     "fs:default",
     "fs:allow-write-text-file",
-    {
-      "identifier": "fs:allow-read",
-      "allow": [{ "path": "**" }]
-    },
+    "fs:read-all",
     "updater:default",
-    "process:allow-restart",
-    "process:allow-relaunch"
+    "process:allow-restart"
   ]
 }
