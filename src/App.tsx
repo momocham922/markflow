@@ -51,6 +51,7 @@ function App() {
     setActiveDocId,
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
+  const syncing = useAuthStore((s) => s.syncing);
   const [rightPanel, setRightPanel] = useState<RightPanel>("none");
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
   const [updateInfo, setUpdateInfo] = useState<{ version: string; update: unknown } | null>(null);
@@ -534,6 +535,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         </div>
 
+        {/* Syncing overlay — blocks interaction during cloud sync */}
+        {syncing && (
+          <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
+            <div className="flex items-center gap-3 rounded-lg bg-card border border-border px-5 py-3 shadow-lg">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              <span className="text-sm text-foreground">Syncing...</span>
+            </div>
+          </div>
+        )}
         <StatusBar />
         <ShareDialog open={shareOpen} onOpenChange={setShareOpen} />
         <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />

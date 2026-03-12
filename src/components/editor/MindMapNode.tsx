@@ -106,9 +106,12 @@ export interface MindMapNodeData {
   themeId?: MindMapThemeId;
   editing?: boolean;
   editLabel?: string;
+  selectAll?: boolean;
   onEditChange?: (value: string) => void;
   onEditFinish?: () => void;
   onEditCancel?: () => void;
+  onTabInEdit?: () => void;
+  onEnterInEdit?: () => void;
 }
 
 const levelSizes = [
@@ -136,7 +139,12 @@ export const MindMapNode = memo(function MindMapNode({
     if (nodeData.editing && inputRef.current) {
       inputRef.current.value = nodeData.editLabel ?? "";
       inputRef.current.focus();
-      inputRef.current.select();
+      if (nodeData.selectAll) {
+        inputRef.current.select();
+      } else {
+        const len = inputRef.current.value.length;
+        inputRef.current.setSelectionRange(len, len);
+      }
     }
     // Only run when editing state starts — not on every editLabel change
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -174,8 +182,14 @@ export const MindMapNode = memo(function MindMapNode({
           onKeyDown={(e) => {
             e.stopPropagation();
             if (composingRef.current) return;
-            if (e.key === "Enter") nodeData.onEditFinish?.();
-            if (e.key === "Escape") nodeData.onEditCancel?.();
+            if (e.key === "Tab") {
+              e.preventDefault();
+              nodeData.onTabInEdit?.();
+            } else if (e.key === "Enter") {
+              nodeData.onEnterInEdit?.();
+            } else if (e.key === "Escape") {
+              nodeData.onEditCancel?.();
+            }
           }}
           onBlur={() => {
             if (!composingRef.current) nodeData.onEditFinish?.();

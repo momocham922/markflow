@@ -167,6 +167,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const editLabelRef = useRef("");
+  const selectAllRef = useRef(true);
   const updateEditLabel = useCallback((v: string) => {
     editLabelRef.current = v;
   }, []);
@@ -189,18 +190,20 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     if (root) onTitleChange(root.label);
   }, [onChange, onTitleChange]);
 
-  const addChildTo = useCallback((parentId: string) => {
+  const addChildTo = useCallback((parentId: string, baseNodes?: MindMapTreeNode[]) => {
+    const nodes = baseNodes ?? data.nodes;
     const newId = `n-${Date.now()}`;
     const newNode: MindMapTreeNode = { id: newId, label: "New topic", children: [] };
-    const updatedNodes = data.nodes.map((n) =>
+    const updatedNodes = nodes.map((n) =>
       n.id === parentId ? { ...n, children: [...n.children, newId] } : n,
     );
     updatedNodes.push(newNode);
     save({ ...data, nodes: updatedNodes });
     setSelectedNodeId(newId);
     setEditingNodeId(newId);
+    selectAllRef.current = true;
     updateEditLabel("New topic");
-  }, [data, save]);
+  }, [data, save, updateEditLabel]);
 
   const handleAddChild = useCallback(() => {
     addChildTo(selectedNodeId ?? "root");
@@ -236,6 +239,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     if (!selectedNodeId) return;
     const node = nodeMap.get(selectedNodeId);
     if (!node) return;
+    selectAllRef.current = true;
     setEditingNodeId(selectedNodeId);
     updateEditLabel(node.label);
   }, [selectedNodeId, nodeMap, updateEditLabel]);
@@ -243,6 +247,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   // Start editing with a typed character (replaces label, Xmind style)
   const handleStartEditWithChar = useCallback((char: string) => {
     if (!selectedNodeId) return;
+    selectAllRef.current = false;
     setEditingNodeId(selectedNodeId);
     updateEditLabel(char);
   }, [selectedNodeId, updateEditLabel]);
@@ -268,6 +273,45 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     save({ ...data, nodes: updatedNodes });
     setEditingNodeId(null);
   }, [editingNodeId, data, save]);
+
+  // Apply current edit label to nodes, returning updated array
+  const applyEdit = useCallback((): MindMapTreeNode[] => {
+    const label = editLabelRef.current;
+    if (!editingNodeId || !label.trim()) return data.nodes;
+    return data.nodes.map((n) =>
+      n.id === editingNodeId ? { ...n, label: label.trim() } : n,
+    );
+  }, [editingNodeId, data.nodes]);
+
+  // Tab during editing: finish edit + add child to the edited node
+  const handleTabInEdit = useCallback(() => {
+    const nodeId = editingNodeId;
+    if (!nodeId) return;
+    const nodes = applyEdit();
+    setEditingNodeId(null);
+    addChildTo(nodeId, nodes);
+  }, [editingNodeId, applyEdit, addChildTo]);
+
+  // Enter during editing: finish edit + add sibling
+  const handleEnterInEdit = useCallback(() => {
+    const nodeId = editingNodeId;
+    if (!nodeId) return;
+    const nodes = applyEdit();
+    if (nodeId === "root") {
+      // Root can't have siblings, just finish edit
+      save({ ...data, nodes });
+      setEditingNodeId(null);
+      return;
+    }
+    const parentNode = nodes.find((n) => n.children.includes(nodeId));
+    if (!parentNode) {
+      save({ ...data, nodes });
+      setEditingNodeId(null);
+      return;
+    }
+    setEditingNodeId(null);
+    addChildTo(parentNode.id, nodes);
+  }, [editingNodeId, applyEdit, addChildTo, data, save]);
 
   const handleThemeChange = useCallback((themeId: MindMapThemeId) => {
     setThemeSettings({ mindMapTheme: themeId });
@@ -360,10 +404,16 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   handleFinishEditRef.current = handleFinishEdit;
   const handleEditCancelRef = useRef(handleEditCancel);
   handleEditCancelRef.current = handleEditCancel;
+  const handleTabInEditRef = useRef(handleTabInEdit);
+  handleTabInEditRef.current = handleTabInEdit;
+  const handleEnterInEditRef = useRef(handleEnterInEdit);
+  handleEnterInEditRef.current = handleEnterInEdit;
 
   const stableOnEditChange = useCallback((v: string) => updateEditLabel(v), [updateEditLabel]);
   const stableOnEditFinish = useCallback(() => handleFinishEditRef.current(), []);
   const stableOnEditCancel = useCallback(() => handleEditCancelRef.current(), []);
+  const stableOnTabInEdit = useCallback(() => handleTabInEditRef.current(), []);
+  const stableOnEnterInEdit = useCallback(() => handleEnterInEditRef.current(), []);
 
   // Make selected node visually distinct + inject editing state
   const nodesWithSelection = useMemo(() =>
@@ -375,13 +425,16 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
         ...(n.id === editingNodeId ? {
           editing: true,
           editLabel: editLabelRef.current,
+          selectAll: selectAllRef.current,
           onEditChange: stableOnEditChange,
           onEditFinish: stableOnEditFinish,
           onEditCancel: stableOnEditCancel,
+          onTabInEdit: stableOnTabInEdit,
+          onEnterInEdit: stableOnEnterInEdit,
         } : {}),
       },
     })),
-    [nodes, selectedNodeId, editingNodeId, stableOnEditChange, stableOnEditFinish, stableOnEditCancel],
+    [nodes, selectedNodeId, editingNodeId, stableOnEditChange, stableOnEditFinish, stableOnEditCancel, stableOnTabInEdit, stableOnEnterInEdit],
   );
 
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
@@ -471,6 +524,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
             setSelectedNodeId(node.id);
             const n = nodeMap.get(node.id);
             if (n) {
+              selectAllRef.current = true;
               setEditingNodeId(node.id);
               updateEditLabel(n.label);
             }

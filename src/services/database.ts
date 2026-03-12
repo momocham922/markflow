@@ -59,6 +59,12 @@ async function ensureMigrations(database: Database) {
       await database.execute(`ALTER TABLE documents ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'markdown'`);
     } catch { /* already exists */ }
 
+    // settings table (ensure exists — may have been created by Rust migration)
+    await database.execute(`CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`);
+
     // document_snapshots table (migration v6) — last-known-good content backup
     await database.execute(`CREATE TABLE IF NOT EXISTS document_snapshots (
       document_id TEXT PRIMARY KEY,

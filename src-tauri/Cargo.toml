@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.2.7"
+version = "0.2.8"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
