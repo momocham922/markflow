@@ -108,7 +108,7 @@ export function Sidebar() {
   const moveDocRef = useRef(moveDocument);
   moveDocRef.current = moveDocument;
   const moveTeamDocFnRef = useRef<(docId: string, folder: string) => void>(() => {});
-  const [contextMenuDocId, setContextMenuDocId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
   const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const ime = useIMEGuard();
@@ -435,101 +435,23 @@ export function Sidebar() {
 
   const isDark = typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 
-  // ── Shared context menu ────────────────────────────────────
-  // Works for both personal docs and team docs.
-  const renderContextMenu = (
-    docId: string,
-    docFolder: string,
-    folderList: string[],
-    onMove: (docId: string, folder: string) => void,
-    onDelete: (docId: string) => void,
-    title: string,
-  ) => (
-    <>
-      <div
-        style={{ position: "fixed", inset: 0, zIndex: 50 }}
-        onClick={() => setContextMenuDocId(null)}
-        onPointerDown={() => setContextMenuDocId(null)}
-      />
-      <div
-        data-context-menu
-        style={{
-          position: "relative",
-          zIndex: 51,
-          margin: "2px 4px",
-          background: isDark ? "#262626" : "#fff",
-          border: `1px solid ${isDark ? "#404040" : "#e5e5e5"}`,
-          borderRadius: 6,
-          padding: "4px 0",
-          fontSize: 12,
-          boxShadow: isDark ? "0 4px 12px rgba(0,0,0,0.4)" : "0 4px 12px rgba(0,0,0,0.1)",
-        }}
-      >
-        {folderList.length > 1 && (
-          <>
-            <p style={{ padding: "2px 10px", fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Move to
-            </p>
-            {folderList.map((f) => {
-              const isCurrent = docFolder === f;
-              return (
-                <button
-                  key={f}
-                  style={{
-                    display: "flex", width: "100%", alignItems: "center", gap: 6,
-                    padding: "4px 10px", fontSize: 11, textAlign: "left", border: "none",
-                    background: "transparent", cursor: isCurrent ? "default" : "pointer",
-                    color: isCurrent ? "#999" : "inherit",
-                  }}
-                  disabled={isCurrent}
-                  onClick={() => { onMove(docId, f); setContextMenuDocId(null); }}
-                >
-                  <Folder style={{ width: 11, height: 11, flexShrink: 0 }} />
-                  {f === "/" ? "Root" : f.split("/").pop()}
-                  {isCurrent && <span style={{ fontSize: 9, marginLeft: "auto" }}>(current)</span>}
-                </button>
-              );
-            })}
-            <hr style={{ margin: "3px 0", border: "none", borderTop: `1px solid ${isDark ? "#404040" : "#e5e5e5"}` }} />
-          </>
-        )}
-        <button
-          style={{
-            display: "flex", width: "100%", alignItems: "center", gap: 6,
-            padding: "4px 10px", fontSize: 11, textAlign: "left", border: "none",
-            background: "transparent", cursor: "pointer", color: "inherit",
-          }}
-          onClick={() => {
-            setRenamingDocId(docId);
-            setRenameValue(title);
-            setContextMenuDocId(null);
-          }}
-        >
-          <PenLine style={{ width: 11, height: 11, flexShrink: 0 }} />
-          Rename
-        </button>
-        <button
-          style={{
-            display: "flex", width: "100%", alignItems: "center", gap: 6,
-            padding: "4px 10px", fontSize: 11, textAlign: "left", border: "none",
-            background: "transparent", cursor: "pointer", color: "#ef4444",
-          }}
-          onClick={() => { onDelete(docId); setContextMenuDocId(null); }}
-        >
-          <Trash2 style={{ width: 11, height: 11, flexShrink: 0 }} />
-          Delete
-        </button>
-      </div>
-    </>
-  );
+  // ── Context menu open helper ────────────────────────────────
+  const openContextMenu = (docId: string, e: React.MouseEvent | React.PointerEvent) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setContextMenu({ docId, x: rect.right, y: rect.top });
+  };
 
   // ── Shared doc row trigger (⋮ button) ─────────────────────
-  const menuTrigger = (docId: string, isMenuOpen: boolean) => (
+  const menuTrigger = (docId: string) => (
     <button
       type="button"
       onClick={(e) => {
         e.stopPropagation();
-        setContextMenuDocId(isMenuOpen ? null : docId);
+        if (contextMenu?.docId === docId) {
+          setContextMenu(null);
+        } else {
+          openContextMenu(docId, e);
+        }
       }}
       onPointerDown={(e) => {
         e.stopPropagation();
@@ -540,80 +462,66 @@ export function Sidebar() {
     </button>
   );
 
-  const renderDoc = (doc: Document) => {
-    const isMenuOpen = contextMenuDocId === doc.id;
-    return (
-      <>
-        <div
-          role="button"
-          tabIndex={0}
-          onPointerDown={(e) => {
-            if (e.button === 2) {
-              e.preventDefault();
-              setContextMenuDocId(isMenuOpen ? null : doc.id);
-            } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
-              dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
-            }
+  const renderDoc = (doc: Document) => (
+    <div
+      role="button"
+      tabIndex={0}
+      onPointerDown={(e) => {
+        if (e.button === 2) {
+          e.preventDefault();
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          setContextMenu({ docId: doc.id, x: e.clientX, y: rect.top });
+        } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
+          dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
+        }
+      }}
+      onContextMenu={(e) => e.preventDefault()}
+      onClick={() => { if (!dragHappenedRef.current) setActiveDocId(doc.id); }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveDocId(doc.id); }}
+      onDoubleClick={(e) => {
+        e.preventDefault();
+        setRenamingDocId(doc.id);
+        setRenameValue(doc.title);
+      }}
+      className={cn(
+        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
+        activeDocId === doc.id
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "text-sidebar-foreground hover:bg-sidebar-accent/50",
+      )}
+    >
+      <FileText className="h-3.5 w-3.5 shrink-0" />
+      {renamingDocId === doc.id ? (
+        <input
+          autoFocus
+          className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs"
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onCompositionStart={ime.onCompositionStart}
+          onCompositionEnd={ime.onCompositionEnd}
+          onBlur={() => commitRename(doc.id)}
+          onKeyDown={(e) => {
+            if (ime.isComposing()) return;
+            if (e.key === "Enter") commitRename(doc.id);
+            if (e.key === "Escape") setRenamingDocId(null);
           }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-          }}
-          onClick={() => { if (!dragHappenedRef.current) setActiveDocId(doc.id); }}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveDocId(doc.id); }}
-          onDoubleClick={(e) => {
-            e.preventDefault();
-            setRenamingDocId(doc.id);
-            setRenameValue(doc.title);
-          }}
-          className={cn(
-            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
-            activeDocId === doc.id
-              ? "bg-sidebar-accent text-sidebar-accent-foreground"
-              : "text-sidebar-foreground hover:bg-sidebar-accent/50",
-          )}
-        >
-          <FileText className="h-3.5 w-3.5 shrink-0" />
-          {renamingDocId === doc.id ? (
-            <input
-              autoFocus
-              className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs"
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              onCompositionStart={ime.onCompositionStart}
-              onCompositionEnd={ime.onCompositionEnd}
-              onBlur={() => commitRename(doc.id)}
-              onKeyDown={(e) => {
-                if (ime.isComposing()) return;
-                if (e.key === "Enter") commitRename(doc.id);
-                if (e.key === "Escape") setRenamingDocId(null);
-              }}
-              onClick={(e) => e.stopPropagation()}
-            />
-          ) : (
-            <span className="flex-1 truncate">{doc.title}</span>
-          )}
-          {doc.isShared && (
-            <span title="Shared"><Share2 className="h-3 w-3 shrink-0 text-muted-foreground" /></span>
-          )}
-          {doc.tags.length > 0 && (
-            <span className="text-[9px] text-muted-foreground shrink-0">
-              {doc.tags.length}
-              <Tag className="inline h-2 w-2 ml-0.5" />
-            </span>
-          )}
-          {menuTrigger(doc.id, isMenuOpen)}
-        </div>
-        {isMenuOpen && renderContextMenu(
-          doc.id,
-          doc.folder,
-          personalFolders,
-          (id, f) => moveDocument(id, f),
-          (id) => deleteDocument(id),
-          doc.title,
-        )}
-      </>
-    );
-  };
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <span className="flex-1 truncate">{doc.title}</span>
+      )}
+      {doc.isShared && (
+        <span title="Shared"><Share2 className="h-3 w-3 shrink-0 text-muted-foreground" /></span>
+      )}
+      {doc.tags.length > 0 && (
+        <span className="text-[9px] text-muted-foreground shrink-0">
+          {doc.tags.length}
+          <Tag className="inline h-2 w-2 ml-0.5" />
+        </span>
+      )}
+      {menuTrigger(doc.id)}
+    </div>
+  );
 
   const renderSearchMatch = (doc: Document) => {
     const q = search.toLowerCase();
@@ -760,8 +668,6 @@ export function Sidebar() {
     const localDoc = documents.find((d) => d.id === td.id);
     const title = localDoc?.title || td.title;
     const isOwnDoc = localDoc?.ownerId === user?.uid;
-    const isMenuOpen = contextMenuDocId === td.id;
-    const teamFolderList = ["/", ...(team.folders || [])];
     return (
       <div key={td.id} style={{ paddingLeft: `${depth * 12}px` }}>
         <div
@@ -770,14 +676,13 @@ export function Sidebar() {
           onPointerDown={(e) => {
             if (e.button === 2) {
               e.preventDefault();
-              setContextMenuDocId(isMenuOpen ? null : td.id);
+              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+              setContextMenu({ docId: td.id, x: e.clientX, y: rect.top });
             } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== td.id) {
               dragRef.current = { docId: td.id, teamId: team.id, startX: e.clientX, startY: e.clientY, active: false };
             }
           }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-          }}
+          onContextMenu={(e) => e.preventDefault()}
           onClick={() => { if (!dragHappenedRef.current) openTeamOrSharedDoc(td.id, team.id); }}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") openTeamOrSharedDoc(td.id, team.id); }}
           onDoubleClick={(e) => {
@@ -813,20 +718,16 @@ export function Sidebar() {
             <span className="flex-1 truncate">{title}</span>
           )}
           {!isOwnDoc && localDoc?.ownerId && (
-            <span className="text-[9px] text-muted-foreground shrink-0" title="Created by another member">
-              shared
+            <span
+              className="shrink-0"
+              title="Created by another member"
+              style={{ display: "inline-flex", alignItems: "center", gap: 2, padding: "1px 5px", borderRadius: 9999, fontSize: 9, opacity: 0.6, background: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)", color: isDark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.4)" }}
+            >
+              <Users style={{ width: 8, height: 8 }} />
             </span>
           )}
-          {menuTrigger(td.id, isMenuOpen)}
+          {menuTrigger(td.id)}
         </div>
-        {isMenuOpen && renderContextMenu(
-          td.id,
-          td.folder || "/",
-          teamFolderList,
-          (id, f) => handleMoveTeamDoc(id, f),
-          (id) => handleDeleteTeamDoc(id, team),
-          title,
-        )}
       </div>
     );
   };
@@ -1280,6 +1181,113 @@ export function Sidebar() {
         {teams.length > 0 && ` / ${teams.length} team${teams.length !== 1 ? "s" : ""}`}
         {sharedDocs.length > 0 && ` / ${sharedDocs.length} shared`}
       </div>
+
+      {/* Floating context menu */}
+      {contextMenu && (() => {
+        const doc = documents.find((d) => d.id === contextMenu.docId);
+        const teamDoc = teams.flatMap((t) => t.docs.map((d) => ({ ...d, team: t }))).find((d) => d.id === contextMenu.docId);
+        const isTeam = !!teamDoc;
+        const folderList = isTeam
+          ? ["/", ...(teamDoc.team.folders || [])]
+          : personalFolders;
+        const docFolder = isTeam ? (teamDoc.folder || "/") : (doc?.folder || "/");
+        const title = doc?.title || teamDoc?.title || "";
+        const onMove = isTeam
+          ? (id: string, f: string) => handleMoveTeamDoc(id, f)
+          : (id: string, f: string) => moveDocument(id, f);
+        const onDelete = isTeam
+          ? (id: string) => handleDeleteTeamDoc(id, teamDoc.team)
+          : (id: string) => deleteDocument(id);
+        // Clamp position to viewport
+        const menuW = 180;
+        const menuH = 200;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const x = Math.min(contextMenu.x, vw - menuW - 8);
+        const y = contextMenu.y + menuH > vh ? Math.max(8, contextMenu.y - menuH) : contextMenu.y;
+        return (
+          <>
+            <div
+              style={{ position: "fixed", inset: 0, zIndex: 9998 }}
+              onClick={() => setContextMenu(null)}
+              onPointerDown={() => setContextMenu(null)}
+            />
+            <div
+              data-context-menu
+              style={{
+                position: "fixed",
+                left: x,
+                top: y,
+                zIndex: 9999,
+                minWidth: menuW,
+                background: isDark ? "#262626" : "#fff",
+                border: `1px solid ${isDark ? "#404040" : "#e5e5e5"}`,
+                borderRadius: 8,
+                padding: "4px 0",
+                fontSize: 12,
+                boxShadow: isDark
+                  ? "0 8px 24px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3)"
+                  : "0 8px 24px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06)",
+              }}
+            >
+              {folderList.length > 1 && (
+                <>
+                  <p style={{ padding: "2px 10px", fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    Move to
+                  </p>
+                  {folderList.map((f) => {
+                    const isCurrent = docFolder === f;
+                    return (
+                      <button
+                        key={f}
+                        style={{
+                          display: "flex", width: "100%", alignItems: "center", gap: 6,
+                          padding: "4px 10px", fontSize: 11, textAlign: "left", border: "none",
+                          background: "transparent", cursor: isCurrent ? "default" : "pointer",
+                          color: isCurrent ? "#999" : "inherit",
+                        }}
+                        disabled={isCurrent}
+                        onClick={() => { onMove(contextMenu.docId, f); setContextMenu(null); }}
+                      >
+                        <Folder style={{ width: 11, height: 11, flexShrink: 0 }} />
+                        {f === "/" ? "Root" : f.split("/").pop()}
+                        {isCurrent && <span style={{ fontSize: 9, marginLeft: "auto" }}>(current)</span>}
+                      </button>
+                    );
+                  })}
+                  <hr style={{ margin: "3px 0", border: "none", borderTop: `1px solid ${isDark ? "#404040" : "#e5e5e5"}` }} />
+                </>
+              )}
+              <button
+                style={{
+                  display: "flex", width: "100%", alignItems: "center", gap: 6,
+                  padding: "4px 10px", fontSize: 11, textAlign: "left", border: "none",
+                  background: "transparent", cursor: "pointer", color: "inherit",
+                }}
+                onClick={() => {
+                  setRenamingDocId(contextMenu.docId);
+                  setRenameValue(title);
+                  setContextMenu(null);
+                }}
+              >
+                <PenLine style={{ width: 11, height: 11, flexShrink: 0 }} />
+                Rename
+              </button>
+              <button
+                style={{
+                  display: "flex", width: "100%", alignItems: "center", gap: 6,
+                  padding: "4px 10px", fontSize: 11, textAlign: "left", border: "none",
+                  background: "transparent", cursor: "pointer", color: "#ef4444",
+                }}
+                onClick={() => { onDelete(contextMenu.docId); setContextMenu(null); }}
+              >
+                <Trash2 style={{ width: 11, height: 11, flexShrink: 0 }} />
+                Delete
+              </button>
+            </div>
+          </>
+        );
+      })()}
 
       {/* Drag indicator — follows pointer during drag */}
       {dragIndicator && createPortal(
