@@ -1184,10 +1184,13 @@ export function Sidebar() {
 
       {/* Footer */}
       <Separator />
-      <div className="px-3 py-2 text-[10px] text-muted-foreground">
-        {personalDocs.length} doc{personalDocs.length !== 1 ? "s" : ""}
-        {teams.length > 0 && ` / ${teams.length} team${teams.length !== 1 ? "s" : ""}`}
-        {sharedDocs.length > 0 && ` / ${sharedDocs.length} shared`}
+      <div className="flex items-center justify-between px-3 py-2 text-[10px] text-muted-foreground">
+        <span>
+          {personalDocs.length} doc{personalDocs.length !== 1 ? "s" : ""}
+          {teams.length > 0 && ` / ${teams.length} team${teams.length !== 1 ? "s" : ""}`}
+          {sharedDocs.length > 0 && ` / ${sharedDocs.length} shared`}
+        </span>
+        <span className="opacity-50">v{__APP_VERSION__}</span>
       </div>
 
       {/* Floating context menu */}
