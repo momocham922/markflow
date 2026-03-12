@@ -50,6 +50,30 @@ async function processImageFile(file: File): Promise<string> {
 }
 
 /**
+ * Process an image file dropped via Tauri's drag-drop (given a file path).
+ * Reads from disk, uploads to Firebase Storage (or local fallback), returns markdown.
+ */
+export async function processImagePath(path: string): Promise<string> {
+  const { readFile } = await import("@tauri-apps/plugin-fs");
+  const bytes = await readFile(path);
+  const ext = extFromName(path);
+  const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "image";
+
+  const user = useAuthStore.getState().user;
+  if (user) {
+    const url = await uploadImage(user.uid, bytes, ext);
+    return `![${name}](${url})`;
+  }
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  const data = Array.from(bytes);
+  const savedPath = await invoke<string>("save_image", { data, ext });
+  const assetUrl = convertFileSrc(savedPath);
+  return `![${name}](${assetUrl})`;
+}
+
+/**
  * CodeMirror extension that handles image paste and drag-and-drop.
  * Uploads images to Firebase Storage (cloud-first) and inserts markdown image syntax.
  */

@@ -13,7 +13,7 @@ import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
-import { imagePaste } from "@/extensions/image-paste";
+import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
@@ -133,8 +133,8 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
     if (cached && cached !== "loading" && cached !== "error") {
       return buildLinkCardHtml(cached, href);
     }
-    // Not yet cached — mark for fetch, render fallback
-    if (!cached) pendingOgpUrls.push(href);
+    // Not yet cached or stale "loading" — mark for fetch, render fallback
+    if (!cached || cached === "loading") pendingOgpUrls.push(href);
     const escaped = escapeHtml(href);
     return `<div class="link-card">
       <a href="${escaped}" class="link-card-fallback" target="_blank" rel="noopener noreferrer">${escaped}</a>
@@ -164,6 +164,7 @@ export function Editor() {
   const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
+  const pendingOgpUrlsRef = useRef<string[]>([]);
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
@@ -289,6 +290,9 @@ export function Editor() {
       });
       // Restore code/pre blocks
       html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
+      // Capture pending URLs to ref (survives concurrent renders)
+      // eslint-disable-next-line react-compiler/react-compiler
+      pendingOgpUrlsRef.current = [...pendingOgpUrls];
       return html;
     } catch {
       return deferredContent;
@@ -310,16 +314,17 @@ export function Editor() {
 
   // Fetch OGP data for pending URLs collected during marked render
   useEffect(() => {
-    if (pendingOgpUrls.length === 0) return;
-    const urls = [...pendingOgpUrls];
-    pendingOgpUrls = [];
+    const urls = pendingOgpUrlsRef.current;
+    if (urls.length === 0) return;
+    pendingOgpUrlsRef.current = [];
 
     let cancelled = false;
     (async () => {
       let fetched = 0;
       for (const url of urls) {
         if (cancelled) break;
-        if (ogpCache.has(url)) continue;
+        const cached = ogpCache.get(url);
+        if (cached && cached !== "loading") continue;
         ogpCache.set(url, "loading");
         try {
           const data = await invoke<OgpData>("fetch_ogp", { url });
@@ -330,13 +335,18 @@ export function Editor() {
           ogpCache.set(url, "error");
         }
       }
-      // Trigger re-render so previewHtml picks up cached data
       if (fetched > 0 && !cancelled) {
         setOgpVersion((v) => v + 1);
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      // Clean up stale "loading" entries so URLs get re-fetched on next render
+      for (const url of urls) {
+        if (ogpCache.get(url) === "loading") ogpCache.delete(url);
+      }
+    };
   }, [previewHtml]);
 
   // Sync mermaid theme with app theme
@@ -422,6 +432,38 @@ export function Editor() {
       setView(null);
       viewRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Handle Tauri file drag-and-drop for images (DOM drop events don't receive files in WKWebView)
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        const appWindow = getCurrentWebviewWindow();
+        unlisten = await appWindow.onDragDropEvent(async (event) => {
+          if (event.payload.type !== "drop") return;
+          const view = viewRef.current;
+          if (!view) return;
+          const imageExts = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+          const imagePaths = event.payload.paths.filter((p) => {
+            const ext = p.split(".").pop()?.toLowerCase() ?? "";
+            return imageExts.has(ext);
+          });
+          if (imagePaths.length === 0) return;
+          try {
+            const markdowns = await Promise.all(imagePaths.map(processImagePath));
+            const v = viewRef.current;
+            if (v && markdowns.length > 0) {
+              const pos = v.state.selection.main.head;
+              v.dispatch({ changes: { from: pos, insert: markdowns.join("\n") + "\n" } });
+            }
+          } catch { /* upload failed */ }
+        });
+      } catch { /* not in Tauri */ }
+    })();
+    return () => { unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
