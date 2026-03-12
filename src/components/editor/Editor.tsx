@@ -13,9 +13,12 @@ import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
+import { imagePaste } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
+import { VersionHistory } from "./VersionHistory";
+import { MindMapView } from "./MindMapView";
 import mermaid from "mermaid";
 
 // HTML → Markdown converter for legacy Tiptap content
@@ -40,7 +43,7 @@ function ensureMarkdown(content: string): string {
   }
 }
 
-export type PreviewMode = "edit" | "split" | "preview";
+export type PreviewMode = "edit" | "split" | "preview" | "mindmap";
 
 // Configure marked with highlight.js
 marked.setOptions({
@@ -148,6 +151,7 @@ export function Editor() {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
+  const [historyOpen, setHistoryOpen] = useState(false);
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
@@ -233,6 +237,7 @@ export function Editor() {
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       EditorView.lineWrapping,
       markdownShortcuts,
+      imagePaste,
       ...(isCollabReady && collabExtension ? [collabExtension] : []),
     ],
     [collabExtension, isCollabReady],
@@ -402,6 +407,15 @@ export function Editor() {
     [setView],
   );
 
+  // Restore a version's content into the document
+  const handleRestoreVersion = useCallback(
+    (content: string) => {
+      if (!activeDocId || !content.trim()) return;
+      updateDocument(activeDocId, { content, updatedAt: Date.now() });
+    },
+    [activeDocId, updateDocument],
+  );
+
   // Cleanup on unmount only
   useEffect(() => {
     return () => {
@@ -429,6 +443,7 @@ export function Editor() {
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
+        onHistoryOpen={() => setHistoryOpen(true)}
         collabSlot={
           (collabConnected || collabExtension) ? (
             <div className="flex items-center gap-1.5 shrink-0 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5">
@@ -466,10 +481,10 @@ export function Editor() {
         }
       />
       <div className="flex flex-1 overflow-hidden">
-        {/* Editor pane — always mounted, hidden in preview-only mode */}
+        {/* Editor pane — always mounted, hidden in preview-only and mindmap modes */}
         <div
           className={`overflow-auto editor-scroll ${
-            previewMode === "preview"
+            previewMode === "preview" || previewMode === "mindmap"
               ? "hidden"
               : previewMode === "split"
                 ? "w-1/2 border-r border-border"
@@ -493,8 +508,14 @@ export function Editor() {
             />
           )}
         </div>
+        {/* Mind map view */}
+        {previewMode === "mindmap" && (
+          <div className="flex-1">
+            <MindMapView content={activeDoc.content || ""} title={activeDoc.title} />
+          </div>
+        )}
         {/* Preview pane — rendered markdown */}
-        {previewMode !== "edit" && (
+        {previewMode !== "edit" && previewMode !== "mindmap" && (
           <div
             className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"}`}
           >
@@ -539,6 +560,13 @@ export function Editor() {
           </div>
         )}
       </div>
+      <VersionHistory
+        open={historyOpen}
+        onOpenChange={setHistoryOpen}
+        docId={activeDocId}
+        currentTitle={activeDoc?.title ?? ""}
+        onRestore={handleRestoreVersion}
+      />
     </div>
   );
 }

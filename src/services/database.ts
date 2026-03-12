@@ -209,6 +209,11 @@ export async function createVersion(version: {
   );
 }
 
+export async function deleteVersion(versionId: string): Promise<void> {
+  const database = await getDb();
+  await database.execute("DELETE FROM versions WHERE id = $1", [versionId]);
+}
+
 export async function deleteVersionsForDocument(documentId: string): Promise<void> {
   const database = await getDb();
   await database.execute(

@@ -21,6 +21,8 @@ import {
   Link,
   Pencil,
   Check,
+  History,
+  Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -33,12 +35,14 @@ interface EditorToolbarProps {
   previewMode: PreviewMode;
   onPreviewModeChange: (mode: PreviewMode) => void;
   collabSlot?: ReactNode;
+  onHistoryOpen?: () => void;
 }
 
 export function EditorToolbar({
   previewMode,
   onPreviewModeChange,
   collabSlot,
+  onHistoryOpen,
 }: EditorToolbarProps) {
   const [themeOpen, setThemeOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
@@ -211,7 +215,7 @@ export function EditorToolbar({
         {collabSlot}
 
         {/* Formatting buttons */}
-        {previewMode !== "preview" && (
+        {previewMode !== "preview" && previewMode !== "mindmap" && (
           <>
             <div className="flex items-center gap-0.5">
               <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => wrapSelection("**", "**")} title="Bold (Cmd+B)">
@@ -273,6 +277,18 @@ export function EditorToolbar({
           </>
         )}
 
+        {/* History */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 gap-1 px-2 text-[11px] text-muted-foreground"
+          onClick={onHistoryOpen}
+          title="Version History"
+        >
+          <History className="h-3.5 w-3.5" />
+          History
+        </Button>
+
         {/* Theme customizer */}
         <Button
           variant="ghost"
@@ -313,6 +329,15 @@ export function EditorToolbar({
             title="Preview only"
           >
             <Eye className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant={previewMode === "mindmap" ? "secondary" : "ghost"}
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => onPreviewModeChange("mindmap")}
+            title="Mind Map"
+          >
+            <Network className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>

@@ -259,21 +259,25 @@ export interface FirestoreVersion {
   message: string | null;
   createdAt: number;
   ownerId: string;
+  ownerName: string;
 }
 
-export async function syncVersionsToCloud(
+export async function syncVersionToCloud(
   documentId: string,
-  versions: { id: string; content: string; title: string; message: string | null; createdAt: number },
+  version: { id: string; content: string; title: string; message: string | null; createdAt: number },
   ownerId: string,
+  ownerName: string,
 ): Promise<void> {
-  const ref = doc(firestore, VERSIONS_COLLECTION, versions.id);
+  if (!version.content?.trim()) return;
+  const ref = doc(firestore, VERSIONS_COLLECTION, version.id);
   await setDoc(ref, {
     documentId,
-    content: versions.content,
-    title: versions.title,
-    message: versions.message,
-    createdAt: versions.createdAt,
+    content: version.content,
+    title: version.title,
+    message: version.message,
+    createdAt: version.createdAt,
     ownerId,
+    ownerName,
   }, { merge: true });
 }
 
@@ -287,4 +291,8 @@ export async function fetchVersionsFromCloud(
   );
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as FirestoreVersion);
+}
+
+export async function deleteVersionFromCloud(versionId: string): Promise<void> {
+  await deleteDoc(doc(firestore, VERSIONS_COLLECTION, versionId));
 }

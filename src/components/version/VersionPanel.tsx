@@ -16,7 +16,7 @@ import { DiffView } from "./DiffView";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import * as db from "@/services/database";
-import { syncVersionsToCloud, fetchVersionsFromCloud } from "@/services/firebase";
+import { syncVersionToCloud, fetchVersionsFromCloud } from "@/services/firebase";
 
 interface Version {
   id: string;
@@ -114,10 +114,10 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
       await db.createVersion(versionData);
       // Sync to cloud
       if (user) {
-        syncVersionsToCloud(activeDoc.id, {
+        syncVersionToCloud(activeDoc.id, {
           ...versionData,
           createdAt: Date.now(),
-        }, user.uid).catch(() => {});
+        }, user.uid, user.displayName || user.email || "Unknown").catch(() => {});
       }
       setSnapshotMsg("");
       await loadVersions();

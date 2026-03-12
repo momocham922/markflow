@@ -198,6 +198,31 @@ async fn print_html(html: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn save_image(app: tauri::AppHandle, data: Vec<u8>, ext: String) -> Result<String, String> {
+    use tauri::Manager;
+
+    // Validate extension
+    let ext = ext.to_lowercase();
+    let valid = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
+    if !valid.contains(&ext.as_str()) {
+        return Err(format!("Unsupported image format: {}", ext));
+    }
+
+    let images_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("images");
+    std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+
+    let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let path = images_dir.join(&filename);
+    std::fs::write(&path, &data).map_err(|e| e.to_string())?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -261,7 +286,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html])
+        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-cli/schema.json",
   "productName": "MarkFlow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.markflow.app",
   "build": {
     "frontendDist": "../dist",
@@ -23,7 +23,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/images/**"]
+      }
     }
   },
   "bundle": {

@@ -42,11 +42,12 @@ export async function getEditorContent(page: Page): Promise<string> {
 }
 
 /** Switch preview mode */
-export async function setPreviewMode(page: Page, mode: "edit" | "split" | "preview") {
+export async function setPreviewMode(page: Page, mode: "edit" | "split" | "preview" | "mindmap") {
   const titles: Record<string, string> = {
     edit: "Edit only",
     split: "Split view",
     preview: "Preview only",
+    mindmap: "Mind Map",
   };
   await page.locator(`button[title="${titles[mode]}"]`).click();
   await page.waitForTimeout(300);

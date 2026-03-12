@@ -23,7 +23,7 @@
 | TODO | Version management: GitHub integration | Choice between app-native and GitHub |
 | TODO | Auth: GitHub login support | Currently Google-only |
 | TODO | iOS app version | Requires separate build target |
-| TODO | Images: local upload -> WebP convert -> GCS | No image handling yet |
+| PARTIAL | Images: paste/drop -> local save -> asset protocol | Phase 1 done (paste, drag-drop, local save). TODO: WebP convert, GCS upload |
 | DONE | YouTube: beautiful preview rendering, inline playback | Custom marked renderer, iframe embed, XSS-safe |
 | DONE | Links: smart card rendering with OGP info | Rust fetch_ogp command, cache with race condition fix, XSS-safe |
 
@@ -42,9 +42,9 @@
 
 | Status | Item | Notes |
 |--------|------|-------|
-| TODO | Mind map support (Xmind-style) | Not started; @xyflow/react is installed as dependency |
-| TODO | Remote update after build distribution | Requires Tauri updater plugin |
-| TODO | Version management tied to documents | Auto-versioning exists (use-auto-version.ts) but no UI for browsing/restoring versions |
+| DONE | Mind map support (Xmind-style) | Heading-based tree visualization via @xyflow/react, 4th editor view mode |
+| DONE | Remote update after build distribution | Tauri updater plugin + GitHub Releases endpoint |
+| DONE | Version management tied to documents | Auto-versioning + VersionHistory dialog (browse, preview, restore, delete) |
 | DONE | Beautiful Mermaid diagram rendering | mermaid.run() in useEffect, theme sync, XSS-safe escaping |
 | TODO | Visualization view | Folder/label structure visualization, group-level summaries |
 | TODO | Real-time voice capture -> transcription -> Markdown | Not started |
@@ -136,7 +136,7 @@
 | Build verification | DONE | pnpm build succeeds (4651 modules, 0 errors) |
 | Unit tests (Vitest) | TODO | No test framework installed |
 | Component tests | TODO | No test framework installed |
-| E2E tests (Playwright) | TODO | No test framework installed |
+| E2E tests (Playwright) | DONE | 80 tests covering init, CRUD, editor, preview, sidebar, tags, themes, commands, mind map, version history |
 | Tauri runtime tests | TODO | Requires tauri-driver |
 
 ## Reference
