@@ -60,11 +60,27 @@ function parseHeadings(content: string, docTitle: string): HeadingNode {
 const LEVEL_CHAR_WIDTHS = [8.5, 8, 7, 6.5, 6.5, 6]; // px per char
 const LEVEL_PADDING_X = [40, 32, 28, 24, 24, 20]; // total horizontal padding
 
+/** Count CJK/fullwidth characters that render ~2x wider than Latin */
+function countWideChars(text: string): number {
+  let count = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (
+      (cp >= 0x3000 && cp <= 0x9FFF) ||
+      (cp >= 0xF900 && cp <= 0xFAFF) ||
+      (cp >= 0xFF01 && cp <= 0xFF60) ||
+      (cp >= 0xAC00 && cp <= 0xD7AF)
+    ) count++;
+  }
+  return count;
+}
+
 function estimateNodeWidth(label: string, level: number): number {
   const idx = Math.min(level, LEVEL_CHAR_WIDTHS.length - 1);
   const charW = LEVEL_CHAR_WIDTHS[idx];
-  const padX = LEVEL_PADDING_X[idx];
-  return Math.max(label.length * charW + padX, 60);
+  const wide = countWideChars(label);
+  const narrow = label.length - wide;
+  return Math.max(narrow * charW + wide * charW * 1.8 + LEVEL_PADDING_X[idx], 60);
 }
 
 // Estimate node height per level
@@ -184,7 +200,7 @@ export function MindMapView({ content, title }: MindMapViewProps) {
       >
         <Controls
           showInteractive={false}
-          className="!bg-card !border-border !shadow-sm [&>button]:!bg-card [&>button]:!border-border [&>button]:!text-foreground"
+          className="bg-card! border-border! shadow-sm! [&>button]:bg-card! [&>button]:border-border! [&>button]:text-foreground!"
         />
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border)" />
       </ReactFlow>

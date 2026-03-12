@@ -9,14 +9,15 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { MindMapNode, type MindMapNodeData } from "./MindMapNode";
-import { Plus, Trash2, Pencil } from "lucide-react";
+import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId } from "./MindMapNode";
+import { Plus, Trash2, Pencil, Palette } from "lucide-react";
 
 const nodeTypes = { mindmap: MindMapNode };
 
 /** Data model for a mind map stored in document content */
 export interface MindMapData {
   nodes: MindMapTreeNode[];
+  theme?: MindMapThemeId;
 }
 
 export interface MindMapTreeNode {
@@ -48,9 +49,27 @@ const LEVEL_NODE_HEIGHTS = [40, 36, 32, 30, 28, 26];
 const H_GAP = 60;
 const V_GAP = 24;
 
+/** Count CJK/fullwidth characters that render ~2x wider than Latin */
+function countWideChars(text: string): number {
+  let count = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (
+      (cp >= 0x3000 && cp <= 0x9FFF) || // CJK, hiragana, katakana
+      (cp >= 0xF900 && cp <= 0xFAFF) || // CJK Compatibility
+      (cp >= 0xFF01 && cp <= 0xFF60) || // Fullwidth forms
+      (cp >= 0xAC00 && cp <= 0xD7AF)    // Korean Hangul
+    ) count++;
+  }
+  return count;
+}
+
 function estimateNodeWidth(label: string, level: number): number {
   const idx = Math.min(level, LEVEL_CHAR_WIDTHS.length - 1);
-  return Math.max(label.length * LEVEL_CHAR_WIDTHS[idx] + LEVEL_PADDING_X[idx], 60);
+  const charW = LEVEL_CHAR_WIDTHS[idx];
+  const wide = countWideChars(label);
+  const narrow = label.length - wide;
+  return Math.max(narrow * charW + wide * charW * 1.8 + LEVEL_PADDING_X[idx], 60);
 }
 
 function estimateNodeHeight(level: number): number {
@@ -82,7 +101,8 @@ function buildLayoutTree(data: MindMapData): LayoutNode {
   return build("root", 0);
 }
 
-function layoutTree(root: LayoutNode): { nodes: Node[]; edges: Edge[] } {
+function layoutTree(root: LayoutNode, themeId: MindMapThemeId = "lavender"): { nodes: Node[]; edges: Edge[] } {
+  const themeObj = mindMapThemes[themeId] ?? mindMapThemes.lavender;
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
@@ -102,7 +122,7 @@ function layoutTree(root: LayoutNode): { nodes: Node[]; edges: Edge[] } {
       id: node.id,
       type: "mindmap",
       position: { x, y: yCenter - nodeH / 2 },
-      data: { label: node.label, level: node.level } satisfies MindMapNodeData,
+      data: { label: node.label, level: node.level, themeId } satisfies MindMapNodeData,
     });
 
     if (node.children.length === 0) return;
@@ -121,7 +141,7 @@ function layoutTree(root: LayoutNode): { nodes: Node[]; edges: Edge[] } {
         source: node.id,
         target: child.id,
         type: "default",
-        style: { stroke: "oklch(0.65 0.15 270 / 0.35)", strokeWidth: 1.5 },
+        style: { stroke: themeObj.edgeColor, strokeWidth: 1.5 },
       });
       layout(child, childX, childY, childY + h);
       childY += h + V_GAP;
@@ -145,7 +165,9 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const editRef = useRef<HTMLInputElement>(null);
+  const currentTheme: MindMapThemeId = data.theme ?? "lavender";
 
   // Build a lookup map
   const nodeMap = useMemo(() => {
@@ -214,6 +236,11 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     setEditingNodeId(null);
   }, [editingNodeId, editLabel, data, save]);
 
+  const handleThemeChange = useCallback((themeId: MindMapThemeId) => {
+    save({ ...data, theme: themeId });
+    setThemeMenuOpen(false);
+  }, [data, save]);
+
   // Focus edit input when editing starts
   useEffect(() => {
     if (editingNodeId && editRef.current) {
@@ -224,7 +251,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
 
   // Layout
   const layoutRoot = useMemo(() => buildLayoutTree(data), [data]);
-  const { nodes, edges } = useMemo(() => layoutTree(layoutRoot), [layoutRoot]);
+  const { nodes, edges } = useMemo(() => layoutTree(layoutRoot, currentTheme), [layoutRoot, currentTheme]);
 
   // Make selected node visually distinct
   const nodesWithSelection = useMemo(() =>
@@ -264,6 +291,35 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           <Trash2 className="h-3.5 w-3.5" />
           Delete
         </button>
+        <div className="relative">
+          <button
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-foreground bg-secondary hover:bg-accent transition-colors"
+            onClick={() => setThemeMenuOpen((v) => !v)}
+            title="Change theme"
+          >
+            <Palette className="h-3.5 w-3.5" />
+            Theme
+          </button>
+          {themeMenuOpen && (
+            <div className="absolute top-full left-0 mt-1 z-50 bg-card border border-border rounded-lg shadow-lg p-2 w-36">
+              {(Object.keys(mindMapThemes) as MindMapThemeId[]).map((id) => (
+                <button
+                  key={id}
+                  className={`flex items-center gap-2 w-full rounded-md px-2.5 py-1.5 text-xs transition-colors ${
+                    currentTheme === id ? "bg-accent font-medium" : "hover:bg-accent/50"
+                  }`}
+                  onClick={() => handleThemeChange(id)}
+                >
+                  <span
+                    className="h-3 w-3 rounded-full shrink-0"
+                    style={{ backgroundColor: mindMapThemes[id].swatch }}
+                  />
+                  {mindMapThemes[id].name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         {selectedNode && (
           <span className="ml-auto text-[11px] text-muted-foreground truncate max-w-48">
             Selected: {selectedNode.label}
@@ -307,7 +363,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           onNodeClick={(_e, node) => {
             setSelectedNodeId(node.id);
           }}
-          onPaneClick={() => setSelectedNodeId(null)}
+          onPaneClick={() => { setSelectedNodeId(null); setThemeMenuOpen(false); }}
           onNodeDoubleClick={(_e, node) => {
             setSelectedNodeId(node.id);
             const n = nodeMap.get(node.id);
