@@ -73,6 +73,42 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
 };
 
+// OGP data cache (persists across re-renders, cleared on page reload)
+interface OgpData {
+  title: string;
+  description: string;
+  image: string;
+  site_name: string;
+  url: string;
+}
+const ogpCache = new Map<string, OgpData | "loading" | "error">();
+
+// Track URLs that need OGP fetching — collected during marked render, consumed by useEffect
+let pendingOgpUrls: string[] = [];
+
+/** Build OGP card HTML from cached data */
+function buildLinkCardHtml(data: OgpData, url: string): string {
+  let domain: string;
+  try {
+    domain = new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    domain = url;
+  }
+  const safeUrl = escapeHtml(url);
+  const safeImage = data.image ? escapeHtml(data.image) : "";
+  const safeTitle = escapeHtml(data.title || domain);
+  const desc = data.description ? data.description.slice(0, 120) + (data.description.length > 120 ? "…" : "") : "";
+  const safeSite = escapeHtml(data.site_name || domain);
+  return `<div class="link-card"><a href="${safeUrl}" class="link-card-inner" target="_blank" rel="noopener noreferrer">
+    ${safeImage ? `<img class="link-card-image" src="${safeImage}" alt="" loading="lazy" />` : ""}
+    <div class="link-card-body">
+      <div class="link-card-title">${safeTitle}</div>
+      ${desc ? `<div class="link-card-desc">${escapeHtml(desc)}</div>` : ""}
+      <div class="link-card-url">${safeSite}</div>
+    </div>
+  </a></div>`;
+}
+
 // YouTube & OGP link card rendering
 renderer.link = function ({ href, text }: { href: string; text: string }) {
   // Block dangerous protocols (javascript:, data:, vbscript:)
@@ -89,10 +125,17 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
       <p class="youtube-embed-title">${text !== href ? escapeHtml(text) : ""}</p>
     </div>`;
   }
-  // Bare URL (text matches href) → render as OGP link card placeholder
+  // Bare URL (text matches href) → render as OGP link card
   if (text === href && /^https?:\/\//i.test(href)) {
+    // Check cache synchronously — if data exists, render full card inline
+    const cached = ogpCache.get(href);
+    if (cached && cached !== "loading" && cached !== "error") {
+      return buildLinkCardHtml(cached, href);
+    }
+    // Not yet cached — mark for fetch, render fallback
+    if (!cached) pendingOgpUrls.push(href);
     const escaped = escapeHtml(href);
-    return `<div class="link-card" data-url="${escaped}">
+    return `<div class="link-card">
       <a href="${escaped}" class="link-card-fallback" target="_blank" rel="noopener noreferrer">${escaped}</a>
     </div>`;
   }
@@ -100,39 +143,6 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
 };
 
 marked.use({ renderer });
-
-// OGP data cache (persists across re-renders, cleared on page reload)
-interface OgpData {
-  title: string;
-  description: string;
-  image: string;
-  site_name: string;
-  url: string;
-}
-const ogpCache = new Map<string, OgpData | "loading" | "error">();
-
-/** Render OGP data into a link card DOM element */
-function renderLinkCard(el: HTMLElement, data: OgpData, url: string) {
-  let domain: string;
-  try {
-    domain = new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    domain = url;
-  }
-  const safeUrl = escapeHtml(url);
-  const safeImage = data.image ? escapeHtml(data.image) : "";
-  const safeTitle = escapeHtml(data.title || domain);
-  const desc = data.description ? data.description.slice(0, 120) + (data.description.length > 120 ? "…" : "") : "";
-  const safeSite = escapeHtml(data.site_name || domain);
-  el.innerHTML = `<a href="${safeUrl}" class="link-card-inner" target="_blank" rel="noopener noreferrer">
-    ${safeImage ? `<img class="link-card-image" src="${safeImage}" alt="" loading="lazy" />` : ""}
-    <div class="link-card-body">
-      <div class="link-card-title">${safeTitle}</div>
-      ${desc ? `<div class="link-card-desc">${escapeHtml(desc)}</div>` : ""}
-      <div class="link-card-url">${safeSite}</div>
-    </div>
-  </a>`;
-}
 
 /** Escape HTML special characters to prevent XSS */
 function escapeHtml(s: string): string {
@@ -152,6 +162,7 @@ export function Editor() {
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [ogpVersion, setOgpVersion] = useState(0);
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
@@ -252,8 +263,11 @@ export function Editor() {
   const deferredContent = useDeferredValue(activeDoc?.content ?? "");
 
   // Convert markdown to HTML for preview (with wiki-link support)
+  // ogpVersion dependency: re-render when OGP data arrives so cards render inline
   const previewHtml = useMemo(() => {
     if (!deferredContent) return "";
+    // Reset pending OGP URLs for this render pass
+    pendingOgpUrls = [];
     try {
       let html = marked.parse(deferredContent) as string;
       // Protect code/pre blocks from wiki-link replacement
@@ -278,7 +292,8 @@ export function Editor() {
     } catch {
       return deferredContent;
     }
-  }, [deferredContent, documents]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deferredContent, documents, ogpVersion]);
 
   // Render mermaid diagrams after preview HTML updates or theme change
   const previewRef = useRef<HTMLDivElement>(null);
@@ -292,49 +307,33 @@ export function Editor() {
     mermaid.run({ nodes: Array.from(mermaidDivs) }).catch(() => {});
   }, [previewHtml, theme]);
 
-  // Populate OGP link cards after preview HTML updates
+  // Fetch OGP data for pending URLs collected during marked render
   useEffect(() => {
-    const container = previewRef.current;
-    if (!container) return;
-    const cards = container.querySelectorAll<HTMLElement>(".link-card[data-url]");
-    if (cards.length === 0) return;
+    if (pendingOgpUrls.length === 0) return;
+    const urls = [...pendingOgpUrls];
+    pendingOgpUrls = [];
 
     let cancelled = false;
-    cards.forEach(async (el) => {
-      const url = el.getAttribute("data-url");
-      if (!url || el.hasAttribute("data-ogp-loaded")) return;
-      el.setAttribute("data-ogp-loaded", "1");
-
-      // Check cache
-      const cached = ogpCache.get(url);
-      if (cached === "error") return; // Already failed
-      if (cached && cached !== "loading") {
-        renderLinkCard(el, cached, url);
-        return;
+    (async () => {
+      let fetched = 0;
+      for (const url of urls) {
+        if (cancelled) break;
+        if (ogpCache.has(url)) continue;
+        ogpCache.set(url, "loading");
+        try {
+          const data = await invoke<OgpData>("fetch_ogp", { url });
+          if (cancelled) break;
+          ogpCache.set(url, data);
+          fetched++;
+        } catch {
+          ogpCache.set(url, "error");
+        }
       }
-      if (cached === "loading") {
-        // Another request is in-flight — poll until it resolves
-        const poll = setInterval(() => {
-          if (cancelled) { clearInterval(poll); return; }
-          const r = ogpCache.get(url);
-          if (r && r !== "loading") {
-            clearInterval(poll);
-            if (r !== "error") renderLinkCard(el, r as OgpData, url);
-          }
-        }, 200);
-        return;
+      // Trigger re-render so previewHtml picks up cached data
+      if (fetched > 0 && !cancelled) {
+        setOgpVersion((v) => v + 1);
       }
-
-      ogpCache.set(url, "loading");
-      try {
-        const data = await invoke<OgpData>("fetch_ogp", { url });
-        if (cancelled) return;
-        ogpCache.set(url, data);
-        renderLinkCard(el, data, url);
-      } catch {
-        ogpCache.set(url, "error");
-      }
-    });
+    })();
 
     return () => { cancelled = true; };
   }, [previewHtml]);
