@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback, useRef, lazy, Suspense, type PointerEvent as ReactPointerEvent } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { Editor } from "@/components/editor/Editor";
@@ -323,12 +322,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           <div
             className="h-7 w-full shrink-0"
             data-tauri-drag-region
-            onDoubleClick={(e) => {
-              e.preventDefault();
-              window.getSelection()?.removeAllRanges();
-              const win = getCurrentWindow();
-              win.isMaximized().then((m) => (m ? win.unmaximize() : win.maximize()));
-            }}
           />
           <div className="flex-1 overflow-hidden">
             <SharedDocView
@@ -351,12 +344,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <div
           className="h-7 w-full shrink-0"
           data-tauri-drag-region
-          onDoubleClick={(e) => {
-            e.preventDefault();
-            window.getSelection()?.removeAllRanges();
-            const win = getCurrentWindow();
-            win.isMaximized().then((m) => (m ? win.unmaximize() : win.maximize()));
-          }}
         />
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
@@ -379,14 +366,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             <div
               className="flex items-center justify-between border-b border-border px-3 pb-1.5"
               data-tauri-drag-region
-              onDoubleClick={(e) => {
-                e.preventDefault();
-                window.getSelection()?.removeAllRanges();
-                const win = getCurrentWindow();
-                win.isMaximized().then((maximized) =>
-                  maximized ? win.unmaximize() : win.maximize(),
-                );
-              }}
             >
               <div className="flex items-center gap-1">
                 {!sidebarOpen && (
