@@ -6,6 +6,7 @@ import {
   BackgroundVariant,
   type Node,
   type Edge,
+  ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { MindMapNode, type MindMapNodeData } from "./MindMapNode";
@@ -27,7 +28,6 @@ function parseHeadings(content: string, docTitle: string): HeadingNode {
   const root: HeadingNode = { id: "root", label: docTitle || "Document", level: 0, children: [] };
   const lines = content.split("\n");
 
-  // Stack tracks the path to the current parent at each level
   const stack: HeadingNode[] = [root];
 
   let headingIdx = 0;
@@ -44,7 +44,6 @@ function parseHeadings(content: string, docTitle: string): HeadingNode {
       children: [],
     };
 
-    // Pop stack until we find a parent with a lower level
     while (stack.length > 1 && stack[stack.length - 1].level >= level) {
       stack.pop();
     }
@@ -56,13 +55,31 @@ function parseHeadings(content: string, docTitle: string): HeadingNode {
   return root;
 }
 
+// Estimate rendered node width from label text and level
+// Accounts for font size + padding differences per level
+const LEVEL_CHAR_WIDTHS = [8.5, 8, 7, 6.5, 6.5, 6]; // px per char
+const LEVEL_PADDING_X = [40, 32, 28, 24, 24, 20]; // total horizontal padding
+
+function estimateNodeWidth(label: string, level: number): number {
+  const idx = Math.min(level, LEVEL_CHAR_WIDTHS.length - 1);
+  const charW = LEVEL_CHAR_WIDTHS[idx];
+  const padX = LEVEL_PADDING_X[idx];
+  return Math.max(label.length * charW + padX, 60);
+}
+
+// Estimate node height per level
+const LEVEL_NODE_HEIGHTS = [40, 36, 32, 30, 28, 26];
+
+function estimateNodeHeight(level: number): number {
+  return LEVEL_NODE_HEIGHTS[Math.min(level, LEVEL_NODE_HEIGHTS.length - 1)];
+}
+
 // Layout constants
-const H_GAP = 200;    // horizontal gap between levels
-const V_GAP = 16;     // vertical gap between sibling nodes
-const NODE_HEIGHT = 36;
+const H_GAP = 60;    // horizontal gap between node edge and child node start
+const V_GAP = 24;    // vertical gap between sibling nodes
 
 /**
- * Compute tree layout positions.
+ * Compute tree layout positions with dynamic sizing.
  * Returns flat arrays of nodes and edges for ReactFlow.
  */
 function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
@@ -71,7 +88,7 @@ function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
 
   // First pass: compute subtree heights
   function subtreeHeight(node: HeadingNode): number {
-    if (node.children.length === 0) return NODE_HEIGHT;
+    if (node.children.length === 0) return estimateNodeHeight(node.level);
     let total = 0;
     for (const child of node.children) {
       total += subtreeHeight(child);
@@ -82,18 +99,20 @@ function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
 
   // Second pass: assign positions
   function layout(node: HeadingNode, x: number, yStart: number, yEnd: number) {
+    const nodeH = estimateNodeHeight(node.level);
     const yCenter = (yStart + yEnd) / 2;
 
     nodes.push({
       id: node.id,
       type: "mindmap",
-      position: { x, y: yCenter - NODE_HEIGHT / 2 },
+      position: { x, y: yCenter - nodeH / 2 },
       data: { label: node.label, level: node.level } satisfies MindMapNodeData,
     });
 
     if (node.children.length === 0) return;
 
-    const childX = x + H_GAP;
+    const nodeW = estimateNodeWidth(node.label, node.level);
+    const childX = x + nodeW + H_GAP;
     const totalChildHeight = node.children.reduce(
       (sum, c) => sum + subtreeHeight(c),
       0,
@@ -109,8 +128,8 @@ function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
         id: `${node.id}-${child.id}`,
         source: node.id,
         target: child.id,
-        type: "smoothstep",
-        style: { stroke: "oklch(0.65 0.15 270 / 0.4)", strokeWidth: 2 },
+        type: "default",
+        style: { stroke: "oklch(0.65 0.15 270 / 0.35)", strokeWidth: 1.5 },
       });
 
       layout(child, childX, childY, childYEnd);
@@ -132,7 +151,6 @@ interface MindMapViewProps {
 export function MindMapView({ content, title }: MindMapViewProps) {
   const { nodes, edges } = useMemo(() => {
     const tree = parseHeadings(content, title);
-    // If no headings found, show just the root
     if (tree.children.length === 0) {
       return {
         nodes: [{
@@ -153,6 +171,7 @@ export function MindMapView({ content, title }: MindMapViewProps) {
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        connectionLineType={ConnectionLineType.Bezier}
         fitView
         fitViewOptions={{ padding: 0.3 }}
         proOptions={{ hideAttribution: true }}
