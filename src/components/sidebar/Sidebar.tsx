@@ -15,6 +15,7 @@ import {
   Users,
   Lock,
   PenLine,
+  Network,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
@@ -260,20 +261,25 @@ export function Sidebar() {
     });
   }, []);
 
-  const handleNew = (folder = "/") => {
+  const handleNew = (folder = "/", docType: "markdown" | "mindmap" = "markdown") => {
+    const isMindMap = docType === "mindmap";
+    const title = isMindMap ? "New Mind Map" : "Untitled";
+    const content = isMindMap
+      ? JSON.stringify({ nodes: [{ id: "root", label: title, children: [] }] })
+      : "# Untitled\n";
     const doc: Document = {
       id: crypto.randomUUID(),
-      title: "Untitled",
-      content: "# Untitled\n",
+      title,
+      content,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       folder,
       tags: [],
       ownerId: null,
+      docType,
     };
     addDocument(doc);
     setActiveDocId(doc.id);
-    // Expand the folder
     setExpandedFolders((prev) => new Set([...prev, folder]));
   };
 
@@ -490,7 +496,7 @@ export function Sidebar() {
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
       )}
     >
-      <FileText className="h-3.5 w-3.5 shrink-0" />
+      {doc.docType === "mindmap" ? <Network className="h-3.5 w-3.5 shrink-0" /> : <FileText className="h-3.5 w-3.5 shrink-0" />}
       {renamingDocId === doc.id ? (
         <input
           autoFocus
@@ -990,10 +996,12 @@ export function Sidebar() {
                   <span className="ml-auto text-[10px]">{personalDocs.length}</span>
                 </button>
                 <div className="flex gap-0.5 pr-2">
-                  <Plus
-                    className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer"
-                    onClick={() => { handleNew(); setMyDocsExpanded(true); }}
-                  />
+                  <span title="New document" onClick={() => { handleNew(); setMyDocsExpanded(true); }}>
+                    <Plus className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
+                  </span>
+                  <span title="New mind map" onClick={() => { handleNew("/", "mindmap"); setMyDocsExpanded(true); }}>
+                    <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
+                  </span>
                   <FolderPlus
                     className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer"
                     onClick={() => { setCreatingFolderIn("/"); setNewFolderName(""); setMyDocsExpanded(true); }}

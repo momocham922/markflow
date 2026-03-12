@@ -19,6 +19,7 @@ import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import { VersionHistory } from "./VersionHistory";
 import { MindMapView } from "./MindMapView";
+import { MindMapEditor, createInitialMindMapData } from "./MindMapEditor";
 import mermaid from "mermaid";
 
 // HTML → Markdown converter for legacy Tiptap content
@@ -424,6 +425,22 @@ export function Editor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Callbacks for mind map editor
+  const handleMindMapChange = useCallback(
+    (content: string) => {
+      if (!activeDocId) return;
+      updateDocument(activeDocId, { content, updatedAt: Date.now() });
+    },
+    [activeDocId, updateDocument],
+  );
+  const handleMindMapTitleChange = useCallback(
+    (title: string) => {
+      if (!activeDocId) return;
+      updateDocument(activeDocId, { title, updatedAt: Date.now() });
+    },
+    [activeDocId, updateDocument],
+  );
+
   if (!activeDoc) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -433,6 +450,21 @@ export function Editor() {
             Create a new document or select one from the sidebar
           </p>
         </div>
+      </div>
+    );
+  }
+
+  // Standalone mind map document — uses dedicated editor, no markdown
+  if (activeDoc.docType === "mindmap") {
+    return (
+      <div className="flex h-full flex-col relative">
+        <MindMapEditor
+          key={activeDocId}
+          content={activeDoc.content || JSON.stringify(createInitialMindMapData(activeDoc.title))}
+          title={activeDoc.title}
+          onChange={handleMindMapChange}
+          onTitleChange={handleMindMapTitleChange}
+        />
       </div>
     );
   }

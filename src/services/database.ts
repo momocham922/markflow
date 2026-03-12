@@ -54,6 +54,11 @@ async function ensureMigrations(database: Database) {
       await database.execute(`ALTER TABLE documents ADD COLUMN title_pinned INTEGER NOT NULL DEFAULT 0`);
     } catch { /* already exists */ }
 
+    // doc_type column (migration v8)
+    try {
+      await database.execute(`ALTER TABLE documents ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'markdown'`);
+    } catch { /* already exists */ }
+
     // document_snapshots table (migration v6) — last-known-good content backup
     await database.execute(`CREATE TABLE IF NOT EXISTS document_snapshots (
       document_id TEXT PRIMARY KEY,
@@ -79,6 +84,7 @@ export interface DbDocument {
   owner_id: string | null;
   is_shared: number;
   title_pinned: number;
+  doc_type: string;
 }
 
 export async function getAllDocuments(): Promise<DbDocument[]> {
@@ -108,6 +114,7 @@ export async function upsertDocument(doc: {
   ownerId?: string | null;
   isShared?: boolean;
   titlePinned?: boolean;
+  docType?: string;
 }): Promise<void> {
   const database = await getDb();
 
@@ -144,12 +151,13 @@ export async function upsertDocument(doc: {
   const ownerId = doc.ownerId ?? null;
   const isShared = doc.isShared ? 1 : 0;
   const titlePinned = doc.titlePinned ? 1 : 0;
+  const docType = doc.docType ?? "markdown";
   await database.execute(
-    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags, owner_id, is_shared, title_pinned)
-     VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9, $10)
+    `INSERT INTO documents (id, title, content, created_at, updated_at, is_dirty, folder, tags, owner_id, is_shared, title_pinned, doc_type)
+     VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9, $10, $11)
      ON CONFLICT(id) DO UPDATE SET
-       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7, owner_id = $8, is_shared = $9, title_pinned = $10`,
-    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags, ownerId, isShared, titlePinned],
+       title = $2, content = $3, updated_at = $5, is_dirty = 1, folder = $6, tags = $7, owner_id = $8, is_shared = $9, title_pinned = $10, doc_type = $11`,
+    [doc.id, doc.title, doc.content, doc.createdAt, doc.updatedAt, folder, tags, ownerId, isShared, titlePinned, docType],
   );
 }
 

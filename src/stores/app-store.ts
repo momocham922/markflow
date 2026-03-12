@@ -2,6 +2,8 @@ import { create } from "zustand";
 import * as db from "@/services/database";
 import { fetchDocument } from "@/services/firebase";
 
+export type DocType = "markdown" | "mindmap";
+
 export interface Document {
   id: string;
   title: string;
@@ -14,6 +16,7 @@ export interface Document {
   teamId?: string | null;
   isShared?: boolean;
   titlePinned?: boolean;
+  docType?: DocType;
 }
 
 export interface CustomPreviewTheme {
@@ -253,6 +256,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           ownerId: r.owner_id ?? null,
           isShared: r.is_shared === 1,
           titlePinned: r.title_pinned === 1,
+          docType: (r.doc_type as DocType) || "markdown",
         });
       }
 
