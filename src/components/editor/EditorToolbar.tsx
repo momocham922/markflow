@@ -19,6 +19,7 @@ import {
   ListOrdered,
   Quote,
   Link,
+  Image,
   Pencil,
   Check,
   History,
@@ -29,6 +30,7 @@ import { Separator } from "@/components/ui/separator";
 import { ThemeCustomizer } from "@/components/ThemeCustomizer";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
+import { processImagePath } from "@/extensions/image-paste";
 import type { PreviewMode } from "./Editor";
 
 interface EditorToolbarProps {
@@ -242,6 +244,27 @@ export function EditorToolbar({
                 view.focus();
               }} title="Link (Cmd+K)">
                 <Link className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={async () => {
+                if (!view) return;
+                try {
+                  const { open } = await import("@tauri-apps/plugin-dialog");
+                  const path = await open({
+                    multiple: false,
+                    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"] }],
+                  });
+                  if (!path) return;
+                  const filePath = typeof path === "string" ? path : path[0];
+                  if (!filePath) return;
+                  const md = await processImagePath(filePath);
+                  const pos = view.state.selection.main.head;
+                  view.dispatch({ changes: { from: pos, insert: md + "\n" } });
+                  view.focus();
+                } catch (e) {
+                  console.error("Insert image failed:", e);
+                }
+              }} title="Insert Image">
+                <Image className="h-3.5 w-3.5" />
               </Button>
             </div>
 

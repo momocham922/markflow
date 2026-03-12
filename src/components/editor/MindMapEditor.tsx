@@ -9,7 +9,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId } from "./MindMapNode";
+import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId, type EdgeStyle } from "./MindMapNode";
 import { Plus, Trash2, Pencil, Palette } from "lucide-react";
 import { useAppStore } from "@/stores/app-store";
 
@@ -137,12 +137,13 @@ function layoutTree(root: LayoutNode, themeId: MindMapThemeId = "lavender"): { n
     let childY = yCenter - totalChildHeight / 2;
     for (const child of node.children) {
       const h = subtreeHeight(child);
+      const edgeTypeMap: Record<EdgeStyle, string> = { bezier: "default", straight: "straight", step: "smoothstep" };
       edges.push({
         id: `${node.id}-${child.id}`,
         source: node.id,
         target: child.id,
-        type: "default",
-        style: { stroke: themeObj.edgeColor, strokeWidth: 1.5 },
+        type: edgeTypeMap[themeObj.edgeStyle] ?? "default",
+        style: { stroke: themeObj.edgeColor, strokeWidth: themeObj.edgeStyle === "step" ? 2 : 1.5 },
       });
       layout(child, childX, childY, childY + h);
       childY += h + V_GAP;
@@ -253,27 +254,77 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     setThemeMenuOpen(false);
   }, [setThemeSettings]);
 
-  // Keyboard shortcuts: Tab = add child, Enter = add sibling, Delete = delete
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (editingNodeId) return; // don't intercept while renaming
-    if (e.key === "Tab") {
-      e.preventDefault();
-      handleAddChild();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (selectedNodeId && selectedNodeId !== "root") {
-        handleAddSibling();
-      } else {
-        handleAddChild();
-      }
-    } else if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId && selectedNodeId !== "root") {
-      e.preventDefault();
-      handleDelete();
-    } else if (e.key === "F2" && selectedNodeId) {
-      e.preventDefault();
-      handleStartEdit();
+  // Find parent of a node
+  const findParent = useCallback((nodeId: string): MindMapTreeNode | null => {
+    return data.nodes.find((n) => n.children.includes(nodeId)) ?? null;
+  }, [data]);
+
+  // Arrow key navigation: find next node in given direction
+  const navigateTo = useCallback((direction: "left" | "right" | "up" | "down") => {
+    if (!selectedNodeId) { setSelectedNodeId("root"); return; }
+
+    if (direction === "right") {
+      // Go to first child
+      const node = nodeMap.get(selectedNodeId);
+      if (node && node.children.length > 0) setSelectedNodeId(node.children[0]);
+    } else if (direction === "left") {
+      // Go to parent
+      if (selectedNodeId === "root") return;
+      const parent = findParent(selectedNodeId);
+      if (parent) setSelectedNodeId(parent.id);
+    } else {
+      // Up/Down: navigate among siblings
+      const parent = findParent(selectedNodeId);
+      if (!parent) return;
+      const idx = parent.children.indexOf(selectedNodeId);
+      if (direction === "up" && idx > 0) setSelectedNodeId(parent.children[idx - 1]);
+      if (direction === "down" && idx < parent.children.length - 1) setSelectedNodeId(parent.children[idx + 1]);
     }
-  }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit]);
+  }, [selectedNodeId, nodeMap, findParent]);
+
+  // Document-level keyboard handler (bypasses ReactFlow event capture)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't intercept when editing or when an input/textarea is focused
+      if (editingNodeId) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      if (e.key === "Tab") {
+        e.preventDefault();
+        handleAddChild();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (selectedNodeId && selectedNodeId !== "root") {
+          handleAddSibling();
+        } else {
+          handleAddChild();
+        }
+      } else if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId && selectedNodeId !== "root") {
+        e.preventDefault();
+        handleDelete();
+      } else if ((e.key === "F2" || e.key === " ") && selectedNodeId) {
+        e.preventDefault();
+        handleStartEdit();
+      } else if (e.key === "Escape") {
+        setSelectedNodeId(null);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        navigateTo("right");
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        navigateTo("left");
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        navigateTo("up");
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        navigateTo("down");
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit, navigateTo]);
 
   // Focus edit input when editing starts
   useEffect(() => {
@@ -354,11 +405,9 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
             </div>
           )}
         </div>
-        {selectedNode && (
-          <span className="ml-auto text-[11px] text-muted-foreground truncate max-w-48">
-            Selected: {selectedNode.label}
-          </span>
-        )}
+        <span className="ml-auto text-[10px] text-muted-foreground truncate">
+          {selectedNode ? selectedNode.label : "Tab: child / Enter: sibling / Arrows: navigate"}
+        </span>
       </div>
 
       {/* Inline edit overlay */}
@@ -382,7 +431,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       )}
 
       {/* ReactFlow canvas */}
-      <div className="flex-1" onKeyDown={handleKeyDown} tabIndex={0}>
+      <div className="flex-1">
         <ReactFlow
           nodes={nodesWithSelection}
           edges={edges}

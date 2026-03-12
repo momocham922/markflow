@@ -53,6 +53,7 @@ function App() {
   const initAuth = useAuthStore((s) => s.init);
   const [rightPanel, setRightPanel] = useState<RightPanel>("none");
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; update: unknown } | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
@@ -129,23 +130,14 @@ function App() {
     return cleanup;
   }, [initAuth]);
 
-  // Auto-update check on startup
+  // Auto-update check on startup — only checks, never auto-installs
   useEffect(() => {
     const timer = setTimeout(async () => {
       try {
         const { check } = await import("@tauri-apps/plugin-updater");
         const update = await check();
         if (update) {
-          const { ask } = await import("@tauri-apps/plugin-dialog");
-          const yes = await ask(
-            `MarkFlow v${update.version} が利用可能です。今すぐアップデートしますか？`,
-            { title: "アップデート", kind: "info", okLabel: "アップデート", cancelLabel: "あとで" },
-          );
-          if (yes) {
-            await update.downloadAndInstall();
-            const { relaunch } = await import("@tauri-apps/plugin-process");
-            await relaunch();
-          }
+          setUpdateInfo({ version: update.version, update });
         }
       } catch {
         // Silently ignore update check failures (offline, dev mode, etc.)
@@ -153,6 +145,18 @@ function App() {
     }, 3000);
     return () => clearTimeout(timer);
   }, []);
+
+  const handleInstallUpdate = useCallback(async () => {
+    if (!updateInfo) return;
+    try {
+      const update = updateInfo.update as { downloadAndInstall: () => Promise<void> };
+      await update.downloadAndInstall();
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch {
+      setUpdateInfo(null);
+    }
+  }, [updateInfo]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -347,6 +351,26 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           className="h-7 w-full shrink-0"
           data-tauri-drag-region
         />
+        {/* Update banner */}
+        {updateInfo && (
+          <div className="flex items-center justify-between gap-3 bg-primary px-4 py-1.5 text-primary-foreground text-xs shrink-0">
+            <span>MarkFlow v{updateInfo.version} が利用可能です</span>
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded-md bg-primary-foreground/20 px-3 py-0.5 hover:bg-primary-foreground/30 transition-colors"
+                onClick={() => setUpdateInfo(null)}
+              >
+                あとで
+              </button>
+              <button
+                className="rounded-md bg-primary-foreground text-primary px-3 py-0.5 font-medium hover:opacity-90 transition-opacity"
+                onClick={handleInstallUpdate}
+              >
+                アップデート
+              </button>
+            </div>
+          </div>
+        )}
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
           {sidebarOpen && (

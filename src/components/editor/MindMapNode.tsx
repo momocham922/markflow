@@ -3,11 +3,16 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 export type MindMapThemeId = "lavender" | "ocean" | "forest" | "sunset" | "mono";
 
+export type NodeShape = "pill" | "rounded" | "rect" | "underline";
+export type EdgeStyle = "bezier" | "straight" | "step";
+
 export interface MindMapTheme {
   name: string;
-  swatch: string; // preview color for the picker
+  swatch: string;
   nodeColors: string[]; // tailwind classes per level
   edgeColor: string;
+  nodeShape: NodeShape;
+  edgeStyle: EdgeStyle;
 }
 
 export const mindMapThemes: Record<MindMapThemeId, MindMapTheme> = {
@@ -23,6 +28,8 @@ export const mindMapThemes: Record<MindMapThemeId, MindMapTheme> = {
       "bg-pink-400 text-white",
     ],
     edgeColor: "oklch(0.65 0.15 270 / 0.35)",
+    nodeShape: "pill",
+    edgeStyle: "bezier",
   },
   ocean: {
     name: "Ocean",
@@ -36,19 +43,23 @@ export const mindMapThemes: Record<MindMapThemeId, MindMapTheme> = {
       "bg-cyan-400 text-white",
     ],
     edgeColor: "oklch(0.65 0.12 220 / 0.35)",
+    nodeShape: "rounded",
+    edgeStyle: "straight",
   },
   forest: {
     name: "Forest",
     swatch: "#22c55e",
     nodeColors: [
-      "bg-emerald-600 text-white",
-      "bg-green-600 text-white",
-      "bg-teal-500 text-white",
-      "bg-lime-600 text-white",
-      "bg-green-400 text-white",
-      "bg-emerald-400 text-white",
+      "border-emerald-600 text-emerald-700 dark:text-emerald-300",
+      "border-green-500 text-green-700 dark:text-green-300",
+      "border-teal-500 text-teal-700 dark:text-teal-300",
+      "border-lime-500 text-lime-700 dark:text-lime-300",
+      "border-green-400 text-green-600 dark:text-green-400",
+      "border-emerald-400 text-emerald-600 dark:text-emerald-400",
     ],
     edgeColor: "oklch(0.60 0.14 155 / 0.35)",
+    nodeShape: "underline",
+    edgeStyle: "step",
   },
   sunset: {
     name: "Sunset",
@@ -62,20 +73,31 @@ export const mindMapThemes: Record<MindMapThemeId, MindMapTheme> = {
       "bg-yellow-500 text-white",
     ],
     edgeColor: "oklch(0.65 0.16 40 / 0.35)",
+    nodeShape: "rect",
+    edgeStyle: "bezier",
   },
   mono: {
     name: "Mono",
     swatch: "#64748b",
     nodeColors: [
-      "bg-slate-700 text-white",
-      "bg-slate-600 text-white",
-      "bg-slate-500 text-white",
-      "bg-gray-500 text-white",
-      "bg-gray-400 text-white",
-      "bg-slate-400 text-white",
+      "border-slate-500 text-slate-700 dark:text-slate-200",
+      "border-slate-400 text-slate-600 dark:text-slate-300",
+      "border-gray-400 text-gray-600 dark:text-gray-300",
+      "border-gray-300 text-gray-500 dark:text-gray-400",
+      "border-gray-300 text-gray-500 dark:text-gray-400",
+      "border-gray-200 text-gray-400 dark:text-gray-500",
     ],
     edgeColor: "oklch(0.55 0.01 260 / 0.30)",
+    nodeShape: "rounded",
+    edgeStyle: "step",
   },
+};
+
+const shapeClass: Record<NodeShape, string> = {
+  pill: "rounded-full",
+  rounded: "rounded-lg",
+  rect: "rounded-sm",
+  underline: "rounded-none border-b-2 bg-transparent!",
 };
 
 export interface MindMapNodeData {
@@ -100,11 +122,13 @@ export const MindMapNode = memo(function MindMapNode({
   const nodeData = data as unknown as MindMapNodeData;
   const theme = mindMapThemes[nodeData.themeId ?? "lavender"];
   const colorIdx = Math.min(nodeData.level, theme.nodeColors.length - 1);
+  const shape = shapeClass[theme.nodeShape];
+  const isUnderline = theme.nodeShape === "underline";
 
   return (
     <div
-      className={`rounded-full shadow-sm ${theme.nodeColors[colorIdx]} ${levelSizes[Math.min(nodeData.level, levelSizes.length - 1)]} ${
-        selected ? "ring-2 ring-white/50 shadow-md scale-105" : ""
+      className={`${shape} ${isUnderline ? "" : "shadow-sm"} ${theme.nodeColors[colorIdx]} ${levelSizes[Math.min(nodeData.level, levelSizes.length - 1)]} ${
+        selected ? (isUnderline ? "ring-1 ring-current/30 bg-current/5!" : "ring-2 ring-white/50 shadow-md scale-105") : ""
       }`}
     >
       <Handle

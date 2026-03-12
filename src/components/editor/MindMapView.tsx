@@ -9,7 +9,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId } from "./MindMapNode";
+import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId, type EdgeStyle } from "./MindMapNode";
 import { useAppStore } from "@/stores/app-store";
 
 const nodeTypes = { mindmap: MindMapNode };
@@ -142,12 +142,13 @@ function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { 
       const h = subtreeHeight(child);
       const childYEnd = childY + h;
 
+      const edgeTypeMap: Record<EdgeStyle, string> = { bezier: "default", straight: "straight", step: "smoothstep" };
       edges.push({
         id: `${node.id}-${child.id}`,
         source: node.id,
         target: child.id,
-        type: "default",
-        style: { stroke: themeObj.edgeColor, strokeWidth: 1.5 },
+        type: edgeTypeMap[themeObj.edgeStyle] ?? "default",
+        style: { stroke: themeObj.edgeColor, strokeWidth: themeObj.edgeStyle === "step" ? 2 : 1.5 },
       });
 
       layout(child, childX, childY, childYEnd);
