@@ -163,7 +163,22 @@ interface MindMapEditorProps {
 }
 
 export function MindMapEditor({ content, title, onChange, onTitleChange }: MindMapEditorProps) {
-  const data = useMemo(() => parseMindMapData(content) ?? createInitialMindMapData(title), [content]);
+  // Use local state instead of useMemo so saves take effect immediately
+  // (no two-render cycle waiting for content prop round-trip through parent)
+  const [data, setData] = useState<MindMapData>(() => parseMindMapData(content) ?? createInitialMindMapData(title));
+  const lastSavedJsonRef = useRef<string>("");
+
+  // Sync from external content changes (undo, version restore, etc.)
+  // Skip when content matches our last save (avoids redundant update)
+  const prevContentRef = useRef(content);
+  if (content !== prevContentRef.current) {
+    prevContentRef.current = content;
+    if (content !== lastSavedJsonRef.current) {
+      const parsed = parseMindMapData(content);
+      if (parsed) setData(parsed);
+    }
+  }
+
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const editLabelRef = useRef("");
@@ -184,7 +199,10 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   }, [data]);
 
   const save = useCallback((newData: MindMapData) => {
-    onChange(JSON.stringify(newData));
+    const json = JSON.stringify(newData);
+    lastSavedJsonRef.current = json;
+    setData(newData); // immediate local update — no round-trip wait
+    onChange(json);
     // Update title from root node label
     const root = newData.nodes.find((n) => n.id === "root");
     if (root) onTitleChange(root.label);

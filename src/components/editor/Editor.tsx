@@ -435,36 +435,36 @@ export function Editor() {
   }, []);
 
   // Handle Tauri file drag-and-drop for images
-  // Uses listen("tauri://drag-drop") — requires dragDropEnabled: false in tauri.conf.json
+  // Uses webview-scoped onDragDropEvent() — requires dragDropEnabled: true in tauri.conf.json
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     const imageExts = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<{ paths: string[]; position: { x: number; y: number } }>(
-          "tauri://drag-drop",
-          async (event) => {
-            const view = viewRef.current;
-            if (!view) return;
-            const imagePaths = event.payload.paths.filter((p) => {
-              const ext = p.split(".").pop()?.toLowerCase() ?? "";
-              return imageExts.has(ext);
-            });
-            if (imagePaths.length === 0) return;
-            try {
-              const markdowns = await Promise.all(imagePaths.map(processImagePath));
-              const v = viewRef.current;
-              if (v && markdowns.length > 0) {
-                const pos = v.state.selection.main.head;
-                v.dispatch({ changes: { from: pos, insert: markdowns.join("\n") + "\n" } });
-              }
-            } catch (err) {
-              console.error("Image drop failed:", err);
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        const webview = getCurrentWebview();
+        unlisten = await webview.onDragDropEvent(async (event) => {
+          if (event.payload.type !== "drop") return;
+          const view = viewRef.current;
+          if (!view) return;
+          const paths = event.payload.paths;
+          const imagePaths = paths.filter((p: string) => {
+            const ext = p.split(".").pop()?.toLowerCase() ?? "";
+            return imageExts.has(ext);
+          });
+          if (imagePaths.length === 0) return;
+          try {
+            const markdowns = await Promise.all(imagePaths.map(processImagePath));
+            const v = viewRef.current;
+            if (v && markdowns.length > 0) {
+              const pos = v.state.selection.main.head;
+              v.dispatch({ changes: { from: pos, insert: markdowns.join("\n") + "\n" } });
             }
-          },
-        );
+          } catch (err) {
+            console.error("Image drop failed:", err);
+          }
+        });
       } catch { /* not in Tauri */ }
     })();
     return () => { unlisten?.(); };
