@@ -17,9 +17,15 @@
     "sql:allow-select",
     "dialog:default",
     "dialog:allow-save",
+    "dialog:allow-ask",
     "fs:default",
     "fs:allow-write-text-file",
+    {
+      "identifier": "fs:allow-read",
+      "allow": [{ "path": "**" }]
+    },
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "process:allow-relaunch"
   ]
 }

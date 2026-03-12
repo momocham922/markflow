@@ -11,6 +11,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId } from "./MindMapNode";
 import { Plus, Trash2, Pencil, Palette } from "lucide-react";
+import { useAppStore } from "@/stores/app-store";
 
 const nodeTypes = { mindmap: MindMapNode };
 
@@ -167,7 +168,8 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const [editLabel, setEditLabel] = useState("");
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const editRef = useRef<HTMLInputElement>(null);
-  const currentTheme: MindMapThemeId = data.theme ?? "lavender";
+  const { themeSettings, setThemeSettings } = useAppStore();
+  const currentTheme = (themeSettings.mindMapTheme || "lavender") as MindMapThemeId;
 
   // Build a lookup map
   const nodeMap = useMemo(() => {
@@ -183,20 +185,30 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     if (root) onTitleChange(root.label);
   }, [onChange, onTitleChange]);
 
-  const handleAddChild = useCallback(() => {
-    const parentId = selectedNodeId ?? "root";
+  const addChildTo = useCallback((parentId: string) => {
     const newId = `n-${Date.now()}`;
     const newNode: MindMapTreeNode = { id: newId, label: "New topic", children: [] };
     const updatedNodes = data.nodes.map((n) =>
       n.id === parentId ? { ...n, children: [...n.children, newId] } : n,
     );
     updatedNodes.push(newNode);
-    save({ nodes: updatedNodes });
+    save({ ...data, nodes: updatedNodes });
     setSelectedNodeId(newId);
-    // Auto-start editing the new node
     setEditingNodeId(newId);
     setEditLabel("New topic");
-  }, [selectedNodeId, data, save]);
+  }, [data, save]);
+
+  const handleAddChild = useCallback(() => {
+    addChildTo(selectedNodeId ?? "root");
+  }, [selectedNodeId, addChildTo]);
+
+  // Add sibling: find parent of selected node, add new child to that parent
+  const handleAddSibling = useCallback(() => {
+    if (!selectedNodeId || selectedNodeId === "root") return;
+    const parentNode = data.nodes.find((n) => n.children.includes(selectedNodeId));
+    if (!parentNode) return;
+    addChildTo(parentNode.id);
+  }, [selectedNodeId, data, addChildTo]);
 
   const handleDelete = useCallback(() => {
     if (!selectedNodeId || selectedNodeId === "root") return;
@@ -212,7 +224,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     const updatedNodes = data.nodes
       .filter((n) => !toDelete.has(n.id))
       .map((n) => ({ ...n, children: n.children.filter((c) => !toDelete.has(c)) }));
-    save({ nodes: updatedNodes });
+    save({ ...data, nodes: updatedNodes });
     setSelectedNodeId(null);
   }, [selectedNodeId, data, nodeMap, save]);
 
@@ -232,14 +244,36 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     const updatedNodes = data.nodes.map((n) =>
       n.id === editingNodeId ? { ...n, label: editLabel.trim() } : n,
     );
-    save({ nodes: updatedNodes });
+    save({ ...data, nodes: updatedNodes });
     setEditingNodeId(null);
   }, [editingNodeId, editLabel, data, save]);
 
   const handleThemeChange = useCallback((themeId: MindMapThemeId) => {
-    save({ ...data, theme: themeId });
+    setThemeSettings({ mindMapTheme: themeId });
     setThemeMenuOpen(false);
-  }, [data, save]);
+  }, [setThemeSettings]);
+
+  // Keyboard shortcuts: Tab = add child, Enter = add sibling, Delete = delete
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (editingNodeId) return; // don't intercept while renaming
+    if (e.key === "Tab") {
+      e.preventDefault();
+      handleAddChild();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (selectedNodeId && selectedNodeId !== "root") {
+        handleAddSibling();
+      } else {
+        handleAddChild();
+      }
+    } else if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId && selectedNodeId !== "root") {
+      e.preventDefault();
+      handleDelete();
+    } else if (e.key === "F2" && selectedNodeId) {
+      e.preventDefault();
+      handleStartEdit();
+    }
+  }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit]);
 
   // Focus edit input when editing starts
   useEffect(() => {
@@ -348,7 +382,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       )}
 
       {/* ReactFlow canvas */}
-      <div className="flex-1">
+      <div className="flex-1" onKeyDown={handleKeyDown} tabIndex={0}>
         <ReactFlow
           nodes={nodesWithSelection}
           edges={edges}

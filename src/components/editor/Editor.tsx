@@ -314,9 +314,8 @@ export function Editor() {
 
   // Fetch OGP data for pending URLs collected during marked render
   useEffect(() => {
-    const urls = pendingOgpUrlsRef.current;
+    const urls = [...pendingOgpUrlsRef.current];
     if (urls.length === 0) return;
-    pendingOgpUrlsRef.current = [];
 
     let cancelled = false;
     (async () => {

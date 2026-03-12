@@ -29,12 +29,14 @@ export interface CustomPreviewTheme {
 export interface ThemeSettings {
   previewTheme: string;
   editorTheme: string;
+  mindMapTheme: string;
   customPreviewCss: string;
 }
 
 const defaultThemeSettings: ThemeSettings = {
   previewTheme: "github",
   editorTheme: "default",
+  mindMapTheme: "lavender",
   customPreviewCss: "",
 };
 

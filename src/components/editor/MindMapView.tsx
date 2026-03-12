@@ -9,7 +9,8 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { MindMapNode, type MindMapNodeData } from "./MindMapNode";
+import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId } from "./MindMapNode";
+import { useAppStore } from "@/stores/app-store";
 
 const nodeTypes = { mindmap: MindMapNode };
 
@@ -98,7 +99,8 @@ const V_GAP = 24;    // vertical gap between sibling nodes
  * Compute tree layout positions with dynamic sizing.
  * Returns flat arrays of nodes and edges for ReactFlow.
  */
-function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
+function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { nodes: Node[]; edges: Edge[] } {
+  const themeObj = mindMapThemes[themeId] ?? mindMapThemes.lavender;
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
@@ -122,7 +124,7 @@ function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
       id: node.id,
       type: "mindmap",
       position: { x, y: yCenter - nodeH / 2 },
-      data: { label: node.label, level: node.level } satisfies MindMapNodeData,
+      data: { label: node.label, level: node.level, themeId } satisfies MindMapNodeData,
     });
 
     if (node.children.length === 0) return;
@@ -145,7 +147,7 @@ function layoutTree(root: HeadingNode): { nodes: Node[]; edges: Edge[] } {
         source: node.id,
         target: child.id,
         type: "default",
-        style: { stroke: "oklch(0.65 0.15 270 / 0.35)", strokeWidth: 1.5 },
+        style: { stroke: themeObj.edgeColor, strokeWidth: 1.5 },
       });
 
       layout(child, childX, childY, childYEnd);
@@ -165,6 +167,7 @@ interface MindMapViewProps {
 }
 
 export function MindMapView({ content, title }: MindMapViewProps) {
+  const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) || "lavender") as MindMapThemeId;
   const { nodes, edges } = useMemo(() => {
     const tree = parseHeadings(content, title);
     if (tree.children.length === 0) {
@@ -173,13 +176,13 @@ export function MindMapView({ content, title }: MindMapViewProps) {
           id: "root",
           type: "mindmap",
           position: { x: 200, y: 200 },
-          data: { label: title || "Document", level: 0 } satisfies MindMapNodeData,
+          data: { label: title || "Document", level: 0, themeId: mindMapTheme } satisfies MindMapNodeData,
         }],
         edges: [],
       };
     }
-    return layoutTree(tree);
-  }, [content, title]);
+    return layoutTree(tree, mindMapTheme);
+  }, [content, title, mindMapTheme]);
 
   return (
     <div className="h-full w-full">

@@ -136,8 +136,10 @@ function App() {
         const { check } = await import("@tauri-apps/plugin-updater");
         const update = await check();
         if (update) {
-          const yes = confirm(
+          const { ask } = await import("@tauri-apps/plugin-dialog");
+          const yes = await ask(
             `MarkFlow v${update.version} が利用可能です。今すぐアップデートしますか？`,
+            { title: "アップデート", kind: "info", okLabel: "アップデート", cancelLabel: "あとで" },
           );
           if (yes) {
             await update.downloadAndInstall();
