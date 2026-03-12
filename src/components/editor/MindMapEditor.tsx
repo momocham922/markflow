@@ -168,7 +168,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const editRef = useRef<HTMLInputElement>(null);
+  const editCancelledRef = useRef(false);
   const { themeSettings, setThemeSettings } = useAppStore();
   const currentTheme = (themeSettings.mindMapTheme || "lavender") as MindMapThemeId;
 
@@ -237,7 +237,16 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     setEditLabel(node.label);
   }, [selectedNodeId, nodeMap]);
 
+  const handleEditCancel = useCallback(() => {
+    editCancelledRef.current = true;
+    setEditingNodeId(null);
+  }, []);
+
   const handleFinishEdit = useCallback(() => {
+    if (editCancelledRef.current) {
+      editCancelledRef.current = false;
+      return;
+    }
     if (!editingNodeId || !editLabel.trim()) {
       setEditingNodeId(null);
       return;
@@ -290,10 +299,10 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
 
-      if (e.key === "Tab") {
+      if (e.key === "Enter") {
         e.preventDefault();
         handleAddChild();
-      } else if (e.key === "Enter") {
+      } else if (e.key === "Tab") {
         e.preventDefault();
         if (selectedNodeId && selectedNodeId !== "root") {
           handleAddSibling();
@@ -326,22 +335,28 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     return () => document.removeEventListener("keydown", handler);
   }, [editingNodeId, selectedNodeId, handleAddChild, handleAddSibling, handleDelete, handleStartEdit, navigateTo]);
 
-  // Focus edit input when editing starts
-  useEffect(() => {
-    if (editingNodeId && editRef.current) {
-      editRef.current.focus();
-      editRef.current.select();
-    }
-  }, [editingNodeId]);
 
   // Layout
   const layoutRoot = useMemo(() => buildLayoutTree(data), [data]);
   const { nodes, edges } = useMemo(() => layoutTree(layoutRoot, currentTheme), [layoutRoot, currentTheme]);
 
-  // Make selected node visually distinct
+  // Make selected node visually distinct + inject editing state
   const nodesWithSelection = useMemo(() =>
-    nodes.map((n) => ({ ...n, selected: n.id === selectedNodeId })),
-    [nodes, selectedNodeId],
+    nodes.map((n) => ({
+      ...n,
+      selected: n.id === selectedNodeId,
+      data: {
+        ...n.data,
+        ...(n.id === editingNodeId ? {
+          editing: true,
+          editLabel,
+          onEditChange: setEditLabel,
+          onEditFinish: handleFinishEdit,
+          onEditCancel: handleEditCancel,
+        } : {}),
+      },
+    })),
+    [nodes, selectedNodeId, editingNodeId, editLabel, handleFinishEdit, handleEditCancel],
   );
 
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
@@ -406,29 +421,9 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           )}
         </div>
         <span className="ml-auto text-[10px] text-muted-foreground truncate">
-          {selectedNode ? selectedNode.label : "Tab: child / Enter: sibling / Arrows: navigate"}
+          {selectedNode ? selectedNode.label : "Enter: child / Tab: sibling / Arrows: navigate"}
         </span>
       </div>
-
-      {/* Inline edit overlay */}
-      {editingNodeId && (
-        <div className="absolute top-0 left-0 right-0 bottom-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[1px]">
-          <div className="bg-card border border-border rounded-lg shadow-lg p-4 w-72">
-            <p className="text-xs text-muted-foreground mb-2">Rename node</p>
-            <input
-              ref={editRef}
-              className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring"
-              value={editLabel}
-              onChange={(e) => setEditLabel(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleFinishEdit();
-                if (e.key === "Escape") setEditingNodeId(null);
-              }}
-              onBlur={handleFinishEdit}
-            />
-          </div>
-        </div>
-      )}
 
       {/* ReactFlow canvas */}
       <div className="flex-1">

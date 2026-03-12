@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useRef, useEffect } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 export type MindMapThemeId = "lavender" | "ocean" | "forest" | "sunset" | "mono";
@@ -104,6 +104,11 @@ export interface MindMapNodeData {
   label: string;
   level: number;
   themeId?: MindMapThemeId;
+  editing?: boolean;
+  editLabel?: string;
+  onEditChange?: (value: string) => void;
+  onEditFinish?: () => void;
+  onEditCancel?: () => void;
 }
 
 const levelSizes = [
@@ -124,6 +129,14 @@ export const MindMapNode = memo(function MindMapNode({
   const colorIdx = Math.min(nodeData.level, theme.nodeColors.length - 1);
   const shape = shapeClass[theme.nodeShape];
   const isUnderline = theme.nodeShape === "underline";
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (nodeData.editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [nodeData.editing]);
 
   return (
     <div
@@ -136,7 +149,23 @@ export const MindMapNode = memo(function MindMapNode({
         position={Position.Left}
         className="bg-transparent! w-0! h-0! min-w-0! min-h-0! border-0! -left-px!"
       />
-      <span className="whitespace-nowrap">{nodeData.label}</span>
+      {nodeData.editing ? (
+        <input
+          ref={inputRef}
+          className="bg-transparent outline-none border-none text-inherit font-inherit whitespace-nowrap min-w-[3ch]"
+          style={{ width: `${Math.max((nodeData.editLabel ?? "").length, 3)}ch` }}
+          value={nodeData.editLabel ?? ""}
+          onChange={(e) => nodeData.onEditChange?.(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") nodeData.onEditFinish?.();
+            if (e.key === "Escape") nodeData.onEditCancel?.();
+          }}
+          onBlur={() => nodeData.onEditFinish?.()}
+        />
+      ) : (
+        <span className="whitespace-nowrap">{nodeData.label}</span>
+      )}
       <Handle
         type="source"
         position={Position.Right}
