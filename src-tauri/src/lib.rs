@@ -257,6 +257,64 @@ async fn save_image(app: tauri::AppHandle, data: Vec<u8>, ext: String) -> Result
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Upload image bytes to Firebase Storage via REST API (bypasses WKWebView CORS issues).
+/// Returns the public download URL.
+#[tauri::command]
+async fn upload_image_cloud(
+    data: Vec<u8>,
+    ext: String,
+    uid: String,
+    token: String,
+    bucket: String,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let object_path = format!("images/{}/{}.{}", uid, id, ext);
+    let content_type = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        _ => "application/octet-stream",
+    };
+
+    let upload_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o?uploadType=media&name={}",
+        urlencoding::encode(&bucket),
+        urlencoding::encode(&object_path),
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .post(&upload_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", content_type)
+        .body(data)
+        .send()
+        .await
+        .map_err(|e| format!("Upload request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    }
+
+    // Build the download URL
+    let encoded_path = urlencoding::encode(&object_path);
+    let download_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+        bucket, encoded_path
+    );
+
+    Ok(download_url)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -320,7 +378,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes])
+        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,6 +1,7 @@
 import { EditorView } from "@codemirror/view";
-import { uploadImage } from "@/services/firebase";
+import { auth } from "@/services/firebase";
 import { useAuthStore } from "@/stores/auth-store";
+import { invoke } from "@tauri-apps/api/core";
 
 function extFromMime(mime: string): string {
   const map: Record<string, string> = {
@@ -14,17 +15,31 @@ function extFromMime(mime: string): string {
   return map[mime] || "png";
 }
 
-/** Race a promise against a timeout */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Upload timeout")), ms)),
-  ]);
+const STORAGE_BUCKET = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "";
+
+/**
+ * Upload image bytes via Rust command (bypasses WKWebView CORS issues).
+ * Uses Firebase Storage REST API through reqwest.
+ */
+async function uploadViaRust(uid: string, data: Uint8Array, ext: string): Promise<string> {
+  const firebaseUser = auth.currentUser;
+  if (!firebaseUser) {
+    throw new Error("Firebase auth not ready");
+  }
+  const token = await firebaseUser.getIdToken();
+  const url = await invoke<string>("upload_image_cloud", {
+    data: Array.from(data),
+    ext,
+    uid,
+    token,
+    bucket: STORAGE_BUCKET,
+  });
+  return url;
 }
 
 /**
  * Cloud-only image processing for pasted images (raw bytes).
- * Uploads to Firebase Storage — fails with error if upload fails.
+ * Uploads to Firebase Storage via Rust — fails with error if upload fails.
  */
 export async function processImageFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
@@ -39,13 +54,13 @@ export async function processImageFile(file: File): Promise<string> {
     throw new Error("ログインが必要です");
   }
 
-  const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
+  const cloudUrl = await uploadViaRust(user.uid, bytes, ext);
   return `![${altText}](${cloudUrl})`;
 }
 
 /**
  * Cloud-only image processing for file paths (D&D, file picker).
- * Reads file bytes and uploads to Firebase Storage — fails with error if upload fails.
+ * Reads file bytes via Rust, uploads to Firebase Storage via Rust.
  */
 export async function processImagePath(path: string): Promise<string> {
   const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "image";
@@ -56,15 +71,16 @@ export async function processImagePath(path: string): Promise<string> {
     throw new Error("ログインが必要です");
   }
 
-  const { readFile } = await import("@tauri-apps/plugin-fs");
-  const bytes = await readFile(path);
-  const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
+  // Read file bytes via Rust (no FS plugin permission issues)
+  const data = await invoke<number[]>("read_file_bytes", { path });
+  const bytes = new Uint8Array(data);
+  const cloudUrl = await uploadViaRust(user.uid, bytes, ext);
   return `![${name}](${cloudUrl})`;
 }
 
 /**
  * CodeMirror extension that handles image paste and drag-and-drop.
- * Uploads images to Firebase Storage (cloud-only) and inserts markdown image syntax.
+ * Uploads images to Firebase Storage (cloud-only) via Rust and inserts markdown image syntax.
  */
 export const imagePaste = EditorView.domEventHandlers({
   paste(event, view) {
