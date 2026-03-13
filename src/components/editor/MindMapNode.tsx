@@ -108,7 +108,6 @@ export interface MindMapNodeData {
   editLabel?: string;
   selectAll?: boolean;
   onEditChange?: (value: string) => void;
-  onEditFinish?: () => void;
   onEditCancel?: () => void;
   onTabInEdit?: () => void;
   onEnterInEdit?: () => void;
@@ -134,10 +133,9 @@ export const MindMapNode = memo(function MindMapNode({
   const isUnderline = theme.nodeShape === "underline";
   const inputRef = useRef<HTMLInputElement>(null);
   const composingRef = useRef(false);
-  // Suppress onBlur when Tab/Enter/Escape caused the blur (prevents stale save)
-  const suppressBlurRef = useRef(false);
 
-  // Focus input with retry — ReactFlow may steal focus or delay node rendering
+  // Focus input with retry — ReactFlow may steal focus or delay node rendering.
+  // autoFocus handles the initial focus; this retry loop is a backup.
   useEffect(() => {
     if (!nodeData.editing) return;
     const input = inputRef.current;
@@ -150,7 +148,6 @@ export const MindMapNode = memo(function MindMapNode({
       if (cancelled || !inputRef.current) return;
       inputRef.current.focus();
       if (document.activeElement === inputRef.current) {
-        // Focus succeeded
         if (nodeData.selectAll) {
           inputRef.current.select();
         } else {
@@ -158,13 +155,11 @@ export const MindMapNode = memo(function MindMapNode({
           inputRef.current.setSelectionRange(len, len);
         }
       } else if (++attempts < 8) {
-        // Focus failed (ReactFlow stole it), retry next frame
         requestAnimationFrame(tryFocus);
       }
     };
     requestAnimationFrame(tryFocus);
     return () => { cancelled = true; };
-    // Only run when editing state starts — not on every editLabel change
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeData.editing]);
 
@@ -182,6 +177,7 @@ export const MindMapNode = memo(function MindMapNode({
       {nodeData.editing ? (
         <input
           ref={inputRef}
+          autoFocus
           className="bg-transparent outline-none border-none text-inherit font-inherit whitespace-nowrap min-w-[3ch] w-[8ch]"
           defaultValue={nodeData.editLabel ?? ""}
           onCompositionStart={() => { composingRef.current = true; }}
@@ -193,7 +189,6 @@ export const MindMapNode = memo(function MindMapNode({
             if (!composingRef.current) {
               nodeData.onEditChange?.((e.target as HTMLInputElement).value);
             }
-            // Auto-size input width
             const el = e.target as HTMLInputElement;
             el.style.width = `${Math.max(el.value.length + 1, 3)}ch`;
           }}
@@ -202,22 +197,12 @@ export const MindMapNode = memo(function MindMapNode({
             if (composingRef.current) return;
             if (e.key === "Tab") {
               e.preventDefault();
-              suppressBlurRef.current = true;
               nodeData.onTabInEdit?.();
             } else if (e.key === "Enter") {
-              suppressBlurRef.current = true;
               nodeData.onEnterInEdit?.();
             } else if (e.key === "Escape") {
-              suppressBlurRef.current = true;
               nodeData.onEditCancel?.();
             }
-          }}
-          onBlur={() => {
-            if (suppressBlurRef.current) {
-              suppressBlurRef.current = false;
-              return;
-            }
-            if (!composingRef.current) nodeData.onEditFinish?.();
           }}
         />
       ) : (

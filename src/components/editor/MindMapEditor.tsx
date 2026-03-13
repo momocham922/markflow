@@ -187,7 +187,6 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     editLabelRef.current = v;
   }, []);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const editCancelledRef = useRef(false);
   const { themeSettings, setThemeSettings } = useAppStore();
   const currentTheme = (themeSettings.mindMapTheme || "lavender") as MindMapThemeId;
 
@@ -221,9 +220,6 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     setEditingNodeId(newId);
     selectAllRef.current = true;
     updateEditLabel("New topic");
-    // Reset editCancelled so the new node's eventual onBlur works normally
-    // (setTimeout ensures this runs AFTER React processes the stale onBlur from the old input)
-    setTimeout(() => { editCancelledRef.current = false; }, 0);
   }, [data, save, updateEditLabel]);
 
   const handleAddChild = useCallback(() => {
@@ -274,17 +270,13 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   }, [selectedNodeId, updateEditLabel]);
 
   const handleEditCancel = useCallback(() => {
-    editCancelledRef.current = true;
     setEditingNodeId(null);
   }, []);
 
   const handleFinishEdit = useCallback(() => {
-    if (editCancelledRef.current) {
-      editCancelledRef.current = false;
-      return;
-    }
+    if (!editingNodeId) return;
     const label = editLabelRef.current;
-    if (!editingNodeId || !label.trim()) {
+    if (!label.trim()) {
       setEditingNodeId(null);
       return;
     }
@@ -308,9 +300,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const handleTabInEdit = useCallback(() => {
     const nodeId = editingNodeId;
     if (!nodeId) return;
-    editCancelledRef.current = true;
     const nodes = applyEdit();
-    // addChildTo sets editingNodeId to the new node — no intermediate null needed
     addChildTo(nodeId, nodes);
   }, [editingNodeId, applyEdit, addChildTo]);
 
@@ -318,8 +308,6 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const handleEnterInEdit = useCallback(() => {
     const nodeId = editingNodeId;
     if (!nodeId) return;
-    // Prevent stale onBlur from overwriting new data
-    editCancelledRef.current = true;
     const nodes = applyEdit();
     if (nodeId === "root") {
       // Root can't have siblings, just finish edit
@@ -430,8 +418,6 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const { nodes, edges } = useMemo(() => layoutTree(layoutRoot, currentTheme), [layoutRoot, currentTheme]);
 
   // Stable refs for editing callbacks — avoids re-rendering all nodes on every keystroke
-  const handleFinishEditRef = useRef(handleFinishEdit);
-  handleFinishEditRef.current = handleFinishEdit;
   const handleEditCancelRef = useRef(handleEditCancel);
   handleEditCancelRef.current = handleEditCancel;
   const handleTabInEditRef = useRef(handleTabInEdit);
@@ -440,7 +426,6 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   handleEnterInEditRef.current = handleEnterInEdit;
 
   const stableOnEditChange = useCallback((v: string) => updateEditLabel(v), [updateEditLabel]);
-  const stableOnEditFinish = useCallback(() => handleFinishEditRef.current(), []);
   const stableOnEditCancel = useCallback(() => handleEditCancelRef.current(), []);
   const stableOnTabInEdit = useCallback(() => handleTabInEditRef.current(), []);
   const stableOnEnterInEdit = useCallback(() => handleEnterInEditRef.current(), []);
@@ -457,14 +442,13 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           editLabel: editLabelRef.current,
           selectAll: selectAllRef.current,
           onEditChange: stableOnEditChange,
-          onEditFinish: stableOnEditFinish,
           onEditCancel: stableOnEditCancel,
           onTabInEdit: stableOnTabInEdit,
           onEnterInEdit: stableOnEnterInEdit,
         } : {}),
       },
     })),
-    [nodes, selectedNodeId, editingNodeId, stableOnEditChange, stableOnEditFinish, stableOnEditCancel, stableOnTabInEdit, stableOnEnterInEdit],
+    [nodes, selectedNodeId, editingNodeId, stableOnEditChange, stableOnEditCancel, stableOnTabInEdit, stableOnEnterInEdit],
   );
 
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
@@ -552,9 +536,10 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           selectionKeyCode={null}
           multiSelectionKeyCode={null}
           onNodeClick={(_e, node) => {
+            if (editingNodeId && node.id !== editingNodeId) handleFinishEdit();
             setSelectedNodeId(node.id);
           }}
-          onPaneClick={() => { setSelectedNodeId(null); setThemeMenuOpen(false); }}
+          onPaneClick={() => { handleFinishEdit(); setSelectedNodeId(null); setThemeMenuOpen(false); }}
           onNodeDoubleClick={(_e, node) => {
             setSelectedNodeId(node.id);
             const n = nodeMap.get(node.id);

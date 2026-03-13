@@ -435,16 +435,16 @@ export function Editor() {
   }, []);
 
   // Handle Tauri file drag-and-drop for images
-  // Uses webview-scoped onDragDropEvent() — requires dragDropEnabled: true in tauri.conf.json
+  // Uses window-scoped onDragDropEvent() — dragDropEnabled: true emits events at window level
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     const imageExts = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
 
     (async () => {
       try {
-        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-        const webview = getCurrentWebview();
-        unlisten = await webview.onDragDropEvent(async (event) => {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        unlisten = await win.onDragDropEvent(async (event) => {
           if (event.payload.type !== "drop") return;
           const view = viewRef.current;
           if (!view) return;
