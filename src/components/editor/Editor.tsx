@@ -13,7 +13,7 @@ import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
-import { imagePaste } from "@/extensions/image-paste";
+import { imagePaste, processImageFile } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
@@ -431,6 +431,71 @@ export function Editor() {
       setView(null);
       viewRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Handle Tauri native file drag-and-drop for images
+  // WKWebView cannot receive browser-native drop events from Finder,
+  // so we must use Tauri's event API with dragDropEnabled: true.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const imageExts = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{ paths: string[]; position: { x: number; y: number } }>(
+          "tauri://drag-drop",
+          async (event) => {
+            const view = viewRef.current;
+            if (!view) return;
+            const { paths, position } = event.payload;
+            if (!paths?.length) return;
+
+            const imagePaths = paths.filter((p) => {
+              const ext = p.split(".").pop()?.toLowerCase() ?? "";
+              return imageExts.has(ext);
+            });
+            if (!imagePaths.length) return;
+
+            const pos = view.posAtCoords({ x: position.x, y: position.y })
+              ?? view.state.selection.main.head;
+            const placeholder = "![Uploading image...]()";
+            view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
+
+            try {
+              const markdowns = await Promise.all(imagePaths.map(async (p) => {
+                // Read file via Rust command (bypasses FS plugin scope issues)
+                const bytes = await invoke<number[]>("read_file_bytes", { path: p });
+                const ext = p.split(".").pop()?.toLowerCase() ?? "png";
+                const name = p.split("/").pop() ?? "image.png";
+                const mime = ext === "svg" ? "image/svg+xml" : `image/${ext === "jpg" ? "jpeg" : ext}`;
+                const file = new File([new Uint8Array(bytes)], name, { type: mime });
+                return processImageFile(file);
+              }));
+              const v = viewRef.current;
+              if (v) {
+                const doc = v.state.doc.toString();
+                const idx = doc.indexOf(placeholder);
+                if (idx >= 0) {
+                  v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") } });
+                }
+              }
+            } catch {
+              const v = viewRef.current;
+              if (v) {
+                const doc = v.state.doc.toString();
+                const idx = doc.indexOf(placeholder);
+                if (idx >= 0) {
+                  v.dispatch({ changes: { from: idx, to: idx + placeholder.length + 1, insert: "" } });
+                }
+              }
+            }
+          },
+        );
+      } catch { /* not in Tauri */ }
+    })();
+    return () => { unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

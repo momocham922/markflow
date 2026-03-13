@@ -27,7 +27,7 @@ function extFromName(name: string): string {
  * Upload an image to Firebase Storage and return the markdown to insert.
  * Falls back to local save via Tauri if not logged in.
  */
-async function processImageFile(file: File): Promise<string> {
+export async function processImageFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   const ext = file.name ? extFromName(file.name) : extFromMime(file.type);

@@ -162,7 +162,8 @@ interface MindMapEditorProps {
   onTitleChange: (title: string) => void;
 }
 
-/** Fixed-position input overlay rendered OUTSIDE ReactFlow to avoid focus theft */
+/** Fixed-position input overlay rendered OUTSIDE ReactFlow to avoid focus theft.
+ *  Uses solid background + colored border so it's unmissable. */
 function EditOverlay({
   nodeId,
   initialLabel,
@@ -185,33 +186,28 @@ function EditOverlay({
   const inputRef = useRef<HTMLInputElement>(null);
   const [pos, setPos] = useState<{
     left: number; top: number; width: number; height: number;
-    borderRadius: string; color: string; fontSize: string; fontWeight: string;
   } | null>(null);
   const committedRef = useRef(false);
   const composingRef = useRef(false);
 
   useEffect(() => {
     const tryPosition = () => {
-      const wrapper = document.querySelector(`.react-flow__node[data-id="${nodeId}"]`);
-      if (!wrapper) return false;
-      const el = (wrapper.firstElementChild as HTMLElement) ?? wrapper;
-      const rect = el.getBoundingClientRect();
-      const computed = window.getComputedStyle(el);
-      setPos({
-        left: rect.left, top: rect.top, width: rect.width, height: rect.height,
-        borderRadius: computed.borderRadius, color: computed.color,
-        fontSize: computed.fontSize, fontWeight: computed.fontWeight,
-      });
+      const el = document.querySelector(`[data-id="${nodeId}"]`);
+      if (!el) return false;
+      const inner = (el.firstElementChild as HTMLElement) ?? el;
+      const rect = inner.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      setPos({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
       return true;
     };
     if (tryPosition()) return;
     let cancelled = false;
     let attempts = 0;
     const retry = () => {
-      if (cancelled || attempts++ > 10) return;
-      if (!tryPosition()) requestAnimationFrame(retry);
+      if (cancelled || attempts++ > 20) return;
+      setTimeout(() => { if (!cancelled && !tryPosition()) retry(); }, 30);
     };
-    requestAnimationFrame(retry);
+    retry();
     return () => { cancelled = true; };
   }, [nodeId]);
 
@@ -254,22 +250,21 @@ function EditOverlay({
       onBlur={() => { if (!committedRef.current) onFinish(); }}
       style={{
         position: "fixed",
-        left: pos.left,
-        top: pos.top,
-        width: pos.width,
-        height: pos.height,
+        left: pos.left - 2,
+        top: pos.top - 2,
+        width: pos.width + 4,
+        height: pos.height + 4,
         zIndex: 9999,
-        background: "transparent",
-        border: "none",
-        outline: "2px solid oklch(0.65 0.15 250 / 0.6)",
-        outlineOffset: "1px",
-        borderRadius: pos.borderRadius,
-        padding: 0,
+        background: "var(--background, white)",
+        border: "2px solid oklch(0.55 0.2 260)",
+        borderRadius: 6,
+        padding: "0 8px",
         textAlign: "center",
-        color: pos.color,
-        fontSize: pos.fontSize,
-        fontWeight: pos.fontWeight,
+        color: "var(--foreground, black)",
+        fontSize: 13,
+        fontWeight: 500,
         boxSizing: "border-box",
+        outline: "none",
       }}
     />
   );

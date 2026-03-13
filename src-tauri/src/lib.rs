@@ -199,6 +199,11 @@ async fn print_html(html: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn save_image(app: tauri::AppHandle, data: Vec<u8>, ext: String) -> Result<String, String> {
     use tauri::Manager;
 
@@ -286,7 +291,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image])
+        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image, read_file_bytes])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
