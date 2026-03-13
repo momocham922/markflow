@@ -23,10 +23,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Cloud-first image processing for pasted images (raw bytes).
- * 1. Save locally via Rust (fast, reliable)
- * 2. Upload to Firebase Storage with timeout
- * 3. Return cloud URL if successful, local asset URL as fallback
+ * Cloud-only image processing for pasted images (raw bytes).
+ * Uploads to Firebase Storage — fails with error if upload fails.
  */
 export async function processImageFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
@@ -36,60 +34,37 @@ export async function processImageFile(file: File): Promise<string> {
     : extFromMime(file.type);
   const altText = file.name?.replace(/\.[^.]+$/, "") || "image";
 
-  // Save locally first (immediate, reliable)
-  const { invoke, convertFileSrc } = await import("@tauri-apps/api/core");
-  const data = Array.from(bytes);
-  const savedPath = await invoke<string>("save_image", { data, ext });
-  const localUrl = convertFileSrc(savedPath);
-
-  // Cloud-first: upload to Firebase Storage with timeout
   const user = useAuthStore.getState().user;
-  if (user) {
-    try {
-      const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
-      return `![${altText}](${cloudUrl})`;
-    } catch {
-      // Cloud upload failed or timed out — use local URL
-    }
+  if (!user) {
+    throw new Error("ログインが必要です");
   }
 
-  return `![${altText}](${localUrl})`;
+  const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
+  return `![${altText}](${cloudUrl})`;
 }
 
 /**
- * Cloud-first image processing for file paths (D&D, file picker).
- * 1. Copy to app data via Rust (fast file copy, no byte serialization)
- * 2. Read bytes and upload to Firebase Storage with timeout
- * 3. Return cloud URL if successful, local asset URL as fallback
+ * Cloud-only image processing for file paths (D&D, file picker).
+ * Reads file bytes and uploads to Firebase Storage — fails with error if upload fails.
  */
 export async function processImagePath(path: string): Promise<string> {
   const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "image";
   const ext = path.split(".").pop()?.toLowerCase() || "png";
 
-  // Copy locally first (fast, reliable)
-  const { invoke, convertFileSrc } = await import("@tauri-apps/api/core");
-  const savedPath = await invoke<string>("copy_image_file", { source: path });
-  const localUrl = convertFileSrc(savedPath);
-
-  // Cloud-first: upload to Firebase Storage with timeout
   const user = useAuthStore.getState().user;
-  if (user) {
-    try {
-      const { readFile } = await import("@tauri-apps/plugin-fs");
-      const bytes = await readFile(savedPath);
-      const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
-      return `![${name}](${cloudUrl})`;
-    } catch {
-      // Cloud upload failed or timed out — use local URL
-    }
+  if (!user) {
+    throw new Error("ログインが必要です");
   }
 
-  return `![${name}](${localUrl})`;
+  const { readFile } = await import("@tauri-apps/plugin-fs");
+  const bytes = await readFile(path);
+  const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
+  return `![${name}](${cloudUrl})`;
 }
 
 /**
  * CodeMirror extension that handles image paste and drag-and-drop.
- * Uploads images to Firebase Storage (cloud-first) and inserts markdown image syntax.
+ * Uploads images to Firebase Storage (cloud-only) and inserts markdown image syntax.
  */
 export const imagePaste = EditorView.domEventHandlers({
   paste(event, view) {
@@ -118,12 +93,13 @@ export const imagePaste = EditorView.domEventHandlers({
               });
             }
           })
-          .catch(() => {
+          .catch((err) => {
             const doc = view.state.doc.toString();
             const idx = doc.indexOf(placeholder);
             if (idx >= 0) {
+              const errMsg = `![Upload failed: ${err?.message || "Unknown error"}]()`;
               view.dispatch({
-                changes: { from: idx, to: idx + placeholder.length, insert: "" },
+                changes: { from: idx, to: idx + placeholder.length, insert: errMsg },
               });
             }
           });
