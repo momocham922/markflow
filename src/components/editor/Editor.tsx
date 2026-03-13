@@ -185,13 +185,14 @@ export function Editor() {
       if (!activeDocId) return;
       if (!content.trim()) return;
       const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
-      if (!activeDoc?.titlePinned) {
+      // Skip auto-title for pinned, shared, or team docs
+      if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
         const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, activeDoc?.isShared, activeDoc?.teamId, updateDocument],
   );
 
   // Callback: sync Y.Text content → frozen value BEFORE yCollab activates.
@@ -388,13 +389,14 @@ export function Editor() {
       if (!activeDocId) return;
       if (!value.trim()) return;
       const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
-      if (!activeDoc?.titlePinned) {
+      // Skip auto-title for pinned, shared, or team docs
+      if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
         const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, activeDoc?.isShared, activeDoc?.teamId, updateDocument],
   );
 
   const onCreateEditor = useCallback(

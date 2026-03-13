@@ -315,6 +315,47 @@ async fn upload_image_cloud(
     Ok(download_url)
 }
 
+/// Upload image from a file path — reads file and uploads in Rust (no IPC byte transfer).
+#[tauri::command]
+async fn upload_image_from_path(
+    path: String,
+    uid: String,
+    token: String,
+    bucket: String,
+) -> Result<String, String> {
+    let src = std::path::Path::new(&path);
+    if !src.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+
+    let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+    upload_image_cloud(data, ext, uid, token, bucket).await
+}
+
+/// Upload image from base64 string — avoids massive JSON number array over IPC.
+#[tauri::command]
+async fn upload_image_from_base64(
+    base64_data: String,
+    ext: String,
+    uid: String,
+    token: String,
+    bucket: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&base64_data)
+        .map_err(|e| format!("Base64 decode failed: {}", e))?;
+
+    upload_image_cloud(data, ext, uid, token, bucket).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -378,7 +419,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud])
+        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

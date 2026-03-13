@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.2.19"
+version = "0.2.20"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -25,3 +25,4 @@ reqwest = { version = "0.12", features = ["rustls-tls"], default-features = fals
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"

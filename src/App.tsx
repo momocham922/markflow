@@ -142,6 +142,40 @@ function App() {
     return cleanup;
   }, [initAuth]);
 
+  // Sync before close — flush DB + cloud sync before window closes
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        unlisten = await win.onCloseRequested(async (event) => {
+          event.preventDefault();
+          try {
+            // Flush pending DB saves
+            const { flushPendingSaves } = await import("@/stores/app-store");
+            flushPendingSaves();
+            // Sync to cloud
+            const authState = useAuthStore.getState();
+            if (authState.user) {
+              await Promise.race([
+                authState.syncToCloud(),
+                new Promise((resolve) => setTimeout(resolve, 5000)),
+              ]);
+            }
+          } catch {
+            // Best effort — close anyway
+          }
+          const { getCurrentWindow: getWin } = await import("@tauri-apps/api/window");
+          await getWin().destroy();
+        });
+      } catch {
+        // Not in Tauri
+      }
+    })();
+    return () => { unlisten?.(); };
+  }, []);
+
   // Auto-update check on startup — only checks, never auto-installs
   useEffect(() => {
     const timer = setTimeout(async () => {

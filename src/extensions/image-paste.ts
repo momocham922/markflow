@@ -17,29 +17,47 @@ function extFromMime(mime: string): string {
 
 const STORAGE_BUCKET = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "";
 
-/**
- * Upload image bytes via Rust command (bypasses WKWebView CORS issues).
- * Uses Firebase Storage REST API through reqwest.
- */
-async function uploadViaRust(uid: string, data: Uint8Array, ext: string): Promise<string> {
+async function getFirebaseToken(): Promise<string> {
   const firebaseUser = auth.currentUser;
-  if (!firebaseUser) {
-    throw new Error("Firebase auth not ready");
+  if (!firebaseUser) throw new Error("Firebase auth not ready");
+  return firebaseUser.getIdToken();
+}
+
+/**
+ * Upload image from a file path — Rust reads and uploads (no byte IPC).
+ */
+async function uploadFromPath(uid: string, path: string): Promise<string> {
+  const token = await getFirebaseToken();
+  return invoke<string>("upload_image_from_path", {
+    path,
+    uid,
+    token,
+    bucket: STORAGE_BUCKET,
+  });
+}
+
+/**
+ * Upload image from raw bytes — base64 encode to avoid JSON array overhead.
+ */
+async function uploadFromBytes(uid: string, data: Uint8Array, ext: string): Promise<string> {
+  const token = await getFirebaseToken();
+  // Convert to base64 in JS — much smaller than JSON number array
+  let binary = "";
+  for (let i = 0; i < data.length; i++) {
+    binary += String.fromCharCode(data[i]);
   }
-  const token = await firebaseUser.getIdToken();
-  const url = await invoke<string>("upload_image_cloud", {
-    data: Array.from(data),
+  const base64Data = btoa(binary);
+  return invoke<string>("upload_image_from_base64", {
+    base64Data,
     ext,
     uid,
     token,
     bucket: STORAGE_BUCKET,
   });
-  return url;
 }
 
 /**
  * Cloud-only image processing for pasted images (raw bytes).
- * Uploads to Firebase Storage via Rust — fails with error if upload fails.
  */
 export async function processImageFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
@@ -50,37 +68,28 @@ export async function processImageFile(file: File): Promise<string> {
   const altText = file.name?.replace(/\.[^.]+$/, "") || "image";
 
   const user = useAuthStore.getState().user;
-  if (!user) {
-    throw new Error("ログインが必要です");
-  }
+  if (!user) throw new Error("ログインが必要です");
 
-  const cloudUrl = await uploadViaRust(user.uid, bytes, ext);
+  const cloudUrl = await uploadFromBytes(user.uid, bytes, ext);
   return `![${altText}](${cloudUrl})`;
 }
 
 /**
  * Cloud-only image processing for file paths (D&D, file picker).
- * Reads file bytes via Rust, uploads to Firebase Storage via Rust.
+ * Everything happens in Rust — no byte transfer over IPC.
  */
 export async function processImagePath(path: string): Promise<string> {
   const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "image";
-  const ext = path.split(".").pop()?.toLowerCase() || "png";
 
   const user = useAuthStore.getState().user;
-  if (!user) {
-    throw new Error("ログインが必要です");
-  }
+  if (!user) throw new Error("ログインが必要です");
 
-  // Read file bytes via Rust (no FS plugin permission issues)
-  const data = await invoke<number[]>("read_file_bytes", { path });
-  const bytes = new Uint8Array(data);
-  const cloudUrl = await uploadViaRust(user.uid, bytes, ext);
+  const cloudUrl = await uploadFromPath(user.uid, path);
   return `![${name}](${cloudUrl})`;
 }
 
 /**
  * CodeMirror extension that handles image paste and drag-and-drop.
- * Uploads images to Firebase Storage (cloud-only) via Rust and inserts markdown image syntax.
  */
 export const imagePaste = EditorView.domEventHandlers({
   paste(event, view) {

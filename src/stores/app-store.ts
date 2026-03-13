@@ -119,7 +119,7 @@ function cloudSyncDebounced() {
 }
 
 // Flush all pending saves immediately (called on app close)
-function flushPendingSaves() {
+export function flushPendingSaves() {
   for (const [id, doc] of pendingDocs) {
     const timer = saveTimers.get(id);
     if (timer) clearTimeout(timer);
