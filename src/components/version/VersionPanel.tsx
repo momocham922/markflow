@@ -25,6 +25,7 @@ interface Version {
   title: string;
   message: string | null;
   createdAt: number;
+  ownerName?: string;
 }
 
 export interface DiffState {
@@ -54,7 +55,7 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
     if (!activeDocId) return;
     try {
       const rows = await db.getVersions(activeDocId);
-      const localVersions = rows.map((r) => ({
+      const localVersions: Version[] = rows.map((r) => ({
         id: r.id,
         documentId: r.document_id,
         content: r.content,
@@ -77,6 +78,7 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
                 title: cv.title,
                 message: cv.message,
                 createdAt: cv.createdAt,
+                ownerName: cv.ownerName,
               });
             }
           }
@@ -248,6 +250,7 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
                       )}
                     </div>
                     <div className="text-[10px] text-muted-foreground">
+                      {v.ownerName && <span className="mr-1">{v.ownerName}</span>}
                       {formatTime(v.createdAt)}
                     </div>
                   </div>

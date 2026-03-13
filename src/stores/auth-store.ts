@@ -160,6 +160,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   isShared: true,
                   content: fullDoc.content,
                   title: fullDoc.title,
+                  titlePinned: true, // preserve cloud title — prevent auto-derive overwrite
                   updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
                 });
               } else {
@@ -210,6 +211,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                     teamId: team.id,
                     content: fullDoc.content,
                     title: fullDoc.title,
+                    titlePinned: true, // preserve cloud title — prevent auto-derive overwrite
                     updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
                   });
                 } else {

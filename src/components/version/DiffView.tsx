@@ -33,7 +33,7 @@ export function DiffView({ oldText, newText, fullPage }: DiffViewProps) {
         className={`rounded-md border border-border overflow-hidden font-mono leading-relaxed ${
           fullPage
             ? "text-sm overflow-y-auto"
-            : "text-[11px] max-h-[300px] overflow-y-auto"
+            : "text-[10px] max-h-45 overflow-y-auto"
         }`}
       >
         {changes.map((change: Change, i: number) => {

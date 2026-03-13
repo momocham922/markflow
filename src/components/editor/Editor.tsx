@@ -13,7 +13,7 @@ import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
-import { imagePaste, processImageFile } from "@/extensions/image-paste";
+import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
@@ -464,15 +464,7 @@ export function Editor() {
             view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
 
             try {
-              const markdowns = await Promise.all(imagePaths.map(async (p) => {
-                // Read file via Rust command (bypasses FS plugin scope issues)
-                const bytes = await invoke<number[]>("read_file_bytes", { path: p });
-                const ext = p.split(".").pop()?.toLowerCase() ?? "png";
-                const name = p.split("/").pop() ?? "image.png";
-                const mime = ext === "svg" ? "image/svg+xml" : `image/${ext === "jpg" ? "jpeg" : ext}`;
-                const file = new File([new Uint8Array(bytes)], name, { type: mime });
-                return processImageFile(file);
-              }));
+              const markdowns = await Promise.all(imagePaths.map((p) => processImagePath(p)));
               const v = viewRef.current;
               if (v) {
                 const doc = v.state.doc.toString();
