@@ -72,6 +72,12 @@ async function ensureMigrations(database: Database) {
       title TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     )`);
+
+    // deleted_docs table (migration v9) — tracks locally deleted docs to prevent re-sync
+    await database.execute(`CREATE TABLE IF NOT EXISTS deleted_docs (
+      doc_id TEXT PRIMARY KEY,
+      deleted_at INTEGER NOT NULL
+    )`);
   } catch (err) {
     console.error("[db] migration repair failed:", err);
   }
@@ -253,6 +259,30 @@ export async function deleteSnapshot(documentId: string): Promise<void> {
     "DELETE FROM document_snapshots WHERE document_id = $1",
     [documentId],
   );
+}
+
+// ─── Deleted docs tracking ───────────────────────────────────
+
+export async function trackDeletedDoc(docId: string): Promise<void> {
+  const database = await getDb();
+  await database.execute(
+    `INSERT INTO deleted_docs (doc_id, deleted_at) VALUES ($1, $2)
+     ON CONFLICT(doc_id) DO UPDATE SET deleted_at = $2`,
+    [docId, Date.now()],
+  );
+}
+
+export async function getDeletedDocIds(): Promise<Set<string>> {
+  const database = await getDb();
+  const rows = await database.select<{ doc_id: string }[]>(
+    "SELECT doc_id FROM deleted_docs",
+  );
+  return new Set(rows.map((r) => r.doc_id));
+}
+
+export async function clearDeletedDoc(docId: string): Promise<void> {
+  const database = await getDb();
+  await database.execute("DELETE FROM deleted_docs WHERE doc_id = $1", [docId]);
 }
 
 /**

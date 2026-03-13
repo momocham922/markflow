@@ -308,6 +308,26 @@ export async function deleteVersionFromCloud(versionId: string): Promise<void> {
   await deleteDoc(doc(firestore, VERSIONS_COLLECTION, versionId));
 }
 
+// ─── User settings (theme, preferences) ─────────────────────
+
+const SETTINGS_COLLECTION = "user_settings";
+
+export async function saveUserSettingsToFirestore(
+  uid: string,
+  settings: Record<string, unknown>,
+): Promise<void> {
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid);
+  await setDoc(ref, { ...settings, updatedAt: serverTimestamp() }, { merge: true });
+}
+
+export async function fetchUserSettings(
+  uid: string,
+): Promise<Record<string, unknown> | null> {
+  const snap = await getDoc(doc(firestore, SETTINGS_COLLECTION, uid));
+  if (!snap.exists()) return null;
+  return snap.data() as Record<string, unknown>;
+}
+
 // ─── Image upload (Firebase Storage) ────────────────────────
 
 const storage = getStorage(app);

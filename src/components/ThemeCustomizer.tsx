@@ -264,6 +264,7 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
               setThemeSettings({
                 previewTheme: "github",
                 editorTheme: "default",
+                mindMapTheme: "lavender",
                 customPreviewCss: "",
               })
             }

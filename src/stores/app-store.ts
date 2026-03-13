@@ -364,6 +364,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     try {
       await db.deleteDocument(id);
+      // Track deletion so syncFromCloud won't re-add this doc
+      await db.trackDeletedDoc(id);
     } catch {
       // Ignore if no DB
     }
