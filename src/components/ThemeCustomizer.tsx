@@ -11,8 +11,7 @@ import { useAppStore, type CustomPreviewTheme } from "@/stores/app-store";
 import { previewThemeList } from "@/styles/preview-themes";
 import { editorThemeList } from "@/styles/editor-themes";
 import { Check, Upload, Download, X } from "lucide-react";
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { getPlatform } from "@/platform";
 
 type Tab = "presets" | "custom";
 
@@ -64,11 +63,12 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
 
   const handleExportTheme = useCallback(async (theme: CustomPreviewTheme) => {
     const json = JSON.stringify(theme, null, 2);
-    const path = await save({
+    const platform = await getPlatform();
+    const path = await platform.showSaveDialog({
       defaultPath: `${theme.id}.json`,
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
-    if (path) await writeTextFile(path, json);
+    if (path) await platform.writeTextFile(path, json);
   }, []);
 
   const handleDownloadTemplate = useCallback(async () => {
@@ -95,11 +95,12 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
       },
     };
     const json = JSON.stringify(template, null, 2);
-    const path = await save({
+    const platform = await getPlatform();
+    const path = await platform.showSaveDialog({
       defaultPath: "theme-template.json",
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
-    if (path) await writeTextFile(path, json);
+    if (path) await platform.writeTextFile(path, json);
   }, []);
 
   return (

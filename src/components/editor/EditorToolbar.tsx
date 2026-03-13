@@ -248,13 +248,13 @@ export function EditorToolbar({
               <Button variant="ghost" size="icon" className="h-6 w-6" onClick={async () => {
                 if (!view) return;
                 try {
-                  const { open } = await import("@tauri-apps/plugin-dialog");
-                  const path = await open({
-                    multiple: false,
+                  const { getPlatform } = await import("@/platform");
+                  const platform = await getPlatform();
+                  const paths = await platform.showOpenDialog({
                     filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"] }],
                   });
-                  if (!path) return;
-                  const filePath = typeof path === "string" ? path : path[0];
+                  if (!paths || paths.length === 0) return;
+                  const filePath = paths[0];
                   if (!filePath) return;
                   const md = await processImagePath(filePath);
                   const pos = view.state.selection.main.head;

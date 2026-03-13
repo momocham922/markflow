@@ -18,9 +18,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
-import { invoke } from "@tauri-apps/api/core";
+import { getPlatform } from "@/platform";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -145,36 +143,26 @@ function App() {
 
   // Sync before close — flush DB + cloud sync before window closes
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let closing = false;
+    let unlisten: (() => void) | null = null;
     (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const win = getCurrentWindow();
-        unlisten = await win.onCloseRequested(async (event) => {
-          if (closing) return;
-          closing = true;
-          event.preventDefault();
-          const authState = useAuthStore.getState();
-          const needsSync = !!authState.user;
-          if (needsSync) setClosingSyncVisible(true);
-          try {
-            const { flushPendingSaves } = await import("@/stores/app-store");
-            flushPendingSaves();
-            if (needsSync) {
-              await Promise.race([
-                authState.syncToCloud(),
-                new Promise((resolve) => setTimeout(resolve, 3000)),
-              ]);
-            }
-          } catch {
-            // Best effort
+      const platform = await getPlatform();
+      unlisten = await platform.onWindowClose(async () => {
+        const authState = useAuthStore.getState();
+        const needsSync = !!authState.user;
+        if (needsSync) setClosingSyncVisible(true);
+        try {
+          const { flushPendingSaves } = await import("@/stores/app-store");
+          flushPendingSaves();
+          if (needsSync) {
+            await Promise.race([
+              authState.syncToCloud(),
+              new Promise((resolve) => setTimeout(resolve, 3000)),
+            ]);
           }
-          await win.destroy();
-        });
-      } catch {
-        // Not in Tauri
-      }
+        } catch {
+          // Best effort
+        }
+      });
     })();
     return () => { unlisten?.(); };
   }, []);
@@ -183,8 +171,8 @@ function App() {
   useEffect(() => {
     const timer = setTimeout(async () => {
       try {
-        const { check } = await import("@tauri-apps/plugin-updater");
-        const update = await check();
+        const platform = await getPlatform();
+        const update = await platform.checkForUpdate();
         if (update) {
           setUpdateInfo({ version: update.version, update });
         }
@@ -200,10 +188,10 @@ function App() {
     setUpdateStatus("downloading");
     setUpdateError("");
     try {
-      const update = updateInfo.update as { downloadAndInstall: () => Promise<void> };
-      await update.downloadAndInstall();
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await relaunch();
+      const update = updateInfo.update as { install: () => Promise<void> };
+      await update.install();
+      const platform = await getPlatform();
+      await platform.relaunch();
     } catch (err) {
       setUpdateStatus("error");
       setUpdateError(err instanceof Error ? err.message : String(err));
@@ -278,15 +266,17 @@ img{max-width:100%;height:auto;}
 table{border-collapse:collapse;width:100%;}
 th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
 </head><body>${htmlContent}</body></html>`;
-    const path = await save({ defaultPath: `${doc.title}.html`, filters: [{ name: "HTML", extensions: ["html"] }] });
-    if (path) await writeTextFile(path, html);
+    const platform = await getPlatform();
+    const path = await platform.showSaveDialog({ defaultPath: `${doc.title}.html`, filters: [{ name: "HTML", extensions: ["html"] }] });
+    if (path) await platform.writeTextFile(path, html);
   }, [activeDocId, documents]);
 
   const exportText = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
-    const path = await save({ defaultPath: `${doc.title}.txt`, filters: [{ name: "Text", extensions: ["txt"] }] });
-    if (path) await writeTextFile(path, doc.content);
+    const platform = await getPlatform();
+    const path = await platform.showSaveDialog({ defaultPath: `${doc.title}.txt`, filters: [{ name: "Text", extensions: ["txt"] }] });
+    if (path) await platform.writeTextFile(path, doc.content);
   }, [activeDocId, documents]);
 
   const exportMarkdown = useCallback(async () => {
@@ -296,8 +286,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
     if (/^\s*<[a-z][\s\S]*>/i.test(md)) {
       md = turndown.turndown(md);
     }
-    const path = await save({ defaultPath: `${doc.title}.md`, filters: [{ name: "Markdown", extensions: ["md"] }] });
-    if (path) await writeTextFile(path, md);
+    const platform = await getPlatform();
+    const path = await platform.showSaveDialog({ defaultPath: `${doc.title}.md`, filters: [{ name: "Markdown", extensions: ["md"] }] });
+    if (path) await platform.writeTextFile(path, md);
   }, [activeDocId, documents]);
 
   // ─── Import Markdown ─────────────────────────────────────
@@ -358,7 +349,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 </html>`;
 
     try {
-      await invoke("print_html", { html });
+      const platform = await getPlatform();
+      await platform.printHtml(html);
     } catch (e) {
       console.error("Print failed:", e);
     }
