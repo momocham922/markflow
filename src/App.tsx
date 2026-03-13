@@ -152,22 +152,23 @@ function App() {
         unlisten = await win.onCloseRequested(async (event) => {
           event.preventDefault();
           try {
-            // Flush pending DB saves
             const { flushPendingSaves } = await import("@/stores/app-store");
             flushPendingSaves();
-            // Sync to cloud
             const authState = useAuthStore.getState();
             if (authState.user) {
               await Promise.race([
                 authState.syncToCloud(),
-                new Promise((resolve) => setTimeout(resolve, 5000)),
+                new Promise((resolve) => setTimeout(resolve, 3000)),
               ]);
             }
           } catch {
-            // Best effort — close anyway
+            // Best effort
           }
-          const { getCurrentWindow: getWin } = await import("@tauri-apps/api/window");
-          await getWin().destroy();
+          try {
+            await win.destroy();
+          } catch {
+            win.close();
+          }
         });
       } catch {
         // Not in Tauri
