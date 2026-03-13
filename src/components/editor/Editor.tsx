@@ -13,7 +13,7 @@ import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
-import { imagePaste, processImagePath } from "@/extensions/image-paste";
+import { imagePaste } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
@@ -431,64 +431,6 @@ export function Editor() {
       setView(null);
       viewRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Handle Tauri file drag-and-drop for images
-  // Uses window-scoped onDragDropEvent() — dragDropEnabled: true emits events at window level
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    const imageExts = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
-
-    (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const win = getCurrentWindow();
-        unlisten = await win.onDragDropEvent(async (event) => {
-          if (event.payload.type !== "drop") return;
-          const view = viewRef.current;
-          if (!view) return;
-          const paths = (event.payload as { paths?: string[] }).paths;
-          if (!paths || !Array.isArray(paths)) return;
-          const imagePaths = paths.filter((p: string) => {
-            const ext = p.split(".").pop()?.toLowerCase() ?? "";
-            return imageExts.has(ext);
-          });
-          if (imagePaths.length === 0) return;
-
-          // Insert placeholder so user sees progress (like paste handler)
-          const placeholder = "![Uploading image...]()";
-          const pos = view.state.selection.main.head;
-          view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
-
-          try {
-            const markdowns = await Promise.all(imagePaths.map(processImagePath));
-            const v = viewRef.current;
-            if (v && markdowns.length > 0) {
-              const doc = v.state.doc.toString();
-              const idx = doc.indexOf(placeholder);
-              if (idx >= 0) {
-                v.dispatch({
-                  changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") },
-                });
-              }
-            }
-          } catch (err) {
-            console.error("Image drop failed:", err);
-            // Remove placeholder on failure
-            const v = viewRef.current;
-            if (v) {
-              const doc = v.state.doc.toString();
-              const idx = doc.indexOf(placeholder);
-              if (idx >= 0) {
-                v.dispatch({ changes: { from: idx, to: idx + placeholder.length + 1, insert: "" } });
-              }
-            }
-          }
-        });
-      } catch { /* not in Tauri */ }
-    })();
-    return () => { unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -162,6 +162,119 @@ interface MindMapEditorProps {
   onTitleChange: (title: string) => void;
 }
 
+/** Fixed-position input overlay rendered OUTSIDE ReactFlow to avoid focus theft */
+function EditOverlay({
+  nodeId,
+  initialLabel,
+  selectAll,
+  onFinish,
+  onCancel,
+  onTab,
+  onEnter,
+  onLabelChange,
+}: {
+  nodeId: string;
+  initialLabel: string;
+  selectAll: boolean;
+  onFinish: () => void;
+  onCancel: () => void;
+  onTab: () => void;
+  onEnter: () => void;
+  onLabelChange: (v: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [pos, setPos] = useState<{
+    left: number; top: number; width: number; height: number;
+    borderRadius: string; color: string; fontSize: string; fontWeight: string;
+  } | null>(null);
+  const committedRef = useRef(false);
+  const composingRef = useRef(false);
+
+  useEffect(() => {
+    const tryPosition = () => {
+      const wrapper = document.querySelector(`.react-flow__node[data-id="${nodeId}"]`);
+      if (!wrapper) return false;
+      const el = (wrapper.firstElementChild as HTMLElement) ?? wrapper;
+      const rect = el.getBoundingClientRect();
+      const computed = window.getComputedStyle(el);
+      setPos({
+        left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+        borderRadius: computed.borderRadius, color: computed.color,
+        fontSize: computed.fontSize, fontWeight: computed.fontWeight,
+      });
+      return true;
+    };
+    if (tryPosition()) return;
+    let cancelled = false;
+    let attempts = 0;
+    const retry = () => {
+      if (cancelled || attempts++ > 10) return;
+      if (!tryPosition()) requestAnimationFrame(retry);
+    };
+    requestAnimationFrame(retry);
+    return () => { cancelled = true; };
+  }, [nodeId]);
+
+  useEffect(() => {
+    if (!pos || !inputRef.current) return;
+    inputRef.current.focus();
+    if (selectAll) {
+      inputRef.current.select();
+    } else {
+      const len = inputRef.current.value.length;
+      inputRef.current.setSelectionRange(len, len);
+    }
+  }, [pos, selectAll]);
+
+  if (!pos) return null;
+
+  return (
+    <input
+      ref={inputRef}
+      defaultValue={initialLabel}
+      onChange={(e) => onLabelChange(e.target.value)}
+      onCompositionStart={() => { composingRef.current = true; }}
+      onCompositionEnd={() => { composingRef.current = false; }}
+      onKeyDown={(e) => {
+        if (composingRef.current) return;
+        if (e.key === "Tab") {
+          e.preventDefault();
+          committedRef.current = true;
+          onTab();
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          committedRef.current = true;
+          onEnter();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          committedRef.current = true;
+          onCancel();
+        }
+      }}
+      onBlur={() => { if (!committedRef.current) onFinish(); }}
+      style={{
+        position: "fixed",
+        left: pos.left,
+        top: pos.top,
+        width: pos.width,
+        height: pos.height,
+        zIndex: 9999,
+        background: "transparent",
+        border: "none",
+        outline: "2px solid oklch(0.65 0.15 250 / 0.6)",
+        outlineOffset: "1px",
+        borderRadius: pos.borderRadius,
+        padding: 0,
+        textAlign: "center",
+        color: pos.color,
+        fontSize: pos.fontSize,
+        fontWeight: pos.fontWeight,
+        boxSizing: "border-box",
+      }}
+    />
+  );
+}
+
 export function MindMapEditor({ content, title, onChange, onTitleChange }: MindMapEditorProps) {
   // Use local state instead of useMemo so saves take effect immediately
   // (no two-render cycle waiting for content prop round-trip through parent)
@@ -417,38 +530,17 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const layoutRoot = useMemo(() => buildLayoutTree(data), [data]);
   const { nodes, edges } = useMemo(() => layoutTree(layoutRoot, currentTheme), [layoutRoot, currentTheme]);
 
-  // Stable refs for editing callbacks — avoids re-rendering all nodes on every keystroke
-  const handleEditCancelRef = useRef(handleEditCancel);
-  handleEditCancelRef.current = handleEditCancel;
-  const handleTabInEditRef = useRef(handleTabInEdit);
-  handleTabInEditRef.current = handleTabInEdit;
-  const handleEnterInEditRef = useRef(handleEnterInEdit);
-  handleEnterInEditRef.current = handleEnterInEdit;
-
-  const stableOnEditChange = useCallback((v: string) => updateEditLabel(v), [updateEditLabel]);
-  const stableOnEditCancel = useCallback(() => handleEditCancelRef.current(), []);
-  const stableOnTabInEdit = useCallback(() => handleTabInEditRef.current(), []);
-  const stableOnEnterInEdit = useCallback(() => handleEnterInEditRef.current(), []);
-
-  // Make selected node visually distinct + inject editing state
+  // Make selected node visually distinct + mark editing node (text hidden, overlay shows instead)
   const nodesWithSelection = useMemo(() =>
     nodes.map((n) => ({
       ...n,
       selected: n.id === selectedNodeId,
       data: {
         ...n.data,
-        ...(n.id === editingNodeId ? {
-          editing: true,
-          editLabel: editLabelRef.current,
-          selectAll: selectAllRef.current,
-          onEditChange: stableOnEditChange,
-          onEditCancel: stableOnEditCancel,
-          onTabInEdit: stableOnTabInEdit,
-          onEnterInEdit: stableOnEnterInEdit,
-        } : {}),
+        ...(n.id === editingNodeId ? { editing: true } : {}),
       },
     })),
-    [nodes, selectedNodeId, editingNodeId, stableOnEditChange, stableOnEditCancel, stableOnTabInEdit, stableOnEnterInEdit],
+    [nodes, selectedNodeId, editingNodeId],
   );
 
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : null;
@@ -549,6 +641,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
               updateEditLabel(n.label);
             }
           }}
+          onMoveStart={() => { if (editingNodeId) handleFinishEdit(); }}
           panOnDrag
           zoomOnScroll
           className="bg-background"
@@ -560,6 +653,19 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border)" />
         </ReactFlow>
       </div>
+      {editingNodeId && (
+        <EditOverlay
+          key={editingNodeId}
+          nodeId={editingNodeId}
+          initialLabel={editLabelRef.current}
+          selectAll={selectAllRef.current}
+          onFinish={handleFinishEdit}
+          onCancel={handleEditCancel}
+          onTab={handleTabInEdit}
+          onEnter={handleEnterInEdit}
+          onLabelChange={updateEditLabel}
+        />
+      )}
     </div>
   );
 }

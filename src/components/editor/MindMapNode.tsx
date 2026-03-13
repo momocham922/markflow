@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect } from "react";
+import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 export type MindMapThemeId = "lavender" | "ocean" | "forest" | "sunset" | "mono";
@@ -105,15 +105,9 @@ export interface MindMapNodeData {
   level: number;
   themeId?: MindMapThemeId;
   editing?: boolean;
-  editLabel?: string;
-  selectAll?: boolean;
-  onEditChange?: (value: string) => void;
-  onEditCancel?: () => void;
-  onTabInEdit?: () => void;
-  onEnterInEdit?: () => void;
 }
 
-const levelSizes = [
+export const levelSizes = [
   "text-sm font-semibold px-5 py-2",     // root
   "text-[13px] font-medium px-4 py-1.5", // h1
   "text-xs font-medium px-3.5 py-1.5",   // h2
@@ -131,37 +125,6 @@ export const MindMapNode = memo(function MindMapNode({
   const colorIdx = Math.min(nodeData.level, theme.nodeColors.length - 1);
   const shape = shapeClass[theme.nodeShape];
   const isUnderline = theme.nodeShape === "underline";
-  const inputRef = useRef<HTMLInputElement>(null);
-  const composingRef = useRef(false);
-
-  // Focus input with retry — ReactFlow may steal focus or delay node rendering.
-  // autoFocus handles the initial focus; this retry loop is a backup.
-  useEffect(() => {
-    if (!nodeData.editing) return;
-    const input = inputRef.current;
-    if (!input) return;
-    input.value = nodeData.editLabel ?? "";
-
-    let cancelled = false;
-    let attempts = 0;
-    const tryFocus = () => {
-      if (cancelled || !inputRef.current) return;
-      inputRef.current.focus();
-      if (document.activeElement === inputRef.current) {
-        if (nodeData.selectAll) {
-          inputRef.current.select();
-        } else {
-          const len = inputRef.current.value.length;
-          inputRef.current.setSelectionRange(len, len);
-        }
-      } else if (++attempts < 8) {
-        requestAnimationFrame(tryFocus);
-      }
-    };
-    requestAnimationFrame(tryFocus);
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeData.editing]);
 
   return (
     <div
@@ -174,40 +137,7 @@ export const MindMapNode = memo(function MindMapNode({
         position={Position.Left}
         className="bg-transparent! w-0! h-0! min-w-0! min-h-0! border-0! -left-px!"
       />
-      {nodeData.editing ? (
-        <input
-          ref={inputRef}
-          autoFocus
-          className="bg-transparent outline-none border-none text-inherit font-inherit whitespace-nowrap min-w-[3ch] w-[8ch]"
-          defaultValue={nodeData.editLabel ?? ""}
-          onCompositionStart={() => { composingRef.current = true; }}
-          onCompositionEnd={(e) => {
-            composingRef.current = false;
-            nodeData.onEditChange?.((e.target as HTMLInputElement).value);
-          }}
-          onInput={(e) => {
-            if (!composingRef.current) {
-              nodeData.onEditChange?.((e.target as HTMLInputElement).value);
-            }
-            const el = e.target as HTMLInputElement;
-            el.style.width = `${Math.max(el.value.length + 1, 3)}ch`;
-          }}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (composingRef.current) return;
-            if (e.key === "Tab") {
-              e.preventDefault();
-              nodeData.onTabInEdit?.();
-            } else if (e.key === "Enter") {
-              nodeData.onEnterInEdit?.();
-            } else if (e.key === "Escape") {
-              nodeData.onEditCancel?.();
-            }
-          }}
-        />
-      ) : (
-        <span className="whitespace-nowrap">{nodeData.label}</span>
-      )}
+      <span className={`whitespace-nowrap ${nodeData.editing ? "opacity-0" : ""}`}>{nodeData.label}</span>
       <Handle
         type="source"
         position={Position.Right}
