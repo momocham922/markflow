@@ -64,6 +64,8 @@ function App() {
   const [rightPanel, setRightPanel] = useState<RightPanel>("none");
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
   const [updateInfo, setUpdateInfo] = useState<{ version: string; update: unknown } | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "downloading" | "error">("idle");
+  const [updateError, setUpdateError] = useState("");
   const [shareOpen, setShareOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
@@ -158,13 +160,16 @@ function App() {
 
   const handleInstallUpdate = useCallback(async () => {
     if (!updateInfo) return;
+    setUpdateStatus("downloading");
+    setUpdateError("");
     try {
       const update = updateInfo.update as { downloadAndInstall: () => Promise<void> };
       await update.downloadAndInstall();
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
-    } catch {
-      setUpdateInfo(null);
+    } catch (err) {
+      setUpdateStatus("error");
+      setUpdateError(err instanceof Error ? err.message : String(err));
     }
   }, [updateInfo]);
 
@@ -364,19 +369,26 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         {/* Update banner */}
         {updateInfo && (
           <div className="flex items-center justify-between gap-3 bg-primary px-4 py-1.5 text-primary-foreground text-xs shrink-0">
-            <span>MarkFlow v{updateInfo.version} が利用可能です</span>
+            <span>
+              {updateStatus === "downloading" ? "ダウンロード中..." :
+               updateStatus === "error" ? `更新失敗: ${updateError}` :
+               `MarkFlow v${updateInfo.version} が利用可能です`}
+            </span>
             <div className="flex items-center gap-2">
+              {updateStatus !== "downloading" && (
+                <button
+                  className="rounded-md bg-primary-foreground/20 px-3 py-0.5 hover:bg-primary-foreground/30 transition-colors"
+                  onClick={() => { setUpdateInfo(null); setUpdateStatus("idle"); }}
+                >
+                  あとで
+                </button>
+              )}
               <button
-                className="rounded-md bg-primary-foreground/20 px-3 py-0.5 hover:bg-primary-foreground/30 transition-colors"
-                onClick={() => setUpdateInfo(null)}
-              >
-                あとで
-              </button>
-              <button
-                className="rounded-md bg-primary-foreground text-primary px-3 py-0.5 font-medium hover:opacity-90 transition-opacity"
+                className="rounded-md bg-primary-foreground text-primary px-3 py-0.5 font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
                 onClick={handleInstallUpdate}
+                disabled={updateStatus === "downloading"}
               >
-                アップデート
+                {updateStatus === "error" ? "再試行" : updateStatus === "downloading" ? "..." : "アップデート"}
               </button>
             </div>
           </div>
