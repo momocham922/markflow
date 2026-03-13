@@ -22,7 +22,7 @@
 |--------|------|-------|
 | TODO | Version management: GitHub integration | Choice between app-native and GitHub |
 | TODO | Auth: GitHub login support | Currently Google-only |
-| TODO | iOS app version | Requires separate build target |
+| DONE | iOS app version | Tauri v2 iOS, builds and runs on simulator |
 | DONE | Images: paste/drop -> local save -> asset protocol | Paste, drag-drop, local save, WebP auto-convert (Rust image crate) |
 | DONE | YouTube: beautiful preview rendering, inline playback | Custom marked renderer, iframe embed, XSS-safe |
 | DONE | Links: smart card rendering with OGP info | Rust fetch_ogp command, cache with race condition fix, XSS-safe |
