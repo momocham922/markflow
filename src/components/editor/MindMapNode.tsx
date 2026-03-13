@@ -137,22 +137,33 @@ export const MindMapNode = memo(function MindMapNode({
   // Suppress onBlur when Tab/Enter/Escape caused the blur (prevents stale save)
   const suppressBlurRef = useRef(false);
 
+  // Focus input with retry — ReactFlow may steal focus or delay node rendering
   useEffect(() => {
-    if (nodeData.editing && inputRef.current) {
-      const input = inputRef.current;
-      input.value = nodeData.editLabel ?? "";
-      // Defer focus to next frame — ReactFlow may steal focus during commit
-      setTimeout(() => {
-        if (!inputRef.current) return;
-        inputRef.current.focus();
+    if (!nodeData.editing) return;
+    const input = inputRef.current;
+    if (!input) return;
+    input.value = nodeData.editLabel ?? "";
+
+    let cancelled = false;
+    let attempts = 0;
+    const tryFocus = () => {
+      if (cancelled || !inputRef.current) return;
+      inputRef.current.focus();
+      if (document.activeElement === inputRef.current) {
+        // Focus succeeded
         if (nodeData.selectAll) {
           inputRef.current.select();
         } else {
           const len = inputRef.current.value.length;
           inputRef.current.setSelectionRange(len, len);
         }
-      }, 0);
-    }
+      } else if (++attempts < 8) {
+        // Focus failed (ReactFlow stole it), retry next frame
+        requestAnimationFrame(tryFocus);
+      }
+    };
+    requestAnimationFrame(tryFocus);
+    return () => { cancelled = true; };
     // Only run when editing state starts — not on every editLabel change
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeData.editing]);

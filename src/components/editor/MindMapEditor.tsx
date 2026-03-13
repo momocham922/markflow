@@ -308,10 +308,9 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
   const handleTabInEdit = useCallback(() => {
     const nodeId = editingNodeId;
     if (!nodeId) return;
-    // Prevent stale onBlur from overwriting new data
     editCancelledRef.current = true;
     const nodes = applyEdit();
-    setEditingNodeId(null);
+    // addChildTo sets editingNodeId to the new node — no intermediate null needed
     addChildTo(nodeId, nodes);
   }, [editingNodeId, applyEdit, addChildTo]);
 
@@ -334,7 +333,7 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
       setEditingNodeId(null);
       return;
     }
-    setEditingNodeId(null);
+    // addChildTo sets editingNodeId to the new node — no intermediate null needed
     addChildTo(parentNode.id, nodes);
   }, [editingNodeId, applyEdit, addChildTo, data, save]);
 
@@ -546,7 +545,12 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
           proOptions={{ hideAttribution: true }}
           nodesDraggable={false}
           nodesConnectable={false}
+          nodesFocusable={false}
+          edgesFocusable={false}
           elementsSelectable
+          deleteKeyCode={null}
+          selectionKeyCode={null}
+          multiSelectionKeyCode={null}
           onNodeClick={(_e, node) => {
             setSelectedNodeId(node.id);
           }}

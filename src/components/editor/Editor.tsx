@@ -448,21 +448,42 @@ export function Editor() {
           if (event.payload.type !== "drop") return;
           const view = viewRef.current;
           if (!view) return;
-          const paths = event.payload.paths;
+          const paths = (event.payload as { paths?: string[] }).paths;
+          if (!paths || !Array.isArray(paths)) return;
           const imagePaths = paths.filter((p: string) => {
             const ext = p.split(".").pop()?.toLowerCase() ?? "";
             return imageExts.has(ext);
           });
           if (imagePaths.length === 0) return;
+
+          // Insert placeholder so user sees progress (like paste handler)
+          const placeholder = "![Uploading image...]()";
+          const pos = view.state.selection.main.head;
+          view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
+
           try {
             const markdowns = await Promise.all(imagePaths.map(processImagePath));
             const v = viewRef.current;
             if (v && markdowns.length > 0) {
-              const pos = v.state.selection.main.head;
-              v.dispatch({ changes: { from: pos, insert: markdowns.join("\n") + "\n" } });
+              const doc = v.state.doc.toString();
+              const idx = doc.indexOf(placeholder);
+              if (idx >= 0) {
+                v.dispatch({
+                  changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") },
+                });
+              }
             }
           } catch (err) {
             console.error("Image drop failed:", err);
+            // Remove placeholder on failure
+            const v = viewRef.current;
+            if (v) {
+              const doc = v.state.doc.toString();
+              const idx = doc.indexOf(placeholder);
+              if (idx >= 0) {
+                v.dispatch({ changes: { from: idx, to: idx + placeholder.length + 1, insert: "" } });
+              }
+            }
           }
         });
       } catch { /* not in Tauri */ }
