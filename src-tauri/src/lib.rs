@@ -257,7 +257,35 @@ async fn save_image(app: tauri::AppHandle, data: Vec<u8>, ext: String) -> Result
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Convert image bytes to WebP format for smaller file size.
+/// Returns (webp_bytes, "webp") on success, or the original (data, ext) if conversion
+/// fails or is unnecessary (GIF, SVG, already WebP, or WebP is larger).
+fn try_convert_to_webp(data: Vec<u8>, ext: &str) -> (Vec<u8>, String) {
+    match ext {
+        "png" | "jpg" | "jpeg" | "bmp" => {}
+        _ => return (data, ext.to_string()),
+    }
+    match image::load_from_memory(&data) {
+        Ok(img) => {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            match img.write_to(&mut buf, image::ImageFormat::WebP) {
+                Ok(_) => {
+                    let webp_data = buf.into_inner();
+                    if webp_data.len() < data.len() {
+                        (webp_data, "webp".to_string())
+                    } else {
+                        (data, ext.to_string())
+                    }
+                }
+                Err(_) => (data, ext.to_string()),
+            }
+        }
+        Err(_) => (data, ext.to_string()),
+    }
+}
+
 /// Upload image bytes to Firebase Storage via REST API (bypasses WKWebView CORS issues).
+/// Automatically converts PNG/JPEG/BMP to WebP when it reduces file size.
 /// Returns the public download URL.
 #[tauri::command]
 async fn upload_image_cloud(
@@ -267,6 +295,7 @@ async fn upload_image_cloud(
     token: String,
     bucket: String,
 ) -> Result<String, String> {
+    let (data, ext) = try_convert_to_webp(data, &ext);
     let id = uuid::Uuid::new_v4().to_string();
     let object_path = format!("images/{}/{}.{}", uid, id, ext);
     let content_type = match ext.as_str() {
