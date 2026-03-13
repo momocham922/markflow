@@ -33,10 +33,10 @@
 |--------|------|-------|
 | TODO | MCP integration | Not started |
 | TODO | Nanobanana integration for image insertion | Not started |
-| TODO | Google Search for AI responses | Not started |
-| TODO | Multimodal input support | Not started |
+| DONE | Google Search for AI responses | Web search toggle via Claude web_search tool |
+| DONE | Multimodal input support | Image attachment (paste/file picker) sent as base64 content blocks |
 | DONE | Adjustable AI panel width | Implemented |
-| TODO | Output control via rules-like configuration | Not started |
+| DONE | Output control via rules-like configuration | Custom AI rules dialog, persisted in SQLite settings |
 
 ## Additional Features
 
