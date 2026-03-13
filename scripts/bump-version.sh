@@ -19,8 +19,15 @@ sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$ROOT/package.
 # 2. tauri.conf.json
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$ROOT/src-tauri/tauri.conf.json"
 
-# 3. Cargo.toml (only the package version, not dependency versions)
-sed -i '' "0,/^version = \".*\"/s/^version = \".*\"/version = \"$VERSION\"/" "$ROOT/src-tauri/Cargo.toml"
+# 3. Cargo.toml (only the package version line, under [package])
+python3 -c "
+import re, sys
+with open('$ROOT/src-tauri/Cargo.toml') as f:
+    content = f.read()
+content = re.sub(r'^(version\s*=\s*)\"[^\"]*\"', r'\g<1>\"$VERSION\"', content, count=1, flags=re.MULTILINE)
+with open('$ROOT/src-tauri/Cargo.toml', 'w') as f:
+    f.write(content)
+"
 
 # Verify all 3 match
 V1=$(grep '"version"' "$ROOT/package.json" | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/')

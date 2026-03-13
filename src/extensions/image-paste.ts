@@ -122,7 +122,7 @@ export const imagePaste = EditorView.domEventHandlers({
             const doc = view.state.doc.toString();
             const idx = doc.indexOf(placeholder);
             if (idx >= 0) {
-              const errMsg = `![Upload failed: ${err?.message || "Unknown error"}]()`;
+              const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
               view.dispatch({
                 changes: { from: idx, to: idx + placeholder.length, insert: errMsg },
               });
