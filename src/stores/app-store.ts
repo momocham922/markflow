@@ -199,9 +199,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   setThemeSettings: (updates) =>
     set((s) => {
       const themeSettings = { ...s.themeSettings, ...updates };
-      db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(
-        console.error,
+      const json = JSON.stringify(themeSettings);
+      // Primary: SQLite
+      db.setSetting("themeSettings", json).catch((e) =>
+        console.error("[app-store] SQLite theme save failed:", e),
       );
+      // Backup: localStorage (always works in WebView)
+      try { localStorage.setItem("markflow:themeSettings", json); } catch {}
       return { themeSettings };
     }),
 
@@ -269,7 +273,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       const savedTheme = await db.getSetting("theme");
-      const savedThemeSettings = await db.getSetting("themeSettings");
+      // Load theme settings: SQLite primary, localStorage fallback
+      let savedThemeSettings = await db.getSetting("themeSettings");
+      if (!savedThemeSettings) {
+        try { savedThemeSettings = localStorage.getItem("markflow:themeSettings"); } catch {}
+      }
       let themeSettings = { ...defaultThemeSettings };
       if (savedThemeSettings) {
         try {
@@ -303,8 +311,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ documents, folders, themeSettings, customPreviewThemes, initialized: true });
       }
     } catch {
-      // Running in browser without Tauri — skip DB
-      set({ initialized: true });
+      // Running in browser without Tauri — skip DB, but still restore themes from localStorage
+      let themeSettings = { ...defaultThemeSettings };
+      try {
+        const lsTheme = localStorage.getItem("markflow:themeSettings");
+        if (lsTheme) themeSettings = { ...defaultThemeSettings, ...JSON.parse(lsTheme) };
+      } catch {}
+      set({ themeSettings, initialized: true });
     }
   },
 

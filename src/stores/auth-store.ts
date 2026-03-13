@@ -48,7 +48,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           email: user.email || "",
           displayName: user.displayName,
         }).catch(() => {});
-        get().syncFromCloud();
+        // Wait for loadDocuments to complete before syncing from cloud.
+        // Without this, syncFromCloud may see default themeSettings and
+        // overwrite correct SQLite values with stale cloud values.
+        const appState = useAppStore.getState();
+        if (appState.initialized) {
+          get().syncFromCloud();
+        } else {
+          const unsub = useAppStore.subscribe((s) => {
+            if (s.initialized) {
+              unsub();
+              get().syncFromCloud();
+            }
+          });
+        }
       }
     });
 
@@ -355,10 +368,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const appState = useAppStore.getState();
       const { documents } = appState;
 
-      // Sync theme settings to cloud
-      saveUserSettingsToFirestore(user.uid, {
-        themeSettings: appState.themeSettings,
-      }).catch((err) => console.error("Failed to sync settings:", err));
+      // Only sync theme settings after loadDocuments has completed,
+      // otherwise we'd save default values and overwrite correct cloud data.
+      if (appState.initialized) {
+        saveUserSettingsToFirestore(user.uid, {
+          themeSettings: appState.themeSettings,
+        }).catch((err) => console.error("Failed to sync settings:", err));
+      }
 
       // Retry pending cloud deletions
       try {
