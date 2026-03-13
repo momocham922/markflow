@@ -5,6 +5,7 @@ import {
   indexedDBLocalPersistence,
   GoogleAuthProvider,
   signInWithCredential,
+  signInWithPopup,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   type User,
@@ -62,14 +63,22 @@ export const auth = _auth;
 export const firestore = getFirestore(app);
 
 export async function signInWithGoogle(): Promise<User | null> {
-  const { getPlatform } = await import("@/platform");
+  const { getPlatform, isIOS } = await import("@/platform");
   const platform = await getPlatform();
 
-  // Start local callback server (Rust side) and get the random port
+  // iOS (Tauri iOS or Safari): use signInWithPopup (local HTTP server redirect won't work)
+  if (isIOS) {
+    const provider = new GoogleAuthProvider();
+    provider.addScope("email");
+    provider.addScope("profile");
+    const result = await signInWithPopup(auth, provider);
+    return result.user;
+  }
+
+  // Desktop (Tauri): use local OAuth callback server
   const port = await platform.startOAuthListener();
   const redirectUri = `http://localhost:${port}/callback`;
 
-  // Build Google OAuth URL
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: redirectUri,
@@ -80,7 +89,6 @@ export async function signInWithGoogle(): Promise<User | null> {
   });
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
-  // Listen for the OAuth callback event from platform adapter
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
 
@@ -111,11 +119,9 @@ export async function signInWithGoogle(): Promise<User | null> {
       }
     }, 300000);
 
-    // Open the auth URL in the system browser
     platform.openExternal(authUrl).catch(reject);
   });
 
-  // Exchange auth code for tokens
   const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

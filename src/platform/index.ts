@@ -10,6 +10,19 @@ function detectTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/** Detect iOS (both Tauri iOS and mobile Safari) */
+function detectIOS(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+/** True when running on iOS (Tauri iOS or Safari) — cached after first call */
+export const isIOS = detectIOS();
+
+/** True when running inside Tauri (desktop or iOS) */
+export const isTauri = detectTauri();
+
 let _adapter: PlatformAdapter | null = null;
 
 export async function getPlatform(): Promise<PlatformAdapter> {

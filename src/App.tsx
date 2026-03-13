@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
-import { getPlatform } from "@/platform";
+import { getPlatform, isIOS } from "@/platform";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -368,11 +368,13 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
   if (shareToken) {
     return (
       <TooltipProvider>
-        <div className="flex h-screen w-screen flex-col overflow-hidden bg-background">
-          <div
-            className="h-7 w-full shrink-0"
-            data-tauri-drag-region
-          />
+        <div className={cn("flex h-screen w-screen flex-col overflow-hidden bg-background", isIOS && "safe-top safe-bottom")}>
+          {!isIOS && (
+            <div
+              className="h-7 w-full shrink-0"
+              data-tauri-drag-region
+            />
+          )}
           <div className="flex-1 overflow-hidden">
             <SharedDocView
               token={shareToken}
@@ -389,12 +391,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen w-screen flex-col overflow-hidden">
-        {/* Window drag region — full width, topmost element */}
-        <div
-          className="h-7 w-full shrink-0"
-          data-tauri-drag-region
-        />
+      <div className={cn("flex h-screen w-screen flex-col overflow-hidden", isIOS && "safe-top safe-bottom")}>
+        {/* Window drag region — desktop only (macOS title bar) */}
+        {!isIOS && (
+          <div
+            className="h-7 w-full shrink-0"
+            data-tauri-drag-region
+          />
+        )}
         {/* Update banner */}
         {updateInfo && (
           <div className="flex items-center justify-between gap-3 bg-primary px-4 py-1.5 text-primary-foreground text-xs shrink-0">
@@ -423,26 +427,40 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         )}
         <div className="flex flex-1 overflow-hidden">
-          {/* Sidebar */}
+          {/* Sidebar — overlay on iOS, inline on desktop */}
+          {sidebarOpen && isIOS && (
+            <div
+              className="fixed inset-0 z-40 bg-black/30"
+              onClick={toggleSidebar}
+            />
+          )}
           {sidebarOpen && (
             <>
-              <div className="shrink-0 overflow-hidden" style={{ width: sidebarWidth }}>
+              <div
+                className={cn(
+                  "shrink-0 overflow-hidden",
+                  isIOS && "fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background"
+                )}
+                style={{ width: isIOS ? 280 : sidebarWidth }}
+              >
                 <Sidebar />
               </div>
-              {/* Sidebar resize handle */}
-              <div
-                className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
-                onPointerDown={(e) => handleResizeStart("sidebar", e)}
-              />
+              {/* Sidebar resize handle — desktop only */}
+              {!isIOS && (
+                <div
+                  className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
+                  onPointerDown={(e) => handleResizeStart("sidebar", e)}
+                />
+              )}
             </>
           )}
 
           {/* Main content */}
           <div className="flex flex-1 flex-col overflow-hidden">
-            {/* Top bar — draggable title bar region */}
+            {/* Top bar — draggable on desktop, normal on iOS */}
             <div
-              className="flex items-center justify-between border-b border-border px-3 pb-1.5"
-              data-tauri-drag-region
+              className={cn("flex items-center justify-between border-b border-border px-3 pb-1.5", isIOS && "pt-1 safe-left safe-right")}
+              {...(!isIOS ? { "data-tauri-drag-region": true } : {})}
             >
               <div className="flex items-center gap-1">
                 {!sidebarOpen && (
@@ -486,9 +504,11 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 >
                   <Upload className="h-3.5 w-3.5" />
                 </Button>
-                <span className="ml-1 text-[10px] text-muted-foreground hidden sm:inline">
-                  Cmd+K search · Cmd+Shift+/ shortcuts
-                </span>
+                {!isIOS && (
+                  <span className="ml-1 text-[10px] text-muted-foreground hidden sm:inline">
+                    Cmd+K search · Cmd+Shift+/ shortcuts
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-1">
                 <Button
