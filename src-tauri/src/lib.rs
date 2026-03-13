@@ -191,10 +191,14 @@ async fn print_html(html: String) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
     let path = temp_dir.join("markflow-print.html");
     std::fs::write(&path, &html).map_err(|e| e.to_string())?;
-    std::process::Command::new("/usr/bin/open")
-        .arg(path.to_str().ok_or("Invalid path")?)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "ios"))]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg(path.to_str().ok_or("Invalid path")?)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    // iOS: print is handled in JS via window.print() or WKWebView
     Ok(())
 }
 
