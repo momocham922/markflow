@@ -23,7 +23,7 @@
 | TODO | Version management: GitHub integration | Choice between app-native and GitHub |
 | TODO | Auth: GitHub login support | Currently Google-only |
 | TODO | iOS app version | Requires separate build target |
-| PARTIAL | Images: paste/drop -> local save -> asset protocol | Phase 1 done (paste, drag-drop, local save). TODO: WebP convert, GCS upload |
+| DONE | Images: paste/drop -> local save -> asset protocol | Paste, drag-drop, local save, WebP auto-convert (Rust image crate) |
 | DONE | YouTube: beautiful preview rendering, inline playback | Custom marked renderer, iframe embed, XSS-safe |
 | DONE | Links: smart card rendering with OGP info | Rust fetch_ogp command, cache with race condition fix, XSS-safe |
 
@@ -57,8 +57,8 @@
 | DONE | Real-time collaboration (Yjs) | y-websocket + y-codemirror.next + y-indexeddb |
 | DONE | Share via link | Firestore shareLink, SharedDocView component |
 | DONE | Team documents | Firestore teams, team folders, team doc sync |
-| PARTIAL | Shared doc content stability | First-time migration logic works; needs multi-device runtime testing |
-| CONCERN | Collab content-loss edge cases | tryFinalize always prefers local on first-use; may not respect peer edits when peers are connected simultaneously |
+| DONE | Shared doc content stability | y-indexeddb persistence, seedIfEmpty leader election, empty content guards |
+| DONE | Collab content-loss edge cases | clientID leader election prevents concurrent seeding; lowest ID seeds, others wait |
 
 ## Core Editor
 
@@ -109,7 +109,7 @@
 
 | Status | Item | Notes |
 |--------|------|-------|
-| PARTIAL | Slack notifications | notifySlack() exists in code, webhook-based; unconfirmed if actually configured/working |
+| DONE | Slack notifications | Webhook-based, SlackSettingsDialog UI for config, event type toggles |
 
 ## Bugs & Fixes (all resolved)
 
