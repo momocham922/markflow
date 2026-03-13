@@ -111,25 +111,28 @@ export function useCollaboration(
       let finalized = false;
 
       /** Seed Y.Text from local content if Y.Doc is empty.
-       *  If peers are connected, wait briefly for their state to propagate
-       *  before seeding — prevents content duplication when multiple users
-       *  open the same doc simultaneously with an empty WS server.
+       *  Uses clientID-based leader election to prevent content duplication
+       *  when multiple users open the same doc simultaneously.
+       *  Only the client with the lowest clientID seeds immediately;
+       *  others wait and only seed if the leader didn't.
        */
       const seedIfEmpty = () => {
         const ydocContent = ytext.toString();
         const localContent = initialContentRef.current;
         if (!ydocContent.trim() && localContent.trim()) {
-          const peerCount = Array.from(provider.awareness.getStates().keys())
-            .filter((id) => id !== ydoc.clientID).length;
-          if (peerCount > 0) {
-            // Peers connected — wait for their Y.Doc state before seeding
-            setTimeout(() => {
-              if (cancelled) return;
-              if (!ytext.toString().trim() && localContent.trim()) {
-                ydoc.transact(() => { ytext.insert(0, localContent); });
-              }
-            }, 1500);
-            return;
+          const allClientIds = Array.from(provider.awareness.getStates().keys());
+          if (allClientIds.length > 1) {
+            const minId = Math.min(...allClientIds);
+            if (ydoc.clientID !== minId) {
+              // Not the leader — wait for leader to seed, then fallback
+              setTimeout(() => {
+                if (cancelled) return;
+                if (!ytext.toString().trim() && localContent.trim()) {
+                  ydoc.transact(() => { ytext.insert(0, localContent); });
+                }
+              }, 2000);
+              return;
+            }
           }
           ydoc.transact(() => {
             ytext.insert(0, localContent);
