@@ -412,26 +412,10 @@ export function MindMapEditor({ content, title, onChange, onTitleChange }: MindM
     addChildTo(nodeId, nodes);
   }, [editingNodeId, applyEdit, addChildTo]);
 
-  // Enter during editing: finish edit + add sibling
+  // Enter during editing: just confirm the edit (don't add sibling)
   const handleEnterInEdit = useCallback(() => {
-    const nodeId = editingNodeId;
-    if (!nodeId) return;
-    const nodes = applyEdit();
-    if (nodeId === "root") {
-      // Root can't have siblings, just finish edit
-      save({ ...data, nodes });
-      setEditingNodeId(null);
-      return;
-    }
-    const parentNode = nodes.find((n) => n.children.includes(nodeId));
-    if (!parentNode) {
-      save({ ...data, nodes });
-      setEditingNodeId(null);
-      return;
-    }
-    // addChildTo sets editingNodeId to the new node — no intermediate null needed
-    addChildTo(parentNode.id, nodes);
-  }, [editingNodeId, applyEdit, addChildTo, data, save]);
+    handleFinishEdit();
+  }, [handleFinishEdit]);
 
   const handleThemeChange = useCallback((themeId: MindMapThemeId) => {
     setThemeSettings({ mindMapTheme: themeId });
