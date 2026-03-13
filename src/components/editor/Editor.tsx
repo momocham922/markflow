@@ -7,7 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
-import { invoke } from "@tauri-apps/api/core";
+import { getPlatform } from "@/platform";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
@@ -327,7 +327,8 @@ export function Editor() {
         if (cached && cached !== "loading") continue;
         ogpCache.set(url, "loading");
         try {
-          const data = await invoke<OgpData>("fetch_ogp", { url });
+          const platform = await getPlatform();
+          const data = await platform.fetchOgp(url);
           if (cancelled) break;
           ogpCache.set(url, data);
           fetched++;
@@ -445,49 +446,45 @@ export function Editor() {
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<{ paths: string[]; position: { x: number; y: number } }>(
-          "tauri://drag-drop",
-          async (event) => {
-            const view = viewRef.current;
-            if (!view) return;
-            const { paths, position } = event.payload;
-            if (!paths?.length) return;
+        const platform = await getPlatform();
+        unlisten = await platform.onDragDrop(async (paths, position) => {
+          const view = viewRef.current;
+          if (!view) return;
+          if (!paths?.length) return;
 
-            const imagePaths = paths.filter((p) => {
-              const ext = p.split(".").pop()?.toLowerCase() ?? "";
-              return imageExts.has(ext);
-            });
-            if (!imagePaths.length) return;
+          const imagePaths = paths.filter((p) => {
+            const ext = p.split(".").pop()?.toLowerCase() ?? "";
+            return imageExts.has(ext);
+          });
+          if (!imagePaths.length) return;
 
-            const pos = view.posAtCoords({ x: position.x, y: position.y })
-              ?? view.state.selection.main.head;
-            const placeholder = "![Uploading image...]()";
-            view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
+          const pos = view.posAtCoords({ x: position.x, y: position.y })
+            ?? view.state.selection.main.head;
+          const placeholder = "![Uploading image...]()";
+          view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
 
-            try {
-              const markdowns = await Promise.all(imagePaths.map((p) => processImagePath(p)));
-              const v = viewRef.current;
-              if (v) {
-                const doc = v.state.doc.toString();
-                const idx = doc.indexOf(placeholder);
-                if (idx >= 0) {
-                  v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") } });
-                }
-              }
-            } catch (err: unknown) {
-              const v = viewRef.current;
-              if (v) {
-                const doc = v.state.doc.toString();
-                const idx = doc.indexOf(placeholder);
-                if (idx >= 0) {
-                  const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-                  v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: errMsg } });
-                }
+          try {
+            const markdowns = await Promise.all(imagePaths.map((p) => processImagePath(p)));
+            const v = viewRef.current;
+            if (v) {
+              const doc = v.state.doc.toString();
+              const idx = doc.indexOf(placeholder);
+              if (idx >= 0) {
+                v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") } });
               }
             }
-          },
-        );
+          } catch (err: unknown) {
+            const v = viewRef.current;
+            if (v) {
+              const doc = v.state.doc.toString();
+              const idx = doc.indexOf(placeholder);
+              if (idx >= 0) {
+                const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
+                v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: errMsg } });
+              }
+            }
+          }
+        }) ?? undefined;
       } catch { /* not in Tauri */ }
     })();
     return () => { unlisten?.(); };

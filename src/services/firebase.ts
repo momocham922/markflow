@@ -62,12 +62,11 @@ export const auth = _auth;
 export const firestore = getFirestore(app);
 
 export async function signInWithGoogle(): Promise<User | null> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  const { listen } = await import("@tauri-apps/api/event");
-  const { open } = await import("@tauri-apps/plugin-shell");
+  const { getPlatform } = await import("@/platform");
+  const platform = await getPlatform();
 
   // Start local callback server (Rust side) and get the random port
-  const port = await invoke<number>("oauth_listen");
+  const port = await platform.startOAuthListener();
   const redirectUri = `http://localhost:${port}/callback`;
 
   // Build Google OAuth URL
@@ -81,25 +80,25 @@ export async function signInWithGoogle(): Promise<User | null> {
   });
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
-  // Listen for the OAuth callback event from Rust
+  // Listen for the OAuth callback event from platform adapter
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
 
-    const unlistenOk = listen<string>("oauth-callback", (event) => {
+    const unlistenOk = platform.onOAuthCallback((code) => {
       if (!settled) {
         settled = true;
         unlistenOk.then((fn) => fn());
         unlistenErr.then((fn) => fn());
-        resolve(event.payload);
+        resolve(code);
       }
     });
 
-    const unlistenErr = listen<string>("oauth-error", (event) => {
+    const unlistenErr = platform.onOAuthError((error) => {
       if (!settled) {
         settled = true;
         unlistenOk.then((fn) => fn());
         unlistenErr.then((fn) => fn());
-        reject(new Error(event.payload));
+        reject(new Error(error));
       }
     });
 
@@ -113,7 +112,7 @@ export async function signInWithGoogle(): Promise<User | null> {
     }, 300000);
 
     // Open the auth URL in the system browser
-    open(authUrl).catch(reject);
+    platform.openExternal(authUrl).catch(reject);
   });
 
   // Exchange auth code for tokens

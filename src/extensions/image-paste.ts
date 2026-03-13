@@ -1,7 +1,7 @@
 import { EditorView } from "@codemirror/view";
 import { auth } from "@/services/firebase";
 import { useAuthStore } from "@/stores/auth-store";
-import { invoke } from "@tauri-apps/api/core";
+import { getPlatform } from "@/platform";
 
 function extFromMime(mime: string): string {
   const map: Record<string, string> = {
@@ -28,12 +28,8 @@ async function getFirebaseToken(): Promise<string> {
  */
 async function uploadFromPath(uid: string, path: string): Promise<string> {
   const token = await getFirebaseToken();
-  return invoke<string>("upload_image_from_path", {
-    path,
-    uid,
-    token,
-    bucket: STORAGE_BUCKET,
-  });
+  const platform = await getPlatform();
+  return platform.uploadImageFromPath(path, uid, token, STORAGE_BUCKET);
 }
 
 /**
@@ -41,19 +37,13 @@ async function uploadFromPath(uid: string, path: string): Promise<string> {
  */
 async function uploadFromBytes(uid: string, data: Uint8Array, ext: string): Promise<string> {
   const token = await getFirebaseToken();
-  // Convert to base64 in JS — much smaller than JSON number array
   let binary = "";
   for (let i = 0; i < data.length; i++) {
     binary += String.fromCharCode(data[i]);
   }
   const base64Data = btoa(binary);
-  return invoke<string>("upload_image_from_base64", {
-    base64Data,
-    ext,
-    uid,
-    token,
-    bucket: STORAGE_BUCKET,
-  });
+  const platform = await getPlatform();
+  return platform.uploadImageFromBase64(base64Data, ext, uid, token, STORAGE_BUCKET);
 }
 
 /**
