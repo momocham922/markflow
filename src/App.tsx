@@ -145,11 +145,14 @@ function App() {
   // Sync before close — flush DB + cloud sync before window closes
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let closing = false;
     (async () => {
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
         unlisten = await win.onCloseRequested(async (event) => {
+          if (closing) return;
+          closing = true;
           event.preventDefault();
           try {
             const { flushPendingSaves } = await import("@/stores/app-store");
@@ -164,11 +167,7 @@ function App() {
           } catch {
             // Best effort
           }
-          try {
-            await win.destroy();
-          } catch {
-            win.close();
-          }
+          await win.destroy();
         });
       } catch {
         // Not in Tauri
