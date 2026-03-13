@@ -581,9 +581,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   </Suspense>
                 )}
               </div>
-              {viewMode === "editor" && rightPanel !== "none" && (
+              {viewMode === "editor" && rightPanel !== "none" && !isIOS && (
                 <>
-                  {/* Right panel resize handle */}
+                  {/* Right panel resize handle — desktop */}
                   <div
                     className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
                     onPointerDown={(e) => handleResizeStart("right", e)}
@@ -604,6 +604,21 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             </div>
           </div>
         </div>
+
+        {/* Right panels — fullscreen overlay on iOS */}
+        {isIOS && viewMode === "editor" && rightPanel !== "none" && (
+          <div className="fixed inset-0 z-40 flex flex-col safe-top safe-bottom bg-background">
+            {rightPanel === "versions" && (
+              <VersionPanel
+                onClose={() => setRightPanel("none")}
+                onViewDiff={setDiffState}
+              />
+            )}
+            {rightPanel === "ai" && (
+              <AiPanel onClose={() => setRightPanel("none")} />
+            )}
+          </div>
+        )}
 
         {/* Syncing overlay — initial sync or closing sync */}
         {(closingSyncVisible || (syncing && !initialSyncDoneRef.current)) && (
