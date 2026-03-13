@@ -16,6 +16,10 @@ import {
   LogIn,
   BookOpen,
   Trash2,
+  Globe,
+  Paperclip,
+  Settings,
+  Image as ImageIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -27,11 +31,13 @@ import {
   sendToClaude,
   AI_ACTIONS,
   type ClaudeMessage,
+  type ContentBlock,
 } from "@/services/claude";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { signInWithGoogle } from "@/services/firebase";
+import * as db from "@/services/database";
 
 const iconMap: Record<string, React.ElementType> = {
   FileText,
@@ -43,7 +49,7 @@ const iconMap: Record<string, React.ElementType> = {
   List,
 };
 
-const SYSTEM_PROMPT =
+const DEFAULT_SYSTEM_PROMPT =
   "You are a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user's message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. Do NOT use emojis in your responses unless the user explicitly asks for them. Keep responses concise and professional.";
 
 interface AiPanelProps {
@@ -54,6 +60,55 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  images?: { data: string; mediaType: string }[];
+}
+
+// --- Custom Rules Dialog (inline) ---
+function RulesEditor({
+  open,
+  onClose,
+  rules,
+  onSave,
+}: {
+  open: boolean;
+  onClose: () => void;
+  rules: string;
+  onSave: (rules: string) => void;
+}) {
+  const [draft, setDraft] = useState(rules);
+  useEffect(() => { if (open) setDraft(rules); }, [open, rules]);
+
+  if (!open) return null;
+
+  return (
+    <div className="absolute inset-0 z-50 flex flex-col bg-background">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border">
+        <span className="text-sm font-medium">AI Custom Rules</span>
+        <Button variant="ghost" size="icon" className="h-6 w-6 cursor-pointer" onClick={onClose}>
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <div className="flex-1 p-3 flex flex-col gap-2 min-h-0">
+        <p className="text-[10px] text-muted-foreground">
+          Custom instructions that are always included in the system prompt. Example: "Always respond in Japanese." or "Use bullet points for all answers."
+        </p>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="Enter custom instructions for the AI..."
+          className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring resize-none select-text"
+        />
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" className="text-xs cursor-pointer" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button size="sm" className="text-xs cursor-pointer" onClick={() => { onSave(draft); onClose(); }}>
+            Save
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function AiPanel({ onClose }: AiPanelProps) {
@@ -68,9 +123,26 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [allDocsContext, setAllDocsContext] = useState(false);
+  const [webSearch, setWebSearch] = useState(false);
+  const [customRules, setCustomRules] = useState("");
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [attachedImages, setAttachedImages] = useState<{ data: string; mediaType: string; preview: string }[]>([]);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const prevDocIdRef = useRef<string | null>(null);
+
+  // Load custom rules from DB on mount
+  useEffect(() => {
+    db.getSetting("ai_custom_rules").then((val) => {
+      if (val) setCustomRules(val);
+    }).catch(() => {});
+  }, []);
+
+  const saveCustomRules = useCallback((rules: string) => {
+    setCustomRules(rules);
+    db.setSetting("ai_custom_rules", rules).catch(() => {});
+  }, []);
 
   // Reset conversation on document switch
   useEffect(() => {
@@ -93,6 +165,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
       ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
     }
   }, [input]);
+
+  const getSystemPrompt = (): string => {
+    if (!customRules.trim()) return DEFAULT_SYSTEM_PROMPT;
+    return `${DEFAULT_SYSTEM_PROMPT}\n\n--- User's Custom Instructions ---\n${customRules}`;
+  };
 
   const stripHtml = (html: string) => {
     const parser = new DOMParser();
@@ -128,6 +205,57 @@ export function AiPanel({ onClose }: AiPanelProps) {
     return parts.join("\n");
   };
 
+  const handleImageAttach = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("image/")) continue;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // data:image/png;base64,xxxx
+        const match = result.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        if (match) {
+          setAttachedImages((prev) => [
+            ...prev,
+            { data: match[2], mediaType: match[1], preview: result },
+          ]);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+    // Reset input so the same file can be re-selected
+    e.target.value = "";
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          const match = result.match(/^data:(image\/[^;]+);base64,(.+)$/);
+          if (match) {
+            setAttachedImages((prev) => [
+              ...prev,
+              { data: match[2], mediaType: match[1], preview: result },
+            ]);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  };
+
   const handleAction = async (actionId: string) => {
     if (!user || !activeDoc) return;
     const action = AI_ACTIONS.find((a) => a.id === actionId);
@@ -153,9 +281,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
     try {
       const result = await sendToClaude(
         "",
-        SYSTEM_PROMPT,
+        getSystemPrompt(),
         [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
         (text) => setStreamingText(text),
+        webSearch,
       );
       const assistantMsg: ChatMessage = {
         id: crypto.randomUUID(),
@@ -179,14 +308,21 @@ export function AiPanel({ onClose }: AiPanelProps) {
   };
 
   const handleChat = async () => {
-    if (!user || !input.trim()) return;
+    if (!user || (!input.trim() && attachedImages.length === 0)) return;
 
     const userInput = input.trim();
     setInput("");
+    const images = [...attachedImages];
+    setAttachedImages([]);
 
     setMessages((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), role: "user", content: userInput },
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userInput || "(image)",
+        images: images.length > 0 ? images.map((i) => ({ data: i.data, mediaType: i.mediaType })) : undefined,
+      },
     ]);
     setStreaming(true);
     setStreamingText("");
@@ -194,20 +330,40 @@ export function AiPanel({ onClose }: AiPanelProps) {
     try {
       const isFirstMessage = apiMessages.length === 0;
       const context = buildContextPrefix();
-      const fullUserContent = isFirstMessage
+
+      // Build content blocks for multimodal
+      const contentBlocks: ContentBlock[] = [];
+
+      // Add images first
+      for (const img of images) {
+        contentBlocks.push({
+          type: "image",
+          source: { type: "base64", media_type: img.mediaType, data: img.data },
+        });
+      }
+
+      // Add text
+      const textContent = isFirstMessage
         ? `${context}\n\nUser request: ${userInput}`
         : userInput;
+      if (textContent) {
+        contentBlocks.push({ type: "text", text: textContent });
+      }
 
       const newApiMessages: ClaudeMessage[] = [
         ...apiMessages,
-        { role: "user" as const, content: fullUserContent },
+        {
+          role: "user" as const,
+          content: images.length > 0 ? contentBlocks : textContent,
+        },
       ].slice(-20);
 
       const result = await sendToClaude(
         "",
-        SYSTEM_PROMPT,
+        getSystemPrompt(),
         newApiMessages,
         (text) => setStreamingText(text),
+        webSearch,
       );
 
       setApiMessages([
@@ -356,7 +512,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
   );
 
   return (
-    <div className="flex h-full w-full flex-col border-l border-border bg-background">
+    <div className="relative flex h-full w-full flex-col border-l border-border bg-background">
+      {/* Custom Rules Editor (overlay) */}
+      <RulesEditor
+        open={rulesOpen}
+        onClose={() => setRulesOpen(false)}
+        rules={customRules}
+        onSave={saveCustomRules}
+      />
+
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <div className="flex items-center gap-2">
@@ -364,6 +528,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <span className="text-sm font-medium">Claude AI</span>
         </div>
         <div className="flex items-center gap-0.5">
+          <Button
+            variant={webSearch ? "secondary" : "ghost"}
+            size="icon"
+            className="h-6 w-6 cursor-pointer"
+            onClick={() => setWebSearch(!webSearch)}
+            title={webSearch ? "Web search enabled" : "Enable web search"}
+          >
+            <Globe className="h-3.5 w-3.5" />
+          </Button>
           <Button
             variant={allDocsContext ? "secondary" : "ghost"}
             size="icon"
@@ -376,6 +549,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
             }
           >
             <BookOpen className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant={customRules.trim() ? "secondary" : "ghost"}
+            size="icon"
+            className="h-6 w-6 cursor-pointer"
+            onClick={() => setRulesOpen(true)}
+            title={customRules.trim() ? "Custom rules active" : "Set custom AI rules"}
+          >
+            <Settings className="h-3.5 w-3.5" />
           </Button>
           {messages.length > 0 && (
             <Button
@@ -430,11 +612,21 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
       <Separator />
 
-      {/* Context indicator */}
-      {allDocsContext && (
-        <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-1">
-          <BookOpen className="h-3 w-3" />
-          All {documents.length} documents as context
+      {/* Status indicators */}
+      {(allDocsContext || webSearch) && (
+        <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-2">
+          {allDocsContext && (
+            <span className="flex items-center gap-1">
+              <BookOpen className="h-3 w-3" />
+              {documents.length} docs
+            </span>
+          )}
+          {webSearch && (
+            <span className="flex items-center gap-1">
+              <Globe className="h-3 w-3" />
+              Web search
+            </span>
+          )}
         </div>
       )}
 
@@ -505,9 +697,23 @@ export function AiPanel({ onClose }: AiPanelProps) {
               )}
               <div className="leading-relaxed">
                 {msg.role === "user" ? (
-                  <span className="inline-block bg-primary text-primary-foreground rounded-md px-2 py-1 select-text">
-                    {msg.content}
-                  </span>
+                  <div className="inline-block text-left">
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="flex gap-1 justify-end mb-1">
+                        {msg.images.map((img, i) => (
+                          <img
+                            key={i}
+                            src={`data:${img.mediaType};base64,${img.data}`}
+                            alt=""
+                            className="h-16 w-16 object-cover rounded"
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <span className="inline-block bg-primary text-primary-foreground rounded-md px-2 py-1 select-text">
+                      {msg.content}
+                    </span>
+                  </div>
                 ) : (
                   <div className="prose ai-markdown select-text">
                     {renderMarkdown(msg.content)}
@@ -530,12 +736,56 @@ export function AiPanel({ onClose }: AiPanelProps) {
         </div>
       </ScrollArea>
 
-      {/* Input — textarea, Shift+Enter to send */}
+      {/* Attached images preview */}
+      {attachedImages.length > 0 && (
+        <div className="border-t border-border px-2 py-1 flex gap-1 items-center">
+          {attachedImages.map((img, i) => (
+            <div key={i} className="relative group">
+              <img
+                src={img.preview}
+                alt=""
+                className="h-10 w-10 object-cover rounded border border-border"
+              />
+              <button
+                className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center text-[8px] opacity-0 group-hover:opacity-100 transition-opacity"
+                onClick={() => setAttachedImages((prev) => prev.filter((_, j) => j !== i))}
+              >
+                x
+              </button>
+            </div>
+          ))}
+          <span className="text-[10px] text-muted-foreground ml-1">
+            <ImageIcon className="h-3 w-3 inline" /> {attachedImages.length}
+          </span>
+        </div>
+      )}
+
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      {/* Input — textarea, Cmd+Enter to send */}
       <div className="border-t border-border p-2">
         <div className="flex gap-1 items-end">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 cursor-pointer"
+            onClick={handleImageAttach}
+            disabled={streaming}
+            title="Attach image"
+          >
+            <Paperclip className="h-3.5 w-3.5" />
+          </Button>
           <textarea
             ref={textareaRef}
-            placeholder="Ask about your document... (Cmd+Enter to send)"
+            placeholder="Ask about your document... (Cmd+Enter)"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -544,6 +794,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
                 handleChat();
               }
             }}
+            onPaste={handlePaste}
             rows={1}
             disabled={streaming}
             className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border"
@@ -552,7 +803,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
             size="icon"
             className="h-7 w-7 shrink-0 cursor-pointer"
             onClick={handleChat}
-            disabled={streaming || !input.trim()}
+            disabled={streaming || (!input.trim() && attachedImages.length === 0)}
           >
             <Send className="h-3.5 w-3.5" />
           </Button>
