@@ -2,9 +2,6 @@ import { EditorView } from "@codemirror/view";
 import { uploadImage } from "@/services/firebase";
 import { useAuthStore } from "@/stores/auth-store";
 
-/**
- * Extract file extension from a MIME type or filename.
- */
 function extFromMime(mime: string): string {
   const map: Record<string, string> = {
     "image/png": "png",
@@ -17,60 +14,77 @@ function extFromMime(mime: string): string {
   return map[mime] || "png";
 }
 
-function extFromName(name: string): string {
-  const parts = name.split(".");
-  if (parts.length > 1) return parts[parts.length - 1].toLowerCase();
-  return "png";
+/** Race a promise against a timeout */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Upload timeout")), ms)),
+  ]);
 }
 
 /**
- * Upload an image to Firebase Storage and return the markdown to insert.
- * Falls back to local save via Tauri if not logged in.
+ * Cloud-first image processing for pasted images (raw bytes).
+ * 1. Save locally via Rust (fast, reliable)
+ * 2. Upload to Firebase Storage with timeout
+ * 3. Return cloud URL if successful, local asset URL as fallback
  */
 export async function processImageFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
-  const ext = file.name ? extFromName(file.name) : extFromMime(file.type);
+  const ext = file.name
+    ? file.name.split(".").pop()?.toLowerCase() || "png"
+    : extFromMime(file.type);
   const altText = file.name?.replace(/\.[^.]+$/, "") || "image";
 
-  // Cloud-first: upload to Firebase Storage if logged in
-  const user = useAuthStore.getState().user;
-  if (user) {
-    const url = await uploadImage(user.uid, bytes, ext);
-    return `![${altText}](${url})`;
-  }
-
-  // Fallback: save locally via Tauri backend
-  const { invoke } = await import("@tauri-apps/api/core");
-  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  // Save locally first (immediate, reliable)
+  const { invoke, convertFileSrc } = await import("@tauri-apps/api/core");
   const data = Array.from(bytes);
   const savedPath = await invoke<string>("save_image", { data, ext });
-  const assetUrl = convertFileSrc(savedPath);
-  return `![${altText}](${assetUrl})`;
+  const localUrl = convertFileSrc(savedPath);
+
+  // Cloud-first: upload to Firebase Storage with timeout
+  const user = useAuthStore.getState().user;
+  if (user) {
+    try {
+      const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
+      return `![${altText}](${cloudUrl})`;
+    } catch {
+      // Cloud upload failed or timed out — use local URL
+    }
+  }
+
+  return `![${altText}](${localUrl})`;
 }
 
 /**
- * Process an image file dropped via Tauri's drag-drop (given a file path).
- * Reads from disk, uploads to Firebase Storage (or local fallback), returns markdown.
+ * Cloud-first image processing for file paths (D&D, file picker).
+ * 1. Copy to app data via Rust (fast file copy, no byte serialization)
+ * 2. Read bytes and upload to Firebase Storage with timeout
+ * 3. Return cloud URL if successful, local asset URL as fallback
  */
 export async function processImagePath(path: string): Promise<string> {
-  const { readFile } = await import("@tauri-apps/plugin-fs");
-  const bytes = await readFile(path);
-  const ext = extFromName(path);
   const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "image";
+  const ext = path.split(".").pop()?.toLowerCase() || "png";
 
+  // Copy locally first (fast, reliable)
+  const { invoke, convertFileSrc } = await import("@tauri-apps/api/core");
+  const savedPath = await invoke<string>("copy_image_file", { source: path });
+  const localUrl = convertFileSrc(savedPath);
+
+  // Cloud-first: upload to Firebase Storage with timeout
   const user = useAuthStore.getState().user;
   if (user) {
-    const url = await uploadImage(user.uid, bytes, ext);
-    return `![${name}](${url})`;
+    try {
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const bytes = await readFile(savedPath);
+      const cloudUrl = await withTimeout(uploadImage(user.uid, bytes, ext), 15_000);
+      return `![${name}](${cloudUrl})`;
+    } catch {
+      // Cloud upload failed or timed out — use local URL
+    }
   }
 
-  const { invoke } = await import("@tauri-apps/api/core");
-  const { convertFileSrc } = await import("@tauri-apps/api/core");
-  const data = Array.from(bytes);
-  const savedPath = await invoke<string>("save_image", { data, ext });
-  const assetUrl = convertFileSrc(savedPath);
-  return `![${name}](${assetUrl})`;
+  return `![${name}](${localUrl})`;
 }
 
 /**
