@@ -110,11 +110,27 @@ export function useCollaboration(
       let wsSynced = false;
       let finalized = false;
 
-      /** Seed Y.Text from local content if Y.Doc is empty */
+      /** Seed Y.Text from local content if Y.Doc is empty.
+       *  If peers are connected, wait briefly for their state to propagate
+       *  before seeding — prevents content duplication when multiple users
+       *  open the same doc simultaneously with an empty WS server.
+       */
       const seedIfEmpty = () => {
         const ydocContent = ytext.toString();
         const localContent = initialContentRef.current;
         if (!ydocContent.trim() && localContent.trim()) {
+          const peerCount = Array.from(provider.awareness.getStates().keys())
+            .filter((id) => id !== ydoc.clientID).length;
+          if (peerCount > 0) {
+            // Peers connected — wait for their Y.Doc state before seeding
+            setTimeout(() => {
+              if (cancelled) return;
+              if (!ytext.toString().trim() && localContent.trim()) {
+                ydoc.transact(() => { ytext.insert(0, localContent); });
+              }
+            }, 1500);
+            return;
+          }
           ydoc.transact(() => {
             ytext.insert(0, localContent);
           });
