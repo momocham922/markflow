@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
 import { SlackSettingsDialog } from "@/components/SlackSettingsDialog";
+import { isIOS } from "@/platform";
 
 function UserAvatar({ user }: { user: { photoURL: string | null; displayName: string | null; email: string | null } }) {
   const [imgFailed, setImgFailed] = useState(false);
@@ -39,20 +40,21 @@ export function UserMenu() {
 
   if (!user) {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         {loginError && (
-          <span className="text-[10px] text-red-500 max-w-[200px] truncate" title={loginError}>
+          <span className={`text-[10px] text-red-500 truncate ${isIOS ? "max-w-20" : "max-w-50"}`} title={loginError}>
             {loginError}
           </span>
         )}
         <Button
           variant="ghost"
-          size="sm"
-          className="gap-2 text-xs"
+          size={isIOS ? "icon" : "sm"}
+          className={isIOS ? "h-7 w-7" : "gap-2 text-xs"}
           onClick={login}
+          title="Sign in with Google"
         >
           <LogIn className="h-3.5 w-3.5" />
-          Sign in with Google
+          {!isIOS && "Sign in with Google"}
         </Button>
       </div>
     );
@@ -96,9 +98,11 @@ export function UserMenu() {
       </Button>
       <div className="flex items-center gap-1.5">
         <UserAvatar user={user} />
-        <span className="text-xs text-muted-foreground max-w-[100px] truncate">
-          {user.displayName || user.email}
-        </span>
+        {!isIOS && (
+          <span className="text-xs text-muted-foreground max-w-25 truncate">
+            {user.displayName || user.email}
+          </span>
+        )}
       </div>
       <Button
         variant="ghost"

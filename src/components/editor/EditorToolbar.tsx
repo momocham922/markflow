@@ -31,6 +31,7 @@ import { ThemeCustomizer } from "@/components/ThemeCustomizer";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { processImagePath } from "@/extensions/image-paste";
+import { isIOS } from "@/platform";
 import type { PreviewMode } from "./Editor";
 
 interface EditorToolbarProps {
@@ -123,7 +124,7 @@ export function EditorToolbar({
   };
 
   return (
-    <div className="flex items-center justify-between border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2">
+    <div className={`flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 ${isIOS ? "overflow-x-auto" : "justify-between"}`}>
       {/* Left: document title (rename) + tags */}
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1 overflow-hidden">
         {/* Document title / rename */}
