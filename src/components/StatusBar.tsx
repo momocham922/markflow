@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
+import { isIOS } from "@/platform";
 
 export function StatusBar() {
   const { theme, toggleTheme, activeDocId, documents } = useAppStore();
@@ -16,7 +17,7 @@ export function StatusBar() {
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
 
   return (
-    <div className="flex h-7 items-center justify-between border-t border-border bg-background px-3 text-[11px] text-muted-foreground">
+    <div className={`flex items-center justify-between border-t border-border bg-background px-3 text-[11px] text-muted-foreground ${isIOS ? "h-6 safe-bottom safe-left safe-right" : "h-7"}`}>
       <div className="flex items-center gap-3">
         {user ? (
           <span className="flex items-center gap-1">
