@@ -280,8 +280,8 @@ async fn upload_image_cloud(
     };
 
     let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?uploadType=media&name={}",
-        urlencoding::encode(&bucket),
+        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
+        bucket,
         urlencoding::encode(&object_path),
     );
 
@@ -292,8 +292,10 @@ async fn upload_image_cloud(
 
     let resp = client
         .post(&upload_url)
-        .header("Authorization", format!("Bearer {}", token))
+        .header("Authorization", format!("Firebase {}", token))
         .header("Content-Type", content_type)
+        .header("X-Goog-Upload-Protocol", "raw")
+        .header("X-Goog-Upload-Command", "upload, finalize")
         .body(data)
         .send()
         .await
