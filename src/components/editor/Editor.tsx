@@ -475,13 +475,14 @@ export function Editor() {
                   v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") } });
                 }
               }
-            } catch {
+            } catch (err: unknown) {
               const v = viewRef.current;
               if (v) {
                 const doc = v.state.doc.toString();
                 const idx = doc.indexOf(placeholder);
                 if (idx >= 0) {
-                  v.dispatch({ changes: { from: idx, to: idx + placeholder.length + 1, insert: "" } });
+                  const errMsg = `![Upload failed: ${err instanceof Error ? err.message : "Unknown error"}]()`;
+                  v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: errMsg } });
                 }
               }
             }

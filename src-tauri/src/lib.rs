@@ -305,12 +305,28 @@ async fn upload_image_cloud(
         return Err(format!("Upload failed (HTTP {}): {}", status, body));
     }
 
-    // Build the download URL
+    // Parse response to extract downloadTokens for authenticated URL
+    let body = resp.text().await.unwrap_or_default();
     let encoded_path = urlencoding::encode(&object_path);
-    let download_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-        bucket, encoded_path
-    );
+
+    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
+                bucket, encoded_path, token
+            )
+        } else {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+                bucket, encoded_path
+            )
+        }
+    } else {
+        format!(
+            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+            bucket, encoded_path
+        )
+    };
 
     Ok(download_url)
 }
