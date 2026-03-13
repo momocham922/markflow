@@ -2,9 +2,24 @@ import { auth } from "./firebase";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
 
+export type ContentBlock = {
+  type: "text";
+  text: string;
+} | {
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string };
+}
+
 export interface ClaudeMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | ContentBlock[];
+}
+
+export interface SendOptions {
+  systemPrompt: string;
+  messages: ClaudeMessage[];
+  onChunk?: (text: string) => void;
+  tools?: boolean;
 }
 
 async function getFirebaseIdToken(): Promise<string> {
@@ -26,6 +41,7 @@ export async function sendToClaude(
   systemPrompt: string,
   messages: ClaudeMessage[],
   onChunk?: (text: string) => void,
+  tools?: boolean,
 ): Promise<string> {
   const idToken = await getFirebaseIdToken();
 
@@ -33,18 +49,26 @@ export async function sendToClaude(
   const controller = new AbortController();
   activeAbortController = controller;
 
+  const body: Record<string, unknown> = {
+    system: systemPrompt,
+    messages,
+    max_tokens: 4096,
+    stream: !!onChunk,
+  };
+
+  if (tools) {
+    body.tools = [
+      { type: "web_search_20250305", name: "web_search", max_uses: 3 },
+    ];
+  }
+
   const response = await fetch(`${AI_PROXY_URL}/v1/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${idToken}`,
     },
-    body: JSON.stringify({
-      system: systemPrompt,
-      messages,
-      max_tokens: 4096,
-      stream: !!onChunk,
-    }),
+    body: JSON.stringify(body),
     signal: controller.signal,
   });
 
@@ -96,6 +120,13 @@ export async function sendToClaude(
 
   activeAbortController = null;
   const data = await response.json();
+  // Handle both single text and multi-block responses (tool use)
+  if (Array.isArray(data.content)) {
+    return data.content
+      .filter((b: { type: string }) => b.type === "text")
+      .map((b: { text: string }) => b.text)
+      .join("");
+  }
   return data.content?.[0]?.text || "";
 }
 
