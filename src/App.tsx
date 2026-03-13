@@ -66,6 +66,7 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<{ version: string; update: unknown } | null>(null);
   const [updateStatus, setUpdateStatus] = useState<"idle" | "downloading" | "error">("idle");
   const [updateError, setUpdateError] = useState("");
+  const [closingSyncVisible, setClosingSyncVisible] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
@@ -154,11 +155,13 @@ function App() {
           if (closing) return;
           closing = true;
           event.preventDefault();
+          const authState = useAuthStore.getState();
+          const needsSync = !!authState.user;
+          if (needsSync) setClosingSyncVisible(true);
           try {
             const { flushPendingSaves } = await import("@/stores/app-store");
             flushPendingSaves();
-            const authState = useAuthStore.getState();
-            if (authState.user) {
+            if (needsSync) {
               await Promise.race([
                 authState.syncToCloud(),
                 new Promise((resolve) => setTimeout(resolve, 3000)),
@@ -590,12 +593,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         </div>
 
-        {/* Syncing overlay — blocks interaction only during initial cloud sync */}
-        {syncing && !initialSyncDoneRef.current && (
+        {/* Syncing overlay — initial sync or closing sync */}
+        {(closingSyncVisible || (syncing && !initialSyncDoneRef.current)) && (
           <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
             <div className="flex items-center gap-3 rounded-lg bg-card border border-border px-5 py-3 shadow-lg">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-              <span className="text-sm text-foreground">Syncing...</span>
+              <span className="text-sm text-foreground">
+                {closingSyncVisible ? "保存中..." : "Syncing..."}
+              </span>
             </div>
           </div>
         )}
