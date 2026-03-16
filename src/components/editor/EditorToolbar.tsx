@@ -123,8 +123,109 @@ export function EditorToolbar({
     setRenaming(false);
   };
 
+  // ── iOS mobile layout ───────────────────────────────────
+  if (isIOS) {
+    return (
+      <div className="flex items-center justify-between border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2">
+        {/* Left: document title */}
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1">
+          {activeDoc && (
+            renaming ? (
+              <div className="flex items-center gap-1 shrink-0">
+                <input
+                  autoFocus
+                  className="bg-transparent text-xs font-medium outline-none border-b border-input w-32"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onCompositionStart={ime.onCompositionStart}
+                  onCompositionEnd={ime.onCompositionEnd}
+                  onKeyDown={(e) => {
+                    if (ime.isComposing()) return;
+                    if (e.key === "Enter") handleFinishRename();
+                    if (e.key === "Escape") setRenaming(false);
+                  }}
+                  onBlur={handleFinishRename}
+                />
+                <Check
+                  className="h-3 w-3 cursor-pointer hover:text-foreground"
+                  onClick={handleFinishRename}
+                />
+              </div>
+            ) : (
+              <span
+                className="text-xs font-medium truncate max-w-[140px] cursor-pointer hover:text-foreground shrink-0 flex items-center gap-1"
+                onClick={handleStartRename}
+                title="Click to rename"
+              >
+                {activeDoc.title}
+                <Pencil className="h-2.5 w-2.5 opacity-50" />
+              </span>
+            )
+          )}
+          {collabSlot}
+        </div>
+
+        {/* Right: essential controls */}
+        <div className="flex items-center gap-1 shrink-0">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onHistoryOpen}
+            title="Version History"
+          >
+            <History className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => setThemeOpen(true)}
+            title="Theme"
+          >
+            <Paintbrush className="h-3.5 w-3.5" />
+          </Button>
+
+          {/* Preview mode toggle (no split on mobile) */}
+          <div className="flex items-center rounded-md border border-border p-0.5">
+            <Button
+              variant={previewMode === "edit" ? "secondary" : "ghost"}
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => onPreviewModeChange("edit")}
+              title="Edit only"
+            >
+              <PenLine className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant={previewMode === "preview" ? "secondary" : "ghost"}
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => onPreviewModeChange("preview")}
+              title="Preview only"
+            >
+              <Eye className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant={previewMode === "mindmap" ? "secondary" : "ghost"}
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => onPreviewModeChange("mindmap")}
+              title="Mind Map"
+            >
+              <Network className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+
+        <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />
+      </div>
+    );
+  }
+
+  // ── Desktop layout ──────────────────────────────────────
   return (
-    <div className={`flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 ${isIOS ? "overflow-x-auto" : "justify-between"}`}>
+    <div className="flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 justify-between">
       {/* Left: document title (rename) + tags */}
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1 overflow-hidden">
         {/* Document title / rename */}

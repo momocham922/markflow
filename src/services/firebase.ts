@@ -5,7 +5,6 @@ import {
   indexedDBLocalPersistence,
   GoogleAuthProvider,
   signInWithCredential,
-  signInWithPopup,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   type User,
@@ -62,22 +61,133 @@ try {
 export const auth = _auth;
 export const firestore = getFirestore(app);
 
+/**
+ * Check for pending OAuth code from iOS in-webview flow.
+ * Called on app init after the WKWebView reloads from the OAuth redirect.
+ */
+export async function checkPendingOAuthCode(): Promise<User | null> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const code = await invoke<string | null>("get_pending_oauth_code");
+    if (!code) return null;
+
+    const redirectUri = "http://localhost:19847/callback";
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const err = await tokenResponse.text();
+      throw new Error(`Token exchange failed: ${err}`);
+    }
+
+    const tokens = await tokenResponse.json();
+    const credential = GoogleAuthProvider.credential(tokens.id_token, tokens.access_token);
+    const result = await signInWithCredential(auth, credential);
+    return result.user;
+  } catch (e) {
+    console.error("checkPendingOAuthCode failed:", e);
+    return null;
+  }
+}
+
 export async function signInWithGoogle(): Promise<User | null> {
   const { getPlatform, isIOS } = await import("@/platform");
   const platform = await getPlatform();
 
-  // iOS (Tauri iOS or Safari): use signInWithPopup (local HTTP server redirect won't work)
+  const port = 19847;
+  const redirectUri = `http://localhost:${port}/callback`;
+
+  // iOS: open SFSafariViewController (system browser sheet) for OAuth
+  // Google blocks embedded WKWebView OAuth, but SFSafariViewController is allowed.
+  // The Rust localhost server captures the callback and emits an event.
   if (isIOS) {
-    const provider = new GoogleAuthProvider();
-    provider.addScope("email");
-    provider.addScope("profile");
-    const result = await signInWithPopup(auth, provider);
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { listen } = await import("@tauri-apps/api/event");
+
+    // Start localhost callback server (iOS mode)
+    await invoke<number>("oauth_listen", { ios: true });
+
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      prompt: "select_account",
+      access_type: "offline",
+    });
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+
+    // Wait for the OAuth callback event from Rust
+    const authCode = await new Promise<string>((resolve, reject) => {
+      let settled = false;
+
+      const unlistenOk = listen<string>("oauth-callback", (event) => {
+        if (!settled) {
+          settled = true;
+          unlistenOk.then((fn) => fn());
+          unlistenErr.then((fn) => fn());
+          resolve(event.payload);
+        }
+      });
+
+      const unlistenErr = listen<string>("oauth-error", (event) => {
+        if (!settled) {
+          settled = true;
+          unlistenOk.then((fn) => fn());
+          unlistenErr.then((fn) => fn());
+          reject(new Error(event.payload));
+        }
+      });
+
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          unlistenOk.then((fn) => fn());
+          unlistenErr.then((fn) => fn());
+          invoke("dismiss_safari_vc").catch(() => {});
+          reject(new Error("Authentication timed out"));
+        }
+      }, 300000);
+
+      // Open SFSafariViewController (stays in-app, not blocked by Google)
+      invoke("open_safari_vc", { url: authUrl }).catch(reject);
+    });
+
+    // Exchange code for tokens
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code: authCode,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const err = await tokenResponse.text();
+      throw new Error(`Token exchange failed: ${err}`);
+    }
+
+    const tokens = await tokenResponse.json();
+    const credential = GoogleAuthProvider.credential(tokens.id_token, tokens.access_token);
+    const result = await signInWithCredential(auth, credential);
     return result.user;
   }
 
-  // Desktop (Tauri): use local OAuth callback server
-  const port = await platform.startOAuthListener();
-  const redirectUri = `http://localhost:${port}/callback`;
+  // Desktop: use local OAuth callback server + external browser
+  await platform.startOAuthListener();
 
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,

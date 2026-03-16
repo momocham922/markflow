@@ -86,7 +86,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       await signInWithGoogle();
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "Login failed";
+      const msg = error instanceof Error ? error.message : String(error);
+      alert("Login error: " + msg);
       console.error("Login failed:", error);
       set({ loginError: msg });
     }

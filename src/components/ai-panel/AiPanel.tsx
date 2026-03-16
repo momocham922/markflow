@@ -37,6 +37,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { signInWithGoogle } from "@/services/firebase";
+import { isIOS } from "@/platform";
 import * as db from "@/services/database";
 
 const iconMap: Record<string, React.ElementType> = {
@@ -421,10 +422,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={isIOS ? "h-9 w-9 cursor-pointer" : "h-6 w-6 cursor-pointer"}
             onClick={onClose}
           >
-            <X className="h-3.5 w-3.5" />
+            <X className={isIOS ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
         <div className="flex flex-1 flex-col items-center justify-center p-4 space-y-3">
@@ -576,10 +577,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={isIOS ? "h-9 w-9 cursor-pointer" : "h-6 w-6 cursor-pointer"}
             onClick={onClose}
           >
-            <X className="h-3.5 w-3.5" />
+            <X className={isIOS ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
       </div>

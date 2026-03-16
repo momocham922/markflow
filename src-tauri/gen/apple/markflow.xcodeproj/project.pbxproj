@@ -10,6 +10,7 @@
 		0307A952F0601DF2ACF9E985 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 4497F6D81288986ED6A17BC3 /* assets */; };
 		1183B3BAF4F916C83F438838 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 4165E31486B941CEB3EBD85D /* LaunchScreen.storyboard */; };
 		569808A244D22983D568F525 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 68A3B12333279F5A5EE47776 /* main.mm */; };
+		AA000003000000000000AAAA /* SafariServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA000004000000000000AAAA /* SafariServices.framework */; };
 		5A40D738270BD020EF91BF0C /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 724695B008A5526C2C14B9A8 /* MetalKit.framework */; };
 		60DFFEED3BC5AB9ACEEE42DE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D69553D13CD98E3A2EDDD807 /* Assets.xcassets */; };
 		6FAFD665FC36B3FD8C5BC669 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 67FEF76018A4415CC03EE23D /* UIKit.framework */; };
@@ -24,7 +25,7 @@
 /* Begin PBXFileReference section */
 		0A1A6E4421681B8EB09ED60B /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		0CB4D0D2EB31550BC5247982 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
-		3CA0588A7BC4369DAB1260B7 /* markflow_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = markflow_iOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3CA0588A7BC4369DAB1260B7 /* MarkFlow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MarkFlow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3CC147A1F6D1CB33D61C050E /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		4165E31486B941CEB3EBD85D /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		4497F6D81288986ED6A17BC3 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
@@ -35,11 +36,12 @@
 		724695B008A5526C2C14B9A8 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		AB88A5E97FAC127924B84460 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		B0AB743B96B140EAC125E253 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
-		C34FE6D7710B56D067DBFD21 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		C34FE6D7710B56D067DBFD21 /* main.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = main.rs; sourceTree = "<group>"; };
 		CA9B35EE0738E1F73417555B /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		D69553D13CD98E3A2EDDD807 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		DD9A39BDFEFA8BFFA4F7626D /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		DD9A39BDFEFA8BFFA4F7626D /* lib.rs */ = {isa = PBXFileReference; lastKnownFileType = text; path = lib.rs; sourceTree = "<group>"; };
 		F9AA1F11868FBD3AF40DCC62 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		AA000004000000000000AAAA /* SafariServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SafariServices.framework; path = System/Library/Frameworks/SafariServices.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,6 +57,7 @@
 				ADD110B23B9CABE5A344ED09 /* Security.framework in Frameworks */,
 				6FAFD665FC36B3FD8C5BC669 /* UIKit.framework in Frameworks */,
 				A447EF26E0FABC2BE5EB5086 /* WebKit.framework in Frameworks */,
+				AA000003000000000000AAAA /* SafariServices.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -89,6 +92,7 @@
 				CA9B35EE0738E1F73417555B /* Security.framework */,
 				67FEF76018A4415CC03EE23D /* UIKit.framework */,
 				F9AA1F11868FBD3AF40DCC62 /* WebKit.framework */,
+				AA000004000000000000AAAA /* SafariServices.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -96,7 +100,7 @@
 		54CF9B34A23C93B3390DE7F7 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				3CA0588A7BC4369DAB1260B7 /* markflow_iOS.app */,
+				3CA0588A7BC4369DAB1260B7 /* MarkFlow.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -170,7 +174,7 @@
 			packageProductDependencies = (
 			);
 			productName = markflow_iOS;
-			productReference = 3CA0588A7BC4369DAB1260B7 /* markflow_iOS.app */;
+			productReference = 3CA0588A7BC4369DAB1260B7 /* MarkFlow.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -181,8 +185,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = FF96C8DC4494DE24DD074CBE /* Build configuration list for PBXProject "markflow" */;
 			developmentRegion = en;
@@ -256,12 +258,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
-				ARCHS = (
-					arm64,
-				);
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = markflow_iOS/markflow_iOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = HHVN9NX6B8;
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -273,9 +274,21 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.markflow.app;
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.markflow.editor;
 				PRODUCT_NAME = "MarkFlow";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -406,12 +419,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
-				ARCHS = (
-					arm64,
-				);
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = markflow_iOS/markflow_iOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = HHVN9NX6B8;
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -423,9 +435,21 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME) $(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.markflow.app;
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION)",
+					"$(SDKROOT)/usr/lib/swift",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
+					"$(TOOLCHAIN_DIR)/usr/lib/swift-5.0/$(PLATFORM_NAME)",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.markflow.editor;
 				PRODUCT_NAME = "MarkFlow";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";

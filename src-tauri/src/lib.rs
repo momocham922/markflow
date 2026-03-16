@@ -1,5 +1,126 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
+use std::sync::Mutex;
+
+/// Pending OAuth code from iOS in-webview flow
+static PENDING_OAUTH_CODE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Open SFSafariViewController on iOS using ObjC runtime
+#[cfg(target_os = "ios")]
+static SAFARI_VC: Mutex<Option<usize>> = Mutex::new(None);
+
+#[cfg(target_os = "ios")]
+#[link(name = "System", kind = "dylib")]
+extern "C" {
+    fn dispatch_async_f(queue: *mut std::ffi::c_void, context: *mut std::ffi::c_void, work: extern "C" fn(*mut std::ffi::c_void));
+}
+
+#[cfg(target_os = "ios")]
+extern "C" {
+    // dispatch_get_main_queue is actually _dispatch_main_q (a global variable)
+    #[link_name = "_dispatch_main_q"]
+    static _dispatch_main_q: std::ffi::c_void;
+}
+
+#[cfg(target_os = "ios")]
+fn get_main_queue() -> *mut std::ffi::c_void {
+    unsafe { &_dispatch_main_q as *const _ as *mut _ }
+}
+
+#[cfg(target_os = "ios")]
+extern "C" fn present_safari_vc_work(ctx: *mut std::ffi::c_void) {
+    use objc2::runtime::{AnyObject, Bool as ObjcBool};
+    use objc2::msg_send;
+    use std::ptr;
+
+    let svc = ctx as *mut AnyObject;
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(UIApplication), sharedApplication];
+        let scenes: *mut AnyObject = msg_send![app, connectedScenes];
+        let enumerator: *mut AnyObject = msg_send![scenes, objectEnumerator];
+        let mut root_vc: *mut AnyObject = ptr::null_mut();
+
+        loop {
+            let scene: *mut AnyObject = msg_send![enumerator, nextObject];
+            if scene.is_null() { break; }
+            let windows: *mut AnyObject = msg_send![scene, windows];
+            let count: usize = msg_send![windows, count];
+            for i in 0..count {
+                let window: *mut AnyObject = msg_send![windows, objectAtIndex: i];
+                let is_key: ObjcBool = msg_send![window, isKeyWindow];
+                if is_key.as_bool() {
+                    root_vc = msg_send![window, rootViewController];
+                    break;
+                }
+            }
+            if !root_vc.is_null() { break; }
+        }
+
+        if root_vc.is_null() { return; }
+
+        // Find topmost presented VC
+        loop {
+            let presented: *mut AnyObject = msg_send![root_vc, presentedViewController];
+            if presented.is_null() { break; }
+            root_vc = presented;
+        }
+
+        let _: () = msg_send![root_vc, presentViewController: svc animated: ObjcBool::YES completion: ptr::null::<AnyObject>()];
+    }
+}
+
+#[cfg(target_os = "ios")]
+extern "C" fn dismiss_vc_work(ctx: *mut std::ffi::c_void) {
+    use objc2::runtime::{AnyObject, Bool as ObjcBool};
+    use objc2::msg_send;
+    let svc = ctx as *mut AnyObject;
+    unsafe {
+        let _: () = msg_send![svc, dismissViewControllerAnimated: ObjcBool::YES completion: std::ptr::null::<AnyObject>()];
+    }
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn open_safari_vc(url: String) {
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::msg_send;
+    use objc2_foundation::NSString;
+
+    let url_str = NSString::from_str(&url);
+    let ns_url: *mut AnyObject = unsafe { msg_send![objc2::class!(NSURL), URLWithString: &*url_str] };
+    if ns_url.is_null() { return; }
+
+    let svc_class = AnyClass::get(c"SFSafariViewController").unwrap();
+    let svc: *mut AnyObject = unsafe { msg_send![svc_class, alloc] };
+    let svc: *mut AnyObject = unsafe { msg_send![svc, initWithURL: ns_url] };
+    if svc.is_null() { return; }
+
+    *SAFARI_VC.lock().unwrap() = Some(svc as usize);
+
+    unsafe {
+        dispatch_async_f(get_main_queue(), svc as *mut std::ffi::c_void, present_safari_vc_work);
+    }
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn dismiss_safari_vc() {
+    let svc_ptr = SAFARI_VC.lock().unwrap().take();
+    if let Some(ptr) = svc_ptr {
+        unsafe {
+            dispatch_async_f(get_main_queue(), ptr as *mut std::ffi::c_void, dismiss_vc_work);
+        }
+    }
+}
+
+// Desktop stubs
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+fn open_safari_vc(_url: String) {}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+fn dismiss_safari_vc() {}
 
 #[derive(serde::Serialize, Default)]
 struct OgpData {
@@ -113,18 +234,17 @@ async fn fetch_ogp(url: String) -> Result<OgpData, String> {
 }
 
 #[tauri::command]
-async fn oauth_listen(app: tauri::AppHandle) -> Result<u16, String> {
+async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, String> {
     let port: u16 = 19847;
+    let is_ios = ios.unwrap_or(false);
     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .map_err(|e| format!("Failed to bind port {}: {}", port, e))?;
 
-    // Set a timeout so the thread doesn't hang forever
     listener
         .set_nonblocking(false)
         .map_err(|e| format!("Failed to set blocking: {}", e))?;
 
     std::thread::spawn(move || {
-        // Accept one connection (the OAuth callback)
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buf = [0u8; 4096];
             if let Ok(n) = stream.read(&mut buf) {
@@ -149,33 +269,72 @@ async fn oauth_listen(app: tauri::AppHandle) -> Result<u16, String> {
                         }
 
                         if let Some(auth_code) = code {
-                            let html = r#"<!DOCTYPE html><html><head><style>
+                            if is_ios {
+                                // iOS: respond with success HTML, emit event, dismiss SFSafariVC
+                                let html = r#"<!DOCTYPE html><html><body><p>Signing in...</p></body></html>"#;
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-callback", auth_code);
+                                #[cfg(target_os = "ios")]
+                                {
+                                    let svc_ptr = SAFARI_VC.lock().unwrap().take();
+                                    if let Some(ptr) = svc_ptr {
+                                        unsafe {
+                                            dispatch_async_f(get_main_queue(), ptr as *mut std::ffi::c_void, dismiss_vc_work);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Desktop: show success page and emit event
+                                let html = r#"<!DOCTYPE html><html><head><style>
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;}
 .c{text-align:center;padding:2em 3em;border-radius:16px;background:white;box-shadow:0 4px 24px rgba(0,0,0,0.08);}
 h2{margin:0 0 8px;color:#1a1a1a;font-size:1.3em;}
 p{color:#666;margin:0;font-size:0.95em;}
 </style></head><body><div class="c"><h2>Signed in successfully</h2><p>You can close this tab and return to MarkFlow.</p></div></body></html>"#;
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                html.len(),
-                                html
-                            );
-                            let _ = stream.write_all(response.as_bytes());
-                            let _ = stream.flush();
-                            let _ = app.emit("oauth-callback", auth_code);
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-callback", auth_code);
+                            }
                         } else if let Some(err) = error {
-                            let html = format!(
-                                "<!DOCTYPE html><html><body><p>Authentication error: {}</p></body></html>",
-                                err
-                            );
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                html.len(),
-                                html
-                            );
-                            let _ = stream.write_all(response.as_bytes());
-                            let _ = stream.flush();
-                            let _ = app.emit("oauth-error", err);
+                            if is_ios {
+                                let html = format!("<!DOCTYPE html><html><body><p>Error: {}</p></body></html>", err);
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-error", err);
+                                #[cfg(target_os = "ios")]
+                                {
+                                    let svc_ptr = SAFARI_VC.lock().unwrap().take();
+                                    if let Some(ptr) = svc_ptr {
+                                        unsafe {
+                                            dispatch_async_f(get_main_queue(), ptr as *mut std::ffi::c_void, dismiss_vc_work);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let html = format!(
+                                    "<!DOCTYPE html><html><body><p>Authentication error: {}</p></body></html>", err
+                                );
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-error", err);
+                            }
                         }
                     }
                 }
@@ -184,6 +343,11 @@ p{color:#666;margin:0;font-size:0.95em;}
     });
 
     Ok(port)
+}
+
+#[tauri::command]
+fn get_pending_oauth_code() -> Option<String> {
+    PENDING_OAUTH_CODE.lock().unwrap().take()
 }
 
 #[tauri::command]
@@ -470,7 +634,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![oauth_listen, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

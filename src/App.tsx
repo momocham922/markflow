@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
 import { getPlatform, isIOS } from "@/platform";
+import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -68,6 +69,7 @@ function App() {
   const [shareOpen, setShareOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
+  const { viewportHeight, keyboardVisible } = useIOSKeyboard();
   const [shareToken, setShareToken] = useState<string | null>(() => {
     const match = window.location.hash.match(/^#\/share\/(.+)$/);
     return match ? match[1] : null;
@@ -368,7 +370,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
   if (shareToken) {
     return (
       <TooltipProvider>
-        <div className={cn("flex h-screen w-screen flex-col overflow-hidden bg-background", isIOS && "safe-top safe-bottom")}>
+        <div
+          className={cn(
+            "flex w-screen flex-col overflow-hidden bg-background",
+            !isIOS && "h-screen",
+            isIOS && "safe-top",
+          )}
+          style={isIOS ? { height: viewportHeight, position: "fixed", top: 0, left: 0, right: 0 } : undefined}
+        >
           {!isIOS && (
             <div
               className="h-7 w-full shrink-0"
@@ -391,7 +400,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
   return (
     <TooltipProvider>
-      <div className={cn("flex h-screen w-screen flex-col overflow-hidden", isIOS && "safe-top safe-bottom")}>
+      <div
+        className={cn(
+          "flex w-screen flex-col overflow-hidden",
+          !isIOS && "h-screen",
+          isIOS && "safe-top",
+        )}
+        style={isIOS ? { height: viewportHeight, position: "fixed", top: 0, left: 0, right: 0 } : undefined}
+      >
         {/* Window drag region — desktop only (macOS title bar) */}
         {!isIOS && (
           <div
@@ -631,7 +647,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             </div>
           </div>
         )}
-        <StatusBar />
+        {!(isIOS && keyboardVisible) && <StatusBar />}
         <ShareDialog open={shareOpen} onOpenChange={setShareOpen} />
         <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
         <CommandPalette

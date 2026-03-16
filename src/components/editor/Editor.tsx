@@ -7,7 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
-import { getPlatform } from "@/platform";
+import { getPlatform, isIOS } from "@/platform";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
@@ -161,7 +161,7 @@ mermaid.initialize({ startOnLoad: false, theme: "default" });
 export function Editor() {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(isIOS ? "edit" : "split");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
@@ -235,10 +235,10 @@ export function Editor() {
   // Stable reference prevents @uiw/react-codemirror from reconfiguring on every render
   // (inline object literal → new ref each render → StateEffect.reconfigure on every render)
   const basicSetupConfig = useMemo(() => ({
-    lineNumbers: true,
-    highlightActiveLineGutter: true,
+    lineNumbers: !isIOS,
+    highlightActiveLineGutter: !isIOS,
     highlightActiveLine: true,
-    foldGutter: true,
+    foldGutter: !isIOS,
     bracketMatching: true,
     closeBrackets: true,
     indentOnInput: true,
@@ -586,7 +586,7 @@ export function Editor() {
               : previewMode === "split"
                 ? "w-1/2 border-r border-border"
                 : "flex-1"
-          }`}
+          } ${isIOS ? "ios-editor" : ""}`}
         >
           {collabEnabled && !isCollabReady && !wsTimedOut ? (
             <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -614,7 +614,7 @@ export function Editor() {
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && previewMode !== "mindmap" && (
           <div
-            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"}`}
+            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"} ${isIOS ? "overflow-x-hidden" : ""}`}
           >
             {previewThemeCss && <style>{previewThemeCss}</style>}
             {themeSettings.customPreviewCss && (
@@ -622,7 +622,7 @@ export function Editor() {
             )}
             <div
               ref={previewRef}
-              className="prose max-w-none px-12 py-8"
+              className={`prose max-w-none ${isIOS ? "ios-preview" : "px-12 py-8"}`}
               dangerouslySetInnerHTML={{ __html: previewHtml }}
               onClick={(e) => {
                 const target = (e.target as HTMLElement).closest(".wikilink");
@@ -635,7 +635,7 @@ export function Editor() {
             />
             {/* Backlinks */}
             {backlinks.length > 0 && (
-              <div className="px-12 pb-8">
+              <div className={isIOS ? "px-4 pb-4" : "px-12 pb-8"}>
                 <div className="border-t border-border pt-4 mt-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wider mb-2">
                     Backlinks ({backlinks.length})

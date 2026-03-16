@@ -175,6 +175,13 @@
     padding-right: env(safe-area-inset-right, 0px);
   }
 
+  /* Prevent iOS WKWebView from scrolling the page when keyboard opens. */
+  html, body {
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: auto;
+    touch-action: manipulation;
+  }
+
   /* Suppress selection highlight on non-editable chrome.
      WebKit/WKWebView can leave phantom ::selection renders on
      user-select:none elements — making them transparent prevents
@@ -794,4 +801,66 @@ input::selection {
   background-color: var(--color, #333);
   opacity: 0.9;
   z-index: 10;
+}
+
+/* ---- iOS: CodeMirror full-height + scroll padding ---- */
+/* Make CodeMirror fill its flex container so keyboard doesn't cut off content */
+.ios-editor .cm-editor {
+  height: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.ios-editor .cm-editor .cm-scroller {
+  flex: 1 !important;
+  overflow: auto !important;
+}
+/* Extra bottom padding so last line is reachable above keyboard */
+.ios-editor .cm-editor .cm-content {
+  padding-bottom: 40vh !important;
+  font-size: 11px !important;
+  line-height: 1.5 !important;
+}
+
+/* ---- iOS: Mobile preview ---- */
+.ios-preview.prose {
+  font-size: 0.875rem !important;
+  line-height: 1.65 !important;
+  padding: 1rem 1rem !important;
+  overflow-x: hidden !important;
+  overflow-wrap: break-word !important;
+  word-break: break-word !important;
+}
+.ios-preview.prose pre {
+  font-size: 0.75rem !important;
+  overflow-x: auto !important;
+  max-width: 100% !important;
+}
+.ios-preview.prose img {
+  max-width: 100% !important;
+  height: auto !important;
+}
+.ios-preview.prose table {
+  display: block !important;
+  overflow-x: auto !important;
+  max-width: 100% !important;
+  font-size: 0.8rem !important;
+}
+.ios-preview.prose .youtube-embed {
+  max-width: 100% !important;
+}
+.ios-preview.prose .link-card .link-card-inner {
+  flex-direction: column !important;
+}
+.ios-preview.prose .link-card-image {
+  width: 100% !important;
+  max-height: 160px !important;
+}
+.ios-preview.prose h1 {
+  font-size: 1.5em !important;
+}
+.ios-preview.prose h2 {
+  font-size: 1.25em !important;
+}
+.ios-preview.prose h3 {
+  font-size: 1.1em !important;
 }
