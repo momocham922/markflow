@@ -21,6 +21,7 @@ import {
   Settings,
   Image as ImageIcon,
   Wrench,
+  Wand2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -45,6 +46,7 @@ import {
   type McpTool,
 } from "@/services/mcp";
 import { McpSettings, loadMcpConfigs } from "./McpSettings";
+import { generateImage } from "@/services/image-gen";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
@@ -128,7 +130,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const { activeDocId, documents } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const { getSelectedText, replaceSelection, appendToDoc } = useEditorStore();
+  const { getSelectedText, replaceSelection, appendToDoc, insertAtCursor } = useEditorStore();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [apiMessages, setApiMessages] = useState<ClaudeMessage[]>([]);
@@ -144,6 +146,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
   const [mcpSettingsOpen, setMcpSettingsOpen] = useState(false);
   const [toolStatus, setToolStatus] = useState<string | null>(null);
+  const [generatingImage, setGeneratingImage] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -300,6 +303,48 @@ export function AiPanel({ onClose }: AiPanelProps) {
     if (!parsed) throw new Error(`Unknown tool: ${toolName}`);
     return await callTool(parsed.serverId, parsed.toolName, input);
   }, []);
+
+  const handleImageGen = async () => {
+    if (!user || !input.trim()) return;
+    const prompt = input.trim();
+    setInput("");
+    setGeneratingImage(true);
+
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "user", content: `🎨 Generate image: ${prompt}` },
+    ]);
+
+    try {
+      const result = await generateImage(prompt, (status) => setToolStatus(status));
+      setToolStatus(null);
+
+      if (!insertAtCursor(result.markdown)) {
+        appendToDoc(result.markdown);
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `Image generated and inserted:\n\n${result.markdown}`,
+        },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `Image generation failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      ]);
+    } finally {
+      setGeneratingImage(false);
+      setToolStatus(null);
+    }
+  };
 
   const handleAction = async (actionId: string) => {
     if (!user || !activeDoc) return;
@@ -894,10 +939,20 @@ export function AiPanel({ onClose }: AiPanelProps) {
             size="icon"
             className="h-7 w-7 shrink-0 cursor-pointer"
             onClick={handleImageAttach}
-            disabled={streaming}
+            disabled={streaming || generatingImage}
             title="Attach image"
           >
             <Paperclip className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 cursor-pointer"
+            onClick={handleImageGen}
+            disabled={streaming || generatingImage || !input.trim()}
+            title="Generate image from prompt"
+          >
+            <Wand2 className="h-3.5 w-3.5" />
           </Button>
           <textarea
             ref={textareaRef}
@@ -919,7 +974,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
             size="icon"
             className="h-7 w-7 shrink-0 cursor-pointer"
             onClick={handleChat}
-            disabled={streaming || (!input.trim() && attachedImages.length === 0)}
+            disabled={streaming || generatingImage || (!input.trim() && attachedImages.length === 0)}
           >
             <Send className="h-3.5 w-3.5" />
           </Button>
