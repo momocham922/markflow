@@ -20,7 +20,6 @@ import {
   Paperclip,
   Settings,
   Image as ImageIcon,
-  Wrench,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -30,21 +29,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   sendToClaude,
-  sendWithToolLoop,
   AI_ACTIONS,
   type ClaudeMessage,
   type ContentBlock,
 } from "@/services/claude";
-import {
-  getAllTools,
-  toClaudeTools,
-  parseClaudeToolName,
-  callTool,
-  connectServer,
-  getConnectedServerIds,
-  type McpTool,
-} from "@/services/mcp";
-import { McpSettings, loadMcpConfigs } from "./McpSettings";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
@@ -140,10 +128,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const [customRules, setCustomRules] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<{ data: string; mediaType: string; preview: string }[]>([]);
-  const [mcpEnabled, setMcpEnabled] = useState(false);
-  const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
-  const [mcpSettingsOpen, setMcpSettingsOpen] = useState(false);
-  const [toolStatus, setToolStatus] = useState<string | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -154,28 +138,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
     db.getSetting("ai_custom_rules").then((val) => {
       if (val) setCustomRules(val);
     }).catch(() => {});
-  }, []);
-
-  // Auto-connect MCP servers on mount
-  useEffect(() => {
-    loadMcpConfigs().then(async (configs) => {
-      const enabled = configs.filter((c) => c.enabled);
-      const connected = getConnectedServerIds();
-      for (const config of enabled) {
-        if (!connected.includes(config.id)) {
-          try {
-            await connectServer(config);
-          } catch {
-            // Silently skip servers that fail to connect on startup
-          }
-        }
-      }
-      setMcpTools(getAllTools());
-    }).catch(() => {});
-  }, []);
-
-  const refreshMcpTools = useCallback(() => {
-    setMcpTools(getAllTools());
   }, []);
 
   const saveCustomRules = useCallback((rules: string) => {
@@ -295,12 +257,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
     }
   };
 
-  const handleMcpToolCall = useCallback(async (toolName: string, input: Record<string, unknown>): Promise<unknown> => {
-    const parsed = parseClaudeToolName(toolName);
-    if (!parsed) throw new Error(`Unknown tool: ${toolName}`);
-    return await callTool(parsed.serverId, parsed.toolName, input);
-  }, []);
-
   const handleAction = async (actionId: string) => {
     if (!user || !activeDoc) return;
     const action = AI_ACTIONS.find((a) => a.id === actionId);
@@ -324,30 +280,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
     setStreamingText("");
 
     try {
-      const claudeTools = mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
-      let result: string;
-
-      if (claudeTools && claudeTools.length > 0) {
-        setToolStatus(null);
-        result = await sendWithToolLoop(
-          getSystemPrompt(),
-          [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          handleMcpToolCall,
-          (text) => setStreamingText(text),
-          webSearch,
-          claudeTools,
-          (status) => setToolStatus(status),
-        );
-        setToolStatus(null);
-      } else {
-        result = await sendToClaude(
-          "",
-          getSystemPrompt(),
-          [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          (text) => setStreamingText(text),
-          webSearch,
-        );
-      }
+      const result = await sendToClaude(
+        "",
+        getSystemPrompt(),
+        [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
+        (text) => setStreamingText(text),
+        webSearch,
+      );
       const assistantMsg: ChatMessage = {
         id: crypto.randomUUID(),
         role: "assistant",
@@ -366,7 +305,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
     } finally {
       setStreaming(false);
       setStreamingText("");
-      setToolStatus(null);
     }
   };
 
@@ -421,30 +359,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
         },
       ].slice(-20);
 
-      const claudeTools = mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
-      let result: string;
-
-      if (claudeTools && claudeTools.length > 0) {
-        setToolStatus(null);
-        result = await sendWithToolLoop(
-          getSystemPrompt(),
-          newApiMessages,
-          handleMcpToolCall,
-          (text) => setStreamingText(text),
-          webSearch,
-          claudeTools,
-          (status) => setToolStatus(status),
-        );
-        setToolStatus(null);
-      } else {
-        result = await sendToClaude(
-          "",
-          getSystemPrompt(),
-          newApiMessages,
-          (text) => setStreamingText(text),
-          webSearch,
-        );
-      }
+      const result = await sendToClaude(
+        "",
+        getSystemPrompt(),
+        newApiMessages,
+        (text) => setStreamingText(text),
+        webSearch,
+      );
 
       setApiMessages([
         ...newApiMessages,
@@ -466,7 +387,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
     } finally {
       setStreaming(false);
       setStreamingText("");
-      setToolStatus(null);
     }
   };
 
@@ -601,12 +521,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
         rules={customRules}
         onSave={saveCustomRules}
       />
-      {/* MCP Settings (overlay) */}
-      <McpSettings
-        open={mcpSettingsOpen}
-        onClose={() => setMcpSettingsOpen(false)}
-        onToolsChanged={refreshMcpTools}
-      />
 
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
@@ -636,24 +550,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
             }
           >
             <BookOpen className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant={mcpEnabled && mcpTools.length > 0 ? "secondary" : "ghost"}
-            size="icon"
-            className="h-6 w-6 cursor-pointer"
-            onClick={() => {
-              if (mcpTools.length > 0) {
-                setMcpEnabled(!mcpEnabled);
-              } else {
-                setMcpSettingsOpen(true);
-              }
-            }}
-            onContextMenu={(e) => { e.preventDefault(); setMcpSettingsOpen(true); }}
-            title={mcpEnabled && mcpTools.length > 0
-              ? `MCP active (${mcpTools.length} tools) — right-click to configure`
-              : "MCP tools — click to configure"}
-          >
-            <Wrench className="h-3.5 w-3.5" />
           </Button>
           <Button
             variant={customRules.trim() ? "secondary" : "ghost"}
@@ -718,8 +614,8 @@ export function AiPanel({ onClose }: AiPanelProps) {
       <Separator />
 
       {/* Status indicators */}
-      {(allDocsContext || webSearch || (mcpEnabled && mcpTools.length > 0) || toolStatus) && (
-        <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-2 flex-wrap">
+      {(allDocsContext || webSearch) && (
+        <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-2">
           {allDocsContext && (
             <span className="flex items-center gap-1">
               <BookOpen className="h-3 w-3" />
@@ -730,17 +626,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
             <span className="flex items-center gap-1">
               <Globe className="h-3 w-3" />
               Web search
-            </span>
-          )}
-          {mcpEnabled && mcpTools.length > 0 && (
-            <span className="flex items-center gap-1">
-              <Wrench className="h-3 w-3" />
-              {mcpTools.length} tools
-            </span>
-          )}
-          {toolStatus && (
-            <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-              ⚡ {toolStatus}
             </span>
           )}
         </div>
