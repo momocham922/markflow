@@ -46,28 +46,85 @@ then mount CodeMirror in uncontrolled mode (no value prop transition).
 ## Roadmap
 See `ROADMAP.md` for product vision, planned features, known bugs, and priorities.
 
-## Ongoing Work: Collab Content-Loss Fix
+## Release & Update System
 
-### Problem
-Shared document content disappearing due to stale Yjs WS server data.
+### Version Management
+- **Three version files must ALWAYS be in sync**: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`
+- Use `./scripts/bump-version.sh X.Y.Z` to update all 3 atomically
+- **ALWAYS bump version** for any code change — same version won't trigger auto-updater
+- **Signing key**: `~/.tauri/markflow.key` (empty password)
 
-### Completed Fixes
-- Non-shared docs: fully protected (Yjs only enabled when `isShared === true`)
-- Empty content guards in `app-store`, `auth-store`, `Editor.tsx`
-- y-indexeddb added for Y.Doc client persistence
-- First-time migration logic: if IndexedDB is empty, trust local SQLite over WS server
-- Editor: shared docs wait for yCollab before mounting CodeMirror
-- `is_shared` column added to SQLite (migration v5) for persistence
+### Update Channels
+Two channels: **stable** and **beta**. Users toggle in StatusBar (FlaskConical icon).
 
-### Still TODO
-1. Restart app to apply `is_shared` DB migration → verify shared marks & Live indicator return
-2. Test collaborative editing from another machine/user
-3. Review `tryFinalize` logic: currently always prefers local on first-use; may need to respect peer edits when peers are present
-4. Commit all changes (22 files modified, uncommitted)
+| Channel | Endpoint | GitHub release |
+|---------|----------|----------------|
+| stable  | `releases/latest/download/latest.json` | Latest non-prerelease |
+| beta    | `releases/download/beta/beta.json` | `beta` tag (prerelease) |
 
-### Key Files Changed
-- `src/hooks/use-collaboration.ts` — full rewrite (y-indexeddb, migration logic)
-- `src/components/editor/Editor.tsx` — loading state for shared docs, collab indicators
-- `src/stores/app-store.ts` — empty content protection, isShared loading from DB
-- `src/stores/auth-store.ts` — empty content sync skip
-- `src/services/database.ts` — is_shared column, upsert update
+- Rust commands `check_for_update(channel)` / `install_update(channel)` in `src-tauri/src/lib.rs`
+- Channel setting stored in SQLite: `update_channel = "stable" | "beta"`
+- v0.2.31 and earlier have NO beta toggle — they only check stable. Beta testers must manually install DMG first.
+
+### Release Flow
+
+#### Verification (before ANY release)
+```bash
+npx tsc --noEmit          # zero type errors
+pnpm build                # frontend build succeeds
+cargo check               # Rust compiles (in src-tauri/)
+npx playwright test e2e/  # E2E tests pass
+```
+
+#### Beta Release
+```bash
+./scripts/bump-version.sh 0.3.0-beta.1
+git add -A && git commit && git push
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" pnpm tauri build
+./scripts/release-beta.sh
+```
+- Creates/replaces the `beta` tag release on GitHub as a prerelease
+- Uploads DMG, .tar.gz, .sig, and beta.json
+- Beta channel users receive update automatically
+- New beta testers: share DMG directly for first install
+
+#### Stable Release
+```bash
+./scripts/bump-version.sh 0.3.0
+git add -A && git commit && git push
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" pnpm tauri build
+./scripts/release-stable.sh
+```
+- Creates a versioned tag release (e.g., `v0.3.0`) on GitHub
+- Uploads DMG, .tar.gz, .sig, and latest.json
+- ALL users receive update automatically
+
+#### Rollback
+- **Beta**: Delete the `beta` release on GitHub → beta users won't see the update
+- **Stable**: Cannot un-release (users may have already updated). Fix forward with a new patch version.
+
+### Build Artifacts
+All at `src-tauri/target/release/bundle/`:
+- `dmg/MarkFlow_{VERSION}_aarch64.dmg` — installer
+- `macos/MarkFlow.app.tar.gz` — updater payload
+- `macos/MarkFlow.app.tar.gz.sig` — update signature
+
+### Testing
+- **Playwright E2E** (`e2e/`): Runs against `pnpm dev` (frontend only, no Tauri plugins)
+  - `npx playwright test e2e/` or `pnpm test:e2e`
+- **Tauri E2E** (`e2e-tauri/`): Real Tauri app tests via Docker + tauri-driver + WebDriverIO
+  - `pnpm test:tauri` (builds Docker image, runs tests inside container)
+  - Only works on Linux (WebKitGTK) — Docker container handles this on macOS
+- **Unit tests**: `pnpm test` (Vitest)
+
+## Collaboration Architecture (Yjs)
+Shared documents use the Google Docs/Notion pattern:
+1. **Y.Doc** = single source of truth for shared document content
+2. **y-indexeddb** = client-side Y.Doc persistence (offline, instant load)
+3. **y-websocket** = real-time peer sync
+4. **SQLite** = one-time seed only; after first sync, Y.Doc owns content
+
+Editor.tsx: shared docs show "Syncing document..." until yCollab is ready,
+then mount CodeMirror in uncontrolled mode (no value prop transition).
