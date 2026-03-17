@@ -1,11 +1,23 @@
-import Database from "@tauri-apps/plugin-sql";
+import { isTauri } from "@/platform";
 
-let db: Database | null = null;
+// Database interface shared between Tauri SQLite and in-memory fallback
+interface DatabaseLike {
+  execute(query: string, bindValues?: unknown[]): Promise<unknown>;
+  select<T>(query: string, bindValues?: unknown[]): Promise<T>;
+}
+
+let db: DatabaseLike | null = null;
 let migrated = false;
 
-export async function getDb(): Promise<Database> {
+export async function getDb(): Promise<DatabaseLike> {
   if (!db) {
-    db = await Database.load("sqlite:markflow.db");
+    if (isTauri) {
+      const { default: Database } = await import("@tauri-apps/plugin-sql");
+      db = await Database.load("sqlite:markflow.db");
+    } else {
+      const { MemoryDatabase } = await import("./database-memory");
+      db = await MemoryDatabase.load("sqlite:markflow.db");
+    }
   }
   if (!migrated) {
     migrated = true;
@@ -15,7 +27,7 @@ export async function getDb(): Promise<Database> {
 }
 
 /** Ensure all tables and columns exist (fixes missed Tauri migrations) */
-async function ensureMigrations(database: Database) {
+async function ensureMigrations(database: DatabaseLike) {
   try {
     // versions table (migration v2)
     await database.execute(`CREATE TABLE IF NOT EXISTS versions (

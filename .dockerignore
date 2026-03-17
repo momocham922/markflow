@@ -1,0 +1,9 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen/apple
+src-tauri/gen/android
+.git
+*.dmg
+*.app
+e2e-tauri-results
