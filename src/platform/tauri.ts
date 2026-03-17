@@ -106,15 +106,19 @@ export const tauriAdapter: PlatformAdapter = {
     }
   },
 
-  async checkForUpdate(): Promise<{ version: string; install: () => Promise<void> } | null> {
+  async checkForUpdate(channel: "stable" | "beta" = "stable"): Promise<{ version: string; body?: string; install: () => Promise<void> } | null> {
     try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (!update) return null;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{ version: string; body: string | null } | null>(
+        "check_for_update",
+        { channel },
+      );
+      if (!result) return null;
       return {
-        version: update.version,
+        version: result.version,
+        body: result.body ?? undefined,
         install: async () => {
-          await update.downloadAndInstall();
+          await invoke("install_update", { channel });
         },
       };
     } catch {

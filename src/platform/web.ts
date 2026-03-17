@@ -121,7 +121,7 @@ export const webAdapter: PlatformAdapter = {
     return null;
   },
 
-  async checkForUpdate(): Promise<null> {
+  async checkForUpdate(_channel?: "stable" | "beta"): Promise<null> {
     // Web: no auto-update mechanism
     return null;
   },

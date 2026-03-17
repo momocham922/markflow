@@ -1,7 +1,9 @@
-import { Moon, Sun } from "lucide-react";
+import { Moon, Sun, FlaskConical } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { isIOS } from "@/platform";
+import * as db from "@/services/database";
 
 export function StatusBar() {
   const { theme, toggleTheme } = useAppStore();
@@ -34,6 +36,19 @@ export function StatusBar() {
   // Desktop: full layout
   const { activeDocId, documents } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
+  const [betaChannel, setBetaChannel] = useState(false);
+
+  useEffect(() => {
+    db.getSetting("update_channel").then((val) => {
+      setBetaChannel(val === "beta");
+    }).catch(() => {});
+  }, []);
+
+  const toggleBetaChannel = useCallback(async () => {
+    const next = !betaChannel;
+    setBetaChannel(next);
+    await db.setSetting("update_channel", next ? "beta" : "stable");
+  }, [betaChannel]);
 
   return (
     <div className="flex items-center justify-between border-t border-border bg-background px-3 text-[11px] text-muted-foreground h-7">
@@ -64,11 +79,21 @@ export function StatusBar() {
         )}
       </div>
       <div className="flex items-center gap-3">
+        {betaChannel && (
+          <span className="text-amber-500 font-medium">Beta</span>
+        )}
         {activeDoc && (
           <span>
             {(activeDoc.content || "").trim() ? (activeDoc.content || "").trim().split(/\s+/).length : 0} words / {(activeDoc.content || "").length} chars
           </span>
         )}
+        <button
+          className={`h-5 w-5 flex items-center justify-center hover:text-foreground ${betaChannel ? "text-amber-500" : "text-muted-foreground"}`}
+          onClick={toggleBetaChannel}
+          title={betaChannel ? "Beta channel (click to switch to Stable)" : "Stable channel (click to switch to Beta)"}
+        >
+          <FlaskConical className="h-3 w-3" />
+        </button>
         <button
           className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground"
           onClick={toggleTheme}

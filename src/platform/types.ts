@@ -74,7 +74,7 @@ export interface PlatformAdapter {
 
   // --- Auto-update ---
   /** Check for app updates, returns update info or null */
-  checkForUpdate(): Promise<{ version: string; install: () => Promise<void> } | null>;
+  checkForUpdate(channel?: "stable" | "beta"): Promise<{ version: string; body?: string; install: () => Promise<void> } | null>;
   /** Relaunch the app after update */
   relaunch(): Promise<void>;
 }

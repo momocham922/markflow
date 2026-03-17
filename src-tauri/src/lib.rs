@@ -1,6 +1,7 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
 use std::sync::Mutex;
+use tauri_plugin_updater::UpdaterExt;
 
 /// Pending OAuth code from iOS in-webview flow
 static PENDING_OAUTH_CODE: Mutex<Option<String>> = Mutex::new(None);
@@ -654,6 +655,79 @@ async fn upload_image_from_base64(
     upload_image_cloud(data, ext, uid, token, bucket).await
 }
 
+#[derive(serde::Serialize)]
+struct UpdateCheckResult {
+    version: String,
+    body: Option<String>,
+}
+
+const STABLE_ENDPOINT: &str =
+    "https://github.com/momocham922/markflow/releases/latest/download/latest.json";
+const BETA_ENDPOINT: &str =
+    "https://github.com/momocham922/markflow/releases/download/beta/beta.json";
+
+#[tauri::command]
+async fn check_for_update(
+    app: tauri::AppHandle,
+    channel: String,
+) -> Result<Option<UpdateCheckResult>, String> {
+    let endpoint = match channel.as_str() {
+        "beta" => BETA_ENDPOINT,
+        _ => STABLE_ENDPOINT,
+    };
+
+    let url: url::Url = endpoint.parse().map_err(|e: url::ParseError| e.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(UpdateCheckResult {
+            version: update.version.clone(),
+            body: update.body.clone(),
+        })),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), String> {
+    let endpoint = match channel.as_str() {
+        "beta" => BETA_ENDPOINT,
+        _ => STABLE_ENDPOINT,
+    };
+
+    let url: url::Url = endpoint.parse().map_err(|e: url::ParseError| e.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update available".to_string())?;
+
+    update
+        .download_and_install(
+            |_chunk_len: usize, _content_len: Option<u64>| {},
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -733,7 +807,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

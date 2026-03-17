@@ -179,8 +179,10 @@ function App() {
   useEffect(() => {
     const timer = setTimeout(async () => {
       try {
+        const { getSetting } = await import("@/services/database");
+        const channel = ((await getSetting("update_channel")) || "stable") as "stable" | "beta";
         const platform = await getPlatform();
-        const update = await platform.checkForUpdate();
+        const update = await platform.checkForUpdate(channel);
         if (update) {
           setUpdateInfo({ version: update.version, update });
         }
