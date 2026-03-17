@@ -1,6 +1,5 @@
-import { useState, useRef, useCallback, type ReactNode } from "react";
+import { useState, useRef, type ReactNode } from "react";
 import { useIMEGuard } from "@/hooks/use-ime-guard";
-import { useVoiceInput } from "@/hooks/use-voice-input";
 import {
   PenLine,
   Columns2,
@@ -25,8 +24,6 @@ import {
   Check,
   History,
   Network,
-  Mic,
-  MicOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -53,16 +50,6 @@ export function EditorToolbar({
   const [themeOpen, setThemeOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [showTagInput, setShowTagInput] = useState(false);
-
-  const { insertAtCursor } = useEditorStore();
-  const handleVoiceResult = useCallback((text: string, isFinal: boolean) => {
-    if (isFinal && text.trim()) {
-      insertAtCursor(text + " ");
-    }
-  }, [insertAtCursor]);
-  const { isRecording, isSupported: voiceSupported, interimText, toggle: toggleVoice } = useVoiceInput({
-    onResult: handleVoiceResult,
-  });
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const tagInputRef = useRef<HTMLInputElement>(null);
@@ -139,7 +126,7 @@ export function EditorToolbar({
   // ── iOS mobile layout ───────────────────────────────────
   if (isIOS) {
     return (
-      <div className="relative flex items-center justify-between border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2">
+      <div className="flex items-center justify-between border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2">
         {/* Left: document title */}
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1">
           {activeDoc && (
@@ -180,17 +167,6 @@ export function EditorToolbar({
 
         {/* Right: essential controls */}
         <div className="flex items-center gap-1 shrink-0">
-          {voiceSupported && (
-            <Button
-              variant={isRecording ? "secondary" : "ghost"}
-              size="icon"
-              className={`h-7 w-7 ${isRecording ? "text-red-500" : ""}`}
-              onClick={toggleVoice}
-              title={isRecording ? "Stop recording" : "Voice input"}
-            >
-              {isRecording ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
-            </Button>
-          )}
           <Button
             variant="ghost"
             size="icon"
@@ -243,18 +219,13 @@ export function EditorToolbar({
         </div>
 
         <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />
-        {isRecording && interimText && (
-          <div className="absolute left-0 right-0 top-full bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-800 px-3 py-1 text-[10px] text-red-600 dark:text-red-400 truncate z-10">
-            🎙 {interimText}
-          </div>
-        )}
       </div>
     );
   }
 
   // ── Desktop layout ──────────────────────────────────────
   return (
-    <div className="relative flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 justify-between">
+    <div className="flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 justify-between">
       {/* Left: document title (rename) + tags */}
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1 overflow-hidden">
         {/* Document title / rename */}
@@ -431,20 +402,6 @@ export function EditorToolbar({
           </>
         )}
 
-        {/* Voice input */}
-        {voiceSupported && (
-          <Button
-            variant={isRecording ? "secondary" : "ghost"}
-            size="sm"
-            className={`h-6 gap-1 px-2 text-[11px] ${isRecording ? "text-red-500" : "text-muted-foreground"}`}
-            onClick={toggleVoice}
-            title={isRecording ? "Stop recording" : "Voice input"}
-          >
-            {isRecording ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
-            {isRecording ? "Stop" : "Voice"}
-          </Button>
-        )}
-
         {/* History */}
         <Button
           variant="ghost"
@@ -511,11 +468,6 @@ export function EditorToolbar({
       </div>
 
       <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />
-      {isRecording && interimText && (
-        <div className="absolute left-0 right-0 top-full bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-800 px-3 py-1 text-[10px] text-red-600 dark:text-red-400 truncate z-10">
-          🎙 {interimText}
-        </div>
-      )}
     </div>
   );
 }
