@@ -27,6 +27,89 @@ fn get_main_queue() -> *mut std::ffi::c_void {
     unsafe { &_dispatch_main_q as *const _ as *mut _ }
 }
 
+/// UIEdgeInsets for ObjC interop
+#[cfg(target_os = "ios")]
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UIEdgeInsets {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+}
+
+#[cfg(target_os = "ios")]
+unsafe impl objc2::encode::Encode for UIEdgeInsets {
+    const ENCODING: objc2::encode::Encoding = objc2::encode::Encoding::Struct(
+        "UIEdgeInsets",
+        &[
+            objc2::encode::Encoding::Double,
+            objc2::encode::Encoding::Double,
+            objc2::encode::Encoding::Double,
+            objc2::encode::Encoding::Double,
+        ],
+    );
+}
+
+#[cfg(target_os = "ios")]
+unsafe impl objc2::encode::RefEncode for UIEdgeInsets {
+    const ENCODING_REF: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&<Self as objc2::encode::Encode>::ENCODING);
+}
+
+/// Negate the bottom safe area inset so the WKWebView extends behind the home indicator.
+/// This eliminates the gap between the app content and the physical screen bottom.
+#[cfg(target_os = "ios")]
+extern "C" fn setup_fullscreen_webview_work(_ctx: *mut std::ffi::c_void) {
+    use objc2::runtime::{AnyObject, Bool as ObjcBool};
+    use objc2::msg_send;
+    use std::ptr;
+
+    unsafe {
+        let app: *mut AnyObject = msg_send![objc2::class!(UIApplication), sharedApplication];
+        if app.is_null() { return; }
+
+        let scenes: *mut AnyObject = msg_send![app, connectedScenes];
+        let enumerator: *mut AnyObject = msg_send![scenes, objectEnumerator];
+        let mut root_vc: *mut AnyObject = ptr::null_mut();
+
+        loop {
+            let scene: *mut AnyObject = msg_send![enumerator, nextObject];
+            if scene.is_null() { break; }
+            let windows: *mut AnyObject = msg_send![scene, windows];
+            let count: usize = msg_send![windows, count];
+            for i in 0..count {
+                let window: *mut AnyObject = msg_send![windows, objectAtIndex: i];
+                let is_key: ObjcBool = msg_send![window, isKeyWindow];
+                if is_key.as_bool() {
+                    root_vc = msg_send![window, rootViewController];
+                    break;
+                }
+            }
+            if !root_vc.is_null() { break; }
+        }
+
+        if root_vc.is_null() { return; }
+
+        let view: *mut AnyObject = msg_send![root_vc, view];
+        if view.is_null() { return; }
+
+        let insets: UIEdgeInsets = msg_send![view, safeAreaInsets];
+
+        // Set negative bottom to cancel out the device safe area
+        let additional = UIEdgeInsets {
+            top: 0.0,
+            left: 0.0,
+            bottom: -insets.bottom,
+            right: 0.0,
+        };
+        let _: () = msg_send![root_vc, setAdditionalSafeAreaInsets: additional];
+
+        let _: () = msg_send![view, setNeedsLayout];
+        let _: () = msg_send![view, layoutIfNeeded];
+    }
+}
+
 #[cfg(target_os = "ios")]
 extern "C" fn present_safari_vc_work(ctx: *mut std::ffi::c_void) {
     use objc2::runtime::{AnyObject, Bool as ObjcBool};
@@ -634,6 +717,22 @@ pub fn run() {
                 )
                 .build(),
         )
+        .setup(|_app| {
+            #[cfg(target_os = "ios")]
+            {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    unsafe {
+                        dispatch_async_f(
+                            get_main_queue(),
+                            std::ptr::null_mut(),
+                            setup_fullscreen_webview_work,
+                        );
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

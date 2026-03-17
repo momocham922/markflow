@@ -235,7 +235,7 @@ export function Editor() {
   // Stable reference prevents @uiw/react-codemirror from reconfiguring on every render
   // (inline object literal → new ref each render → StateEffect.reconfigure on every render)
   const basicSetupConfig = useMemo(() => ({
-    lineNumbers: !isIOS,
+    lineNumbers: true,
     highlightActiveLineGutter: !isIOS,
     highlightActiveLine: true,
     foldGutter: !isIOS,
@@ -243,6 +243,40 @@ export function Editor() {
     closeBrackets: true,
     indentOnInput: true,
   }), []);
+
+  // iOS: compact gutter via CodeMirror theme (CSS can't override CM's inline width calc)
+  const iosGutterTheme = useMemo(() => {
+    if (!isIOS) return [];
+    return [
+      EditorView.theme({
+        ".cm-gutters": {
+          borderRight: "none",
+        },
+        ".cm-lineNumbers .cm-gutterElement": {
+          fontSize: "9px",
+          lineHeight: "16.5px",
+          opacity: "0.4",
+        },
+      }),
+      // Force narrow gutter via stylesheet with !important (overrides CM's inline width)
+      EditorView.baseTheme({
+        "&light .cm-lineNumbers, &dark .cm-lineNumbers": {
+          minWidth: "0 !important",
+          width: "auto !important",
+        },
+        "&light .cm-lineNumbers .cm-gutterElement, &dark .cm-lineNumbers .cm-gutterElement": {
+          minWidth: "0 !important",
+          padding: "0 1px 0 2px !important",
+        },
+        "&light .cm-gutters, &dark .cm-gutters": {
+          paddingRight: "0 !important",
+        },
+        "&light .cm-line, &dark .cm-line": {
+          paddingLeft: "4px !important",
+        },
+      }),
+    ];
+  }, []);
 
   // Memoize extensions — yCollab only included when isCollabReady so it's part of
   // the initial EditorState (no reconfigure needed, ySync ViewPlugin stays stable).
@@ -252,9 +286,10 @@ export function Editor() {
       EditorView.lineWrapping,
       markdownShortcuts,
       imagePaste,
+      ...iosGutterTheme,
       ...(isCollabReady && collabExtension ? [collabExtension] : []),
     ],
-    [collabExtension, isCollabReady],
+    [collabExtension, isCollabReady, iosGutterTheme],
   );
 
   const editorTheme = useMemo(() => {

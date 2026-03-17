@@ -10,26 +10,23 @@ export function StatusBar() {
   // iOS: ultra-compact bar + safe area spacer (separate divs to avoid height conflicts)
   if (isIOS) {
     return (
-      <div className="shrink-0 bg-background safe-left safe-right">
-        {/* Thin content bar */}
-        <div className="flex items-center justify-between border-t border-border px-3 py-0.5 text-[9px] text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <span
-              className={`h-1 w-1 rounded-full ${
-                !user ? "bg-zinc-400" : isOnline ? "bg-emerald-500" : "bg-amber-500"
-              }`}
-            />
-            {syncing && "Sync..."}
-          </span>
-          <button
-            className="h-4 w-4 flex items-center justify-center text-muted-foreground"
-            onClick={toggleTheme}
-          >
-            {theme === "light" ? <Moon className="h-2.5 w-2.5" /> : <Sun className="h-2.5 w-2.5" />}
-          </button>
-        </div>
-        {/* Home indicator safe area — just background color, no content */}
-        <div className="safe-bottom" />
+      <div
+        className="flex items-center justify-between border-t border-border bg-background px-3 pt-1 pb-7 text-[9px] text-muted-foreground shrink-0"
+      >
+        <span className="flex items-center gap-1">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              !user ? "bg-zinc-400" : isOnline ? "bg-emerald-500" : "bg-amber-500"
+            }`}
+          />
+          {!user ? "Local" : syncing ? "Sync..." : isOnline ? "Online" : "Offline"}
+        </span>
+        <button
+          className="h-5 w-5 flex items-center justify-center text-muted-foreground"
+          onClick={toggleTheme}
+        >
+          {theme === "light" ? <Moon className="h-3 w-3" /> : <Sun className="h-3 w-3" />}
+        </button>
       </div>
     );
   }

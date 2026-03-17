@@ -372,11 +372,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       <TooltipProvider>
         <div
           className={cn(
-            "flex w-screen flex-col overflow-hidden bg-background",
-            !isIOS && "h-screen",
+            "flex flex-col overflow-hidden bg-background",
+            !isIOS && "h-screen w-screen",
             isIOS && "safe-top",
           )}
-          style={isIOS ? { height: viewportHeight, position: "fixed", top: 0, left: 0, right: 0 } : undefined}
+          style={isIOS ? {
+            position: "fixed",
+            top: 0, left: 0, right: 0,
+            ...(keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
+          } : undefined}
         >
           {!isIOS && (
             <div
@@ -402,11 +406,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
     <TooltipProvider>
       <div
         className={cn(
-          "flex w-screen flex-col overflow-hidden",
-          !isIOS && "h-screen",
+          "flex flex-col overflow-hidden bg-background",
+          !isIOS && "h-screen w-screen",
           isIOS && "safe-top",
         )}
-        style={isIOS ? { height: viewportHeight, position: "fixed", top: 0, left: 0, right: 0 } : undefined}
+        style={isIOS ? {
+          position: "fixed",
+          top: 0, left: 0, right: 0,
+          ...(keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
+        } : undefined}
       >
         {/* Window drag region — desktop only (macOS title bar) */}
         {!isIOS && (

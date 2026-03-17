@@ -27,6 +27,7 @@ import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
+import { isIOS } from "@/platform";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -1184,7 +1185,7 @@ export function Sidebar() {
 
       {/* Footer */}
       <Separator />
-      <div className="flex items-center justify-between px-3 py-2 text-[10px] text-muted-foreground">
+      <div className={cn("flex items-center justify-between pt-2 text-[10px] text-muted-foreground", isIOS ? "pb-7 px-5" : "pb-2 px-3")}>
         <span>
           {personalDocs.length} doc{personalDocs.length !== 1 ? "s" : ""}
           {teams.length > 0 && ` / ${teams.length} team${teams.length !== 1 ? "s" : ""}`}

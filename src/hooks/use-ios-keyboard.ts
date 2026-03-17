@@ -16,17 +16,11 @@ export function useIOSKeyboard() {
     if (!isIOS) return;
     const s = document.body.style;
     s.position = "fixed";
-    s.top = "0";
-    s.left = "0";
-    s.width = "100%";
-    s.height = "100%";
+    s.inset = "0";
     s.overflow = "hidden";
     return () => {
       s.position = "";
-      s.top = "";
-      s.left = "";
-      s.width = "";
-      s.height = "";
+      s.inset = "";
       s.overflow = "";
     };
   }, []);
