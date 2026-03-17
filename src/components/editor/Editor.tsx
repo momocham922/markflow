@@ -8,6 +8,7 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
 import { getPlatform, isIOS } from "@/platform";
+import { isHtmlContent, extractYouTubeId, escapeHtml } from "@/lib/editor-utils";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
@@ -29,11 +30,6 @@ const turndown = new TurndownService({
   bulletListMarker: "-",
 });
 
-/** Detect if content is HTML (from old Tiptap editor) */
-function isHtmlContent(content: string): boolean {
-  return /^\s*<[a-z][\s\S]*>/i.test(content);
-}
-
 /** Convert HTML to Markdown, or return as-is if already markdown */
 function ensureMarkdown(content: string): string {
   if (!content || !isHtmlContent(content)) return content;
@@ -51,18 +47,6 @@ marked.setOptions({
   gfm: true,
   breaks: true,
 });
-
-/** Extract YouTube video ID from various URL formats */
-function extractYouTubeId(url: string): string | null {
-  const patterns = [
-    /(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([a-zA-Z0-9_-]{11})/,
-  ];
-  for (const p of patterns) {
-    const m = url.match(p);
-    if (m) return m[1];
-  }
-  return null;
-}
 
 const renderer = new marked.Renderer();
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
@@ -144,16 +128,6 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
 };
 
 marked.use({ renderer });
-
-/** Escape HTML special characters to prevent XSS */
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 // Initialize mermaid — render on demand, not on load
 mermaid.initialize({ startOnLoad: false, theme: "default" });
