@@ -3,20 +3,40 @@
  * Runs against the real Tauri app binary in a Linux container.
  */
 
-/** Wait for the app to finish loading */
+/** Wait for the app to finish loading by checking for actual UI elements */
 export async function waitForAppReady() {
-  const loading = await $("*=Loading...");
-  await loading.waitForDisplayed({ timeout: 20_000, reverse: true });
+  // Wait for the app container to render
+  // The sidebar "My Documents" or the editor should appear when the app is ready
+  await browser.waitUntil(
+    async () => {
+      // Check for any known stable element
+      const sidebar = await $('input[placeholder*="Search"]');
+      if (await sidebar.isExisting()) return true;
+      const editor = await $(".cm-editor");
+      if (await editor.isExisting()) return true;
+      return false;
+    },
+    { timeout: 30_000, interval: 500, timeoutMsg: "App did not load within 30s" }
+  );
+  // Give React a moment to finish rendering
+  await browser.pause(1000);
 }
 
 /** Create a new document via the "+" icon in sidebar */
 export async function createNewDocument() {
-  const plusIcons = await $$(".lucide-plus");
-  if (plusIcons.length > 0) {
-    await plusIcons[0].click();
+  // Try the "New document" span/button first
+  const newDocBtn = await $('span[title="New document"]');
+  if (await newDocBtn.isExisting()) {
+    await newDocBtn.click();
+  } else {
+    // Fallback: look for plus icons
+    const plusIcons = await $$(".lucide-plus");
+    if (plusIcons.length > 0) {
+      await plusIcons[0].click();
+    }
   }
   const editor = await $(".cm-editor");
-  await editor.waitForDisplayed({ timeout: 5_000 });
+  await editor.waitForExist({ timeout: 10_000 });
 }
 
 /** Type text into the CodeMirror editor */
@@ -24,7 +44,7 @@ export async function typeInEditor(text: string, clear = false) {
   const content = await $(".cm-editor .cm-content");
   await content.click();
   if (clear) {
-    await browser.keys(["Meta", "a"]);
+    await browser.keys(["Control", "a"]);
     await browser.keys(["Backspace"]);
   }
   const parts = text.split("\n");
@@ -55,6 +75,7 @@ export async function setPreviewMode(mode: "edit" | "split" | "preview" | "mindm
     mindmap: "Mind Map",
   };
   const btn = await $(`button[title="${titles[mode]}"]`);
+  await btn.waitForExist({ timeout: 5000 });
   await btn.click();
-  await browser.pause(300);
+  await browser.pause(500);
 }

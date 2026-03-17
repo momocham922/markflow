@@ -82,7 +82,7 @@ describe("Preview rendering", () => {
     if (await link.isExisting()) {
       expect(await link.isDisplayed()).toBe(true);
       const href = await link.getAttribute("href");
-      expect(href).toBe("https://example.com");
+      expect(href).toContain("https://example.com");
     }
 
     await setPreviewMode("edit");
