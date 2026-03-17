@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { LogIn, LogOut, Cloud, CloudOff, RefreshCw, Users, Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
@@ -38,9 +38,23 @@ export function UserMenu() {
 
   if (loading) return null;
 
+  const [loginMenuOpen, setLoginMenuOpen] = useState(false);
+  const loginMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!loginMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (loginMenuRef.current && !loginMenuRef.current.contains(e.target as Node)) {
+        setLoginMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [loginMenuOpen]);
+
   if (!user) {
     return (
-      <div className="flex items-center gap-1">
+      <div className="relative flex items-center gap-1" ref={loginMenuRef}>
         {loginError && (
           <span className={`text-[10px] text-red-500 truncate ${isIOS ? "max-w-20" : "max-w-50"}`} title={loginError}>
             {loginError}
@@ -50,12 +64,28 @@ export function UserMenu() {
           variant="ghost"
           size={isIOS ? "icon" : "sm"}
           className={isIOS ? "h-7 w-7" : "gap-2 text-xs"}
-          onClick={login}
-          title="Sign in with Google"
+          onClick={() => setLoginMenuOpen((v) => !v)}
+          title="Sign in"
         >
           <LogIn className="h-3.5 w-3.5" />
-          {!isIOS && "Sign in with Google"}
+          {!isIOS && "Sign in"}
         </Button>
+        {loginMenuOpen && (
+          <div className="absolute right-0 top-full mt-1 z-50 min-w-45 rounded-md border border-border bg-popover p-1 shadow-md">
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-xs hover:bg-accent text-left"
+              onClick={() => { setLoginMenuOpen(false); login("google"); }}
+            >
+              Google
+            </button>
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-xs hover:bg-accent text-left"
+              onClick={() => { setLoginMenuOpen(false); login("github"); }}
+            >
+              GitHub
+            </button>
+          </div>
+        )}
       </div>
     );
   }
