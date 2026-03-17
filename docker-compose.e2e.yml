@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  e2e-tauri:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    environment:
+      - DISPLAY=:99
+    # Mount test results out if needed
+    volumes:
+      - ./e2e-tauri-results:/app/e2e-tauri-results
