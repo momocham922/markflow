@@ -76,34 +76,52 @@ cargo check               # Rust compiles (in src-tauri/)
 npx playwright test e2e/  # E2E tests pass
 ```
 
-#### Beta Release
-```bash
-./scripts/bump-version.sh 0.3.0-beta.1
-git add -A && git commit && git push
-TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" pnpm tauri build
-./scripts/release-beta.sh
+#### Standard: Beta-first release strategy
+大きな機能変更は必ずベータ経由で段階的にリリースする。
+
+1. **mainでは大型機能のmergeをrevert**して、ベータトグル等の基盤だけをstable配信
+2. **`release/beta`ブランチ**にrevert前の全機能入りコードを保持
+3. stable配信後、ベータONのユーザーだけが大型機能を受け取る
+4. ベータテストで問題なければ、mainに機能をマージして次のstable版に昇格
+
 ```
-- Creates/replaces the `beta` tag release on GitHub as a prerelease
-- Uploads DMG, .tar.gz, .sig, and beta.json
-- Beta channel users receive update automatically
-- New beta testers: share DMG directly for first install
+main (0.2.32 stable)        = ベータトグル + バグ修正のみ
+release/beta (0.3.0-beta.1) = 全機能入り（ベータ配信用）
+```
 
 #### Stable Release
 ```bash
-./scripts/bump-version.sh 0.3.0
+./scripts/bump-version.sh X.Y.Z
 git add -A && git commit && git push
 TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" pnpm tauri build
 ./scripts/release-stable.sh
 ```
-- Creates a versioned tag release (e.g., `v0.3.0`) on GitHub
-- Uploads DMG, .tar.gz, .sig, and latest.json
+- Creates a versioned tag release (e.g., `v0.2.32`) on GitHub
 - ALL users receive update automatically
 
+#### Beta Release
+`release/beta`ブランチから実行する。
+```bash
+git checkout release/beta
+./scripts/bump-version.sh X.Y.Z-beta.N
+git add -A && git commit
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" pnpm tauri build
+./scripts/release-beta.sh
+```
+- Creates/replaces the `beta` tag release on GitHub as a prerelease
+- Beta channel users receive update automatically
+
+#### Beta → Stable 昇格
+ベータで問題なければ:
+1. mainに機能をマージ（revertのrevert、またはrelease/betaからmerge）
+2. stableバージョンにバンプ（例: 0.3.0）
+3. `./scripts/release-stable.sh`で全ユーザーに配信
+
 #### Rollback
-- **Beta**: Delete the `beta` release on GitHub → beta users won't see the update
-- **Stable**: Cannot un-release (users may have already updated). Fix forward with a new patch version.
+- **Beta**: `gh release delete beta` → ベータユーザーにアップデートが届かなくなる
+- **Stable**: fix forwardで新パッチバージョンをリリース
 
 ### Build Artifacts
 All at `src-tauri/target/release/bundle/`:
