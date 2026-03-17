@@ -4,7 +4,6 @@ import {
   getAuth,
   indexedDBLocalPersistence,
   GoogleAuthProvider,
-  GithubAuthProvider,
   signInWithCredential,
   signOut as firebaseSignOut,
   onAuthStateChanged,
@@ -46,10 +45,6 @@ const GOOGLE_CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET =
   import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
-const GITHUB_CLIENT_ID =
-  import.meta.env.VITE_GITHUB_CLIENT_ID || "";
-const GITHUB_CLIENT_SECRET =
-  import.meta.env.VITE_GITHUB_CLIENT_SECRET || "";
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
@@ -259,113 +254,6 @@ export async function signInWithGoogle(): Promise<User | null> {
     tokens.id_token,
     tokens.access_token,
   );
-  const result = await signInWithCredential(auth, credential);
-  return result.user;
-}
-
-export async function signInWithGitHub(): Promise<User | null> {
-  const { getPlatform, isIOS } = await import("@/platform");
-  const platform = await getPlatform();
-
-  const port = 19847;
-  const redirectUri = `http://localhost:${port}/callback`;
-
-  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-    throw new Error("GitHub OAuth credentials not configured");
-  }
-
-  // iOS: use SFSafariViewController
-  if (isIOS) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const { listen } = await import("@tauri-apps/api/event");
-
-    await invoke<number>("oauth_listen", { ios: true });
-
-    const params = new URLSearchParams({
-      client_id: GITHUB_CLIENT_ID,
-      redirect_uri: redirectUri,
-      scope: "read:user user:email",
-    });
-    const authUrl = `https://github.com/login/oauth/authorize?${params}`;
-
-    const authCode = await new Promise<string>((resolve, reject) => {
-      let settled = false;
-      const unlistenOk = listen<string>("oauth-callback", (event) => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); resolve(event.payload); }
-      });
-      const unlistenErr = listen<string>("oauth-error", (event) => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error(event.payload)); }
-      });
-      setTimeout(() => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); invoke("dismiss_safari_vc").catch(() => {}); reject(new Error("Authentication timed out")); }
-      }, 300000);
-      invoke("open_safari_vc", { url: authUrl }).catch(reject);
-    });
-
-    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code: authCode,
-        redirect_uri: redirectUri,
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      throw new Error(`GitHub token exchange failed: ${await tokenResponse.text()}`);
-    }
-
-    const tokens = await tokenResponse.json();
-    if (tokens.error) throw new Error(tokens.error_description || tokens.error);
-    const credential = GithubAuthProvider.credential(tokens.access_token);
-    const result = await signInWithCredential(auth, credential);
-    return result.user;
-  }
-
-  // Desktop: external browser
-  await platform.startOAuthListener();
-
-  const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    redirect_uri: redirectUri,
-    scope: "read:user user:email",
-  });
-  const authUrl = `https://github.com/login/oauth/authorize?${params}`;
-
-  const authCode = await new Promise<string>((resolve, reject) => {
-    let settled = false;
-    const unlistenOk = platform.onOAuthCallback((code) => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); resolve(code); }
-    });
-    const unlistenErr = platform.onOAuthError((error) => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error(error)); }
-    });
-    setTimeout(() => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error("Authentication timed out")); }
-    }, 300000);
-    platform.openExternal(authUrl).catch(reject);
-  });
-
-  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      client_secret: GITHUB_CLIENT_SECRET,
-      code: authCode,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!tokenResponse.ok) {
-    throw new Error(`GitHub token exchange failed: ${await tokenResponse.text()}`);
-  }
-
-  const tokens = await tokenResponse.json();
-  if (tokens.error) throw new Error(tokens.error_description || tokens.error);
-  const credential = GithubAuthProvider.credential(tokens.access_token);
   const result = await signInWithCredential(auth, credential);
   return result.user;
 }
