@@ -40,15 +40,18 @@ service cloud.firestore {
         isTeamMember()
       );
 
-      // Versions subcollection — owner, collaborators, and team members
+      // Versions subcollection — owner, collaborators (map + array), and team members
       match /versions/{versionId} {
-        allow read, write: if request.auth != null && (
-          get(/databases/$(database)/documents/documents/$(docId)).data.ownerId == request.auth.uid ||
-          request.auth.uid in get(/databases/$(database)/documents/documents/$(docId)).data.collaborators.keys() ||
-          (get(/databases/$(database)/documents/documents/$(docId)).data.teamId != null
-           && get(/databases/$(database)/documents/documents/$(docId)).data.teamId != ""
-           && request.auth.uid in get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/documents/$(docId)).data.teamId)).data.memberUids)
-        );
+        function canAccessVersions() {
+          let parent = get(/databases/$(database)/documents/documents/$(docId)).data;
+          return parent.ownerId == request.auth.uid
+            || (parent.collaborators != null && request.auth.uid in parent.collaborators.keys())
+            || (parent.collaboratorUids != null && request.auth.uid in parent.collaboratorUids)
+            || (parent.teamId != null && parent.teamId != ""
+                && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids);
+        }
+
+        allow read, write: if request.auth != null && canAccessVersions();
       }
 
       // Comments subcollection

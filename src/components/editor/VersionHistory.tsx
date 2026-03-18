@@ -180,8 +180,8 @@ export function VersionHistory({
             ownerName: v.ownerName || null,
             source: "cloud" as const,
           }));
-        } catch {
-          // Cloud unavailable, fall through to local
+        } catch (err) {
+          console.warn("[versions] Cloud fetch failed:", err);
         }
       }
 

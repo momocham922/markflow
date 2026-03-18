@@ -54,6 +54,7 @@ function App() {
     documents,
     addDocument,
     setActiveDocId,
+    setPendingRestoreContent,
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
   const syncing = useAuthStore((s) => s.syncing);
@@ -658,6 +659,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                       <VersionPanel
                         onClose={() => setRightPanel("none")}
                         onViewDiff={setDiffState}
+                        onRestore={setPendingRestoreContent}
                       />
                     )}
                     {rightPanel === "ai" && (
@@ -677,6 +679,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               <VersionPanel
                 onClose={() => setRightPanel("none")}
                 onViewDiff={setDiffState}
+                onRestore={setPendingRestoreContent}
               />
             )}
             {rightPanel === "ai" && (

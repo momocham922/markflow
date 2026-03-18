@@ -68,6 +68,10 @@ interface AppState {
   deleteFolder: (path: string) => void;
   moveDocument: (docId: string, folder: string) => void;
 
+  // Version restore (VersionPanel → Editor bridge for collab docs)
+  pendingRestoreContent: string | null;
+  setPendingRestoreContent: (content: string | null) => void;
+
   // Custom themes
   customPreviewThemes: CustomPreviewTheme[];
   addCustomPreviewTheme: (theme: CustomPreviewTheme) => void;
@@ -217,6 +221,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   documents: [],
   folders: ["/"],
+  pendingRestoreContent: null,
+  setPendingRestoreContent: (content) => set({ pendingRestoreContent: content }),
+
   customPreviewThemes: [],
 
   loadDocuments: async () => {

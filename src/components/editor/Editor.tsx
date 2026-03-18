@@ -18,6 +18,7 @@ import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
+import { markCollabActive, markCollabInactive } from "@/stores/auth-store";
 import { VersionHistory } from "./VersionHistory";
 import { MindMapView } from "./MindMapView";
 import { MindMapEditor, createInitialMindMapData } from "./MindMapEditor";
@@ -149,6 +150,10 @@ export function Editor() {
   const frozenContentRef = useRef<Record<string, string>>({});
   const prevActiveDocRef = useRef<string | null>(null);
   if (activeDocId && activeDoc?.isShared && activeDocId !== prevActiveDocRef.current) {
+    // Clean up old entry to prevent memory leak (only keep current doc)
+    if (prevActiveDocRef.current && prevActiveDocRef.current !== activeDocId) {
+      delete frozenContentRef.current[prevActiveDocRef.current];
+    }
     frozenContentRef.current[activeDocId] = activeDoc.content || "";
   }
   prevActiveDocRef.current = activeDocId ?? null;
@@ -179,9 +184,18 @@ export function Editor() {
   );
 
   // Real-time collaboration via Yjs — only for shared documents
-  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled, wsTimedOut } =
+  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled, wsTimedOut, replaceContent: collabReplaceContent } =
     useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
   const isCollabReady = Boolean(activeDocId && collabExtension && collabDocId === activeDocId);
+
+  // Track active collab docs so syncFromCloud/syncToCloud skip them
+  useEffect(() => {
+    if (isCollabReady && activeDocId) {
+      markCollabActive(activeDocId);
+      return () => { markCollabInactive(activeDocId); };
+    }
+  }, [isCollabReady, activeDocId]);
+
   // Auto-save versions when content changes significantly
   useAutoVersion({
     docId: activeDocId,
@@ -429,13 +443,27 @@ export function Editor() {
   );
 
   // Restore a version's content into the document
+  // FIX: Also update Y.Doc for collab documents so the editor reflects the restored version
   const handleRestoreVersion = useCallback(
     (content: string) => {
       if (!activeDocId || !content.trim()) return;
       updateDocument(activeDocId, { content, updatedAt: Date.now() });
+      if (isCollabReady) {
+        collabReplaceContent(content);
+      }
     },
-    [activeDocId, updateDocument],
+    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
   );
+
+  // Watch for pending restore from VersionPanel (store-based bridge)
+  const pendingRestoreContent = useAppStore((s) => s.pendingRestoreContent);
+  const clearPendingRestore = useAppStore((s) => s.setPendingRestoreContent);
+  useEffect(() => {
+    if (pendingRestoreContent !== null) {
+      handleRestoreVersion(pendingRestoreContent);
+      clearPendingRestore(null);
+    }
+  }, [pendingRestoreContent, handleRestoreVersion, clearPendingRestore]);
 
   // Cleanup on unmount only
   useEffect(() => {

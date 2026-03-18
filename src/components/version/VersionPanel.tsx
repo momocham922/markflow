@@ -39,9 +39,10 @@ export interface DiffState {
 interface VersionPanelProps {
   onClose: () => void;
   onViewDiff?: (diff: DiffState) => void;
+  onRestore?: (content: string) => void;
 }
 
-export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
+export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelProps) {
   const { activeDocId, documents, updateDocument } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [versions, setVersions] = useState<Version[]>([]);
@@ -54,45 +55,57 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
 
   const loadVersions = useCallback(async () => {
     if (!activeDocId) return;
+
+    const allVersions: Version[] = [];
+
+    // Fetch local versions (may fail in browser mode — not critical)
     try {
       const rows = await db.getVersions(activeDocId);
-      const localVersions: Version[] = rows.map((r) => ({
-        id: r.id,
-        documentId: r.document_id,
-        content: r.content,
-        title: r.title,
-        message: r.message,
-        createdAt: r.created_at,
-      }));
-
-      // Merge cloud versions if user is logged in
-      if (user) {
-        try {
-          const cloudVersions = await fetchVersionsFromCloud(activeDocId);
-          const localIds = new Set(localVersions.map((v) => v.id));
-          for (const cv of cloudVersions) {
-            if (!localIds.has(cv.id)) {
-              localVersions.push({
-                id: cv.id,
-                documentId: cv.documentId,
-                content: cv.content,
-                title: cv.title,
-                message: cv.message,
-                createdAt: cv.createdAt,
-                ownerName: cv.ownerName,
-              });
-            }
-          }
-          localVersions.sort((a, b) => b.createdAt - a.createdAt);
-        } catch {
-          // Cloud fetch failed, use local only
-        }
+      for (const r of rows) {
+        allVersions.push({
+          id: r.id,
+          documentId: r.document_id,
+          content: r.content,
+          title: r.title,
+          message: r.message,
+          createdAt: r.created_at,
+        });
       }
-
-      setVersions(localVersions);
     } catch {
       // No DB available (browser mode)
     }
+
+    // Fetch cloud versions independently (source of truth for shared docs)
+    if (user) {
+      try {
+        const cloudVersions = await fetchVersionsFromCloud(activeDocId);
+        const localIds = new Set(allVersions.map((v) => v.id));
+        for (const cv of cloudVersions) {
+          if (!localIds.has(cv.id)) {
+            allVersions.push({
+              id: cv.id,
+              documentId: cv.documentId,
+              content: cv.content,
+              title: cv.title,
+              message: cv.message,
+              createdAt: cv.createdAt,
+              ownerName: cv.ownerName,
+            });
+          } else {
+            // Cloud version exists locally — update ownerName from cloud
+            const existing = allVersions.find((v) => v.id === cv.id);
+            if (existing && cv.ownerName) {
+              existing.ownerName = cv.ownerName;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[versions] Cloud fetch failed:", err);
+      }
+    }
+
+    allVersions.sort((a, b) => b.createdAt - a.createdAt);
+    setVersions(allVersions);
   }, [activeDocId, user]);
 
   useEffect(() => {
@@ -120,7 +133,9 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
         syncVersionToCloud(activeDoc.id, {
           ...versionData,
           createdAt: Date.now(),
-        }, user.uid, user.displayName || user.email || "Unknown").catch(() => {});
+        }, user.uid, user.displayName || user.email || "Unknown").catch((err) => {
+          console.warn("[versions] Cloud sync failed:", err);
+        });
       }
       setSnapshotMsg("");
       await loadVersions();
@@ -133,21 +148,38 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
 
   const handleRestore = async (version: Version) => {
     if (!activeDocId || !activeDoc) return;
+
+    // Create backup of current content before restore
+    const backupId = crypto.randomUUID();
+    const backupData = {
+      id: backupId,
+      documentId: activeDoc.id,
+      content: activeDoc.content,
+      title: `Before restore: ${activeDoc.title}`,
+      message: null,
+    };
     try {
-      await db.createVersion({
-        id: crypto.randomUUID(),
-        documentId: activeDoc.id,
-        content: activeDoc.content,
-        title: `Before restore: ${activeDoc.title}`,
-        message: null,
-      });
+      await db.createVersion(backupData);
     } catch {
-      // Best-effort backup
+      // Best-effort local backup
     }
-    updateDocument(activeDocId, {
-      content: version.content,
-      updatedAt: Date.now(),
-    });
+    // Sync backup to cloud
+    if (user) {
+      syncVersionToCloud(activeDoc.id, {
+        ...backupData,
+        createdAt: Date.now(),
+      }, user.uid, user.displayName || user.email || "Unknown").catch(() => {});
+    }
+
+    // Restore via callback (handles Y.Doc for collab) or direct store update
+    if (onRestore) {
+      onRestore(version.content);
+    } else {
+      updateDocument(activeDocId, {
+        content: version.content,
+        updatedAt: Date.now(),
+      });
+    }
     setExpandedId(null);
     await loadVersions();
   };
