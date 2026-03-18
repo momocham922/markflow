@@ -175,6 +175,20 @@ function App() {
     return () => { unlisten?.(); };
   }, []);
 
+  // Signal to Rust that frontend is alive (cancels failsafe auto-updater).
+  // Delayed 5s to ensure full React tree has rendered without crash.
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("cancel_auto_update");
+      } catch {
+        // Not in Tauri or command not available — ignore
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, []);
+
   // Auto-update check on startup — only checks, never auto-installs
   useEffect(() => {
     const timer = setTimeout(async () => {

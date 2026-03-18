@@ -35,9 +35,6 @@ export function UserMenu() {
     useAuthStore();
   const [teamOpen, setTeamOpen] = useState(false);
   const [slackOpen, setSlackOpen] = useState(false);
-
-  if (loading) return null;
-
   const [loginMenuOpen, setLoginMenuOpen] = useState(false);
   const loginMenuRef = useRef<HTMLDivElement>(null);
 
@@ -51,6 +48,8 @@ export function UserMenu() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [loginMenuOpen]);
+
+  if (loading) return null;
 
   if (!user) {
     return (

@@ -1,7 +1,12 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri_plugin_updater::UpdaterExt;
+
+/// Flag set by frontend to indicate it's alive and handling updates itself.
+/// If this remains false after a timeout, Rust auto-installs any available update.
+static FRONTEND_ALIVE: AtomicBool = AtomicBool::new(false);
 
 /// Pending OAuth code from iOS in-webview flow
 static PENDING_OAUTH_CODE: Mutex<Option<String>> = Mutex::new(None);
@@ -434,6 +439,13 @@ fn get_pending_oauth_code() -> Option<String> {
     PENDING_OAUTH_CODE.lock().unwrap().take()
 }
 
+/// Called by frontend to signal it's alive and will handle updates via UI.
+/// Prevents Rust failsafe from auto-installing.
+#[tauri::command]
+fn cancel_auto_update() {
+    FRONTEND_ALIVE.store(true, Ordering::Relaxed);
+}
+
 #[tauri::command]
 async fn print_html(html: String) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
@@ -791,7 +803,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(target_os = "ios")]
             {
                 std::thread::spawn(|| {
@@ -805,9 +817,83 @@ pub fn run() {
                     }
                 });
             }
+
+            // Failsafe auto-updater: runs independently of frontend.
+            // If the frontend crashes (e.g. React hooks violation → black screen),
+            // it can't check for updates. This Rust-side task ensures the app
+            // still self-heals by auto-installing any available update.
+            #[cfg(not(target_os = "ios"))]
+            {
+                let update_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Wait for frontend to boot. If healthy, it calls cancel_auto_update
+                    // within ~5 seconds of mounting.
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                    if FRONTEND_ALIVE.load(Ordering::Relaxed) {
+                        return; // Frontend is alive — it handles updates via UI
+                    }
+
+                    // Frontend didn't respond. It's likely crashed.
+                    // Determine update channel from current version.
+                    let version = update_handle
+                        .config()
+                        .version
+                        .as_deref()
+                        .unwrap_or("");
+                    let endpoint = if version.contains("beta") {
+                        BETA_ENDPOINT
+                    } else {
+                        STABLE_ENDPOINT
+                    };
+
+                    let url: url::Url = match endpoint.parse() {
+                        Ok(u) => u,
+                        Err(_) => return,
+                    };
+
+                    let updater = match update_handle
+                        .updater_builder()
+                        .endpoints(vec![url])
+                    {
+                        Ok(b) => match b.build() {
+                            Ok(u) => u,
+                            Err(_) => return,
+                        },
+                        Err(_) => return,
+                    };
+
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            // Give frontend one more chance (total ~15s from startup)
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            if FRONTEND_ALIVE.load(Ordering::Relaxed) {
+                                return;
+                            }
+
+                            eprintln!(
+                                "[failsafe] Frontend unresponsive. Auto-installing update v{}",
+                                update.version
+                            );
+                            if let Err(e) =
+                                update.download_and_install(|_, _| {}, || {}).await
+                            {
+                                eprintln!("[failsafe] Install failed: {}", e);
+                                return;
+                            }
+                            // Restart app with updated binary
+                            update_handle.restart();
+                        }
+                        _ => {
+                            // No update available or check failed — nothing to do
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, cancel_auto_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
