@@ -7,7 +7,6 @@ const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 const GCP_REGION = process.env.GCP_REGION || "us-east5";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const NANOBANANA_MODEL = process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
-const NANOBANANA_REGION = process.env.NANOBANANA_REGION || "us-central1";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
@@ -17,7 +16,7 @@ function getVertexAiUrl(): string {
 }
 
 function getNanoBananaUrl(): string {
-  return `https://${NANOBANANA_REGION}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${NANOBANANA_REGION}/publishers/google/models/${NANOBANANA_MODEL}:generateContent`;
+  return `https://aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/global/publishers/google/models/${NANOBANANA_MODEL}:generateContent`;
 }
 
 async function getGcpAccessToken(): Promise<string> {

@@ -316,7 +316,33 @@ export function AiPanel({ onClose }: AiPanelProps) {
     ]);
 
     try {
-      const result = await generateImage(prompt, (status) => setToolStatus(status));
+      // Build a detailed image prompt using Claude with conversation context
+      let imagePrompt = prompt;
+      if (apiMessages.length > 0) {
+        setToolStatus("Building image prompt from context...");
+        const contextMessages: ClaudeMessage[] = [
+          ...apiMessages.slice(-10),
+          {
+            role: "user" as const,
+            content: `Based on the conversation above, create a detailed image generation prompt for an AI image generator. The user's request is: "${prompt}"\n\nRespond with ONLY the image generation prompt (no explanation, no markdown, no quotes). The prompt should be detailed, specific, and in the language that best describes the visual content. Include style, composition, colors, and content details.`,
+          },
+        ];
+        try {
+          const detailedPrompt = await sendToClaude(
+            "",
+            "You are a prompt engineer for AI image generation. Convert user requests into detailed, specific image generation prompts.",
+            contextMessages,
+          );
+          if (detailedPrompt.trim()) {
+            imagePrompt = detailedPrompt.trim();
+          }
+        } catch {
+          // Fall back to raw prompt if Claude fails
+        }
+      }
+
+      setToolStatus("Generating image...");
+      const result = await generateImage(imagePrompt, (status) => setToolStatus(status));
       setToolStatus(null);
 
       if (!insertAtCursor(result.markdown)) {
