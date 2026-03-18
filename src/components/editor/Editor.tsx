@@ -273,16 +273,36 @@ export function Editor() {
 
   // Memoize extensions — yCollab is wrapped in a Compartment so reconfigures
   // don't destroy the ySync ViewPlugin (which would kill awareness/cursors).
+  //
+  // When CodeMirror mounts (key={activeDocId}), the Compartment is initialized
+  // with the current collabExtension. After mount, collab changes are applied
+  // via dispatch (Compartment.reconfigure) to avoid full EditorState recreation.
+  //
+  // activeDocId is included in deps because key={activeDocId} forces a remount,
+  // and the new mount must pick up the latest collab state. collabExtension and
+  // isCollabReady are intentionally excluded — handled via dispatch below.
+  const collabExtRef = useRef(collabExtension);
+  const isCollabReadyRef = useRef(isCollabReady);
+  collabExtRef.current = collabExtension;
+  isCollabReadyRef.current = isCollabReady;
+
   const extensions = useMemo(
-    () => [
-      markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
-      EditorView.lineWrapping,
-      markdownShortcuts,
-      imagePaste,
-      ...iosGutterTheme,
-      collabCompartment.current.of([]),
-    ],
-    [iosGutterTheme],
+    () => {
+      const initialCollab = isCollabReadyRef.current && collabExtRef.current
+        ? collabExtRef.current : [];
+      return [
+        markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
+        EditorView.lineWrapping,
+        markdownShortcuts,
+        imagePaste,
+        ...iosGutterTheme,
+        collabCompartment.current.of(initialCollab),
+      ];
+    },
+    // activeDocId triggers remount (key={activeDocId}), so extensions re-compute
+    // with the latest collab state for the new document.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [iosGutterTheme, activeDocId],
   );
 
   // Dispatch Compartment reconfigure directly on the view when collab state changes.
