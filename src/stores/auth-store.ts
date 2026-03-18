@@ -18,6 +18,24 @@ import { notifySlack } from "@/services/slack-notify";
 import { useAppStore, type Document, type DocType } from "./app-store";
 import { getDeletedDocIds, clearDeletedDoc } from "@/services/database";
 
+// --- Sync mutex: prevents concurrent syncFromCloud / syncToCloud ---
+let syncLock = false;
+async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
+  if (syncLock) return undefined;
+  syncLock = true;
+  try {
+    return await fn();
+  } finally {
+    syncLock = false;
+  }
+}
+
+// --- Active collab tracking: docs currently being edited via Yjs ---
+// Editor sets this so sync knows not to overwrite content
+const collabActiveDocIds = new Set<string>();
+export function markCollabActive(docId: string) { collabActiveDocIds.add(docId); }
+export function markCollabInactive(docId: string) { collabActiveDocIds.delete(docId); }
+
 interface AuthState {
   user: User | null;
   loading: boolean;
@@ -110,245 +128,260 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { user, isOnline } = get();
     if (!user || !isOnline) return;
 
-    set({ syncing: true });
-    try {
-      // Load locally deleted doc IDs to skip during sync
-      let deletedDocIds: Set<string>;
+    const result = await withSyncLock(async () => {
+      set({ syncing: true });
       try {
-        deletedDocIds = await getDeletedDocIds();
-      } catch {
-        deletedDocIds = new Set();
-      }
+        // Load locally deleted doc IDs to skip during sync
+        let deletedDocIds: Set<string>;
+        try {
+          deletedDocIds = await getDeletedDocIds();
+        } catch {
+          deletedDocIds = new Set();
+        }
 
-      // Parallel fetch: user docs, shared docs, teams, and user settings
-      const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all([
-        fetchUserDocuments(user.uid),
-        fetchSharedWithMe(user.uid).catch((err) => {
-          console.error("Fetch shared docs failed:", err);
-          return [] as Awaited<ReturnType<typeof fetchSharedWithMe>>;
-        }),
-        fetchUserTeams(user.uid).catch((err) => {
-          console.error("Fetch teams failed:", err);
-          return [] as Awaited<ReturnType<typeof fetchUserTeams>>;
-        }),
-        fetchUserSettings(user.uid).catch(() => null),
-      ]);
+        // Parallel fetch: user docs, shared docs, teams, and user settings
+        const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all([
+          fetchUserDocuments(user.uid),
+          fetchSharedWithMe(user.uid).catch((err) => {
+            console.error("Fetch shared docs failed:", err);
+            return [] as Awaited<ReturnType<typeof fetchSharedWithMe>>;
+          }),
+          fetchUserTeams(user.uid).catch((err) => {
+            console.error("Fetch teams failed:", err);
+            return [] as Awaited<ReturnType<typeof fetchUserTeams>>;
+          }),
+          fetchUserSettings(user.uid).catch(() => null),
+        ]);
 
-      // Restore theme settings from cloud (if local has defaults)
-      if (cloudSettings) {
+        // Restore theme settings from cloud (if local has defaults)
+        if (cloudSettings) {
+          const appStore = useAppStore.getState();
+          const local = appStore.themeSettings;
+          const defaults = { previewTheme: "github", editorTheme: "default", mindMapTheme: "lavender", customPreviewCss: "" };
+          const isDefault = local.previewTheme === defaults.previewTheme
+            && local.editorTheme === defaults.editorTheme
+            && local.mindMapTheme === defaults.mindMapTheme;
+          if (isDefault && cloudSettings.themeSettings) {
+            try {
+              const cloudTheme = typeof cloudSettings.themeSettings === "string"
+                ? JSON.parse(cloudSettings.themeSettings as string)
+                : cloudSettings.themeSettings;
+              appStore.setThemeSettings(cloudTheme);
+            } catch { /* ignore parse errors */ }
+          }
+        }
+
         const appStore = useAppStore.getState();
-        const local = appStore.themeSettings;
-        const defaults = { previewTheme: "github", editorTheme: "default", mindMapTheme: "lavender", customPreviewCss: "" };
-        const isDefault = local.previewTheme === defaults.previewTheme
-          && local.editorTheme === defaults.editorTheme
-          && local.mindMapTheme === defaults.mindMapTheme;
-        if (isDefault && cloudSettings.themeSettings) {
-          try {
-            const cloudTheme = typeof cloudSettings.themeSettings === "string"
-              ? JSON.parse(cloudSettings.themeSettings as string)
-              : cloudSettings.themeSettings;
-            appStore.setThemeSettings(cloudTheme);
-          } catch { /* ignore parse errors */ }
-        }
-      }
+        const localDocs = appStore.documents;
 
-      const appStore = useAppStore.getState();
-      const localDocs = appStore.documents;
-
-      // Claim unclaimed local docs for this user (first login on this device)
-      for (const local of localDocs) {
-        if (!local.ownerId) {
-          appStore.updateDocument(local.id, { ownerId: user.uid });
-        }
-      }
-
-      // Track all cloud doc IDs for deletion reconciliation
-      const cloudDocIds = new Set<string>();
-
-      // Merge user's own cloud docs
-      for (const cloudDoc of cloudDocs) {
-        if (!cloudDoc.content?.trim()) continue;
-        if (deletedDocIds.has(cloudDoc.id)) continue; // skip locally deleted
-
-        cloudDocIds.add(cloudDoc.id);
-        const local = localDocs.find((d) => d.id === cloudDoc.id);
-        if (!local) {
-          const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
-          const hasShareLink = cloudDoc.shareLink?.enabled === true;
-          const newDoc: Document = {
-            id: cloudDoc.id,
-            title: cloudDoc.title,
-            content: cloudDoc.content,
-            createdAt: cloudDoc.createdAt?.toMillis() ?? Date.now(),
-            updatedAt: cloudDoc.updatedAt?.toMillis() ?? Date.now(),
-            folder: cloudDoc.folder ?? "/",
-            tags: cloudDoc.tags ?? [],
-            ownerId: user.uid,
-            isShared: hasCollaborators || hasShareLink,
-            docType: (cloudDoc.docType as DocType) || "markdown",
-          };
-          await appStore.addDocument(newDoc);
-        } else {
-          const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
-          const hasShareLink = cloudDoc.shareLink?.enabled === true;
-          const updates: Partial<Document> = {
-            ownerId: user.uid,
-            isShared: hasCollaborators || hasShareLink,
-          };
-          if (cloudDoc.folder && cloudDoc.folder !== "/" && local.folder === "/") {
-            updates.folder = cloudDoc.folder;
+        // Claim unclaimed local docs for this user (first login on this device)
+        for (const local of localDocs) {
+          if (!local.ownerId) {
+            appStore.updateDocument(local.id, { ownerId: user.uid });
           }
-          appStore.updateDocument(local.id, updates);
         }
-      }
 
-      // Process shared docs — batch fetch full docs in parallel
-      const sharedToFetch: { id: string; isNew: boolean }[] = [];
-      for (const shared of sharedDocs) {
-        if (deletedDocIds.has(shared.id)) continue;
-        cloudDocIds.add(shared.id);
-        const currentDocs = useAppStore.getState().documents;
-        const local = currentDocs.find((d) => d.id === shared.id);
-        if (local) {
-          if (local.ownerId !== user.uid) {
-            sharedToFetch.push({ id: shared.id, isNew: false });
+        // Track all cloud doc IDs for deletion reconciliation
+        const cloudDocIds = new Set<string>();
+
+        // Merge user's own cloud docs
+        for (const cloudDoc of cloudDocs) {
+          if (!cloudDoc.content?.trim()) continue;
+          if (deletedDocIds.has(cloudDoc.id)) continue; // skip locally deleted
+
+          cloudDocIds.add(cloudDoc.id);
+          const local = localDocs.find((d) => d.id === cloudDoc.id);
+          if (!local) {
+            const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
+            const hasShareLink = cloudDoc.shareLink?.enabled === true;
+            const newDoc: Document = {
+              id: cloudDoc.id,
+              title: cloudDoc.title,
+              content: cloudDoc.content,
+              createdAt: cloudDoc.createdAt?.toMillis() ?? Date.now(),
+              updatedAt: cloudDoc.updatedAt?.toMillis() ?? Date.now(),
+              folder: cloudDoc.folder ?? "/",
+              tags: cloudDoc.tags ?? [],
+              ownerId: user.uid,
+              isShared: hasCollaborators || hasShareLink,
+              docType: (cloudDoc.docType as DocType) || "markdown",
+            };
+            await appStore.addDocument(newDoc);
           } else {
-            appStore.updateDocument(shared.id, { isShared: true });
-          }
-        } else {
-          sharedToFetch.push({ id: shared.id, isNew: true });
-        }
-      }
-
-      // Fetch all shared docs in parallel (batch of up to 10)
-      if (sharedToFetch.length > 0) {
-        const batchSize = 10;
-        for (let i = 0; i < sharedToFetch.length; i += batchSize) {
-          const batch = sharedToFetch.slice(i, i + batchSize);
-          const results = await Promise.all(
-            batch.map((s) => fetchDocument(s.id).catch(() => null)),
-          );
-          for (let j = 0; j < batch.length; j++) {
-            const fullDoc = results[j];
-            const entry = batch[j];
-            if (!fullDoc || !fullDoc.content?.trim()) {
-              if (!entry.isNew) appStore.updateDocument(entry.id, { isShared: true });
-              continue;
+            const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
+            const hasShareLink = cloudDoc.shareLink?.enabled === true;
+            const updates: Partial<Document> = {
+              ownerId: user.uid,
+              isShared: hasCollaborators || hasShareLink,
+            };
+            if (cloudDoc.folder && cloudDoc.folder !== "/" && local.folder === "/") {
+              updates.folder = cloudDoc.folder;
             }
-            if (entry.isNew) {
-              const newDoc: Document = {
-                id: fullDoc.id,
-                title: fullDoc.title,
-                content: fullDoc.content,
-                createdAt: fullDoc.createdAt?.toMillis() ?? Date.now(),
-                updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
-                folder: fullDoc.folder ?? "/",
-                tags: fullDoc.tags ?? [],
-                ownerId: fullDoc.ownerId,
-                isShared: true,
-                docType: (fullDoc.docType as DocType) || "markdown",
-              };
-              await appStore.addDocument(newDoc);
-            } else {
-              appStore.updateDocument(entry.id, {
-                isShared: true,
-                content: fullDoc.content,
-                title: fullDoc.title,
-                titlePinned: true,
-                updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
-              });
-            }
+            appStore.updateDocument(local.id, updates);
           }
         }
-      }
 
-      // Fetch all team docs in parallel
-      const teamDocBatches = await Promise.all(
-        teams.map((team) =>
-          fetchTeamDocuments(team.id)
-            .then((docs) => docs.map((d) => ({ ...d, teamId: team.id })))
-            .catch(() => [] as { id: string; teamId: string }[]),
-        ),
-      );
-      const teamDocsToFetch: { id: string; teamId: string; isNew: boolean }[] = [];
-      for (const teamDocs of teamDocBatches) {
-        for (const td of teamDocs) {
-          if (deletedDocIds.has(td.id)) continue;
-          cloudDocIds.add(td.id);
+        // Process shared docs — batch fetch full docs in parallel
+        const sharedToFetch: { id: string; isNew: boolean }[] = [];
+        for (const shared of sharedDocs) {
+          if (deletedDocIds.has(shared.id)) continue;
+          cloudDocIds.add(shared.id);
           const currentDocs = useAppStore.getState().documents;
-          const local = currentDocs.find((d) => d.id === td.id);
+          const local = currentDocs.find((d) => d.id === shared.id);
           if (local) {
             if (local.ownerId !== user.uid) {
-              teamDocsToFetch.push({ id: td.id, teamId: td.teamId, isNew: false });
+              sharedToFetch.push({ id: shared.id, isNew: false });
             } else {
-              appStore.updateDocument(td.id, { isShared: true, teamId: td.teamId });
+              appStore.updateDocument(shared.id, { isShared: true });
             }
           } else {
-            teamDocsToFetch.push({ id: td.id, teamId: td.teamId, isNew: true });
+            sharedToFetch.push({ id: shared.id, isNew: true });
           }
         }
-      }
 
-      // Batch fetch team docs in parallel
-      if (teamDocsToFetch.length > 0) {
-        const batchSize = 10;
-        for (let i = 0; i < teamDocsToFetch.length; i += batchSize) {
-          const batch = teamDocsToFetch.slice(i, i + batchSize);
-          const results = await Promise.all(
-            batch.map((t) => fetchDocument(t.id).catch(() => null)),
-          );
-          for (let j = 0; j < batch.length; j++) {
-            const fullDoc = results[j];
-            const entry = batch[j];
-            if (!fullDoc || !fullDoc.content?.trim()) {
-              if (!entry.isNew) appStore.updateDocument(entry.id, { isShared: true, teamId: entry.teamId });
-              continue;
+        // Fetch all shared docs in parallel (batch of up to 10)
+        if (sharedToFetch.length > 0) {
+          const batchSize = 10;
+          for (let i = 0; i < sharedToFetch.length; i += batchSize) {
+            const batch = sharedToFetch.slice(i, i + batchSize);
+            const results = await Promise.all(
+              batch.map((s) => fetchDocument(s.id).catch(() => null)),
+            );
+            for (let j = 0; j < batch.length; j++) {
+              const fullDoc = results[j];
+              const entry = batch[j];
+              if (!fullDoc || !fullDoc.content?.trim()) {
+                if (!entry.isNew) appStore.updateDocument(entry.id, { isShared: true });
+                continue;
+              }
+              if (entry.isNew) {
+                const newDoc: Document = {
+                  id: fullDoc.id,
+                  title: fullDoc.title,
+                  content: fullDoc.content,
+                  createdAt: fullDoc.createdAt?.toMillis() ?? Date.now(),
+                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
+                  folder: fullDoc.folder ?? "/",
+                  tags: fullDoc.tags ?? [],
+                  ownerId: fullDoc.ownerId,
+                  isShared: true,
+                  docType: (fullDoc.docType as DocType) || "markdown",
+                };
+                await appStore.addDocument(newDoc);
+              } else {
+                // FIX: Skip content update if doc is actively being edited via Yjs
+                // Yjs is the source of truth during collaboration — Firestore snapshot is stale
+                const updates: Partial<Document> = {
+                  isShared: true,
+                  titlePinned: true,
+                };
+                if (!collabActiveDocIds.has(entry.id)) {
+                  updates.content = fullDoc.content;
+                  updates.title = fullDoc.title;
+                  updates.updatedAt = fullDoc.updatedAt?.toMillis() ?? Date.now();
+                }
+                appStore.updateDocument(entry.id, updates);
+              }
             }
-            if (entry.isNew) {
-              const newDoc: Document = {
-                id: fullDoc.id,
-                title: fullDoc.title,
-                content: fullDoc.content,
-                createdAt: fullDoc.createdAt?.toMillis() ?? Date.now(),
-                updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
-                folder: fullDoc.folder ?? "/",
-                tags: fullDoc.tags ?? [],
-                ownerId: fullDoc.ownerId,
-                teamId: entry.teamId,
-                isShared: true,
-                docType: (fullDoc.docType as DocType) || "markdown",
-              };
-              await appStore.addDocument(newDoc);
+          }
+        }
+
+        // Fetch all team docs in parallel
+        const teamDocBatches = await Promise.all(
+          teams.map((team) =>
+            fetchTeamDocuments(team.id)
+              .then((docs) => docs.map((d) => ({ ...d, teamId: team.id })))
+              .catch(() => [] as { id: string; teamId: string }[]),
+          ),
+        );
+        const teamDocsToFetch: { id: string; teamId: string; isNew: boolean }[] = [];
+        for (const teamDocs of teamDocBatches) {
+          for (const td of teamDocs) {
+            if (deletedDocIds.has(td.id)) continue;
+            cloudDocIds.add(td.id);
+            const currentDocs = useAppStore.getState().documents;
+            const local = currentDocs.find((d) => d.id === td.id);
+            if (local) {
+              if (local.ownerId !== user.uid) {
+                teamDocsToFetch.push({ id: td.id, teamId: td.teamId, isNew: false });
+              } else {
+                appStore.updateDocument(td.id, { isShared: true, teamId: td.teamId });
+              }
             } else {
-              appStore.updateDocument(entry.id, {
-                isShared: true,
-                teamId: entry.teamId,
-                content: fullDoc.content,
-                title: fullDoc.title,
-                titlePinned: true,
-                updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
-              });
+              teamDocsToFetch.push({ id: td.id, teamId: td.teamId, isNew: true });
             }
           }
         }
-      }
 
-      // Reconcile deletions: remove local shared/team docs that no longer exist in cloud.
-      // Only remove docs NOT owned by the current user (owned docs are source of truth locally).
-      const finalDocs = useAppStore.getState().documents;
-      for (const local of finalDocs) {
-        if (local.ownerId === user.uid) continue; // never delete own docs
-        if (!local.isShared && !local.teamId) continue; // only shared/team docs
-        if (!cloudDocIds.has(local.id)) {
-          console.warn(`[sync] Removing locally-cached doc ${local.id} (deleted from cloud)`);
-          await appStore.deleteDocument(local.id);
+        // Batch fetch team docs in parallel
+        if (teamDocsToFetch.length > 0) {
+          const batchSize = 10;
+          for (let i = 0; i < teamDocsToFetch.length; i += batchSize) {
+            const batch = teamDocsToFetch.slice(i, i + batchSize);
+            const results = await Promise.all(
+              batch.map((t) => fetchDocument(t.id).catch(() => null)),
+            );
+            for (let j = 0; j < batch.length; j++) {
+              const fullDoc = results[j];
+              const entry = batch[j];
+              if (!fullDoc || !fullDoc.content?.trim()) {
+                if (!entry.isNew) appStore.updateDocument(entry.id, { isShared: true, teamId: entry.teamId });
+                continue;
+              }
+              if (entry.isNew) {
+                const newDoc: Document = {
+                  id: fullDoc.id,
+                  title: fullDoc.title,
+                  content: fullDoc.content,
+                  createdAt: fullDoc.createdAt?.toMillis() ?? Date.now(),
+                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
+                  folder: fullDoc.folder ?? "/",
+                  tags: fullDoc.tags ?? [],
+                  ownerId: fullDoc.ownerId,
+                  teamId: entry.teamId,
+                  isShared: true,
+                  docType: (fullDoc.docType as DocType) || "markdown",
+                };
+                await appStore.addDocument(newDoc);
+              } else {
+                // FIX: Skip content update if doc is actively being edited via Yjs
+                const updates: Partial<Document> = {
+                  isShared: true,
+                  teamId: entry.teamId,
+                  titlePinned: true,
+                };
+                if (!collabActiveDocIds.has(entry.id)) {
+                  updates.content = fullDoc.content;
+                  updates.title = fullDoc.title;
+                  updates.updatedAt = fullDoc.updatedAt?.toMillis() ?? Date.now();
+                }
+                appStore.updateDocument(entry.id, updates);
+              }
+            }
+          }
         }
+
+        // Reconcile deletions: remove local shared/team docs that no longer exist in cloud.
+        // Only remove docs NOT owned by the current user (owned docs are source of truth locally).
+        // FIX: Also skip docs being actively edited (Yjs may not have synced to Firestore yet)
+        const finalDocs = useAppStore.getState().documents;
+        for (const local of finalDocs) {
+          if (local.ownerId === user.uid) continue; // never delete own docs
+          if (!local.isShared && !local.teamId) continue; // only shared/team docs
+          if (collabActiveDocIds.has(local.id)) continue; // skip actively edited docs
+          if (!cloudDocIds.has(local.id)) {
+            console.warn(`[sync] Removing locally-cached doc ${local.id} (deleted from cloud)`);
+            await appStore.deleteDocument(local.id);
+          }
+        }
+      } catch (error) {
+        console.error("Sync from cloud failed:", error);
+      } finally {
+        set({ syncing: false });
       }
-    } catch (error) {
-      console.error("Sync from cloud failed:", error);
-    } finally {
-      set({ syncing: false });
-    }
+    });
+    // result is undefined if lock was held — that's fine, next sync will catch up
+    void result;
   },
 
   deleteFromCloud: async (docId: string) => {
@@ -368,76 +401,85 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { user, isOnline } = get();
     if (!user || !isOnline) return;
 
-    set({ syncing: true });
-    try {
-      const appState = useAppStore.getState();
-      const { documents } = appState;
-
-      // Only sync theme settings after loadDocuments has completed,
-      // otherwise we'd save default values and overwrite correct cloud data.
-      if (appState.initialized) {
-        saveUserSettingsToFirestore(user.uid, {
-          themeSettings: appState.themeSettings,
-        }).catch((err) => console.error("Failed to sync settings:", err));
-      }
-
-      // Retry pending cloud deletions
+    await withSyncLock(async () => {
+      set({ syncing: true });
       try {
-        const deletedIds = await getDeletedDocIds();
-        for (const docId of deletedIds) {
-          // Only retry if doc is not in local store (actually deleted)
-          if (!documents.find((d) => d.id === docId)) {
-            try {
-              await deleteDocumentFromFirestore(docId);
-              await clearDeletedDoc(docId);
-            } catch {
-              // Will retry next sync
+        const appState = useAppStore.getState();
+        const { documents } = appState;
+
+        // Only sync theme settings after loadDocuments has completed,
+        // otherwise we'd save default values and overwrite correct cloud data.
+        if (appState.initialized) {
+          saveUserSettingsToFirestore(user.uid, {
+            themeSettings: appState.themeSettings,
+          }).catch((err) => console.error("Failed to sync settings:", err));
+        }
+
+        // Retry pending cloud deletions
+        try {
+          const deletedIds = await getDeletedDocIds();
+          for (const docId of deletedIds) {
+            // Only retry if doc is not in local store (actually deleted)
+            if (!documents.find((d) => d.id === docId)) {
+              try {
+                await deleteDocumentFromFirestore(docId);
+                await clearDeletedDoc(docId);
+              } catch {
+                // Will retry next sync
+              }
             }
           }
-        }
-      } catch { /* ignore */ }
+        } catch { /* ignore */ }
 
-      // Sync: owned docs + shared docs with non-empty content
-      const syncableDocs = documents.filter(
-        (d) => d.content.trim() && (!d.ownerId || d.ownerId === user.uid || d.isShared),
-      );
-      for (const d of syncableDocs) {
-        const payload = {
-          id: d.id,
-          title: d.title,
-          content: d.content,
-          ownerId: d.ownerId || user.uid,
-          folder: d.folder,
-          tags: d.tags,
-          docType: d.docType,
-        };
-        try {
-          await saveDocumentToFirestore(payload);
-        } catch (saveErr) {
-          // Only create if owned — collaborators shouldn't create docs
-          if (!d.ownerId || d.ownerId === user.uid) {
+        // FIX: Only sync docs owned by this user. Non-owners should NEVER write
+        // document content to Firestore — Yjs handles real-time sync for shared docs,
+        // and non-owner writes can overwrite the owner's latest version.
+        const syncableDocs = documents.filter(
+          (d) => d.content.trim() && (!d.ownerId || d.ownerId === user.uid),
+        );
+        for (const d of syncableDocs) {
+          const payload = {
+            id: d.id,
+            title: d.title,
+            content: d.content,
+            ownerId: d.ownerId || user.uid,
+            folder: d.folder,
+            tags: d.tags,
+            docType: d.docType,
+          };
+          try {
+            await saveDocumentToFirestore(payload);
+          } catch (saveErr) {
+            // FIX: Only fall back to create for genuinely new docs (not yet in Firestore).
+            // Check if doc exists before creating — createDocumentInFirestore wipes
+            // collaborators/shareLink because it uses setDoc without merge.
             try {
-              await createDocumentInFirestore(payload);
+              const existing = await fetchDocument(d.id);
+              if (!existing) {
+                await createDocumentInFirestore(payload);
+              } else {
+                console.error(`Failed to save existing document ${d.id}:`, saveErr);
+              }
             } catch (createErr) {
               console.error(`Failed to sync document ${d.id}:`, saveErr, createErr);
             }
           }
         }
+        // Notify Slack about edits (once per sync, not per doc)
+        if (syncableDocs.length > 0) {
+          const titles = syncableDocs.slice(0, 3).map((d) => d.title).join(", ");
+          const extra = syncableDocs.length > 3 ? ` +${syncableDocs.length - 3} more` : "";
+          notifySlack("edit", {
+            docTitle: titles + extra,
+            authorName: user.displayName || user.email || undefined,
+            detail: `${syncableDocs.length} document(s) synced to cloud`,
+          }).catch(() => {});
+        }
+      } catch (error) {
+        console.error("Sync to cloud failed:", error);
+      } finally {
+        set({ syncing: false });
       }
-      // Notify Slack about edits (once per sync, not per doc)
-      if (syncableDocs.length > 0) {
-        const titles = syncableDocs.slice(0, 3).map((d) => d.title).join(", ");
-        const extra = syncableDocs.length > 3 ? ` +${syncableDocs.length - 3} more` : "";
-        notifySlack("edit", {
-          docTitle: titles + extra,
-          authorName: user.displayName || user.email || undefined,
-          detail: `${syncableDocs.length} document(s) synced to cloud`,
-        }).catch(() => {});
-      }
-    } catch (error) {
-      console.error("Sync to cloud failed:", error);
-    } finally {
-      set({ syncing: false });
-    }
+    });
   },
 }));

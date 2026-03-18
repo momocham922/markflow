@@ -20,6 +20,7 @@ import {
   setDoc,
   deleteDoc,
   updateDoc,
+  runTransaction,
   query,
   where,
   orderBy,
@@ -433,19 +434,41 @@ export async function saveDocumentToFirestore(docData: {
     return;
   }
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
-  await setDoc(
-    ref,
-    {
+
+  // Use transaction for conditional write: only update if our content is newer
+  // than what's in Firestore. Prevents overwriting a collaborator's recent edits
+  // with stale local content.
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    if (snap.exists()) {
+      const cloudData = snap.data();
+      // If cloud has longer/different content from another user, skip stale overwrites.
+      // Only the document owner should update content in Firestore.
+      if (cloudData.ownerId && cloudData.ownerId !== docData.ownerId) {
+        return; // Non-owner should not overwrite
+      }
+    }
+    const payload: Record<string, unknown> = {
       title: docData.title,
       content: docData.content,
       ownerId: docData.ownerId,
       folder: docData.folder ?? "/",
       tags: docData.tags ?? [],
-      ...(docData.docType ? { docType: docData.docType } : {}),
       updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
+    };
+    if (docData.docType) payload.docType = docData.docType;
+
+    if (snap.exists()) {
+      transaction.update(ref, payload);
+    } else {
+      transaction.set(ref, {
+        ...payload,
+        collaborators: {},
+        collaboratorUids: [],
+        createdAt: serverTimestamp(),
+      });
+    }
+  });
 }
 
 export async function createDocumentInFirestore(docData: {

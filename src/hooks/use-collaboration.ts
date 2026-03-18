@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { IndexeddbPersistence } from "y-indexeddb";
@@ -20,6 +20,8 @@ export interface CollabState {
   docId: string | null;
   enabled: boolean;
   wsTimedOut: boolean;
+  /** Replace Y.Text content (e.g., for version restore). Noop if not active. */
+  replaceContent: (content: string) => void;
 }
 
 const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
@@ -115,28 +117,41 @@ export function useCollaboration(
        *  when multiple users open the same doc simultaneously.
        *  Only the client with the lowest clientID seeds immediately;
        *  others wait and only seed if the leader didn't.
+       *
+       *  FIX: Added 500ms delay before leader election to allow awareness
+       *  states from other clients to propagate. Without this, two clients
+       *  connecting simultaneously may both see themselves as the sole client.
        */
+      let seedTimer: ReturnType<typeof setTimeout> | null = null;
       const seedIfEmpty = () => {
         const ydocContent = ytext.toString();
         const localContent = initialContentRef.current;
         if (!ydocContent.trim() && localContent.trim()) {
-          const allClientIds = Array.from(provider.awareness.getStates().keys());
-          if (allClientIds.length > 1) {
-            const minId = Math.min(...allClientIds);
-            if (ydoc.clientID !== minId) {
-              // Not the leader — wait for leader to seed, then fallback
-              setTimeout(() => {
-                if (cancelled) return;
-                if (!ytext.toString().trim() && localContent.trim()) {
-                  ydoc.transact(() => { ytext.insert(0, localContent); });
-                }
-              }, 2000);
-              return;
+          // Delay leader election to let awareness propagate
+          if (seedTimer) clearTimeout(seedTimer);
+          seedTimer = setTimeout(() => {
+            if (cancelled) return;
+            // Re-check after delay — another client may have seeded
+            if (ytext.toString().trim()) return;
+
+            const allClientIds = Array.from(provider.awareness.getStates().keys());
+            if (allClientIds.length > 1) {
+              const minId = Math.min(...allClientIds);
+              if (ydoc.clientID !== minId) {
+                // Not the leader — wait longer for leader to seed, then fallback
+                setTimeout(() => {
+                  if (cancelled) return;
+                  if (!ytext.toString().trim() && localContent.trim()) {
+                    ydoc.transact(() => { ytext.insert(0, localContent); });
+                  }
+                }, 2000);
+                return;
+              }
             }
-          }
-          ydoc.transact(() => {
-            ytext.insert(0, localContent);
-          });
+            ydoc.transact(() => {
+              ytext.insert(0, localContent);
+            });
+          }, 500);
         }
       };
 
@@ -196,9 +211,12 @@ export function useCollaboration(
       // Do NOT seed Y.Text here — seeding creates new Yjs operations that can
       // conflict with operations arriving later from the WS server, causing
       // content duplication. Instead, Editor renders without yCollab.
+      // FIX: Disconnect provider on timeout to prevent ghost reconnections
+      // that could fire "sync" events and re-seed content later.
       const wsTimeout = setTimeout(() => {
         if (!wsSynced && idbSynced && !cancelled && !finalized) {
           console.warn("[collab] WS sync timeout — fallback to non-collab mode");
+          provider.disconnect();
           setWsTimedOut(true);
         }
       }, 5000);
@@ -238,7 +256,10 @@ export function useCollaboration(
       const observer = () => {
         if (!finalized || cancelled) return;
         const text = ytext.toString();
-        if (!text.trim()) return;
+        // FIX: Removed `!text.trim()` guard. If a collaborator legitimately
+        // clears the document, we must propagate that change to the store.
+        // The empty content guard in updateDocument/saveDocumentToFirestore
+        // already prevents accidental data loss at the persistence layer.
 
         pendingText = text;
         if (!throttleTimer) {
@@ -252,6 +273,7 @@ export function useCollaboration(
 
       return () => {
         clearTimeout(wsTimeout);
+        if (seedTimer) clearTimeout(seedTimer);
         if (throttleTimer) clearTimeout(throttleTimer);
         // Flush any pending update on cleanup
         if (pendingText !== null) {
@@ -306,5 +328,16 @@ export function useCollaboration(
     };
   }, [enabled, docId, user]);
 
-  return { extension, connected, peers, docId: collabDocId, enabled, wsTimedOut };
+  // Replace Y.Text content atomically (for version restore)
+  const replaceContent = useCallback((content: string) => {
+    const ydoc = ydocRef.current;
+    if (!ydoc) return;
+    const ytext = ydoc.getText("codemirror");
+    ydoc.transact(() => {
+      ytext.delete(0, ytext.length);
+      if (content) ytext.insert(0, content);
+    });
+  }, []);
+
+  return { extension, connected, peers, docId: collabDocId, enabled, wsTimedOut, replaceContent };
 }

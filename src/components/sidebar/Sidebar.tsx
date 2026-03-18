@@ -151,20 +151,8 @@ export function Sidebar() {
       if (teamsWithDocs.length === 1) {
         setExpandedTeams(new Set([teamsWithDocs[0].id]));
       }
-
-      // Reconcile: remove local team docs that were deleted from Firestore
-      const firestoreTeamDocIds = new Set<string>();
-      for (const team of teamsWithDocs) {
-        for (const doc of team.docs) firestoreTeamDocIds.add(doc.id);
-      }
-      const appStore = useAppStore.getState();
-      for (const doc of appStore.documents) {
-        if (!doc.teamId) continue;
-        if (firestoreTeamDocIds.has(doc.id)) continue;
-        // Grace period: skip docs created in the last 30s (might not be indexed yet)
-        if (Date.now() - doc.createdAt < 30_000) continue;
-        appStore.deleteDocument(doc.id);
-      }
+      // Deletion reconciliation is handled centrally by syncFromCloud
+      // to avoid race conditions with concurrent sync operations.
     } catch { /* ignore */ }
   }, []);
 
@@ -327,13 +315,8 @@ export function Sidebar() {
   };
 
   const handleDeleteTeamDoc = async (docId: string, team: TeamWithDocs) => {
-    // Remove from local store
-    deleteDocument(docId);
-    // Remove from Firestore
-    try {
-      const { deleteDocumentFromFirestore } = await import("@/services/firebase");
-      await deleteDocumentFromFirestore(docId);
-    } catch { /* ignore */ }
+    // deleteDocument handles both local removal and cloud deletion (via deleteFromCloud)
+    await deleteDocument(docId);
     // Update local teams state immediately
     setTeams((prev) =>
       prev.map((t) =>

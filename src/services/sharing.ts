@@ -8,6 +8,7 @@ import {
   updateDoc,
   deleteDoc,
   deleteField,
+  runTransaction,
   query,
   where,
   serverTimestamp,
@@ -101,7 +102,7 @@ export interface Collaborator {
   addedAt: number;
 }
 
-/** Add a collaborator to a document by email */
+/** Add a collaborator to a document by email (atomic transaction) */
 export async function addCollaborator(
   docId: string,
   email: string,
@@ -118,23 +119,25 @@ export async function addCollaborator(
   const key = uid || email.replace(/[.#$/\[\]]/g, "_");
 
   const ref = doc(firestore, "documents", docId);
-  const updates: Record<string, unknown> = {
-    [`collaborators.${key}`]: { email, role, addedAt: Date.now() },
-  };
 
-  // Maintain collaboratorUids array for efficient querying
-  if (uid) {
-    const snap = await getDoc(ref);
-    const existing = (snap.data()?.collaboratorUids || []) as string[];
-    if (!existing.includes(uid)) {
-      updates.collaboratorUids = [...existing, uid];
+  // Use transaction to prevent TOCTOU race: read + write atomically
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const updates: Record<string, unknown> = {
+      [`collaborators.${key}`]: { email, role, addedAt: Date.now() },
+    };
+    if (uid) {
+      const existing = (data.collaboratorUids || []) as string[];
+      if (!existing.includes(uid)) {
+        updates.collaboratorUids = [...existing, uid];
+      }
     }
-  }
-
-  await updateDoc(ref, updates);
+    transaction.update(ref, updates);
+  });
 }
 
-/** Remove a collaborator from a document */
+/** Remove a collaborator from a document (atomic transaction) */
 export async function removeCollaborator(
   docId: string,
   collaborator: Collaborator,
@@ -142,18 +145,18 @@ export async function removeCollaborator(
   const key = collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
   const ref = doc(firestore, "documents", docId);
 
-  const updates: Record<string, unknown> = {
-    [`collaborators.${key}`]: deleteField(),
-  };
-
-  // Also remove from collaboratorUids array
-  if (collaborator.uid) {
-    const snap = await getDoc(ref);
-    const existing = (snap.data()?.collaboratorUids || []) as string[];
-    updates.collaboratorUids = existing.filter((u) => u !== collaborator.uid);
-  }
-
-  await updateDoc(ref, updates);
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const updates: Record<string, unknown> = {
+      [`collaborators.${key}`]: deleteField(),
+    };
+    if (collaborator.uid) {
+      const existing = (data.collaboratorUids || []) as string[];
+      updates.collaboratorUids = existing.filter((u) => u !== collaborator.uid);
+    }
+    transaction.update(ref, updates);
+  });
 }
 
 /** Update a collaborator's role */
@@ -258,7 +261,7 @@ export async function fetchUserTeams(uid: string): Promise<Team[]> {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Team);
 }
 
-/** Add a member to a team */
+/** Add a member to a team (atomic transaction) */
 export async function addTeamMember(
   teamId: string,
   member: { email: string; uid?: string; role: "admin" | "member" },
@@ -279,32 +282,38 @@ export async function addTeamMember(
   };
 
   const ref = doc(firestore, TEAMS_COLLECTION, teamId);
-  // Get current members, add new one
-  const snap = await getDoc(ref);
-  const data = snap.data();
-  const members = (data?.members || []) as TeamMember[];
-  const memberUids = (data?.memberUids || []) as string[];
 
-  if (!members.some((m) => m.email === member.email)) {
-    members.push(teamMember);
-    if (uid && !memberUids.includes(uid)) memberUids.push(uid);
-    await updateDoc(ref, { members, memberUids });
-  }
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const members = [...((data.members || []) as TeamMember[])];
+    const memberUids = [...((data.memberUids || []) as string[])];
+
+    if (!members.some((m) => m.email === member.email)) {
+      members.push(teamMember);
+      if (uid && !memberUids.includes(uid)) memberUids.push(uid);
+      transaction.update(ref, { members, memberUids });
+    }
+  });
 }
 
-/** Remove a member from a team */
+/** Remove a member from a team (atomic transaction) */
 export async function removeTeamMember(
   teamId: string,
   member: TeamMember,
 ): Promise<void> {
   const ref = doc(firestore, TEAMS_COLLECTION, teamId);
-  const snap = await getDoc(ref);
-  const data = snap.data();
-  const members = ((data?.members || []) as TeamMember[]).filter(
-    (m) => m.email !== member.email,
-  );
-  const memberUids = members.map((m) => m.uid).filter(Boolean);
-  await updateDoc(ref, { members, memberUids });
+
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const members = ((data.members || []) as TeamMember[]).filter(
+      (m) => m.email !== member.email,
+    );
+    // Rebuild memberUids from remaining members with valid UIDs
+    const memberUids = members.map((m) => m.uid).filter(Boolean);
+    transaction.update(ref, { members, memberUids });
+  });
 }
 
 /** Delete a team */
