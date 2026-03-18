@@ -262,7 +262,7 @@ export function VersionHistory({
   const handleDelete = async (version: Version) => {
     try {
       if (version.source === "cloud") {
-        await deleteVersionFromCloud(version.id);
+        await deleteVersionFromCloud(docId!, version.id);
       }
       try {
         await db.deleteVersion(version.id);

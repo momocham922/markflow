@@ -486,8 +486,8 @@ export async function updateShareLink(
 }
 
 // ─── Version history cloud sync ─────────────────────────────
-
-const VERSIONS_COLLECTION = "versions";
+// Versions are stored as subcollections: documents/{docId}/versions/{versionId}
+// This matches Firestore security rules and scopes access to document collaborators.
 
 export interface FirestoreVersion {
   id: string;
@@ -507,9 +507,8 @@ export async function syncVersionToCloud(
   ownerName: string,
 ): Promise<void> {
   if (!version.content?.trim()) return;
-  const ref = doc(firestore, VERSIONS_COLLECTION, version.id);
+  const ref = doc(firestore, DOCS_COLLECTION, documentId, "versions", version.id);
   await setDoc(ref, {
-    documentId,
     content: version.content,
     title: version.title,
     message: version.message,
@@ -523,16 +522,19 @@ export async function fetchVersionsFromCloud(
   documentId: string,
 ): Promise<FirestoreVersion[]> {
   const q = query(
-    collection(firestore, VERSIONS_COLLECTION),
-    where("documentId", "==", documentId),
+    collection(firestore, DOCS_COLLECTION, documentId, "versions"),
     orderBy("createdAt", "desc"),
   );
   const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as FirestoreVersion);
+  return snap.docs.map((d) => ({
+    id: d.id,
+    documentId,
+    ...d.data(),
+  }) as FirestoreVersion);
 }
 
-export async function deleteVersionFromCloud(versionId: string): Promise<void> {
-  await deleteDoc(doc(firestore, VERSIONS_COLLECTION, versionId));
+export async function deleteVersionFromCloud(documentId: string, versionId: string): Promise<void> {
+  await deleteDoc(doc(firestore, DOCS_COLLECTION, documentId, "versions", versionId));
 }
 
 // ─── User settings (theme, preferences) ─────────────────────
