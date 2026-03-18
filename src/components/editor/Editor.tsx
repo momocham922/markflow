@@ -4,6 +4,7 @@ import type { ViewUpdate } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { EditorView } from "@codemirror/view";
+import { Compartment } from "@codemirror/state";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
@@ -143,6 +144,10 @@ export function Editor() {
   const setView = useEditorStore((s) => s.setView);
   const viewRef = useRef<EditorView | null>(null);
   const convertedRef = useRef<Set<string>>(new Set());
+  // Compartment isolates yCollab from @uiw/react-codemirror's StateEffect.reconfigure.
+  // Without this, any extension array change destroys the ySync ViewPlugin and
+  // breaks awareness (remote cursors disappear).
+  const collabCompartment = useRef(new Compartment());
 
   // For shared docs: freeze value per-mount so @uiw/react-codemirror
   // never dispatches value-driven transactions that fight yCollab.
@@ -266,19 +271,30 @@ export function Editor() {
     ];
   }, []);
 
-  // Memoize extensions — yCollab only included when isCollabReady so it's part of
-  // the initial EditorState (no reconfigure needed, ySync ViewPlugin stays stable).
+  // Memoize extensions — yCollab is wrapped in a Compartment so reconfigures
+  // don't destroy the ySync ViewPlugin (which would kill awareness/cursors).
   const extensions = useMemo(
     () => [
-      markdown({ base: markdownLanguage, codeLanguages: languages }),
+      markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
       EditorView.lineWrapping,
       markdownShortcuts,
       imagePaste,
       ...iosGutterTheme,
-      ...(isCollabReady && collabExtension ? [collabExtension] : []),
+      collabCompartment.current.of([]),
     ],
-    [collabExtension, isCollabReady, iosGutterTheme],
+    [iosGutterTheme],
   );
+
+  // Dispatch Compartment reconfigure directly on the view when collab state changes.
+  // This swaps the yCollab extension in/out without destroying/recreating EditorState.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const newExt = isCollabReady && collabExtension ? collabExtension : [];
+    view.dispatch({
+      effects: collabCompartment.current.reconfigure(newExt),
+    });
+  }, [isCollabReady, collabExtension]);
 
   const editorTheme = useMemo(() => {
     const preset = editorThemes[themeSettings.editorTheme] ?? editorThemes.default;
