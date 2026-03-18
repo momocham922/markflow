@@ -1,6 +1,7 @@
 import { keymap } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import type { KeyBinding } from "@codemirror/view";
+import { insertNewlineContinueMarkup, deleteMarkupBackward } from "@codemirror/lang-markdown";
 
 /** Wrap selected text with before/after markers, or insert at cursor */
 function wrapSelection(view: EditorView, before: string, after: string): boolean {
@@ -55,7 +56,43 @@ function linePrefix(view: EditorView, prefix: string): boolean {
   return true;
 }
 
+/**
+ * Custom Enter handler for list continuation.
+ * Uses @codemirror/lang-markdown's insertNewlineContinueMarkup internally,
+ * but post-processes to remove extra blank lines that the built-in handler
+ * inserts for "non-tight" lists. This ensures pressing Enter always produces
+ * a single newline before the next bullet, not two.
+ */
+function continueListTight(view: EditorView): boolean {
+  const before = view.state.doc.toString();
+  const result = insertNewlineContinueMarkup(view);
+  if (!result) return false;
+
+  // If the built-in handler inserted an extra blank line (non-tight list behavior),
+  // remove it. Detect by checking if the change introduced \n\n before a list marker.
+  const after = view.state.doc.toString();
+  if (after === before) return result;
+
+  const cursor = view.state.selection.main.head;
+  const line = view.state.doc.lineAt(cursor);
+  const prevLine = line.number > 1 ? view.state.doc.line(line.number - 1) : null;
+
+  // If previous line is empty and current line starts with a list marker,
+  // the built-in handler inserted an unwanted blank line — remove it
+  if (prevLine && prevLine.text.trim() === "" && /^\s*[-*+]\s|^\s*\d+[.)]\s/.test(line.text)) {
+    view.dispatch({
+      changes: { from: prevLine.from, to: prevLine.to + 1, insert: "" },
+    });
+  }
+
+  return result;
+}
+
 const markdownKeybindings: KeyBinding[] = [
+  // List continuation (Enter) and markup deletion (Backspace)
+  { key: "Enter", run: continueListTight },
+  { key: "Backspace", run: deleteMarkupBackward },
+
   // Inline formatting
   { key: "Mod-b", run: (view) => wrapSelection(view, "**", "**") },
   { key: "Mod-i", run: (view) => wrapSelection(view, "_", "_") },
