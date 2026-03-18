@@ -58,10 +58,33 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
 
     const allVersions: Version[] = [];
 
-    // Fetch local versions (may fail in browser mode — not critical)
+    // Cloud-first: fetch Firestore versions as source of truth
+    // These contain ownerName from each user who created them
+    if (user) {
+      try {
+        const cloudVersions = await fetchVersionsFromCloud(activeDocId);
+        for (const cv of cloudVersions) {
+          allVersions.push({
+            id: cv.id,
+            documentId: cv.documentId,
+            content: cv.content,
+            title: cv.title,
+            message: cv.message,
+            createdAt: cv.createdAt,
+            ownerName: cv.ownerName,
+          });
+        }
+      } catch (err) {
+        console.warn("[versions] Cloud fetch failed:", err);
+      }
+    }
+
+    // Fallback: add local-only versions not present in cloud
     try {
       const rows = await db.getVersions(activeDocId);
+      const cloudIds = new Set(allVersions.map((v) => v.id));
       for (const r of rows) {
+        if (cloudIds.has(r.id)) continue;
         allVersions.push({
           id: r.id,
           documentId: r.document_id,
@@ -69,39 +92,11 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
           title: r.title,
           message: r.message,
           createdAt: r.created_at,
+          ownerName: user?.displayName || user?.email || undefined,
         });
       }
     } catch {
       // No DB available (browser mode)
-    }
-
-    // Fetch cloud versions independently (source of truth for shared docs)
-    if (user) {
-      try {
-        const cloudVersions = await fetchVersionsFromCloud(activeDocId);
-        const localIds = new Set(allVersions.map((v) => v.id));
-        for (const cv of cloudVersions) {
-          if (!localIds.has(cv.id)) {
-            allVersions.push({
-              id: cv.id,
-              documentId: cv.documentId,
-              content: cv.content,
-              title: cv.title,
-              message: cv.message,
-              createdAt: cv.createdAt,
-              ownerName: cv.ownerName,
-            });
-          } else {
-            // Cloud version exists locally — update ownerName from cloud
-            const existing = allVersions.find((v) => v.id === cv.id);
-            if (existing && cv.ownerName) {
-              existing.ownerName = cv.ownerName;
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("[versions] Cloud fetch failed:", err);
-      }
     }
 
     allVersions.sort((a, b) => b.createdAt - a.createdAt);
