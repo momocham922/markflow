@@ -241,6 +241,14 @@ export async function createVersion(version: {
   );
 }
 
+/** Get ALL versions across all documents (for backfill migration) */
+export async function getAllVersions(): Promise<DbVersion[]> {
+  const database = await getDb();
+  return database.select<DbVersion[]>(
+    "SELECT * FROM versions ORDER BY created_at ASC",
+  );
+}
+
 export async function deleteVersion(versionId: string): Promise<void> {
   const database = await getDb();
   await database.execute("DELETE FROM versions WHERE id = $1", [versionId]);
