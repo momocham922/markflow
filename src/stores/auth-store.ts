@@ -18,6 +18,54 @@ import { notifySlack } from "@/services/slack-notify";
 import { useAppStore, type Document, type DocType } from "./app-store";
 import { getDeletedDocIds, clearDeletedDoc } from "@/services/database";
 
+// --- One-time backfill: upload local SQLite versions to Firestore ---
+let versionBackfillDone = false;
+async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
+  if (versionBackfillDone) return;
+  versionBackfillDone = true;
+
+  try {
+    const { getSetting, setSetting, getAllVersions } = await import("@/services/database");
+    const flag = await getSetting("versions_backfill_done");
+    if (flag === "1") return;
+
+    const allVersions = await getAllVersions();
+    if (allVersions.length === 0) {
+      await setSetting("versions_backfill_done", "1");
+      return;
+    }
+
+    const { syncVersionToCloud } = await import("@/services/firebase");
+    let uploaded = 0;
+    for (const v of allVersions) {
+      if (!v.content?.trim()) continue;
+      try {
+        await syncVersionToCloud(
+          v.document_id,
+          {
+            id: v.id,
+            content: v.content,
+            title: v.title,
+            message: v.message,
+            createdAt: v.created_at,
+          },
+          uid,
+          displayName,
+        );
+        uploaded++;
+      } catch {
+        // Skip individual failures — don't block the rest
+      }
+    }
+    console.log(`[auth-store] Backfilled ${uploaded}/${allVersions.length} local versions to Firestore`);
+    await setSetting("versions_backfill_done", "1");
+  } catch (e) {
+    console.error("[auth-store] Version backfill failed:", e);
+    // Allow retry on next startup
+    versionBackfillDone = false;
+  }
+}
+
 // --- Sync mutex: prevents concurrent syncFromCloud / syncToCloud ---
 let syncLock = false;
 async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
@@ -70,14 +118,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // Wait for loadDocuments to complete before syncing from cloud.
         // Without this, syncFromCloud may see default themeSettings and
         // overwrite correct SQLite values with stale cloud values.
+        const syncThenBackfill = async () => {
+          await get().syncFromCloud();
+          // Backfill local versions to Firestore (one-time, background)
+          backfillLocalVersionsToCloud(
+            user.uid,
+            user.displayName || user.email || "Unknown",
+          ).catch(() => {});
+        };
         const appState = useAppStore.getState();
         if (appState.initialized) {
-          get().syncFromCloud();
+          syncThenBackfill();
         } else {
           const unsub = useAppStore.subscribe((s) => {
             if (s.initialized) {
               unsub();
-              get().syncFromCloud();
+              syncThenBackfill();
             }
           });
         }
