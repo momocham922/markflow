@@ -207,19 +207,24 @@ export function useCollaboration(
         }
       });
 
-      // Fallback: if WS never syncs (server down), allow non-collab editing.
-      // Do NOT seed Y.Text here — seeding creates new Yjs operations that can
-      // conflict with operations arriving later from the WS server, causing
-      // content duplication. Instead, Editor renders without yCollab.
-      // FIX: Disconnect provider on timeout to prevent ghost reconnections
-      // that could fire "sync" events and re-seed content later.
+      // Fallback: if WS never syncs within timeout (Cloud Run cold start,
+      // server down), activate collab from IDB/local state anyway.
+      // seedIfEmpty() uses leader election to prevent content duplication
+      // when multiple clients seed simultaneously.
+      // Provider stays connected so WS can sync later if server comes up.
       const wsTimeout = setTimeout(() => {
-        if (!wsSynced && idbSynced && !cancelled && !finalized) {
-          console.warn("[collab] WS sync timeout — fallback to non-collab mode");
-          provider.disconnect();
-          setWsTimedOut(true);
+        if (!wsSynced && !cancelled && !finalized) {
+          if (idbSynced) {
+            console.warn("[collab] WS sync timeout — activating with local state");
+            wsSynced = true;
+            tryFinalize();
+          } else {
+            // IDB also hasn't synced — give up and show editor without collab
+            console.warn("[collab] WS+IDB timeout — fallback to non-collab mode");
+            setWsTimedOut(true);
+          }
         }
-      }, 5000);
+      }, 15_000);
 
       // Connection status
       provider.on("status", ({ status }: { status: string }) => {

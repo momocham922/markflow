@@ -669,7 +669,7 @@ export function Editor() {
             <CodeMirror
               key={activeDocId}
               value={isCollabReady ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
-              onChange={isCollabReady ? undefined : onChange}
+              onChange={onChange}
               extensions={extensions}
               theme={editorTheme}
               onCreateEditor={onCreateEditor}
