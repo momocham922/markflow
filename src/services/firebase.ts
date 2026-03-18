@@ -581,28 +581,29 @@ export async function fetchUserSettings(
 }
 
 // ─── AI Chat History (subcollection under user_settings) ────
+// Supports multi-thread: each thread stored as ai_chats/{docId}__{threadId}
+// Thread metadata stored as ai_chats/{docId} with a threads array
 
 /**
- * Save AI chat history for a document.
- * Stored as: user_settings/{uid}/ai_chats/{docId}
- * Subcollection avoids 1MB document size limit for heavy chat histories.
+ * Save AI chat thread content.
+ * chatId = docId (legacy) or docId__threadId (multi-thread)
  */
 export async function saveAiChatToCloud(
   uid: string,
-  docId: string,
+  chatId: string,
   data: { messages: unknown[]; apiMessages: unknown[] },
 ): Promise<void> {
   if (!data.messages.length) return;
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", docId);
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", chatId);
   await setDoc(ref, { ...data, updatedAt: serverTimestamp() });
 }
 
-/** Fetch AI chat history for a document */
+/** Fetch AI chat thread content */
 export async function fetchAiChatFromCloud(
   uid: string,
-  docId: string,
+  chatId: string,
 ): Promise<{ messages: unknown[]; apiMessages: unknown[] } | null> {
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", docId);
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", chatId);
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
   const data = snap.data();
@@ -612,13 +613,34 @@ export async function fetchAiChatFromCloud(
   };
 }
 
-/** Delete AI chat history for a document */
+/** Delete AI chat thread content */
 export async function deleteAiChatFromCloud(
   uid: string,
-  docId: string,
+  chatId: string,
 ): Promise<void> {
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", docId);
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", chatId);
   await deleteDoc(ref);
+}
+
+/** Save thread list metadata for a document */
+export async function saveAiThreadsToCloud(
+  uid: string,
+  docId: string,
+  threads: { id: string; title: string; createdAt: number }[],
+): Promise<void> {
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", `${docId}__meta`);
+  await setDoc(ref, { threads, updatedAt: serverTimestamp() });
+}
+
+/** Fetch thread list metadata for a document */
+export async function fetchAiThreadsFromCloud(
+  uid: string,
+  docId: string,
+): Promise<{ id: string; title: string; createdAt: number }[] | null> {
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", `${docId}__meta`);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  return (snap.data().threads || []) as { id: string; title: string; createdAt: number }[];
 }
 
 // ─── Image upload (Firebase Storage) ────────────────────────

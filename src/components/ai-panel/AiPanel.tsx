@@ -22,6 +22,9 @@ import {
   Image as ImageIcon,
   Wrench,
   Wand2,
+  Plus,
+  MessageSquare,
+  ChevronDown,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -50,7 +53,14 @@ import { generateImage } from "@/services/image-gen";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
-import { signInWithGoogle, saveAiChatToCloud, fetchAiChatFromCloud, deleteAiChatFromCloud } from "@/services/firebase";
+import {
+  signInWithGoogle,
+  saveAiChatToCloud,
+  fetchAiChatFromCloud,
+  deleteAiChatFromCloud,
+  saveAiThreadsToCloud,
+  fetchAiThreadsFromCloud,
+} from "@/services/firebase";
 import { isIOS } from "@/platform";
 import * as db from "@/services/database";
 
@@ -77,6 +87,12 @@ interface ChatMessage {
   content: string;
   images?: { data: string; mediaType: string }[];
   generatedImage?: { url: string; markdown: string };
+}
+
+interface ChatThread {
+  id: string;
+  title: string;
+  createdAt: number;
 }
 
 // --- Custom Rules Dialog (inline) ---
@@ -135,6 +151,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [apiMessages, setApiMessages] = useState<ClaudeMessage[]>([]);
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [threadListOpen, setThreadListOpen] = useState(false);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -152,6 +171,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prevDocIdRef = useRef<string | null>(null);
+  const threadListRef = useRef<HTMLDivElement>(null);
 
   // Load custom rules from DB on mount
   useEffect(() => {
@@ -194,37 +214,42 @@ export function AiPanel({ onClose }: AiPanelProps) {
     }
   }, []);
 
-  // Save chat history for a document (local + cloud)
-  const saveChatHistory = useCallback((docId: string, msgs: ChatMessage[], apiMsgs: ClaudeMessage[]) => {
-    if (!docId || msgs.length === 0) return;
-    const toSave = { messages: msgs, apiMessages: apiMsgs };
-    // Local fallback
-    db.setSetting(`ai_chat_${docId}`, JSON.stringify(toSave)).catch(() => {});
-    // Cloud sync (source of truth)
+  // ─── Thread-based chat persistence ─────────────────────────
+
+  /** Save thread list metadata (local + cloud) */
+  const saveThreadList = useCallback((docId: string, threadList: ChatThread[]) => {
+    db.setSetting(`ai_chat_threads_${docId}`, JSON.stringify(threadList)).catch(() => {});
     const uid = useAuthStore.getState().user?.uid;
-    if (uid) {
-      saveAiChatToCloud(uid, docId, toSave).catch(() => {});
-    }
+    if (uid) saveAiThreadsToCloud(uid, docId, threadList).catch(() => {});
   }, []);
 
-  // Load chat history for a document (cloud-first, local fallback)
-  const loadChatHistory = useCallback(async (docId: string) => {
-    if (!docId) return;
-    // Try cloud first
+  /** Save chat content for a specific thread (local + cloud) */
+  const saveChatHistory = useCallback((docId: string, threadId: string, msgs: ChatMessage[], apiMsgs: ClaudeMessage[]) => {
+    if (!docId || !threadId || msgs.length === 0) return;
+    const toSave = { messages: msgs, apiMessages: apiMsgs };
+    const key = `ai_chat_${docId}_${threadId}`;
+    db.setSetting(key, JSON.stringify(toSave)).catch(() => {});
     const uid = useAuthStore.getState().user?.uid;
+    if (uid) saveAiChatToCloud(uid, `${docId}__${threadId}`, toSave).catch(() => {});
+  }, []);
+
+  /** Load thread content (cloud-first, local fallback) */
+  const loadThreadContent = useCallback(async (docId: string, threadId: string) => {
+    const uid = useAuthStore.getState().user?.uid;
+    // Cloud first
     if (uid) {
       try {
-        const cloudData = await fetchAiChatFromCloud(uid, docId);
+        const cloudData = await fetchAiChatFromCloud(uid, `${docId}__${threadId}`);
         if (cloudData && Array.isArray(cloudData.messages) && cloudData.messages.length > 0) {
           setMessages(cloudData.messages as ChatMessage[]);
           setApiMessages((cloudData.apiMessages || []) as ClaudeMessage[]);
           return;
         }
-      } catch { /* cloud unavailable, fall through */ }
+      } catch { /* cloud unavailable */ }
     }
     // Local fallback
     try {
-      const raw = await db.getSetting(`ai_chat_${docId}`);
+      const raw = await db.getSetting(`ai_chat_${docId}_${threadId}`);
       if (raw) {
         const parsed = JSON.parse(raw);
         setMessages(parsed.messages || []);
@@ -236,20 +261,153 @@ export function AiPanel({ onClose }: AiPanelProps) {
     setApiMessages([]);
   }, []);
 
+  /** Load all threads for a document (with backward compat migration) */
+  const loadDocThreads = useCallback(async (docId: string) => {
+    let threadList: ChatThread[] = [];
+
+    // Try cloud first for thread metadata
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) {
+      try {
+        const cloudThreads = await fetchAiThreadsFromCloud(uid, docId);
+        if (cloudThreads && cloudThreads.length > 0) {
+          threadList = cloudThreads;
+        }
+      } catch { /* cloud unavailable */ }
+    }
+
+    // Local fallback
+    if (threadList.length === 0) {
+      try {
+        const raw = await db.getSetting(`ai_chat_threads_${docId}`);
+        if (raw) threadList = JSON.parse(raw);
+      } catch { /* ignore */ }
+    }
+
+    // Backward compatibility: migrate old single-thread data
+    if (threadList.length === 0) {
+      let hasOldData = false;
+      if (uid) {
+        try {
+          const oldCloud = await fetchAiChatFromCloud(uid, docId);
+          if (oldCloud && Array.isArray(oldCloud.messages) && oldCloud.messages.length > 0) {
+            hasOldData = true;
+            // Migrate to new format
+            const defaultId = "default";
+            const firstMsg = (oldCloud.messages[0] as ChatMessage)?.content || "Chat";
+            threadList = [{ id: defaultId, title: firstMsg.slice(0, 40), createdAt: Date.now() }];
+            // Save migrated data under new key
+            saveChatHistory(docId, defaultId, oldCloud.messages as ChatMessage[], (oldCloud.apiMessages || []) as ClaudeMessage[]);
+            saveThreadList(docId, threadList);
+            // Delete old format
+            deleteAiChatFromCloud(uid, docId).catch(() => {});
+          }
+        } catch { /* ignore */ }
+      }
+      if (!hasOldData) {
+        try {
+          const oldLocal = await db.getSetting(`ai_chat_${docId}`);
+          if (oldLocal) {
+            const parsed = JSON.parse(oldLocal);
+            if (parsed.messages?.length > 0) {
+              const defaultId = "default";
+              const firstMsg = (parsed.messages[0] as ChatMessage)?.content || "Chat";
+              threadList = [{ id: defaultId, title: firstMsg.slice(0, 40), createdAt: Date.now() }];
+              saveChatHistory(docId, defaultId, parsed.messages, parsed.apiMessages || []);
+              saveThreadList(docId, threadList);
+              db.setSetting(`ai_chat_${docId}`, "").catch(() => {}); // Clear old
+            }
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    setThreads(threadList);
+    const latestId = threadList.length > 0 ? threadList[threadList.length - 1].id : null;
+    setActiveThreadId(latestId);
+    if (latestId && docId) {
+      await loadThreadContent(docId, latestId);
+    } else {
+      setMessages([]);
+      setApiMessages([]);
+    }
+  }, [saveChatHistory, saveThreadList, loadThreadContent]);
+
+  /** Create a new thread */
+  const createNewThread = useCallback(() => {
+    if (!activeDocId) return;
+    // Save current thread first
+    if (activeThreadId && messages.length > 0) {
+      saveChatHistory(activeDocId, activeThreadId, messages, apiMessages);
+    }
+    const newThread: ChatThread = {
+      id: crypto.randomUUID().slice(0, 8),
+      title: "New topic",
+      createdAt: Date.now(),
+    };
+    const newList = [...threads, newThread];
+    setThreads(newList);
+    setActiveThreadId(newThread.id);
+    setMessages([]);
+    setApiMessages([]);
+    setStreamingText("");
+    saveThreadList(activeDocId, newList);
+  }, [activeDocId, activeThreadId, messages, apiMessages, threads, saveChatHistory, saveThreadList]);
+
+  /** Switch to a thread */
+  const switchThread = useCallback(async (threadId: string) => {
+    if (!activeDocId || threadId === activeThreadId) return;
+    // Save current
+    if (activeThreadId && messages.length > 0) {
+      saveChatHistory(activeDocId, activeThreadId, messages, apiMessages);
+    }
+    setActiveThreadId(threadId);
+    setStreamingText("");
+    setThreadListOpen(false);
+    await loadThreadContent(activeDocId, threadId);
+  }, [activeDocId, activeThreadId, messages, apiMessages, saveChatHistory, loadThreadContent]);
+
+  /** Delete a thread */
+  const deleteThread = useCallback(async (threadId: string) => {
+    if (!activeDocId) return;
+    const newList = threads.filter((t) => t.id !== threadId);
+    setThreads(newList);
+    saveThreadList(activeDocId, newList);
+    // Delete data
+    const key = `ai_chat_${activeDocId}_${threadId}`;
+    db.setSetting(key, "").catch(() => {});
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) deleteAiChatFromCloud(uid, `${activeDocId}__${threadId}`).catch(() => {});
+    // Switch if needed
+    if (activeThreadId === threadId) {
+      if (newList.length > 0) {
+        const nextId = newList[newList.length - 1].id;
+        setActiveThreadId(nextId);
+        await loadThreadContent(activeDocId, nextId);
+      } else {
+        setActiveThreadId(null);
+        setMessages([]);
+        setApiMessages([]);
+      }
+    }
+  }, [activeDocId, activeThreadId, threads, saveThreadList, loadThreadContent]);
+
   // Save/restore on document switch
   useEffect(() => {
     if (
       prevDocIdRef.current !== null &&
       prevDocIdRef.current !== activeDocId
     ) {
-      // Save previous doc's history
-      saveChatHistory(prevDocIdRef.current, messages, apiMessages);
-      // Load new doc's history
+      // Save previous thread
+      if (prevDocIdRef.current && activeThreadId && messages.length > 0) {
+        saveChatHistory(prevDocIdRef.current, activeThreadId, messages, apiMessages);
+      }
       setStreamingText("");
-      loadChatHistory(activeDocId || "");
+      setThreadListOpen(false);
+      if (activeDocId) loadDocThreads(activeDocId);
+      else { setThreads([]); setActiveThreadId(null); setMessages([]); setApiMessages([]); }
     } else if (prevDocIdRef.current === null && activeDocId) {
-      // Initial load
-      loadChatHistory(activeDocId);
+      loadDocThreads(activeDocId);
     }
     prevDocIdRef.current = activeDocId;
   }, [activeDocId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -257,13 +415,37 @@ export function AiPanel({ onClose }: AiPanelProps) {
   // Auto-save chat history on message changes (debounced)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!activeDocId || messages.length === 0) return;
+    if (!activeDocId || !activeThreadId || messages.length === 0) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    const docId = activeDocId;
+    const threadId = activeThreadId;
     saveTimerRef.current = setTimeout(() => {
-      saveChatHistory(activeDocId, messages, apiMessages);
+      saveChatHistory(docId, threadId, messages, apiMessages);
+      // Auto-update thread title from first user message
+      const firstUserMsg = messages.find((m) => m.role === "user");
+      if (firstUserMsg) {
+        const title = firstUserMsg.content.slice(0, 40);
+        setThreads((prev) => {
+          const updated = prev.map((t) => t.id === threadId ? { ...t, title } : t);
+          saveThreadList(docId, updated);
+          return updated;
+        });
+      }
     }, 1000);
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
-  }, [messages, apiMessages, activeDocId, saveChatHistory]);
+  }, [messages, apiMessages, activeDocId, activeThreadId, saveChatHistory, saveThreadList]);
+
+  // Close thread dropdown on outside click
+  useEffect(() => {
+    if (!threadListOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (threadListRef.current && !threadListRef.current.contains(e.target as Node)) {
+        setThreadListOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [threadListOpen]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -440,6 +622,19 @@ export function AiPanel({ onClose }: AiPanelProps) {
     const action = AI_ACTIONS.find((a) => a.id === actionId);
     if (!action) return;
 
+    // Auto-create thread if none exists
+    if (!activeThreadId && activeDocId) {
+      const newThread: ChatThread = {
+        id: crypto.randomUUID().slice(0, 8),
+        title: action.label,
+        createdAt: Date.now(),
+      };
+      const newList = [...threads, newThread];
+      setThreads(newList);
+      setActiveThreadId(newThread.id);
+      saveThreadList(activeDocId, newList);
+    }
+
     const selected = getSelectedText();
     const targetText = selected || stripHtml(activeDoc.content);
     if (!targetText.trim()) return;
@@ -506,6 +701,19 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   const handleChat = async () => {
     if (!user || (!input.trim() && attachedImages.length === 0)) return;
+
+    // Auto-create thread if none exists
+    if (!activeThreadId && activeDocId) {
+      const newThread: ChatThread = {
+        id: crypto.randomUUID().slice(0, 8),
+        title: input.trim().slice(0, 40) || "Chat",
+        createdAt: Date.now(),
+      };
+      const newList = [...threads, newThread];
+      setThreads(newList);
+      setActiveThreadId(newThread.id);
+      saveThreadList(activeDocId, newList);
+    }
 
     const userInput = input.trim();
     setInput("");
@@ -798,21 +1006,22 @@ export function AiPanel({ onClose }: AiPanelProps) {
           >
             <Settings className="h-3.5 w-3.5" />
           </Button>
-          {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 cursor-pointer"
+            onClick={createNewThread}
+            title="New topic"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+          {activeThreadId && messages.length > 0 && (
             <Button
               variant="ghost"
               size="icon"
               className="h-6 w-6 cursor-pointer"
-              onClick={() => {
-                setMessages([]);
-                setApiMessages([]);
-                if (activeDocId) {
-                  db.setSetting(`ai_chat_${activeDocId}`, "").catch(() => {});
-                  const uid = useAuthStore.getState().user?.uid;
-                  if (uid) deleteAiChatFromCloud(uid, activeDocId).catch(() => {});
-                }
-              }}
-              title="Clear conversation"
+              onClick={() => { if (activeThreadId) deleteThread(activeThreadId); }}
+              title="Delete this topic"
             >
               <Trash2 className="h-3.5 w-3.5" />
             </Button>
@@ -827,6 +1036,49 @@ export function AiPanel({ onClose }: AiPanelProps) {
           </Button>
         </div>
       </div>
+
+      {/* Thread selector bar */}
+      {threads.length > 0 && (
+        <div className="relative border-b border-border" ref={threadListRef}>
+          <button
+            className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-left hover:bg-accent/50 transition-colors"
+            onClick={() => setThreadListOpen(!threadListOpen)}
+          >
+            <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span className="flex-1 truncate font-medium">
+              {threads.find((t) => t.id === activeThreadId)?.title || "Select topic"}
+            </span>
+            <span className="text-[9px] text-muted-foreground">{threads.length}</span>
+            <ChevronDown className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${threadListOpen ? "rotate-180" : ""}`} />
+          </button>
+          {threadListOpen && (
+            <div className="absolute inset-x-0 top-full z-30 bg-popover border border-border rounded-b-md shadow-lg max-h-48 overflow-y-auto">
+              {threads.map((t) => (
+                <div
+                  key={t.id}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] cursor-pointer group transition-colors ${
+                    t.id === activeThreadId ? "bg-accent" : "hover:bg-accent/50"
+                  }`}
+                  onClick={() => switchThread(t.id)}
+                >
+                  <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="flex-1 truncate">{t.title}</span>
+                  <span className="text-[9px] text-muted-foreground">
+                    {new Date(t.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                  </span>
+                  <button
+                    className="opacity-0 group-hover:opacity-60 hover:opacity-100! p-0.5 transition-opacity"
+                    onClick={(e) => { e.stopPropagation(); deleteThread(t.id); }}
+                    title="Delete topic"
+                  >
+                    <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Quick actions */}
       <div className="p-2 space-y-1">
