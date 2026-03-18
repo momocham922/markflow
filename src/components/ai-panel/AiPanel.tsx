@@ -76,6 +76,7 @@ interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   images?: { data: string; mediaType: string }[];
+  generatedImage?: { url: string; markdown: string };
 }
 
 // --- Custom Rules Dialog (inline) ---
@@ -186,18 +187,58 @@ export function AiPanel({ onClose }: AiPanelProps) {
     db.setSetting("ai_custom_rules", rules).catch(() => {});
   }, []);
 
-  // Reset conversation on document switch
+  // Save chat history for a document
+  const saveChatHistory = useCallback((docId: string, msgs: ChatMessage[], apiMsgs: ClaudeMessage[]) => {
+    if (!docId || msgs.length === 0) return;
+    // Strip generatedImage data to keep storage small (keep url/markdown only)
+    const toSave = { messages: msgs, apiMessages: apiMsgs };
+    db.setSetting(`ai_chat_${docId}`, JSON.stringify(toSave)).catch(() => {});
+  }, []);
+
+  // Load chat history for a document
+  const loadChatHistory = useCallback(async (docId: string) => {
+    if (!docId) return;
+    try {
+      const raw = await db.getSetting(`ai_chat_${docId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setMessages(parsed.messages || []);
+        setApiMessages(parsed.apiMessages || []);
+        return;
+      }
+    } catch { /* ignore */ }
+    setMessages([]);
+    setApiMessages([]);
+  }, []);
+
+  // Save/restore on document switch
   useEffect(() => {
     if (
       prevDocIdRef.current !== null &&
       prevDocIdRef.current !== activeDocId
     ) {
-      setMessages([]);
-      setApiMessages([]);
+      // Save previous doc's history
+      saveChatHistory(prevDocIdRef.current, messages, apiMessages);
+      // Load new doc's history
       setStreamingText("");
+      loadChatHistory(activeDocId || "");
+    } else if (prevDocIdRef.current === null && activeDocId) {
+      // Initial load
+      loadChatHistory(activeDocId);
     }
     prevDocIdRef.current = activeDocId;
-  }, [activeDocId]);
+  }, [activeDocId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-save chat history on message changes (debounced)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!activeDocId || messages.length === 0) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveChatHistory(activeDocId, messages, apiMessages);
+    }, 1000);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [messages, apiMessages, activeDocId, saveChatHistory]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -345,16 +386,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
       const result = await generateImage(imagePrompt, (status) => setToolStatus(status));
       setToolStatus(null);
 
-      if (!insertAtCursor(result.markdown)) {
-        appendToDoc(result.markdown);
-      }
-
       setMessages((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: `Image generated and inserted:\n\n${result.markdown}`,
+          content: "Image generated:",
+          generatedImage: { url: result.url, markdown: result.markdown },
         },
       ]);
     } catch (err) {
@@ -743,6 +781,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
               onClick={() => {
                 setMessages([]);
                 setApiMessages([]);
+                if (activeDocId) db.setSetting(`ai_chat_${activeDocId}`, "").catch(() => {});
               }}
               title="Clear conversation"
             >
@@ -904,11 +943,59 @@ export function AiPanel({ onClose }: AiPanelProps) {
                 ) : (
                   <div className="prose ai-markdown select-text">
                     {renderMarkdown(msg.content)}
+                    {msg.generatedImage && (
+                      <div className="mt-2 space-y-2">
+                        <img
+                          src={msg.generatedImage.url}
+                          alt=""
+                          className="max-w-full max-h-48 rounded-md border border-border"
+                        />
+                        <div className="flex gap-1">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="text-[10px] h-6 gap-1 cursor-pointer"
+                            onClick={() => {
+                              if (!insertAtCursor(msg.generatedImage!.markdown)) {
+                                appendToDoc(msg.generatedImage!.markdown);
+                              }
+                            }}
+                          >
+                            <CornerDownLeft className="h-2.5 w-2.5" />
+                            Insert at cursor
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-[10px] h-6 gap-1 cursor-pointer"
+                            onClick={() => navigator.clipboard.writeText(msg.generatedImage!.markdown)}
+                          >
+                            <Copy className="h-2.5 w-2.5" />
+                            Copy markdown
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             </div>
           ))}
+          {/* Thinking / loading indicator */}
+          {(streaming || generatingImage) && !streamingText && (
+            <div className="text-xs bg-muted rounded-md p-2">
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
+                </div>
+                <span className="text-[10px] text-muted-foreground">
+                  {toolStatus || (generatingImage ? "Generating image..." : "Thinking...")}
+                </span>
+              </div>
+            </div>
+          )}
           {streaming && streamingText && (
             <div className="text-xs bg-muted rounded-md p-2">
               <span className="text-[10px] text-muted-foreground">
