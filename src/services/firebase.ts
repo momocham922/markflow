@@ -21,6 +21,7 @@ import {
   deleteDoc,
   updateDoc,
   runTransaction,
+  addDoc,
   query,
   where,
   orderBy,
@@ -663,4 +664,27 @@ export async function uploadImage(
     contentType: `image/${ext === "jpg" ? "jpeg" : ext}`,
   });
   return getDownloadURL(storageRef);
+}
+
+// ─── Remote error logging ────────────────────────────────────
+
+/** Write a client-side error to Firestore so it can be inspected remotely */
+export async function logErrorToCloud(
+  uid: string,
+  context: string,
+  error: unknown,
+  meta?: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await addDoc(collection(firestore, "error_logs"), {
+      uid,
+      context,
+      error: error instanceof Error ? { message: error.message, code: (error as { code?: string }).code } : String(error),
+      meta: meta ?? {},
+      createdAt: serverTimestamp(),
+      appVersion: (globalThis as Record<string, unknown>).__APP_VERSION__ ?? "unknown",
+    });
+  } catch {
+    // Best-effort — don't throw if logging itself fails
+  }
 }

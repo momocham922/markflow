@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import * as db from "@/services/database";
-import { syncVersionToCloud } from "@/services/firebase";
+import { syncVersionToCloud, logErrorToCloud } from "@/services/firebase";
 import { useAuthStore } from "@/stores/auth-store";
 
 interface AutoVersionOptions {
@@ -87,6 +87,7 @@ export function useAutoVersion({
           );
         } catch (e) {
           console.error("[auto-version] Cloud sync FAILED for doc", capturedDocId, "user", user.uid, e);
+          logErrorToCloud(user.uid, "auto-version-sync", e, { docId: capturedDocId });
         }
       } else {
         console.warn("[auto-version] No user — skipping cloud sync for doc", capturedDocId);

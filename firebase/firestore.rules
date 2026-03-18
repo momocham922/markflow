@@ -94,5 +94,11 @@ service cloud.firestore {
       allow update, delete: if request.auth != null &&
         resource.data.ownerId == request.auth.uid;
     }
+
+    // Error logs: any authenticated user can create, only own logs readable
+    match /error_logs/{logId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null;
+    }
   }
 }

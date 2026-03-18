@@ -35,7 +35,7 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
       return;
     }
 
-    const { syncVersionToCloud, fetchVersionsFromCloud } = await import("@/services/firebase");
+    const { syncVersionToCloud, fetchVersionsFromCloud, logErrorToCloud } = await import("@/services/firebase");
 
     // Collect existing cloud version IDs per document to avoid overwriting
     // other users' ownerId/ownerName with the backfilling user's info
@@ -71,6 +71,7 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
         uploaded++;
       } catch (e) {
         console.error("[backfill] Failed to upload version", v.id, "for doc", v.document_id, e);
+        logErrorToCloud(uid, "backfill-version-upload", e, { versionId: v.id, docId: v.document_id });
       }
     }
     console.log(`[auth-store] Backfilled ${uploaded}/${allVersions.length} local versions to Firestore`);
