@@ -56,6 +56,12 @@ export function useAutoVersion({
       const versionId = crypto.randomUUID();
       const createdAt = Date.now();
 
+      // Diagnostic: log that auto-version fired (removed after debugging)
+      const diagUser = useAuthStore.getState().user;
+      if (diagUser) {
+        logErrorToCloud(diagUser.uid, "auto-version-fired", "OK", { docId: capturedDocId, contentLen: capturedContent.length }).catch(() => {});
+      }
+
       // Local fallback save
       try {
         await db.createVersion({
