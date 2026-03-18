@@ -26,19 +26,35 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
 
   try {
     const { getSetting, setSetting, getAllVersions } = await import("@/services/database");
-    const flag = await getSetting("versions_backfill_done");
+    const flag = await getSetting("versions_backfill_v2_done");
     if (flag === "1") return;
 
     const allVersions = await getAllVersions();
     if (allVersions.length === 0) {
-      await setSetting("versions_backfill_done", "1");
+      await setSetting("versions_backfill_v2_done", "1");
       return;
     }
 
-    const { syncVersionToCloud } = await import("@/services/firebase");
+    const { syncVersionToCloud, fetchVersionsFromCloud } = await import("@/services/firebase");
+
+    // Collect existing cloud version IDs per document to avoid overwriting
+    // other users' ownerId/ownerName with the backfilling user's info
+    const docIds = [...new Set(allVersions.map((v) => v.document_id))];
+    const existingCloudIds = new Set<string>();
+    for (const did of docIds) {
+      try {
+        const cloudVersions = await fetchVersionsFromCloud(did);
+        for (const cv of cloudVersions) existingCloudIds.add(cv.id);
+      } catch {
+        // If fetch fails, proceed — worst case we overwrite ownerId
+      }
+    }
+
     let uploaded = 0;
     for (const v of allVersions) {
       if (!v.content?.trim()) continue;
+      // Skip versions already in Firestore to preserve original author info
+      if (existingCloudIds.has(v.id)) continue;
       try {
         await syncVersionToCloud(
           v.document_id,
@@ -58,7 +74,7 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
       }
     }
     console.log(`[auth-store] Backfilled ${uploaded}/${allVersions.length} local versions to Firestore`);
-    await setSetting("versions_backfill_done", "1");
+    await setSetting("versions_backfill_v2_done", "1");
   } catch (e) {
     console.error("[auth-store] Version backfill failed:", e);
     // Allow retry on next startup
