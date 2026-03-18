@@ -6,12 +6,18 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 const GCP_REGION = process.env.GCP_REGION || "us-east5";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
+const NANOBANANA_MODEL = process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
+const NANOBANANA_REGION = process.env.NANOBANANA_REGION || "us-central1";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
 
 function getVertexAiUrl(): string {
   return `https://${GCP_REGION}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/publishers/anthropic/models/${CLAUDE_MODEL}:streamRawPredict`;
+}
+
+function getNanoBananaUrl(): string {
+  return `https://${NANOBANANA_REGION}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${NANOBANANA_REGION}/publishers/google/models/${NANOBANANA_MODEL}:generateContent`;
 }
 
 async function getGcpAccessToken(): Promise<string> {
@@ -52,7 +58,95 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method !== "POST" || req.url !== "/v1/chat") {
+  if (req.method !== "POST") {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+    return;
+  }
+
+  // Read request body (shared by all POST routes)
+  const readBody = (): Promise<string> =>
+    new Promise<string>((resolve, reject) => {
+      let data = "";
+      req.on("data", (chunk: Buffer) => (data += chunk.toString()));
+      req.on("end", () => resolve(data));
+      req.on("error", reject);
+    });
+
+  // --- /v1/image/generate ---
+  if (req.url === "/v1/image/generate") {
+    try {
+      await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = JSON.parse(body);
+      const prompt: string = parsed.prompt;
+      if (!prompt) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "prompt is required" }));
+        return;
+      }
+
+      const accessToken = await getGcpAccessToken();
+      const geminiRes = await fetch(getNanoBananaUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }],
+            },
+          ],
+          generationConfig: {
+            responseModalities: ["TEXT", "IMAGE"],
+          },
+        }),
+      });
+
+      if (!geminiRes.ok) {
+        const errText = await geminiRes.text();
+        res.writeHead(geminiRes.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errText }));
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const geminiData = (await geminiRes.json()) as any;
+      const parts = geminiData.candidates?.[0]?.content?.parts;
+      if (!parts || !Array.isArray(parts)) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No image generated" }));
+        return;
+      }
+
+      // Find the image part (inlineData)
+      const imagePart = parts.find(
+        (p: { inlineData?: { mimeType: string; data: string } }) => p.inlineData,
+      );
+      if (!imagePart?.inlineData) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No image in response" }));
+        return;
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        data: imagePart.inlineData.data,
+        media_type: imagePart.inlineData.mimeType || "image/png",
+      }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Internal server error";
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+    }
+    return;
+  }
+
+  // --- /v1/chat ---
+  if (req.url !== "/v1/chat") {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));
     return;
@@ -62,14 +156,7 @@ const server = http.createServer(async (req, res) => {
     // Verify Firebase auth
     await verifyFirebaseToken(req.headers.authorization);
 
-    // Read request body
-    const body = await new Promise<string>((resolve, reject) => {
-      let data = "";
-      req.on("data", (chunk: Buffer) => (data += chunk.toString()));
-      req.on("end", () => resolve(data));
-      req.on("error", reject);
-    });
-
+    const body = await readBody();
     const parsed = JSON.parse(body);
     const isStream = parsed.stream === true;
 
@@ -82,6 +169,9 @@ const server = http.createServer(async (req, res) => {
     };
     if (parsed.system) {
       vertexBody.system = parsed.system;
+    }
+    if (parsed.tools) {
+      vertexBody.tools = parsed.tools;
     }
 
     const accessToken = await getGcpAccessToken();
