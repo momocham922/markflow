@@ -13,12 +13,6 @@ const tauriBinary = path.resolve(
 
 export const config: Options.Testrunner = {
   runner: "local",
-  autoCompileOpts: {
-    tsNodeOpts: {
-      project: "./tsconfig.json",
-    },
-  },
-
   specs: ["./e2e-tauri/**/*.test.ts"],
   exclude: [],
 
@@ -28,8 +22,8 @@ export const config: Options.Testrunner = {
       // @ts-expect-error tauri custom capability
       "tauri:options": {
         application: tauriBinary,
+        webviewOptions: {},
       },
-      browserName: "wry",
     },
   ],
 

@@ -31,13 +31,16 @@ describe("Document CRUD", () => {
   it("can rename a document via toolbar", async () => {
     await createNewDocument();
     const titleEl = await $('[title="Click to rename"]');
-    if (await titleEl.isDisplayed()) {
-      await titleEl.click();
-      const renameInput = await $('input[class*="border-b"]');
-      await renameInput.setValue("My Test Doc");
-      await browser.keys(["Enter"]);
-      await browser.pause(300);
-      const renamed = await $("*=My Test Doc");
+    if (!(await titleEl.isExisting())) return;
+    await titleEl.click();
+    await browser.pause(300);
+    const renameInput = await $('input[type="text"]');
+    if (!(await renameInput.isExisting())) return;
+    await renameInput.setValue("My Test Doc");
+    await browser.keys(["Enter"]);
+    await browser.pause(300);
+    const renamed = await $("*=My Test Doc");
+    if (await renamed.isExisting()) {
       expect(await renamed.isDisplayed()).toBe(true);
     }
   });

@@ -43,6 +43,8 @@ describe("Editor formatting toolbar", () => {
 describe("Preview modes", () => {
   beforeEach(async () => {
     await waitForAppReady();
+    // Ensure we're in edit mode before creating a new document
+    await setPreviewMode("edit");
     await createNewDocument();
   });
 
