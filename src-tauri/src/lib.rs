@@ -740,6 +740,41 @@ async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), St
     Ok(())
 }
 
+/// Force-install the latest stable version, even if it's a "downgrade" from beta.
+/// Bypasses semver comparison so beta users can switch back to stable.
+#[tauri::command]
+async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
+    let url: url::Url = STABLE_ENDPOINT
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|_current, _remote| true) // always treat as newer
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No stable release available".to_string())?;
+
+    let version = update.version.clone();
+
+    update
+        .download_and_install(
+            |_chunk_len: usize, _content_len: Option<u64>| {},
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(version)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -893,7 +928,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, cancel_auto_update])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

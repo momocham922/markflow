@@ -2,7 +2,7 @@ import { Moon, Sun, FlaskConical } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { isIOS } from "@/platform";
+import { isIOS, isTauri } from "@/platform";
 import * as db from "@/services/database";
 
 export function StatusBar() {
@@ -44,8 +44,33 @@ export function StatusBar() {
     }).catch(() => {});
   }, []);
 
+  const [downgrading, setDowngrading] = useState(false);
+
   const toggleBetaChannel = useCallback(async () => {
     const next = !betaChannel;
+
+    // Switching from beta → stable: offer to force-install stable if current version is beta
+    if (!next && isTauri && __APP_VERSION__.includes("beta")) {
+      const confirmed = window.confirm(
+        "Stableチャンネルに切り替えます。\n最新のStable版をインストールしてアプリを再起動しますか？",
+      );
+      if (!confirmed) return;
+
+      setBetaChannel(false);
+      await db.setSetting("update_channel", "stable");
+      setDowngrading(true);
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke<string>("force_install_stable");
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      } catch (err) {
+        setDowngrading(false);
+        window.alert(`Stable版のインストールに失敗しました: ${err}`);
+      }
+      return;
+    }
+
     setBetaChannel(next);
     await db.setSetting("update_channel", next ? "beta" : "stable");
   }, [betaChannel]);
@@ -79,7 +104,10 @@ export function StatusBar() {
         )}
       </div>
       <div className="flex items-center gap-3">
-        {betaChannel && (
+        {downgrading && (
+          <span className="text-amber-500 font-medium animate-pulse">Installing Stable...</span>
+        )}
+        {betaChannel && !downgrading && (
           <span className="text-amber-500 font-medium">Beta</span>
         )}
         {activeDoc && (
