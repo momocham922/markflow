@@ -1,4 +1,6 @@
 import * as db from "@/services/database";
+import { useAuthStore } from "@/stores/auth-store";
+import { saveUserSettingsToFirestore } from "@/services/firebase";
 
 export interface SlackNotifyConfig {
   webhookUrl: string;
@@ -27,9 +29,15 @@ export async function loadSlackNotifyConfig(): Promise<SlackNotifyConfig> {
   return DEFAULT_CONFIG;
 }
 
-/** Save Slack notification config */
+/** Save Slack notification config (local + cloud) */
 export async function saveSlackNotifyConfig(config: SlackNotifyConfig): Promise<void> {
-  await db.setSetting("slack_notify_config", JSON.stringify(config));
+  const json = JSON.stringify(config);
+  await db.setSetting("slack_notify_config", json);
+  // Cloud sync
+  const uid = useAuthStore.getState().user?.uid;
+  if (uid) {
+    saveUserSettingsToFirestore(uid, { slack_notify_config: json }).catch(() => {});
+  }
 }
 
 /** Send a notification to Slack about a document event */

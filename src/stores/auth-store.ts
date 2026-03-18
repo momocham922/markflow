@@ -153,9 +153,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           fetchUserSettings(user.uid).catch(() => null),
         ]);
 
-        // Restore theme settings from cloud (if local has defaults)
+        // Restore all user settings from cloud
         if (cloudSettings) {
           const appStore = useAppStore.getState();
+
+          // Theme
+          if (cloudSettings.theme && typeof cloudSettings.theme === "string") {
+            const cloudThemeMode = cloudSettings.theme as "light" | "dark";
+            if (appStore.theme !== cloudThemeMode) {
+              document.documentElement.classList.toggle("dark", cloudThemeMode === "dark");
+              useAppStore.setState({ theme: cloudThemeMode });
+            }
+          }
+
+          // Theme settings (only if local has defaults)
           const local = appStore.themeSettings;
           const defaults = { previewTheme: "github", editorTheme: "default", mindMapTheme: "lavender", customPreviewCss: "" };
           const isDefault = local.previewTheme === defaults.previewTheme
@@ -169,6 +180,37 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               appStore.setThemeSettings(cloudTheme);
             } catch { /* ignore parse errors */ }
           }
+
+          // Folders
+          if (Array.isArray(cloudSettings.folders) && cloudSettings.folders.length > 0) {
+            const localFolders = appStore.folders;
+            if (localFolders.length <= 1) {
+              // Local has only "/" default — restore from cloud
+              const restored = ["/", ...cloudSettings.folders.filter((f: unknown) => f !== "/")];
+              useAppStore.setState({ folders: restored as string[] });
+            }
+          }
+
+          // Custom preview themes
+          if (Array.isArray(cloudSettings.customPreviewThemes) && cloudSettings.customPreviewThemes.length > 0) {
+            if (appStore.customPreviewThemes.length === 0) {
+              useAppStore.setState({ customPreviewThemes: cloudSettings.customPreviewThemes as typeof appStore.customPreviewThemes });
+            }
+          }
+
+          // AI custom rules, MCP servers, Slack config → write to SQLite
+          try {
+            const { setSetting } = await import("@/services/database");
+            if (cloudSettings.ai_custom_rules && typeof cloudSettings.ai_custom_rules === "string") {
+              await setSetting("ai_custom_rules", cloudSettings.ai_custom_rules).catch(() => {});
+            }
+            if (cloudSettings.mcp_servers && typeof cloudSettings.mcp_servers === "string") {
+              await setSetting("mcp_servers", cloudSettings.mcp_servers).catch(() => {});
+            }
+            if (cloudSettings.slack_notify_config && typeof cloudSettings.slack_notify_config === "string") {
+              await setSetting("slack_notify_config", cloudSettings.slack_notify_config).catch(() => {});
+            }
+          } catch { /* DB not available */ }
         }
 
         const appStore = useAppStore.getState();
@@ -407,12 +449,29 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const appState = useAppStore.getState();
         const { documents } = appState;
 
-        // Only sync theme settings after loadDocuments has completed,
+        // Sync all user settings to cloud after loadDocuments has completed,
         // otherwise we'd save default values and overwrite correct cloud data.
         if (appState.initialized) {
-          saveUserSettingsToFirestore(user.uid, {
+          const settingsToSync: Record<string, unknown> = {
+            theme: appState.theme,
             themeSettings: appState.themeSettings,
-          }).catch((err) => console.error("Failed to sync settings:", err));
+            folders: appState.folders.filter((f) => f !== "/"),
+            customPreviewThemes: appState.customPreviewThemes,
+          };
+          // Include AI custom rules, MCP servers, Slack config from SQLite
+          try {
+            const { getSetting } = await import("@/services/database");
+            const [aiRules, mcpServers, slackConfig] = await Promise.all([
+              getSetting("ai_custom_rules").catch(() => null),
+              getSetting("mcp_servers").catch(() => null),
+              getSetting("slack_notify_config").catch(() => null),
+            ]);
+            if (aiRules) settingsToSync.ai_custom_rules = aiRules;
+            if (mcpServers) settingsToSync.mcp_servers = mcpServers;
+            if (slackConfig) settingsToSync.slack_notify_config = slackConfig;
+          } catch { /* DB not available */ }
+          saveUserSettingsToFirestore(user.uid, settingsToSync)
+            .catch((err) => console.error("Failed to sync settings:", err));
         }
 
         // Retry pending cloud deletions

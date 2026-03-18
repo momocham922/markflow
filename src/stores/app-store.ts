@@ -78,6 +78,17 @@ interface AppState {
   removeCustomPreviewTheme: (id: string) => void;
 }
 
+/** Sync a setting to cloud (fire-and-forget, lazy import to avoid circular deps) */
+function syncSettingToCloud(data: Record<string, unknown>) {
+  import("@/stores/auth-store").then(({ useAuthStore }) => {
+    const uid = useAuthStore.getState().user?.uid;
+    if (!uid) return;
+    import("@/services/firebase").then(({ saveUserSettingsToFirestore }) => {
+      saveUserSettingsToFirestore(uid, data).catch(() => {});
+    });
+  });
+}
+
 // Debounce save to avoid excessive writes
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -197,6 +208,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const next = s.theme === "light" ? "dark" : "light";
       document.documentElement.classList.toggle("dark", next === "dark");
       db.setSetting("theme", next).catch(console.error);
+      syncSettingToCloud({ theme: next });
       return { theme: next };
     }),
 
@@ -211,6 +223,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
       // Backup: localStorage (always works in WebView)
       try { localStorage.setItem("markflow:themeSettings", json); } catch {}
+      // Cloud sync
+      syncSettingToCloud({ themeSettings });
       return { themeSettings };
     }),
 
@@ -400,8 +414,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const folders = deriveFolders(s.documents, [...s.folders, path]);
       const toSave = folders.filter((f) => f !== "/");
-      db.setSetting("folders", JSON.stringify(toSave))
-        .catch(() => {});
+      db.setSetting("folders", JSON.stringify(toSave)).catch(() => {});
+      syncSettingToCloud({ folders: toSave });
       return { folders };
     });
   },
@@ -423,7 +437,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const folders = s.folders.filter(
         (f) => f !== path && !f.startsWith(path + "/"),
       );
-      db.setSetting("folders", JSON.stringify(folders.filter((f) => f !== "/"))).catch(console.error);
+      const toSave = folders.filter((f) => f !== "/");
+      db.setSetting("folders", JSON.stringify(toSave)).catch(console.error);
+      syncSettingToCloud({ folders: toSave });
       return { folders };
     });
   },
@@ -437,6 +453,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const customPreviewThemes = [...s.customPreviewThemes.filter((t) => t.id !== theme.id), theme];
       db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      syncSettingToCloud({ customPreviewThemes });
       return { customPreviewThemes };
     });
   },
@@ -445,6 +462,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const customPreviewThemes = s.customPreviewThemes.filter((t) => t.id !== id);
       db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      syncSettingToCloud({ customPreviewThemes });
       // Reset to default if the removed theme was active
       if (s.themeSettings.previewTheme === id) {
         const themeSettings = { ...s.themeSettings, previewTheme: "github" };

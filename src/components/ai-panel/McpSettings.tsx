@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import type { McpServerConfig } from "@/services/mcp";
 import { connectServer, disconnectServer, getConnectedServerIds } from "@/services/mcp";
 import * as db from "@/services/database";
+import { useAuthStore } from "@/stores/auth-store";
+import { saveUserSettingsToFirestore } from "@/services/firebase";
 
 interface McpSettingsProps {
   open: boolean;
@@ -24,7 +26,13 @@ export async function loadMcpConfigs(): Promise<McpServerConfig[]> {
 }
 
 async function saveMcpConfigs(configs: McpServerConfig[]): Promise<void> {
-  await db.setSetting(MCP_SETTINGS_KEY, JSON.stringify(configs));
+  const json = JSON.stringify(configs);
+  await db.setSetting(MCP_SETTINGS_KEY, json);
+  // Cloud sync
+  const uid = useAuthStore.getState().user?.uid;
+  if (uid) {
+    saveUserSettingsToFirestore(uid, { mcp_servers: json }).catch(() => {});
+  }
 }
 
 export function McpSettings({ open, onClose, onToolsChanged }: McpSettingsProps) {

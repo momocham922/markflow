@@ -50,7 +50,7 @@ import { generateImage } from "@/services/image-gen";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
-import { signInWithGoogle } from "@/services/firebase";
+import { signInWithGoogle, saveAiChatToCloud, fetchAiChatFromCloud, deleteAiChatFromCloud } from "@/services/firebase";
 import { isIOS } from "@/platform";
 import * as db from "@/services/database";
 
@@ -185,19 +185,44 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const saveCustomRules = useCallback((rules: string) => {
     setCustomRules(rules);
     db.setSetting("ai_custom_rules", rules).catch(() => {});
+    // Cloud sync
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) {
+      import("@/services/firebase").then(({ saveUserSettingsToFirestore }) => {
+        saveUserSettingsToFirestore(uid, { ai_custom_rules: rules }).catch(() => {});
+      });
+    }
   }, []);
 
-  // Save chat history for a document
+  // Save chat history for a document (local + cloud)
   const saveChatHistory = useCallback((docId: string, msgs: ChatMessage[], apiMsgs: ClaudeMessage[]) => {
     if (!docId || msgs.length === 0) return;
-    // Strip generatedImage data to keep storage small (keep url/markdown only)
     const toSave = { messages: msgs, apiMessages: apiMsgs };
+    // Local fallback
     db.setSetting(`ai_chat_${docId}`, JSON.stringify(toSave)).catch(() => {});
+    // Cloud sync (source of truth)
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) {
+      saveAiChatToCloud(uid, docId, toSave).catch(() => {});
+    }
   }, []);
 
-  // Load chat history for a document
+  // Load chat history for a document (cloud-first, local fallback)
   const loadChatHistory = useCallback(async (docId: string) => {
     if (!docId) return;
+    // Try cloud first
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) {
+      try {
+        const cloudData = await fetchAiChatFromCloud(uid, docId);
+        if (cloudData && Array.isArray(cloudData.messages) && cloudData.messages.length > 0) {
+          setMessages(cloudData.messages as ChatMessage[]);
+          setApiMessages((cloudData.apiMessages || []) as ClaudeMessage[]);
+          return;
+        }
+      } catch { /* cloud unavailable, fall through */ }
+    }
+    // Local fallback
     try {
       const raw = await db.getSetting(`ai_chat_${docId}`);
       if (raw) {
@@ -781,7 +806,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
               onClick={() => {
                 setMessages([]);
                 setApiMessages([]);
-                if (activeDocId) db.setSetting(`ai_chat_${activeDocId}`, "").catch(() => {});
+                if (activeDocId) {
+                  db.setSetting(`ai_chat_${activeDocId}`, "").catch(() => {});
+                  const uid = useAuthStore.getState().user?.uid;
+                  if (uid) deleteAiChatFromCloud(uid, activeDocId).catch(() => {});
+                }
               }}
               title="Clear conversation"
             >

@@ -580,6 +580,47 @@ export async function fetchUserSettings(
   return snap.data() as Record<string, unknown>;
 }
 
+// ─── AI Chat History (subcollection under user_settings) ────
+
+/**
+ * Save AI chat history for a document.
+ * Stored as: user_settings/{uid}/ai_chats/{docId}
+ * Subcollection avoids 1MB document size limit for heavy chat histories.
+ */
+export async function saveAiChatToCloud(
+  uid: string,
+  docId: string,
+  data: { messages: unknown[]; apiMessages: unknown[] },
+): Promise<void> {
+  if (!data.messages.length) return;
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", docId);
+  await setDoc(ref, { ...data, updatedAt: serverTimestamp() });
+}
+
+/** Fetch AI chat history for a document */
+export async function fetchAiChatFromCloud(
+  uid: string,
+  docId: string,
+): Promise<{ messages: unknown[]; apiMessages: unknown[] } | null> {
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", docId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  const data = snap.data();
+  return {
+    messages: (data.messages || []) as unknown[],
+    apiMessages: (data.apiMessages || []) as unknown[],
+  };
+}
+
+/** Delete AI chat history for a document */
+export async function deleteAiChatFromCloud(
+  uid: string,
+  docId: string,
+): Promise<void> {
+  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", docId);
+  await deleteDoc(ref);
+}
+
 // ─── Image upload (Firebase Storage) ────────────────────────
 
 const storage = getStorage(app);
