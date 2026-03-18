@@ -45,8 +45,8 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
       try {
         const cloudVersions = await fetchVersionsFromCloud(did);
         for (const cv of cloudVersions) existingCloudIds.add(cv.id);
-      } catch {
-        // If fetch fails, proceed — worst case we overwrite ownerId
+      } catch (e) {
+        console.warn("[backfill] Failed to fetch cloud versions for doc", did, e);
       }
     }
 
@@ -69,8 +69,8 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
           displayName,
         );
         uploaded++;
-      } catch {
-        // Skip individual failures — don't block the rest
+      } catch (e) {
+        console.error("[backfill] Failed to upload version", v.id, "for doc", v.document_id, e);
       }
     }
     console.log(`[auth-store] Backfilled ${uploaded}/${allVersions.length} local versions to Firestore`);

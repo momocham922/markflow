@@ -65,8 +65,8 @@ export function useAutoVersion({
           title: capturedTitle,
           message: null,
         });
-      } catch {
-        // DB not available (browser mode)
+      } catch (e) {
+        console.warn("[auto-version] Local save failed:", e);
       }
 
       // Cloud sync (source of truth)
@@ -85,9 +85,11 @@ export function useAutoVersion({
             user.uid,
             user.displayName || user.email || "Unknown",
           );
-        } catch {
-          // Offline — local version saved as fallback
+        } catch (e) {
+          console.error("[auto-version] Cloud sync FAILED for doc", capturedDocId, "user", user.uid, e);
         }
+      } else {
+        console.warn("[auto-version] No user — skipping cloud sync for doc", capturedDocId);
       }
 
       lastContentRef.current = capturedContent;

@@ -45,9 +45,11 @@ service cloud.firestore {
         function canAccessVersions() {
           let parent = get(/databases/$(database)/documents/documents/$(docId)).data;
           return parent.ownerId == request.auth.uid
-            || (parent.collaborators != null && request.auth.uid in parent.collaborators.keys())
-            || (parent.collaboratorUids != null && request.auth.uid in parent.collaboratorUids)
-            || (parent.teamId != null && parent.teamId != ""
+            || ('collaborators' in parent && parent.collaborators != null
+                && request.auth.uid in parent.collaborators.keys())
+            || ('collaboratorUids' in parent && parent.collaboratorUids != null
+                && request.auth.uid in parent.collaboratorUids)
+            || ('teamId' in parent && parent.teamId != null && parent.teamId != ""
                 && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids);
         }
 
