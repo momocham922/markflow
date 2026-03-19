@@ -44,8 +44,9 @@ export function useVoiceInput({
   const [fullTranscript, setFullTranscript] = useState("");
   const [duration, setDuration] = useState(0);
 
-  const isSupported =
-    typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  // Don't gate on navigator.mediaDevices — WKWebView may not expose it
+  // until getUserMedia is actually called. Errors are caught in startRecording.
+  const isSupported = typeof navigator !== "undefined";
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -127,6 +128,9 @@ export function useVoiceInput({
     stopRecording();
 
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Microphone API not available. Grant microphone permission in System Settings.");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: { ideal: 16000 },
