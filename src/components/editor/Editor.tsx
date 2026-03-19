@@ -197,10 +197,12 @@ export function Editor() {
   }, [isCollabReady, activeDocId]);
 
   // Auto-save versions when content changes significantly
-  useAutoVersion({
+  // In collab mode, only save for local edits (not remote yCollab sync)
+  const { markLocalEdit } = useAutoVersion({
     docId: activeDocId,
     content: activeDoc?.content ?? "",
     title: activeDoc?.title ?? "",
+    collabActive: isCollabReady,
   });
 
   // Auto-convert legacy HTML content to Markdown on first load
@@ -434,11 +436,31 @@ export function Editor() {
   );
 
   // Keep the store's view reference in sync on every editor update
+  // Also detect local edits (vs remote yCollab sync) for auto-version
+  const isCollabReadyRef = useRef(isCollabReady);
+  isCollabReadyRef.current = isCollabReady;
+  const markLocalEditRef = useRef(markLocalEdit);
+  markLocalEditRef.current = markLocalEdit;
+
   const onUpdate = useCallback(
     (update: ViewUpdate) => {
       if (update.view !== viewRef.current) {
         viewRef.current = update.view;
         setView(update.view);
+      }
+      // In collab mode, detect local user edits for auto-version.
+      // Remote yCollab sync transactions lack userEvent annotations.
+      if (isCollabReadyRef.current && update.docChanged) {
+        const hasLocal = update.transactions.some(
+          (tr) =>
+            tr.docChanged &&
+            (tr.isUserEvent("input") ||
+              tr.isUserEvent("delete") ||
+              tr.isUserEvent("undo") ||
+              tr.isUserEvent("redo") ||
+              tr.isUserEvent("move")),
+        );
+        if (hasLocal) markLocalEditRef.current();
       }
     },
     [setView],

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import * as db from "@/services/database";
 import { syncVersionToCloud } from "@/services/firebase";
 import { useAuthStore } from "@/stores/auth-store";
@@ -9,12 +9,18 @@ interface AutoVersionOptions {
   title: string;
   /** Idle time in ms before auto-saving (default: 10s) */
   idleMs?: number;
+  /** When true, only save versions for local user edits (skip remote yCollab sync) */
+  collabActive?: boolean;
 }
 
 /**
  * Auto-saves document versions after periods of inactivity.
  * Any change — even a single character — triggers an auto-save
  * once the user stops editing for `idleMs`.
+ *
+ * In collab mode (`collabActive`), only saves when the local user
+ * actually edited (via `markLocalEdit()`). Remote yCollab sync
+ * changes are ignored to prevent duplicate versions across clients.
  *
  * Cloud-first: when the user is logged in, versions are also
  * synced to Firestore so all collaborators can see them.
@@ -25,10 +31,14 @@ export function useAutoVersion({
   content,
   title,
   idleMs = 10_000,
+  collabActive = false,
 }: AutoVersionOptions) {
   const lastContentRef = useRef<string>("");
   const lastDocIdRef = useRef<string | null>(null);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localEditedRef = useRef(false);
+  const collabActiveRef = useRef(collabActive);
+  collabActiveRef.current = collabActive;
 
   // Reset when switching documents
   useEffect(() => {
@@ -52,6 +62,9 @@ export function useAutoVersion({
 
     idleTimerRef.current = setTimeout(async () => {
       if (!capturedDocId || capturedContent === lastContentRef.current) return;
+      // In collab mode, only save if local user actually edited
+      if (collabActiveRef.current && !localEditedRef.current) return;
+      localEditedRef.current = false;
 
       const versionId = crypto.randomUUID();
       const createdAt = Date.now();
@@ -106,4 +119,11 @@ export function useAutoVersion({
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     };
   }, []);
+
+  /** Call when the local user makes an edit (not remote yCollab sync) */
+  const markLocalEdit = useCallback(() => {
+    localEditedRef.current = true;
+  }, []);
+
+  return { markLocalEdit };
 }
