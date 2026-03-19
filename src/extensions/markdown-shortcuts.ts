@@ -1,6 +1,7 @@
 import { keymap } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import type { KeyBinding } from "@codemirror/view";
+import { Prec } from "@codemirror/state";
 import { insertNewlineContinueMarkup, deleteMarkupBackward } from "@codemirror/lang-markdown";
 
 /** Wrap selected text with before/after markers, or insert at cursor */
@@ -110,4 +111,8 @@ const markdownKeybindings: KeyBinding[] = [
   { key: "Mod-Shift-c", run: (view) => wrapSelection(view, "```\n", "\n```") },
 ];
 
-export const markdownShortcuts = keymap.of(markdownKeybindings);
+// Prec.high() ensures our Enter/Backspace handlers run before basicSetup's
+// defaultKeymap (whose insertNewlineAndIndent always returns true and would
+// otherwise consume Enter before list continuation can fire).
+// This matches @codemirror/lang-markdown's own addKeymap behavior.
+export const markdownShortcuts = Prec.high(keymap.of(markdownKeybindings));
