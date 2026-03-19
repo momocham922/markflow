@@ -113,45 +113,32 @@ export function useCollaboration(
       let finalized = false;
 
       /** Seed Y.Text from local content if Y.Doc is empty.
-       *  Uses clientID-based leader election to prevent content duplication
-       *  when multiple users open the same doc simultaneously.
-       *  Only the client with the lowest clientID seeds immediately;
-       *  others wait and only seed if the leader didn't.
+       *  The WS server seeds from Firestore on first connection, so client-side
+       *  seeding is normally unnecessary. This is a last-resort fallback for when
+       *  the server couldn't seed (e.g. Firestore doc doesn't exist yet).
        *
-       *  FIX: Added 500ms delay before leader election to allow awareness
-       *  states from other clients to propagate. Without this, two clients
-       *  connecting simultaneously may both see themselves as the sole client.
+       *  Uses replace (delete+insert) instead of insert to prevent content
+       *  duplication if two clients seed simultaneously.
        */
       let seedTimer: ReturnType<typeof setTimeout> | null = null;
       const seedIfEmpty = () => {
         const ydocContent = ytext.toString();
         const localContent = initialContentRef.current;
         if (!ydocContent.trim() && localContent.trim()) {
-          // Delay leader election to let awareness propagate
+          // Wait for server-side seeding to propagate before falling back
           if (seedTimer) clearTimeout(seedTimer);
           seedTimer = setTimeout(() => {
             if (cancelled) return;
-            // Re-check after delay — another client may have seeded
+            // Re-check: server may have seeded during the delay
             if (ytext.toString().trim()) return;
 
-            const allClientIds = Array.from(provider.awareness.getStates().keys());
-            if (allClientIds.length > 1) {
-              const minId = Math.min(...allClientIds);
-              if (ydoc.clientID !== minId) {
-                // Not the leader — wait longer for leader to seed, then fallback
-                setTimeout(() => {
-                  if (cancelled) return;
-                  if (!ytext.toString().trim() && localContent.trim()) {
-                    ydoc.transact(() => { ytext.insert(0, localContent); });
-                  }
-                }, 2000);
-                return;
-              }
-            }
+            // Use replace (delete+insert) to prevent duplication
+            // if another client seeds concurrently
             ydoc.transact(() => {
+              ytext.delete(0, ytext.length);
               ytext.insert(0, localContent);
             });
-          }, 500);
+          }, 1500);
         }
       };
 

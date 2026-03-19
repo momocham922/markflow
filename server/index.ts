@@ -112,6 +112,30 @@ function getYDoc(docName: string): Promise<Y.Doc> {
       Y.applyUpdate(doc, snapshot);
     }
 
+    // Fallback: if no snapshot exists, seed Y.Text from Firestore documents collection.
+    // This ensures the server always has the initial content so clients don't need to seed.
+    const ytext = doc.getText("codemirror");
+    if (!ytext.toString().trim()) {
+      const docId = docName.replace(/^markflow-/, "");
+      if (docId && docId !== docName) {
+        try {
+          const docRef = db.collection("documents").doc(docId);
+          const docSnap = await docRef.get();
+          if (docSnap.exists) {
+            const data = docSnap.data();
+            if (data?.content?.trim()) {
+              doc.transact(() => {
+                ytext.insert(0, data.content);
+              });
+              console.log(`Seeded Y.Doc for ${docName} from Firestore documents collection`);
+            }
+          }
+        } catch (err) {
+          console.error(`Failed to seed from Firestore for ${docName}:`, err);
+        }
+      }
+    }
+
     doc.on("update", (update: Uint8Array, origin: unknown) => {
       // Broadcast to connected clients, excluding the sender
       const encoder = encoding.createEncoder();

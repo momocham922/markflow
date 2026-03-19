@@ -151,8 +151,16 @@ export function Sidebar() {
       if (teamsWithDocs.length === 1) {
         setExpandedTeams(new Set([teamsWithDocs[0].id]));
       }
-      // Deletion reconciliation is handled centrally by syncFromCloud
-      // to avoid race conditions with concurrent sync operations.
+      // Sync team doc titles to app-store so Editor toolbar reflects renames
+      const appStore = useAppStore.getState();
+      for (const team of teamsWithDocs) {
+        for (const td of team.docs) {
+          const local = appStore.documents.find((d) => d.id === td.id);
+          if (local && local.title !== td.title) {
+            appStore.updateDocument(td.id, { title: td.title, titlePinned: true });
+          }
+        }
+      }
     } catch { /* ignore */ }
   }, []);
 

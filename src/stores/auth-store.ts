@@ -384,16 +384,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 };
                 await appStore.addDocument(newDoc);
               } else {
-                // FIX: Skip content update if doc is actively being edited via Yjs
-                // Yjs is the source of truth during collaboration — Firestore snapshot is stale
+                // Yjs owns content during collaboration — only update metadata.
+                // Always sync title so renames propagate in real-time.
                 const updates: Partial<Document> = {
                   isShared: true,
                   titlePinned: true,
+                  title: fullDoc.title,
+                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
                 };
                 if (!collabActiveDocIds.has(entry.id)) {
                   updates.content = fullDoc.content;
-                  updates.title = fullDoc.title;
-                  updates.updatedAt = fullDoc.updatedAt?.toMillis() ?? Date.now();
                 }
                 appStore.updateDocument(entry.id, updates);
               }
@@ -459,16 +459,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 };
                 await appStore.addDocument(newDoc);
               } else {
-                // FIX: Skip content update if doc is actively being edited via Yjs
+                // Yjs owns content during collaboration — only update metadata.
+                // Always sync title so renames propagate in real-time.
                 const updates: Partial<Document> = {
                   isShared: true,
                   teamId: entry.teamId,
                   titlePinned: true,
+                  title: fullDoc.title,
+                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
                 };
                 if (!collabActiveDocIds.has(entry.id)) {
                   updates.content = fullDoc.content;
-                  updates.title = fullDoc.title;
-                  updates.updatedAt = fullDoc.updatedAt?.toMillis() ?? Date.now();
                 }
                 appStore.updateDocument(entry.id, updates);
               }
