@@ -7,6 +7,8 @@ const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 const GCP_REGION = process.env.GCP_REGION || "us-east5";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const NANOBANANA_MODEL = process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
+const STT_LOCATION = process.env.STT_LOCATION || "us-central1";
+const STT_MODEL = process.env.STT_MODEL || "chirp_2";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
@@ -71,6 +73,69 @@ const server = http.createServer(async (req, res) => {
       req.on("end", () => resolve(data));
       req.on("error", reject);
     });
+
+  // --- /v1/voice/transcribe ---
+  if (req.url === "/v1/voice/transcribe") {
+    try {
+      await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = JSON.parse(body);
+      const audio: string = parsed.audio; // base64-encoded audio
+      const language: string = parsed.language || "ja-JP";
+
+      if (!audio) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "audio is required" }));
+        return;
+      }
+
+      const accessToken = await getGcpAccessToken();
+      const sttUrl = `https://speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`;
+
+      const sttRes = await fetch(sttUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          config: {
+            autoDecodingConfig: {},
+            model: STT_MODEL,
+            languageCodes: [language],
+            features: {
+              enableAutomaticPunctuation: true,
+            },
+          },
+          content: audio,
+        }),
+      });
+
+      if (!sttRes.ok) {
+        const errText = await sttRes.text();
+        console.error("[voice] STT error:", sttRes.status, errText);
+        res.writeHead(sttRes.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errText }));
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sttData = (await sttRes.json()) as any;
+      const transcript =
+        sttData.results
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ?.map((r: any) => r.alternatives?.[0]?.transcript || "")
+          .join("") || "";
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ text: transcript }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Internal server error";
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+    }
+    return;
+  }
 
   // --- /v1/image/generate ---
   if (req.url === "/v1/image/generate") {

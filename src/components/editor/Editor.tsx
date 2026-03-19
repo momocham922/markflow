@@ -16,6 +16,7 @@ import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
+import { VoicePanel } from "./VoicePanel";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import { markCollabActive, markCollabInactive } from "@/stores/auth-store";
@@ -138,6 +139,7 @@ export function Editor() {
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>(isIOS ? "edit" : "split");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
   const setView = useEditorStore((s) => s.setView);
@@ -568,6 +570,23 @@ export function Editor() {
     [activeDocId, updateDocument],
   );
 
+  // Voice input support
+  const voiceSupported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+
+  const handleInsertMarkdown = useCallback(
+    (markdown: string) => {
+      if (!activeDocId) return;
+      const current = activeDoc?.content ?? "";
+      const newContent = current.trimEnd() + markdown;
+      updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+      // Also update Y.Doc for collab documents
+      if (isCollabReady) {
+        collabReplaceContent(newContent);
+      }
+    },
+    [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
+  );
+
   if (!activeDoc) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -602,6 +621,9 @@ export function Editor() {
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
         onHistoryOpen={() => setHistoryOpen(true)}
+        voiceActive={voiceOpen}
+        voiceSupported={voiceSupported}
+        onVoiceToggle={() => setVoiceOpen((v) => !v)}
         collabSlot={
           (collabConnected || collabExtension) ? (
             <div className="flex items-center gap-1.5 shrink-0 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5">
@@ -718,6 +740,7 @@ export function Editor() {
           </div>
         )}
       </div>
+      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} />}
       <VersionHistory
         open={historyOpen}
         onOpenChange={setHistoryOpen}

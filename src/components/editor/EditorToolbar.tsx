@@ -1,6 +1,5 @@
-import { useState, useRef, useCallback, type ReactNode } from "react";
+import { useState, useRef, type ReactNode } from "react";
 import { useIMEGuard } from "@/hooks/use-ime-guard";
-import { useVoiceInput } from "@/hooks/use-voice-input";
 import {
   PenLine,
   Columns2,
@@ -42,6 +41,9 @@ interface EditorToolbarProps {
   onPreviewModeChange: (mode: PreviewMode) => void;
   collabSlot?: ReactNode;
   onHistoryOpen?: () => void;
+  voiceActive?: boolean;
+  voiceSupported?: boolean;
+  onVoiceToggle?: () => void;
 }
 
 export function EditorToolbar({
@@ -49,20 +51,13 @@ export function EditorToolbar({
   onPreviewModeChange,
   collabSlot,
   onHistoryOpen,
+  voiceActive = false,
+  voiceSupported = false,
+  onVoiceToggle,
 }: EditorToolbarProps) {
   const [themeOpen, setThemeOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [showTagInput, setShowTagInput] = useState(false);
-
-  const { insertAtCursor } = useEditorStore();
-  const handleVoiceResult = useCallback((text: string, isFinal: boolean) => {
-    if (isFinal && text.trim()) {
-      insertAtCursor(text + " ");
-    }
-  }, [insertAtCursor]);
-  const { isRecording, isSupported: voiceSupported, interimText, toggle: toggleVoice } = useVoiceInput({
-    onResult: handleVoiceResult,
-  });
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const tagInputRef = useRef<HTMLInputElement>(null);
@@ -180,15 +175,15 @@ export function EditorToolbar({
 
         {/* Right: essential controls */}
         <div className="flex items-center gap-1 shrink-0">
-          {voiceSupported && (
+          {voiceSupported && onVoiceToggle && (
             <Button
-              variant={isRecording ? "secondary" : "ghost"}
+              variant={voiceActive ? "secondary" : "ghost"}
               size="icon"
-              className={`h-7 w-7 ${isRecording ? "text-red-500" : ""}`}
-              onClick={toggleVoice}
-              title={isRecording ? "Stop recording" : "Voice input"}
+              className={`h-7 w-7 ${voiceActive ? "text-red-500" : ""}`}
+              onClick={onVoiceToggle}
+              title={voiceActive ? "Close voice panel" : "Voice input"}
             >
-              {isRecording ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+              {voiceActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
             </Button>
           )}
           <Button
@@ -243,11 +238,6 @@ export function EditorToolbar({
         </div>
 
         <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />
-        {isRecording && interimText && (
-          <div className="absolute left-0 right-0 top-full bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-800 px-3 py-1 text-[10px] text-red-600 dark:text-red-400 truncate z-10">
-            🎙 {interimText}
-          </div>
-        )}
       </div>
     );
   }
@@ -432,16 +422,16 @@ export function EditorToolbar({
         )}
 
         {/* Voice input */}
-        {voiceSupported && (
+        {voiceSupported && onVoiceToggle && (
           <Button
-            variant={isRecording ? "secondary" : "ghost"}
+            variant={voiceActive ? "secondary" : "ghost"}
             size="sm"
-            className={`h-6 gap-1 px-2 text-[11px] ${isRecording ? "text-red-500" : "text-muted-foreground"}`}
-            onClick={toggleVoice}
-            title={isRecording ? "Stop recording" : "Voice input"}
+            className={`h-6 gap-1 px-2 text-[11px] ${voiceActive ? "text-red-500" : "text-muted-foreground"}`}
+            onClick={onVoiceToggle}
+            title={voiceActive ? "Close voice panel" : "Voice input"}
           >
-            {isRecording ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
-            {isRecording ? "Stop" : "Voice"}
+            {voiceActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+            {voiceActive ? "Stop" : "Voice"}
           </Button>
         )}
 
@@ -511,11 +501,6 @@ export function EditorToolbar({
       </div>
 
       <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />
-      {isRecording && interimText && (
-        <div className="absolute left-0 right-0 top-full bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-800 px-3 py-1 text-[10px] text-red-600 dark:text-red-400 truncate z-10">
-          🎙 {interimText}
-        </div>
-      )}
     </div>
   );
 }
