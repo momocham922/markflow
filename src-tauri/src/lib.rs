@@ -783,29 +783,11 @@ static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
 
-/// Create a WAV file in memory from mono i16 PCM samples.
-fn create_wav_bytes(samples: &[i16], sample_rate: u32) -> Vec<u8> {
-    let data_size = (samples.len() * 2) as u32;
-    let file_size = 36 + data_size;
-    let byte_rate = sample_rate * 2; // mono 16-bit
-    let mut buf = Vec::with_capacity(44 + data_size as usize);
-    buf.extend_from_slice(b"RIFF");
-    buf.extend_from_slice(&file_size.to_le_bytes());
-    buf.extend_from_slice(b"WAVE");
-    buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&16u32.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
-    buf.extend_from_slice(&sample_rate.to_le_bytes());
-    buf.extend_from_slice(&byte_rate.to_le_bytes());
-    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
-    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    buf.extend_from_slice(b"data");
-    buf.extend_from_slice(&data_size.to_le_bytes());
-    for &sample in samples {
-        buf.extend_from_slice(&sample.to_le_bytes());
-    }
-    buf
+/// Voice chunk returned to frontend: raw PCM base64 + sample rate.
+#[derive(serde::Serialize)]
+struct VoiceChunkData {
+    audio: String,
+    sample_rate: u32,
 }
 
 /// Stop active recording and free the cpal Stream.
@@ -905,9 +887,9 @@ fn stop_voice_recording() {
     stop_voice_recording_inner();
 }
 
-/// Drain the audio buffer and return its contents as base64-encoded WAV (mono 16-bit PCM).
+/// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
 #[tauri::command]
-fn get_voice_chunk() -> Result<String, String> {
+fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     use base64::Engine;
 
     let samples: Vec<f32> = {
@@ -916,7 +898,7 @@ fn get_voice_chunk() -> Result<String, String> {
     };
 
     if samples.is_empty() {
-        return Ok(String::new());
+        return Ok(None);
     }
 
     let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
@@ -932,14 +914,17 @@ fn get_voice_chunk() -> Result<String, String> {
         samples
     };
 
-    // f32 → i16
-    let i16_samples: Vec<i16> = mono
-        .iter()
-        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-        .collect();
+    // f32 → i16 (LINEAR16 PCM)
+    let mut pcm_bytes = Vec::with_capacity(mono.len() * 2);
+    for &s in &mono {
+        let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+    }
 
-    let wav = create_wav_bytes(&i16_samples, sample_rate);
-    Ok(base64::engine::general_purpose::STANDARD.encode(&wav))
+    Ok(Some(VoiceChunkData {
+        audio: base64::engine::general_purpose::STANDARD.encode(&pcm_bytes),
+        sample_rate,
+    }))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -68,7 +68,10 @@ export function useVoiceInput({
   }, [onError]);
 
   const sendChunk = useCallback(
-    async (input: Blob | string) => {
+    async (
+      input: Blob | string,
+      meta?: { encoding: string; sampleRate: number },
+    ) => {
       if (typeof input === "string") {
         if (!input) return;
       } else {
@@ -92,7 +95,17 @@ export function useVoiceInput({
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ audio: base64, language }),
+          body: JSON.stringify({
+            audio: base64,
+            language,
+            ...(meta
+              ? {
+                  encoding: meta.encoding,
+                  sampleRate: meta.sampleRate,
+                  channels: 1,
+                }
+              : {}),
+          }),
         });
 
         if (!res.ok) {
@@ -157,8 +170,16 @@ export function useVoiceInput({
         chunkIntervalRef.current = setInterval(async () => {
           try {
             const { invoke: inv } = await import("@tauri-apps/api/core");
-            const chunk = await inv<string>("get_voice_chunk");
-            if (chunk) sendChunk(chunk);
+            const result = await inv<{
+              audio: string;
+              sample_rate: number;
+            } | null>("get_voice_chunk");
+            if (result) {
+              sendChunk(result.audio, {
+                encoding: "LINEAR16",
+                sampleRate: result.sample_rate,
+              });
+            }
           } catch (e) {
             console.error("[voice] Chunk error:", e);
           }

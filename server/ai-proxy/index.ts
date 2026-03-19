@@ -92,6 +92,29 @@ const server = http.createServer(async (req, res) => {
       const accessToken = await getGcpAccessToken();
       const sttUrl = `https://speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`;
 
+      // Support explicit encoding (LINEAR16 from Rust) or auto-detect (webm/opus from browser)
+      const encoding: string | undefined = parsed.encoding;
+      const sampleRate: number | undefined = parsed.sampleRate;
+      const channels: number | undefined = parsed.channels;
+
+      const sttConfig: Record<string, unknown> = {
+        model: STT_MODEL,
+        languageCodes: [language],
+        features: {
+          enableAutomaticPunctuation: true,
+        },
+      };
+
+      if (encoding) {
+        sttConfig.explicitDecodingConfig = {
+          encoding,
+          sampleRateHertz: sampleRate || 48000,
+          audioChannelCount: channels || 1,
+        };
+      } else {
+        sttConfig.autoDecodingConfig = {};
+      }
+
       const sttRes = await fetch(sttUrl, {
         method: "POST",
         headers: {
@@ -99,14 +122,7 @@ const server = http.createServer(async (req, res) => {
           Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
-          config: {
-            autoDecodingConfig: {},
-            model: STT_MODEL,
-            languageCodes: [language],
-            features: {
-              enableAutomaticPunctuation: true,
-            },
-          },
+          config: sttConfig,
           content: audio,
         }),
       });
