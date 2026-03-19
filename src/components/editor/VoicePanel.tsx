@@ -117,7 +117,7 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
   if (!isSupported) {
     return (
       <div className="border-t border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground text-center">
-        Voice input is not supported in this environment.
+        Microphone access is not available. Please check your browser/app permissions.
       </div>
     );
   }

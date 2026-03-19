@@ -570,8 +570,8 @@ export function Editor() {
     [activeDocId, updateDocument],
   );
 
-  // Voice input support
-  const voiceSupported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  // Voice input — always show button; errors handled in useVoiceInput on start
+  const voiceSupported = true;
 
   const handleInsertMarkdown = useCallback(
     (markdown: string) => {

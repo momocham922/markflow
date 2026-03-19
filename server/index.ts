@@ -231,10 +231,87 @@ const server = http.createServer((_req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", async (ws, req) => {
-  // Verify Firebase Auth token from query params
+  // ── Buffer messages immediately ──────────────────────────
+  // Client sends sync step 1 right after connecting (in onopen).
+  // If we await async operations (auth, getYDoc) before registering
+  // the message handler, the client's step 1 is silently dropped.
+  // This causes the server to never send step 2, so the client
+  // never receives the server's Y.Doc content → duplication.
+  const pendingMessages: ArrayBuffer[] = [];
+  let ready = false;
+  let closed = false;
+  const controlledIds = new Set<number>();
+
+  // Message processing function (used after ready)
+  const processMessage = (data: ArrayBuffer, doc: Y.Doc, awareness: awarenessProtocol.Awareness) => {
+    try {
+      const message = new Uint8Array(data as ArrayBuffer);
+      const decoder = decoding.createDecoder(message);
+      const messageType = decoding.readVarUint(decoder);
+
+      switch (messageType) {
+        case messageSync: {
+          const encoder = encoding.createEncoder();
+          encoding.writeVarUint(encoder, messageSync);
+          // Pass ws as origin so the update handler can exclude the sender
+          syncProtocol.readSyncMessage(decoder, encoder, doc, ws);
+          if (encoding.length(encoder) > 1) {
+            ws.send(encoding.toUint8Array(encoder));
+          }
+          break;
+        }
+        case messageAwareness: {
+          const update = decoding.readVarUint8Array(decoder);
+          // Track which client IDs this connection controls
+          const decoder2 = decoding.createDecoder(update);
+          const len = decoding.readVarUint(decoder2);
+          for (let i = 0; i < len; i++) {
+            const clientId = decoding.readVarUint(decoder2);
+            controlledIds.add(clientId);
+            decoding.readVarUint(decoder2); // skip clock
+            decoding.readVarString(decoder2); // skip state JSON
+          }
+          awarenessProtocol.applyAwarenessUpdate(awareness, update, ws);
+          break;
+        }
+      }
+    } catch (err) {
+      console.error("Error handling message:", err);
+    }
+  };
+
+  // Closure variables set after async init completes
+  let doc: Y.Doc | null = null;
+  let awareness: awarenessProtocol.Awareness | null = null;
+  let docName: string | null = null;
+
+  // Register message handler IMMEDIATELY to buffer during async init
+  ws.on("message", (data: ArrayBuffer) => {
+    if (!ready) {
+      pendingMessages.push(data);
+      return;
+    }
+    processMessage(data, doc!, awareness!);
+  });
+
+  ws.on("close", () => {
+    closed = true;
+    if (docName) {
+      const roomConns = conns.get(docName);
+      if (roomConns) {
+        roomConns.delete(ws);
+      }
+      if (awareness) {
+        awarenessProtocol.removeAwarenessStates(awareness, Array.from(controlledIds), null);
+      }
+      cleanupRoom(docName);
+    }
+  });
+
+  // ── Async init (auth + doc load) ─────────────────────────
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   const token = url.searchParams.get("token");
-  const docName = url.pathname.slice(1) || "default";
+  docName = url.pathname.slice(1) || "default";
 
   if (token) {
     try {
@@ -248,14 +325,16 @@ wss.on("connection", async (ws, req) => {
     return;
   }
 
-  // getYDoc is now async (loads from Firestore on first access)
-  const doc = await getYDoc(docName);
-  const awareness = getAwareness(docName, doc);
+  if (closed) return; // Client disconnected during auth
+
+  doc = await getYDoc(docName);
+  if (closed) return; // Client disconnected during doc load
+
+  awareness = getAwareness(docName, doc);
 
   if (!conns.has(docName)) {
     conns.set(docName, new Map());
   }
-  const controlledIds = new Set<number>();
   conns.get(docName)!.set(ws, controlledIds);
 
   // Send sync step 1
@@ -280,56 +359,13 @@ wss.on("connection", async (ws, req) => {
     }
   }
 
-  ws.on("message", (data: ArrayBuffer) => {
-    try {
-      const message = new Uint8Array(data as ArrayBuffer);
-      const decoder = decoding.createDecoder(message);
-      const messageType = decoding.readVarUint(decoder);
-
-      switch (messageType) {
-        case messageSync: {
-          const encoder = encoding.createEncoder();
-          encoding.writeVarUint(encoder, messageSync);
-          // Pass ws as origin so the update handler can exclude the sender
-          syncProtocol.readSyncMessage(decoder, encoder, doc, ws);
-          if (encoding.length(encoder) > 1) {
-            ws.send(encoding.toUint8Array(encoder));
-          }
-          break;
-        }
-        case messageAwareness: {
-          const update = decoding.readVarUint8Array(decoder);
-          // Track which client IDs this connection controls
-          // Format: [len, clientID, clock, stateJSON, clientID, clock, stateJSON, ...]
-          const decoder2 = decoding.createDecoder(update);
-          const len = decoding.readVarUint(decoder2);
-          for (let i = 0; i < len; i++) {
-            const clientId = decoding.readVarUint(decoder2);
-            controlledIds.add(clientId);
-            decoding.readVarUint(decoder2); // skip clock
-            decoding.readVarString(decoder2); // skip state JSON
-          }
-          awarenessProtocol.applyAwarenessUpdate(awareness, update, ws);
-          break;
-        }
-      }
-    } catch (err) {
-      console.error("Error handling message:", err);
-    }
-  });
-
-  ws.on("close", () => {
-    const roomConns = conns.get(docName);
-    if (roomConns) {
-      roomConns.delete(ws);
-    }
-
-    // Remove awareness states for this connection
-    awarenessProtocol.removeAwarenessStates(awareness, Array.from(controlledIds), null);
-
-    // If last client, persist and clean up
-    cleanupRoom(docName);
-  });
+  // ── Flush buffered messages ──────────────────────────────
+  ready = true;
+  for (const msg of pendingMessages) {
+    if (closed) break;
+    processMessage(msg, doc, awareness);
+  }
+  pendingMessages.length = 0;
 });
 
 server.listen(PORT, HOST, () => {

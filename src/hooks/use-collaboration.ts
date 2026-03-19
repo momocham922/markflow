@@ -112,41 +112,9 @@ export function useCollaboration(
       let wsSynced = false;
       let finalized = false;
 
-      /** Seed Y.Text from local content if Y.Doc is empty.
-       *  The WS server seeds from Firestore on first connection, so client-side
-       *  seeding is normally unnecessary. This is a last-resort fallback for when
-       *  the server couldn't seed (e.g. Firestore doc doesn't exist yet).
-       *
-       *  Uses replace (delete+insert) instead of insert to prevent content
-       *  duplication if two clients seed simultaneously.
-       */
-      let seedTimer: ReturnType<typeof setTimeout> | null = null;
-      const seedIfEmpty = () => {
-        const ydocContent = ytext.toString();
-        const localContent = initialContentRef.current;
-        if (!ydocContent.trim() && localContent.trim()) {
-          // Wait for server-side seeding to propagate before falling back
-          if (seedTimer) clearTimeout(seedTimer);
-          seedTimer = setTimeout(() => {
-            if (cancelled) return;
-            // Re-check: server may have seeded during the delay
-            if (ytext.toString().trim()) return;
-
-            // Use replace (delete+insert) to prevent duplication
-            // if another client seeds concurrently
-            ydoc.transact(() => {
-              ytext.delete(0, ytext.length);
-              ytext.insert(0, localContent);
-            });
-          }, 1500);
-        }
-      };
-
       const tryFinalize = () => {
         if (finalized || !idbSynced || !wsSynced || cancelled) return;
         finalized = true;
-
-        seedIfEmpty();
 
         // Sync Y.Text content → frozen value BEFORE activating yCollab.
         // This prevents @uiw/react-codemirror's value prop from conflicting
@@ -179,25 +147,20 @@ export function useCollaboration(
         provider.connect();
       });
 
-      // WS sync — handles both initial sync and reconnections
+      // WS sync — handles both initial sync and reconnections.
+      // Server-side seeding ensures Y.Text has content; client never seeds
+      // to prevent CRDT duplication from concurrent inserts.
       provider.on("sync", (isSynced: boolean) => {
         if (!isSynced) return;
 
         if (!finalized) {
-          // First sync: complete initialization
           wsSynced = true;
           tryFinalize();
-        } else {
-          // Reconnection sync: WS server may have restarted (Cloud Run scale-to-zero).
-          // If Y.Doc is now empty, re-seed from local content.
-          seedIfEmpty();
         }
       });
 
       // Fallback: if WS never syncs within timeout (Cloud Run cold start,
       // server down), activate collab from IDB/local state anyway.
-      // seedIfEmpty() uses leader election to prevent content duplication
-      // when multiple clients seed simultaneously.
       // Provider stays connected so WS can sync later if server comes up.
       const wsTimeout = setTimeout(() => {
         if (!wsSynced && !cancelled && !finalized) {
@@ -265,7 +228,6 @@ export function useCollaboration(
 
       return () => {
         clearTimeout(wsTimeout);
-        if (seedTimer) clearTimeout(seedTimer);
         if (throttleTimer) clearTimeout(throttleTimer);
         // Flush any pending update on cleanup
         if (pendingText !== null) {
