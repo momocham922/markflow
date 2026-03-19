@@ -29,6 +29,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 url = "2"
 tokio = { version = "1", features = ["time"] }
+cpal = "0.15"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"

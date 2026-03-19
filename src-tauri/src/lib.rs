@@ -1,7 +1,7 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tauri_plugin_updater::UpdaterExt;
 
 /// Flag set by frontend to indicate it's alive and handling updates itself.
@@ -775,6 +775,173 @@ async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
     Ok(version)
 }
 
+// ── Voice recording — Rust-side audio capture (bypasses WKWebView getUserMedia restriction) ──
+
+static VOICE_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
+static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
+static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
+
+/// Create a WAV file in memory from mono i16 PCM samples.
+fn create_wav_bytes(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+    let data_size = (samples.len() * 2) as u32;
+    let file_size = 36 + data_size;
+    let byte_rate = sample_rate * 2; // mono 16-bit
+    let mut buf = Vec::with_capacity(44 + data_size as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    for &sample in samples {
+        buf.extend_from_slice(&sample.to_le_bytes());
+    }
+    buf
+}
+
+/// Stop active recording and free the cpal Stream.
+fn stop_voice_recording_inner() {
+    VOICE_ACTIVE.store(false, Ordering::SeqCst);
+    let ptr = {
+        let mut guard = VOICE_STREAM_RAW.lock().unwrap();
+        let p = *guard;
+        *guard = 0;
+        p
+    };
+    if ptr != 0 {
+        // SAFETY: ptr was created by Box::into_raw in start_voice_recording.
+        // We clear the stored value above to prevent double-free.
+        unsafe {
+            drop(Box::from_raw(ptr as *mut cpal::Stream));
+        }
+    }
+}
+
+/// Start capturing audio from the default input device via CoreAudio (cpal).
+#[tauri::command]
+fn start_voice_recording() -> Result<(), String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    stop_voice_recording_inner();
+
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or("No microphone found. Check System Settings > Privacy & Security > Microphone.")?;
+
+    let supported = device
+        .default_input_config()
+        .map_err(|e| format!("Audio config error: {}", e))?;
+
+    let sample_format = supported.sample_format();
+    let sample_rate = supported.sample_rate().0;
+    let channels = supported.channels() as u32;
+
+    VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
+    VOICE_CHANNELS.store(channels, Ordering::Relaxed);
+    VOICE_BUFFER.lock().unwrap().clear();
+    VOICE_ACTIVE.store(true, Ordering::SeqCst);
+
+    let config: cpal::StreamConfig = supported.into();
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device
+            .build_input_stream(
+                &config,
+                |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if !VOICE_ACTIVE.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                        buf.extend_from_slice(data);
+                    }
+                },
+                |err| eprintln!("[voice] Stream error: {}", err),
+                None,
+            )
+            .map_err(|e| format!("Failed to start recording: {}", e))?,
+        cpal::SampleFormat::I16 => device
+            .build_input_stream(
+                &config,
+                |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    if !VOICE_ACTIVE.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                        for &s in data {
+                            buf.push(s as f32 / 32768.0);
+                        }
+                    }
+                },
+                |err| eprintln!("[voice] Stream error: {}", err),
+                None,
+            )
+            .map_err(|e| format!("Failed to start recording: {}", e))?,
+        fmt => return Err(format!("Unsupported audio format: {:?}", fmt)),
+    };
+
+    stream
+        .play()
+        .map_err(|e| format!("Failed to play stream: {}", e))?;
+
+    // Keep stream alive by leaking — freed in stop_voice_recording_inner
+    let ptr = Box::into_raw(Box::new(stream)) as usize;
+    *VOICE_STREAM_RAW.lock().unwrap() = ptr;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_voice_recording() {
+    stop_voice_recording_inner();
+}
+
+/// Drain the audio buffer and return its contents as base64-encoded WAV (mono 16-bit PCM).
+#[tauri::command]
+fn get_voice_chunk() -> Result<String, String> {
+    use base64::Engine;
+
+    let samples: Vec<f32> = {
+        let mut buf = VOICE_BUFFER.lock().unwrap();
+        std::mem::take(&mut *buf)
+    };
+
+    if samples.is_empty() {
+        return Ok(String::new());
+    }
+
+    let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
+    let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
+
+    // Mix to mono if multi-channel
+    let mono: Vec<f32> = if channels > 1 {
+        samples
+            .chunks(channels as usize)
+            .map(|ch| ch.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        samples
+    };
+
+    // f32 → i16
+    let i16_samples: Vec<i16> = mono
+        .iter()
+        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .collect();
+
+    let wav = create_wav_bytes(&i16_samples, sample_rate);
+    Ok(base64::engine::general_purpose::STANDARD.encode(&wav))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -928,7 +1095,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, start_voice_recording, stop_voice_recording, get_voice_chunk])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -4,6 +4,9 @@ import { useAuthStore } from "@/stores/auth-store";
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 2500; // 2.5 second audio chunks
 
+const isTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 export interface UseVoiceInputOptions {
   language?: string;
   onTranscript?: (text: string) => void;
@@ -44,33 +47,43 @@ export function useVoiceInput({
   const [fullTranscript, setFullTranscript] = useState("");
   const [duration, setDuration] = useState(0);
 
-  // Don't gate on navigator.mediaDevices — WKWebView may not expose it
-  // until getUserMedia is actually called. Errors are caught in startRecording.
   const isSupported = typeof navigator !== "undefined";
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunkIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
   const transcriptRef = useRef("");
   const processingRef = useRef(false);
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
 
-  useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
-  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+  }, [onTranscript]);
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
 
   const sendChunk = useCallback(
-    async (audioBlob: Blob) => {
-      if (audioBlob.size < 200) return; // skip silence/tiny chunks
-      if (processingRef.current) return; // prevent overlapping requests
+    async (input: Blob | string) => {
+      if (typeof input === "string") {
+        if (!input) return;
+      } else {
+        if (input.size < 200) return;
+      }
+      if (processingRef.current) return;
       processingRef.current = true;
 
       try {
         const user = useAuthStore.getState().user;
         if (!user) return;
         const token = await user.getIdToken();
-        const base64 = await blobToBase64(audioBlob);
+
+        const base64 =
+          typeof input === "string" ? input : await blobToBase64(input);
         if (!base64) return;
 
         const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
@@ -105,6 +118,13 @@ export function useVoiceInput({
   );
 
   const stopRecording = useCallback(() => {
+    // Stop Rust audio capture if in Tauri
+    if (isTauri) {
+      import("@tauri-apps/api/core").then(({ invoke }) => {
+        invoke("stop_voice_recording").catch(() => {});
+      });
+    }
+
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
       recorderRef.current.stop();
     }
@@ -128,59 +148,80 @@ export function useVoiceInput({
     stopRecording();
 
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Microphone API not available. Grant microphone permission in System Settings.");
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: { ideal: 16000 },
-          channelCount: { ideal: 1 },
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
-      streamRef.current = stream;
+      if (isTauri) {
+        // Rust audio capture — bypasses WKWebView getUserMedia restriction
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("start_voice_recording");
 
-      // Detect supported MIME type (Safari: mp4/aac, Chrome: webm/opus)
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-          ? "audio/mp4"
-          : undefined;
-
-      let chunks: Blob[] = [];
-
-      const createRecorder = () => {
-        const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-        chunks = [];
-
-        rec.ondataavailable = (e) => {
-          if (e.data.size > 0) chunks.push(e.data);
-        };
-
-        rec.onstop = () => {
-          if (chunks.length > 0) {
-            const blob = new Blob(chunks, { type: rec.mimeType });
-            sendChunk(blob);
+        // Poll Rust buffer every CHUNK_MS and send to transcription API
+        chunkIntervalRef.current = setInterval(async () => {
+          try {
+            const { invoke: inv } = await import("@tauri-apps/api/core");
+            const chunk = await inv<string>("get_voice_chunk");
+            if (chunk) sendChunk(chunk);
+          } catch (e) {
+            console.error("[voice] Chunk error:", e);
           }
+        }, CHUNK_MS);
+      } else {
+        // Browser fallback: getUserMedia + MediaRecorder
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(
+            "Microphone API not available. Grant microphone permission in System Settings.",
+          );
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            sampleRate: { ideal: 16000 },
+            channelCount: { ideal: 1 },
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
+        streamRef.current = stream;
+
+        const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : MediaRecorder.isTypeSupported("audio/mp4")
+            ? "audio/mp4"
+            : undefined;
+
+        let chunks: Blob[] = [];
+
+        const createRecorder = () => {
+          const rec = new MediaRecorder(
+            stream,
+            mimeType ? { mimeType } : undefined,
+          );
+          chunks = [];
+
+          rec.ondataavailable = (e) => {
+            if (e.data.size > 0) chunks.push(e.data);
+          };
+
+          rec.onstop = () => {
+            if (chunks.length > 0) {
+              const blob = new Blob(chunks, { type: rec.mimeType });
+              sendChunk(blob);
+            }
+          };
+
+          rec.start();
+          return rec;
         };
 
-        rec.start();
-        return rec;
-      };
+        recorderRef.current = createRecorder();
 
-      recorderRef.current = createRecorder();
+        chunkIntervalRef.current = setInterval(() => {
+          const rec = recorderRef.current;
+          if (rec && rec.state === "recording") {
+            rec.stop();
+            recorderRef.current = createRecorder();
+          }
+        }, CHUNK_MS);
+      }
 
-      // Cycle: stop → send → start new recording every CHUNK_MS
-      chunkIntervalRef.current = setInterval(() => {
-        const rec = recorderRef.current;
-        if (rec && rec.state === "recording") {
-          rec.stop(); // triggers onstop → sendChunk
-          recorderRef.current = createRecorder();
-        }
-      }, CHUNK_MS);
-
-      // Duration counter
+      // Common setup for both paths
       setDuration(0);
       durationIntervalRef.current = setInterval(() => {
         setDuration((d) => d + 1);
@@ -191,7 +232,8 @@ export function useVoiceInput({
       setFullTranscript("");
       setInterimText("");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to start recording";
+      const msg =
+        err instanceof Error ? err.message : "Failed to start recording";
       onErrorRef.current?.(msg);
       stopRecording();
     }
@@ -211,9 +253,15 @@ export function useVoiceInput({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (isTauri) {
+        import("@tauri-apps/api/core").then(({ invoke }) => {
+          invoke("stop_voice_recording").catch(() => {});
+        });
+      }
       streamRef.current?.getTracks().forEach((t) => t.stop());
       if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
-      if (durationIntervalRef.current) clearInterval(durationIntervalRef.current);
+      if (durationIntervalRef.current)
+        clearInterval(durationIntervalRef.current);
     };
   }, []);
 
