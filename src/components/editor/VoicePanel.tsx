@@ -20,6 +20,7 @@ function formatDuration(seconds: number): string {
 
 export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0); // 0 = manual
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
@@ -33,7 +34,10 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
     duration,
     toggle,
     clearTranscript,
-  } = useVoiceInput({ language: "ja-JP" });
+  } = useVoiceInput({
+    language: "ja-JP",
+    onError: (msg) => setVoiceError(msg),
+  });
 
   // Auto-scroll to bottom when new text arrives
   useEffect(() => {
@@ -124,6 +128,12 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
 
   return (
     <div className="border-t border-border bg-background">
+      {/* Error banner */}
+      {voiceError && (
+        <div className="px-4 py-2 text-xs text-destructive bg-destructive/10 border-b border-destructive/20">
+          {voiceError}
+        </div>
+      )}
       {/* Transcript area */}
       {(fullTranscript || isRecording) && (
         <ScrollArea className="max-h-32">
@@ -152,7 +162,7 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
           variant={isRecording ? "destructive" : "default"}
           size="sm"
           className="gap-1.5"
-          onClick={toggle}
+          onClick={() => { setVoiceError(null); toggle(); }}
         >
           {isRecording ? (
             <>

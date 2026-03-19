@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-cli/schema.json",
   "productName": "MarkFlow",
-  "version": "0.3.0-beta.20",
+  "version": "0.3.0-beta.21",
   "identifier": "com.markflow.editor",
   "build": {
     "frontendDist": "../dist",
@@ -44,7 +44,8 @@
     "createUpdaterArtifacts": true,
     "macOS": {
       "signingIdentity": "Developer ID Application: Ryohei Mita (HHVN9NX6B8)",
-      "minimumSystemVersion": "10.13"
+      "minimumSystemVersion": "10.13",
+      "infoPlist": "Info.plist"
     }
   },
   "plugins": {
