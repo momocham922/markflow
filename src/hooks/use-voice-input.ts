@@ -254,7 +254,11 @@ export function useVoiceInput({
       setInterimText("");
     } catch (err) {
       const msg =
-        err instanceof Error ? err.message : "Failed to start recording";
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Failed to start recording";
       onErrorRef.current?.(msg);
       stopRecording();
     }

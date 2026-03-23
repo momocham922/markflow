@@ -151,12 +151,16 @@ export function Sidebar() {
       if (teamsWithDocs.length === 1) {
         setExpandedTeams(new Set([teamsWithDocs[0].id]));
       }
-      // Sync team doc titles to app-store so Editor toolbar reflects renames
+      // Sync team doc titles to app-store so Editor toolbar reflects renames.
+      // Only update titles for non-owned docs — the owner's local title is
+      // authoritative and will be pushed to Firestore via syncToCloud.
+      // Overwriting owned docs here causes a race condition where a stale
+      // Firestore title ("Untitled") reverts a local rename.
       const appStore = useAppStore.getState();
       for (const team of teamsWithDocs) {
         for (const td of team.docs) {
           const local = appStore.documents.find((d) => d.id === td.id);
-          if (local && local.title !== td.title) {
+          if (local && local.title !== td.title && local.ownerId !== uid) {
             appStore.updateDocument(td.id, { title: td.title, titlePinned: true });
           }
         }

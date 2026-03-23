@@ -818,11 +818,17 @@ fn start_voice_recording() -> Result<(), String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
-        .ok_or("No microphone found. Check System Settings > Privacy & Security > Microphone.")?;
+        .ok_or("マイクが見つかりません。System Settings > Privacy & Security > Microphone で MarkFlow を許可してください。")?;
 
     let supported = device
         .default_input_config()
-        .map_err(|e| format!("Audio config error: {}", e))?;
+        .map_err(|e| format!("マイク設定エラー: {}。マイク権限を確認してください。", e))?;
+
+    println!("[voice] Device: {:?}, format: {:?}, rate: {}, ch: {}",
+        device.name().unwrap_or_default(),
+        supported.sample_format(),
+        supported.sample_rate().0,
+        supported.channels());
 
     let sample_format = supported.sample_format();
     let sample_rate = supported.sample_rate().0;
@@ -850,7 +856,7 @@ fn start_voice_recording() -> Result<(), String> {
                 |err| eprintln!("[voice] Stream error: {}", err),
                 None,
             )
-            .map_err(|e| format!("Failed to start recording: {}", e))?,
+            .map_err(|e| format!("録音開始失敗: {}。マイク権限を確認してください。", e))?,
         cpal::SampleFormat::I16 => device
             .build_input_stream(
                 &config,
@@ -867,8 +873,8 @@ fn start_voice_recording() -> Result<(), String> {
                 |err| eprintln!("[voice] Stream error: {}", err),
                 None,
             )
-            .map_err(|e| format!("Failed to start recording: {}", e))?,
-        fmt => return Err(format!("Unsupported audio format: {:?}", fmt)),
+            .map_err(|e| format!("録音開始失敗: {}。マイク権限を確認してください。", e))?,
+        fmt => return Err(format!("未対応のオーディオ形式: {:?}", fmt)),
     };
 
     stream
