@@ -808,10 +808,30 @@ fn stop_voice_recording_inner() {
     }
 }
 
+/// Request microphone permission via AVFoundation (triggers macOS system dialog).
+/// cpal uses CoreAudio directly and does NOT trigger the permission prompt on its own.
+#[cfg(target_os = "macos")]
+fn ensure_microphone_permission() -> Result<(), String> {
+    extern "C" {
+        fn request_microphone_permission() -> i32;
+    }
+    let result = unsafe { request_microphone_permission() };
+    match result {
+        1 => Ok(()),
+        0 => Err("マイクへのアクセスが拒否されています。\nSystem Settings > Privacy & Security > Microphone で MarkFlow を許可してください。".into()),
+        _ => Err("マイク権限リクエストがタイムアウトしました。".into()),
+    }
+}
+
 /// Start capturing audio from the default input device via CoreAudio (cpal).
 #[tauri::command]
 fn start_voice_recording() -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    // Request microphone permission first (macOS only).
+    // Without this, cpal silently receives no audio data.
+    #[cfg(target_os = "macos")]
+    ensure_microphone_permission()?;
 
     stop_voice_recording_inner();
 
