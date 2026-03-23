@@ -56,7 +56,6 @@ export function useVoiceInput({
     null,
   );
   const transcriptRef = useRef("");
-  const processingRef = useRef(false);
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
 
@@ -77,17 +76,21 @@ export function useVoiceInput({
       } else {
         if (input.size < 200) return;
       }
-      if (processingRef.current) return;
-      processingRef.current = true;
 
       try {
         const user = useAuthStore.getState().user;
-        if (!user) return;
+        if (!user) {
+          console.warn("[voice] No authenticated user — skipping transcription");
+          return;
+        }
         const token = await user.getIdToken();
 
         const base64 =
           typeof input === "string" ? input : await blobToBase64(input);
         if (!base64) return;
+
+        const byteLen = Math.round((base64.length * 3) / 4);
+        console.log(`[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`);
 
         const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
           method: "POST",
@@ -109,11 +112,14 @@ export function useVoiceInput({
         });
 
         if (!res.ok) {
-          console.warn("[voice] Transcription failed:", res.status);
+          const errText = await res.text();
+          console.error("[voice] Transcription failed:", res.status, errText);
+          onErrorRef.current?.(`Transcription error: ${res.status}`);
           return;
         }
 
         const data = await res.json();
+        console.log("[voice] STT response:", JSON.stringify(data));
         if (data.text?.trim()) {
           transcriptRef.current +=
             (transcriptRef.current ? " " : "") + data.text.trim();
@@ -123,8 +129,7 @@ export function useVoiceInput({
         }
       } catch (err) {
         console.error("[voice] Transcription error:", err);
-      } finally {
-        processingRef.current = false;
+        onErrorRef.current?.(`Transcription error: ${err}`);
       }
     },
     [language],
@@ -166,7 +171,27 @@ export function useVoiceInput({
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("start_voice_recording");
 
-        // Poll Rust buffer every CHUNK_MS and send to transcription API
+        // Poll Rust buffer every CHUNK_MS and send to transcription API.
+        // Use a queue to avoid losing audio chunks during API calls.
+        const chunkQueue: Array<{ audio: string; sample_rate: number }> = [];
+        let sending = false;
+
+        const processQueue = async () => {
+          if (sending || chunkQueue.length === 0) return;
+          sending = true;
+          const item = chunkQueue.shift()!;
+          try {
+            await sendChunk(item.audio, {
+              encoding: "LINEAR16",
+              sampleRate: item.sample_rate,
+            });
+          } finally {
+            sending = false;
+            // Process next queued chunk if any
+            if (chunkQueue.length > 0) processQueue();
+          }
+        };
+
         chunkIntervalRef.current = setInterval(async () => {
           try {
             const { invoke: inv } = await import("@tauri-apps/api/core");
@@ -175,10 +200,11 @@ export function useVoiceInput({
               sample_rate: number;
             } | null>("get_voice_chunk");
             if (result) {
-              sendChunk(result.audio, {
-                encoding: "LINEAR16",
-                sampleRate: result.sample_rate,
-              });
+              console.log(`[voice] Got chunk from Rust: ${result.audio.length} base64 chars, rate=${result.sample_rate}`);
+              chunkQueue.push(result);
+              processQueue();
+            } else {
+              console.log("[voice] No audio data in buffer");
             }
           } catch (e) {
             console.error("[voice] Chunk error:", e);
