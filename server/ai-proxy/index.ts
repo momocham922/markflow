@@ -7,7 +7,7 @@ const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 const GCP_REGION = process.env.GCP_REGION || "us-east5";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const NANOBANANA_MODEL = process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
-const STT_LOCATION = process.env.STT_LOCATION || "global";
+const STT_LOCATION = process.env.STT_LOCATION || "us-central1";
 const STT_MODEL = process.env.STT_MODEL || "chirp_2";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
@@ -90,7 +90,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const accessToken = await getGcpAccessToken();
-      const sttUrl = `https://speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`;
+      const sttUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`;
 
       // Support explicit encoding (LINEAR16 from Rust) or auto-detect (webm/opus from browser)
       const encoding: string | undefined = parsed.encoding;
