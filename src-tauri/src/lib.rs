@@ -969,9 +969,17 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    println!("[voice] Chunk: {} raw samples @ {}Hz → {} samples @ {}Hz ({:.1}s)",
+    // Voice Activity Detection: skip silence to avoid STT hallucinations
+    // ("はい。はい。" loops, number strings, etc.)
+    let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
+    if rms < 0.005 {
+        println!("[voice] Skipping silent chunk (RMS={:.6})", rms);
+        return Ok(None);
+    }
+
+    println!("[voice] Chunk: {} raw @ {}Hz → {} @ {}Hz ({:.1}s, RMS={:.4})",
         raw_sample_count, sample_rate, resampled.len(), output_rate,
-        resampled.len() as f64 / output_rate as f64);
+        resampled.len() as f64 / output_rate as f64, rms);
 
     // f32 → i16 (LINEAR16 PCM)
     let mut pcm_bytes = Vec::with_capacity(resampled.len() * 2);
