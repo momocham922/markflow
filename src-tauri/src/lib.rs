@@ -914,6 +914,7 @@ fn stop_voice_recording() {
 }
 
 /// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
+/// Audio is resampled to 16 kHz mono for optimal STT quality.
 #[tauri::command]
 fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     use base64::Engine;
@@ -929,6 +930,7 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
 
     let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
     let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
+    let raw_sample_count = samples.len();
 
     // Mix to mono if multi-channel
     let mono: Vec<f32> = if channels > 1 {
@@ -940,16 +942,47 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         samples
     };
 
+    // Resample to 16 kHz for optimal STT quality
+    const TARGET_RATE: u32 = 16000;
+    let resampled = if sample_rate > TARGET_RATE {
+        let ratio = sample_rate as f64 / TARGET_RATE as f64;
+        let new_len = (mono.len() as f64 / ratio) as usize;
+        let mut out = Vec::with_capacity(new_len);
+        for i in 0..new_len {
+            let src = i as f64 * ratio;
+            let idx = src as usize;
+            let frac = src - idx as f64;
+            // Linear interpolation for better quality
+            let s0 = mono[idx.min(mono.len() - 1)];
+            let s1 = mono[(idx + 1).min(mono.len() - 1)];
+            out.push(s0 + (s1 - s0) * frac as f32);
+        }
+        out
+    } else {
+        mono
+    };
+    let output_rate = if sample_rate > TARGET_RATE { TARGET_RATE } else { sample_rate };
+
+    // Skip chunks shorter than 0.3 seconds (too short for useful STT)
+    let min_samples = (output_rate as usize) * 3 / 10;
+    if resampled.len() < min_samples {
+        return Ok(None);
+    }
+
+    println!("[voice] Chunk: {} raw samples @ {}Hz → {} samples @ {}Hz ({:.1}s)",
+        raw_sample_count, sample_rate, resampled.len(), output_rate,
+        resampled.len() as f64 / output_rate as f64);
+
     // f32 → i16 (LINEAR16 PCM)
-    let mut pcm_bytes = Vec::with_capacity(mono.len() * 2);
-    for &s in &mono {
+    let mut pcm_bytes = Vec::with_capacity(resampled.len() * 2);
+    for &s in &resampled {
         let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
         pcm_bytes.extend_from_slice(&sample.to_le_bytes());
     }
 
     Ok(Some(VoiceChunkData {
         audio: base64::engine::general_purpose::STANDARD.encode(&pcm_bytes),
-        sample_rate,
+        sample_rate: output_rate,
     }))
 }
 

@@ -129,7 +129,8 @@ const server = http.createServer(async (req, res) => {
 
       if (!sttRes.ok) {
         const errText = await sttRes.text();
-        console.error("[voice] STT error:", sttRes.status, errText);
+        const audioBytes = Math.round((audio.length * 3) / 4);
+        console.error(`[voice] STT error: ${sttRes.status} | encoding=${encoding} rate=${sampleRate} audioBytes=${audioBytes} | ${errText}`);
         res.writeHead(sttRes.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: errText }));
         return;
