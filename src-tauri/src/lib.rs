@@ -969,10 +969,10 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Voice Activity Detection: skip silence to avoid STT hallucinations
-    // ("はい。はい。" loops, number strings, etc.)
+    // Voice Activity Detection: skip silence/noise to avoid STT hallucinations
+    // ("はい。はい。" loops, "え、え、え" etc.)
     let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
-    if rms < 0.005 {
+    if rms < 0.02 {
         println!("[voice] Skipping silent chunk (RMS={:.6})", rms);
         return Ok(None);
     }

@@ -120,12 +120,22 @@ export function useVoiceInput({
 
         const data = await res.json();
         console.log("[voice] STT response:", JSON.stringify(data));
-        if (data.text?.trim()) {
-          transcriptRef.current +=
-            (transcriptRef.current ? " " : "") + data.text.trim();
-          setFullTranscript(transcriptRef.current);
-          setInterimText(data.text.trim());
-          onTranscriptRef.current?.(data.text.trim());
+        const text = data.text?.trim();
+        if (text) {
+          // Suppress STT hallucination: repeated short phrases
+          // e.g. "え、え、え、え" or "はい。はい。はい。"
+          const isHallucination =
+            text.length <= 20 &&
+            /^(.{1,4}[、。,.]?\s*)\1{2,}/.test(text);
+          if (isHallucination) {
+            console.warn("[voice] Suppressed hallucination:", text);
+          } else {
+            transcriptRef.current +=
+              (transcriptRef.current ? " " : "") + text;
+            setFullTranscript(transcriptRef.current);
+            setInterimText(text);
+            onTranscriptRef.current?.(text);
+          }
         }
       } catch (err) {
         console.error("[voice] Transcription error:", err);
