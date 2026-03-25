@@ -973,15 +973,19 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     }
 
     // Adaptive Voice Activity Detection: auto-calibrates per device
+    // Start with a very low noise floor and let it adapt upward during quiet periods.
+    // This avoids initializing too high if the user speaks immediately.
     let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
     {
         let mut nf = VOICE_NOISE_FLOOR.lock().unwrap();
         if *nf == 0.0 {
-            // First chunk: initialize noise floor
-            *nf = rms;
-        } else if rms < *nf * 2.0 {
-            // Update noise floor slowly during quiet periods
-            *nf = *nf * 0.93 + rms * 0.07;
+            // Initialize to a very low value — will adapt upward during silence
+            *nf = 0.001;
+        }
+        // Only update noise floor during quiet periods (rms near current floor)
+        if rms < *nf * 2.0 {
+            // Cap at 0.01 to prevent floor from drifting too high
+            *nf = (*nf * 0.93 + rms * 0.07).min(0.01);
         }
         // Speech threshold: 3x noise floor, with absolute minimum of 0.003
         let threshold = (*nf * 3.0).max(0.003);
