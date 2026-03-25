@@ -972,30 +972,35 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Adaptive Voice Activity Detection: auto-calibrates per device
-    // Start with a very low noise floor and let it adapt upward during quiet periods.
-    // This avoids initializing too high if the user speaks immediately.
+    // Two-stage Voice Activity Detection:
+    // 1. Adaptive noise gate (RMS vs noise floor)
+    // 2. Crest factor (peak/RMS ratio) — speech has sharp peaks, noise is uniform
     let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
+    let peak = resampled.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    let crest = if rms > 0.0 { peak / rms } else { 0.0 };
     {
         let mut nf = VOICE_NOISE_FLOOR.lock().unwrap();
         if *nf == 0.0 {
-            // Initialize to a very low value — will adapt upward during silence
             *nf = 0.001;
         }
-        // Only update noise floor during quiet periods (rms near current floor)
         if rms < *nf * 2.0 {
-            // Cap at 0.01 to prevent floor from drifting too high
             *nf = (*nf * 0.93 + rms * 0.07).min(0.01);
         }
-        // Speech threshold: 3x noise floor, with absolute minimum of 0.003
         let threshold = (*nf * 3.0).max(0.003);
+        // Stage 1: energy below noise threshold
         if rms < threshold {
-            println!("[voice] Below threshold (RMS={:.5}, floor={:.5}, thresh={:.5})", rms, *nf, threshold);
+            println!("[voice] Skip: low energy (RMS={:.5}, floor={:.5}, thresh={:.5})", rms, *nf, threshold);
             return Ok(None);
         }
-        println!("[voice] Chunk: {} raw @ {}Hz → {} @ {}Hz ({:.1}s, RMS={:.4}, floor={:.5})",
+        // Stage 2: crest factor too low = uniform noise, not speech
+        // Speech typically has crest > 3.0; Gaussian noise ≈ 1.7
+        if crest < 2.5 {
+            println!("[voice] Skip: low crest factor (crest={:.2}, RMS={:.5}) — likely noise", crest, rms);
+            return Ok(None);
+        }
+        println!("[voice] Chunk: {} @ {}Hz → {} @ {}Hz ({:.1}s, RMS={:.4}, crest={:.1}, floor={:.5})",
             raw_sample_count, sample_rate, resampled.len(), output_rate,
-            resampled.len() as f64 / output_rate as f64, rms, *nf);
+            resampled.len() as f64 / output_rate as f64, rms, crest, *nf);
     }
 
     // f32 → i16 (LINEAR16 PCM)

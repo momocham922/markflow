@@ -122,11 +122,20 @@ export function useVoiceInput({
         console.log("[voice] STT response:", JSON.stringify(data));
         const text = data.text?.trim();
         if (text) {
-          // Suppress STT hallucination: repeated short phrases
-          // e.g. "え、え、え、え" or "はい。はい。はい。"
-          const isHallucination =
-            text.length <= 20 &&
-            /^(.{1,4}[、。,.]?\s*)\1{2,}/.test(text);
+          // Multi-pattern hallucination suppression
+          const isHallucination = (() => {
+            // 1. Repeated short phrases: え、え、え / はい。はい。 / ん、ん、ん
+            if (text.length <= 30 && /^(.{1,5}[、。,.!？\s]*)\1{2,}/.test(text)) return true;
+            // 2. Single filler character repeated with punctuation
+            if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
+            // 3. Common STT silence hallucinations (Japanese)
+            if (/^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(text)) return true;
+            // 4. Only numbers/punctuation (noise artifacts)
+            if (/^[\d、。,.\s-]+$/.test(text)) return true;
+            // 5. Very short text (1-2 chars) that's just a filler
+            if (text.length <= 2 && /^[えあうんはへほおいのでがをにと]$/.test(text)) return true;
+            return false;
+          })();
           if (isHallucination) {
             console.warn("[voice] Suppressed hallucination:", text);
           } else {
