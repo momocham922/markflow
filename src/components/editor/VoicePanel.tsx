@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Mic, MicOff, Sparkles, Trash2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { auth } from "@/services/firebase";
@@ -136,23 +135,24 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
       )}
       {/* Transcript area */}
       {(fullTranscript || isRecording) && (
-        <ScrollArea className="max-h-32">
-          <div ref={scrollRef} className="px-4 py-2 text-sm leading-relaxed">
-            {fullTranscript && (
-              <span className="text-foreground">{fullTranscript}</span>
-            )}
-            {isRecording && interimText && (
-              <span className="text-muted-foreground animate-pulse ml-1">
-                {interimText}
-              </span>
-            )}
-            {isRecording && !fullTranscript && !interimText && (
-              <span className="text-muted-foreground animate-pulse">
-                Listening...
-              </span>
-            )}
-          </div>
-        </ScrollArea>
+        <div
+          ref={scrollRef}
+          className="max-h-32 overflow-y-auto px-4 py-2 text-sm leading-relaxed wrap-break-word"
+        >
+          {fullTranscript && (
+            <span className="text-foreground">{fullTranscript}</span>
+          )}
+          {isRecording && interimText && (
+            <span className="text-muted-foreground animate-pulse ml-1">
+              {interimText}
+            </span>
+          )}
+          {isRecording && !fullTranscript && !interimText && (
+            <span className="text-muted-foreground animate-pulse">
+              Listening...
+            </span>
+          )}
+        </div>
       )}
 
       {/* Controls */}
