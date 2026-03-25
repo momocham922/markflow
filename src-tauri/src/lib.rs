@@ -782,6 +782,8 @@ static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
+/// Adaptive noise floor for VAD — auto-calibrates per device
+static VOICE_NOISE_FLOOR: Mutex<f32> = Mutex::new(0.0);
 
 /// Voice chunk returned to frontend: raw PCM base64 + sample rate.
 #[derive(serde::Serialize)]
@@ -857,6 +859,7 @@ fn start_voice_recording() -> Result<(), String> {
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
     VOICE_BUFFER.lock().unwrap().clear();
+    *VOICE_NOISE_FLOOR.lock().unwrap() = 0.0; // reset adaptive VAD
     VOICE_ACTIVE.store(true, Ordering::SeqCst);
 
     let config: cpal::StreamConfig = supported.into();
@@ -969,17 +972,27 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Voice Activity Detection: skip silence/noise to avoid STT hallucinations
-    // ("はい。はい。" loops, "え、え、え" etc.)
+    // Adaptive Voice Activity Detection: auto-calibrates per device
     let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
-    if rms < 0.02 {
-        println!("[voice] Skipping silent chunk (RMS={:.6})", rms);
-        return Ok(None);
+    {
+        let mut nf = VOICE_NOISE_FLOOR.lock().unwrap();
+        if *nf == 0.0 {
+            // First chunk: initialize noise floor
+            *nf = rms;
+        } else if rms < *nf * 2.0 {
+            // Update noise floor slowly during quiet periods
+            *nf = *nf * 0.93 + rms * 0.07;
+        }
+        // Speech threshold: 3x noise floor, with absolute minimum of 0.003
+        let threshold = (*nf * 3.0).max(0.003);
+        if rms < threshold {
+            println!("[voice] Below threshold (RMS={:.5}, floor={:.5}, thresh={:.5})", rms, *nf, threshold);
+            return Ok(None);
+        }
+        println!("[voice] Chunk: {} raw @ {}Hz → {} @ {}Hz ({:.1}s, RMS={:.4}, floor={:.5})",
+            raw_sample_count, sample_rate, resampled.len(), output_rate,
+            resampled.len() as f64 / output_rate as f64, rms, *nf);
     }
-
-    println!("[voice] Chunk: {} raw @ {}Hz → {} @ {}Hz ({:.1}s, RMS={:.4})",
-        raw_sample_count, sample_rate, resampled.len(), output_rate,
-        resampled.len() as f64 / output_rate as f64, rms);
 
     // f32 → i16 (LINEAR16 PCM)
     let mut pcm_bytes = Vec::with_capacity(resampled.len() * 2);
