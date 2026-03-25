@@ -782,8 +782,81 @@ static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
-/// Adaptive noise floor for VAD — auto-calibrates per device
-static VOICE_NOISE_FLOOR: Mutex<f32> = Mutex::new(0.0);
+// ── Silero VAD (neural network voice activity detection) ──
+/// Silero VAD session + LSTM state, combined in one Mutex for simplicity
+static VAD: Mutex<Option<(ort::session::Session, Vec<f32>)>> = Mutex::new(None);
+
+/// Run Silero VAD on 16kHz mono audio. Returns true if speech detected.
+fn silero_vad_has_speech(audio: &[f32]) -> bool {
+    use ndarray::{Array1, Array2, Array3};
+
+    let mut vad_guard = VAD.lock().unwrap();
+    if vad_guard.is_none() {
+        let model_bytes = include_bytes!("../resources/silero_vad.onnx");
+        match ort::session::Session::builder()
+            .and_then(|mut b| b.commit_from_memory(model_bytes))
+        {
+            Ok(session) => {
+                *vad_guard = Some((session, vec![0.0f32; 2 * 1 * 128]));
+            }
+            Err(e) => {
+                println!("[vad] Failed to load Silero model: {}", e);
+                return true; // Pass through on error
+            }
+        }
+    }
+    let (session, state_data) = vad_guard.as_mut().unwrap();
+    let window_size: usize = 512; // 32ms windows at 16kHz
+
+    let mut speech_frames = 0u32;
+    let mut total_frames = 0u32;
+
+    for chunk in audio.chunks(window_size) {
+        if chunk.len() < window_size { break; }
+        total_frames += 1;
+
+        let input = ort::value::Tensor::from_array(
+            Array2::from_shape_vec((1, window_size), chunk.to_vec()).unwrap()
+        ).unwrap();
+        let state = ort::value::Tensor::from_array(
+            Array3::from_shape_vec((2, 1, 128), state_data.clone()).unwrap()
+        ).unwrap();
+        let sr = ort::value::Tensor::from_array(
+            Array1::from_vec(vec![16000i64])
+        ).unwrap();
+
+        let outputs = match session.run(ort::inputs![
+            "input" => input,
+            "state" => state,
+            "sr" => sr,
+        ]) {
+            Ok(o) => o,
+            Err(e) => {
+                println!("[vad] Silero inference error: {}", e);
+                return true; // On error, pass through (don't block audio)
+            }
+        };
+
+        // Extract speech probability
+        if let Ok((_, prob_data)) = outputs["output"].try_extract_tensor::<f32>() {
+            let prob: f32 = prob_data.first().copied().unwrap_or(0.0);
+            if prob > 0.5 {
+                speech_frames += 1;
+            }
+        }
+
+        // Update LSTM state for next window
+        if let Ok((_, new_state)) = outputs["stateN"].try_extract_tensor::<f32>() {
+            *state_data = new_state.to_vec();
+        }
+    }
+
+    let ratio = if total_frames > 0 { speech_frames as f32 / total_frames as f32 } else { 0.0 };
+    println!("[vad] Silero: {}/{} frames speech ({:.0}%)", speech_frames, total_frames, ratio * 100.0);
+
+    // Consider chunk as speech if > 10% of frames contain speech
+    total_frames > 0 && ratio > 0.10
+}
 
 /// Voice chunk returned to frontend: raw PCM base64 + sample rate.
 #[derive(serde::Serialize)]
@@ -859,7 +932,10 @@ fn start_voice_recording() -> Result<(), String> {
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
     VOICE_BUFFER.lock().unwrap().clear();
-    *VOICE_NOISE_FLOOR.lock().unwrap() = 0.0; // reset adaptive VAD
+    // Reset Silero VAD LSTM state for new recording session
+    if let Some((_, ref mut state)) = *VAD.lock().unwrap() {
+        state.fill(0.0);
+    }
     VOICE_ACTIVE.store(true, Ordering::SeqCst);
 
     let config: cpal::StreamConfig = supported.into();
@@ -933,7 +1009,7 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
 
     let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
     let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
-    let raw_sample_count = samples.len();
+    let _raw_sample_count = samples.len();
 
     // Mix to mono if multi-channel
     let mono: Vec<f32> = if channels > 1 {
@@ -972,35 +1048,9 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Two-stage Voice Activity Detection:
-    // 1. Adaptive noise gate (RMS vs noise floor)
-    // 2. Crest factor (peak/RMS ratio) — speech has sharp peaks, noise is uniform
-    let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
-    let peak = resampled.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    let crest = if rms > 0.0 { peak / rms } else { 0.0 };
-    {
-        let mut nf = VOICE_NOISE_FLOOR.lock().unwrap();
-        if *nf == 0.0 {
-            *nf = 0.001;
-        }
-        if rms < *nf * 2.0 {
-            *nf = (*nf * 0.93 + rms * 0.07).min(0.01);
-        }
-        let threshold = (*nf * 3.0).max(0.003);
-        // Stage 1: energy below noise threshold
-        if rms < threshold {
-            println!("[voice] Skip: low energy (RMS={:.5}, floor={:.5}, thresh={:.5})", rms, *nf, threshold);
-            return Ok(None);
-        }
-        // Stage 2: crest factor too low = uniform noise, not speech
-        // Speech typically has crest > 3.0; Gaussian noise ≈ 1.7
-        if crest < 2.5 {
-            println!("[voice] Skip: low crest factor (crest={:.2}, RMS={:.5}) — likely noise", crest, rms);
-            return Ok(None);
-        }
-        println!("[voice] Chunk: {} @ {}Hz → {} @ {}Hz ({:.1}s, RMS={:.4}, crest={:.1}, floor={:.5})",
-            raw_sample_count, sample_rate, resampled.len(), output_rate,
-            resampled.len() as f64 / output_rate as f64, rms, crest, *nf);
+    // Silero VAD: neural network voice activity detection
+    if !silero_vad_has_speech(&resampled) {
+        return Ok(None);
     }
 
     // f32 → i16 (LINEAR16 PCM)
