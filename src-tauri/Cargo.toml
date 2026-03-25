@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.3.0-beta.38"
+version = "0.3.0-beta.39"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -31,6 +31,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 url = "2"
 tokio = { version = "1", features = ["time"] }
 cpal = "0.15"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "tls-native"] }
+ndarray = { version = "0.17", features = ["std"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"

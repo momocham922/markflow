@@ -782,8 +782,100 @@ static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
-/// Adaptive noise floor for VAD — auto-calibrates per device
-static VOICE_NOISE_FLOOR: Mutex<f32> = Mutex::new(0.0);
+
+// ── Silero VAD ──
+// Session + LSTM state + 64-sample context (prepended to each 512-sample window)
+struct VadState {
+    session: ort::session::Session,
+    state: Vec<f32>,    // [2, 1, 128] = 256 floats
+    context: Vec<f32>,  // last 64 samples from previous window
+}
+static VAD: Mutex<Option<VadState>> = Mutex::new(None);
+
+/// Run Silero VAD on 16kHz mono audio. Returns true if speech detected.
+fn silero_vad_has_speech(audio: &[f32]) -> bool {
+    use ndarray::{Array0, Array2, Array3};
+
+    let mut vad = VAD.lock().unwrap();
+    if vad.is_none() {
+        let model_bytes = include_bytes!("../resources/silero_vad.onnx");
+        match ort::session::Session::builder()
+            .and_then(|mut b| b.commit_from_memory(model_bytes))
+        {
+            Ok(session) => {
+                println!("[vad] Silero VAD loaded");
+                *vad = Some(VadState {
+                    session,
+                    state: vec![0.0f32; 2 * 1 * 128],
+                    context: vec![0.0f32; 64],
+                });
+            }
+            Err(e) => {
+                println!("[vad] Failed to load Silero: {}", e);
+                return true;
+            }
+        }
+    }
+    let vs = vad.as_mut().unwrap();
+    let window = 512usize;
+    let ctx_size = 64usize;
+
+    let mut speech_frames = 0u32;
+    let mut total_frames = 0u32;
+    let mut max_prob: f32 = 0.0;
+
+    for chunk in audio.chunks(window) {
+        if chunk.len() < window { break; }
+        total_frames += 1;
+
+        // Prepend 64-sample context (critical for Silero VAD accuracy)
+        let mut input_data = Vec::with_capacity(ctx_size + window);
+        input_data.extend_from_slice(&vs.context);
+        input_data.extend_from_slice(chunk);
+        // input_data is now 576 samples
+
+        let input = ort::value::Tensor::from_array(
+            Array2::from_shape_vec((1, ctx_size + window), input_data).unwrap()
+        ).unwrap();
+        let state = ort::value::Tensor::from_array(
+            Array3::from_shape_vec((2, 1, 128), vs.state.clone()).unwrap()
+        ).unwrap();
+        let sr = ort::value::Tensor::from_array(
+            Array0::from_elem((), 16000i64)
+        ).unwrap();
+
+        let outputs = match vs.session.run(ort::inputs![
+            "input" => input,
+            "state" => state,
+            "sr" => sr,
+        ]) {
+            Ok(o) => o,
+            Err(e) => {
+                println!("[vad] inference error: {}", e);
+                return true;
+            }
+        };
+
+        if let Ok((_, prob_data)) = outputs["output"].try_extract_tensor::<f32>() {
+            let prob: f32 = prob_data.first().copied().unwrap_or(0.0);
+            if prob > max_prob { max_prob = prob; }
+            if prob > 0.5 { speech_frames += 1; }
+        }
+        if let Ok((_, new_state)) = outputs["stateN"].try_extract_tensor::<f32>() {
+            vs.state = new_state.to_vec();
+        }
+
+        // Update context: last 64 samples of this chunk
+        vs.context = chunk[window - ctx_size..].to_vec();
+    }
+
+    println!("[vad] {}/{} speech ({:.0}%), max={:.3}",
+        speech_frames, total_frames,
+        if total_frames > 0 { speech_frames as f32 / total_frames as f32 * 100.0 } else { 0.0 },
+        max_prob);
+
+    speech_frames > 0
+}
 
 /// Voice chunk returned to frontend: raw PCM base64 + sample rate.
 #[derive(serde::Serialize)]
@@ -859,7 +951,11 @@ fn start_voice_recording() -> Result<(), String> {
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
     VOICE_BUFFER.lock().unwrap().clear();
-    *VOICE_NOISE_FLOOR.lock().unwrap() = 0.0;
+    // Reset Silero VAD state for new recording session
+    if let Some(ref mut vs) = *VAD.lock().unwrap() {
+        vs.state.fill(0.0);
+        vs.context.fill(0.0);
+    }
     VOICE_ACTIVE.store(true, Ordering::SeqCst);
 
     let config: cpal::StreamConfig = supported.into();
@@ -972,24 +1068,9 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Adaptive VAD with crest factor
-    let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
-    let peak = resampled.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    let crest = if rms > 0.0 { peak / rms } else { 0.0 };
-    {
-        let mut nf = VOICE_NOISE_FLOOR.lock().unwrap();
-        if *nf == 0.0 { *nf = 0.001; }
-        if rms < *nf * 2.0 {
-            *nf = (*nf * 0.93 + rms * 0.07).min(0.01);
-        }
-        let threshold = (*nf * 3.0).max(0.003);
-        if rms < threshold {
-            return Ok(None);
-        }
-        // Crest factor: speech has sharp peaks (>3), noise is uniform (~1.7)
-        if crest < 2.5 {
-            return Ok(None);
-        }
+    // Silero VAD: neural network voice activity detection
+    if !silero_vad_has_speech(&resampled) {
+        return Ok(None);
     }
 
     // f32 → i16 (LINEAR16 PCM)
