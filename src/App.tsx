@@ -190,9 +190,9 @@ function App() {
     return () => clearTimeout(timer);
   }, []);
 
-  // Auto-update check on startup — only checks, never auto-installs
+  // Auto-update check — on startup and every 30 minutes while app is open
   useEffect(() => {
-    const timer = setTimeout(async () => {
+    const checkUpdate = async () => {
       try {
         const { getSetting } = await import("@/services/database");
         const channel = ((await getSetting("update_channel")) || "stable") as "stable" | "beta";
@@ -204,8 +204,10 @@ function App() {
       } catch {
         // Silently ignore update check failures (offline, dev mode, etc.)
       }
-    }, 3000);
-    return () => clearTimeout(timer);
+    };
+    const startupTimer = setTimeout(checkUpdate, 3000);
+    const interval = setInterval(checkUpdate, 30 * 60 * 1000);
+    return () => { clearTimeout(startupTimer); clearInterval(interval); };
   }, []);
 
   const handleInstallUpdate = useCallback(async () => {
