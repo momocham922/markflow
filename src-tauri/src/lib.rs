@@ -788,7 +788,7 @@ static VAD: Mutex<Option<(ort::session::Session, Vec<f32>)>> = Mutex::new(None);
 
 /// Run Silero VAD on 16kHz mono audio. Returns true if speech detected.
 fn silero_vad_has_speech(audio: &[f32]) -> bool {
-    use ndarray::{Array1, Array2, Array3};
+    use ndarray::{Array0, Array2, Array3};
 
     let mut vad_guard = VAD.lock().unwrap();
     if vad_guard.is_none() {
@@ -797,6 +797,7 @@ fn silero_vad_has_speech(audio: &[f32]) -> bool {
             .and_then(|mut b| b.commit_from_memory(model_bytes))
         {
             Ok(session) => {
+                println!("[vad] Silero VAD model loaded successfully");
                 *vad_guard = Some((session, vec![0.0f32; 2 * 1 * 128]));
             }
             Err(e) => {
@@ -810,10 +811,14 @@ fn silero_vad_has_speech(audio: &[f32]) -> bool {
 
     let mut speech_frames = 0u32;
     let mut total_frames = 0u32;
+    let mut max_prob: f32 = 0.0;
 
-    for chunk in audio.chunks(window_size) {
-        if chunk.len() < window_size { break; }
+    // Process every 3rd window for performance (96ms steps)
+    let step = window_size * 3;
+    let mut offset = 0;
+    while offset + window_size <= audio.len() {
         total_frames += 1;
+        let chunk = &audio[offset..offset + window_size];
 
         let input = ort::value::Tensor::from_array(
             Array2::from_shape_vec((1, window_size), chunk.to_vec()).unwrap()
@@ -821,8 +826,9 @@ fn silero_vad_has_speech(audio: &[f32]) -> bool {
         let state = ort::value::Tensor::from_array(
             Array3::from_shape_vec((2, 1, 128), state_data.clone()).unwrap()
         ).unwrap();
+        // sr must be scalar (shape []) per Silero VAD spec
         let sr = ort::value::Tensor::from_array(
-            Array1::from_vec(vec![16000i64])
+            Array0::from_elem((), 16000i64)
         ).unwrap();
 
         let outputs = match session.run(ort::inputs![
@@ -833,29 +839,33 @@ fn silero_vad_has_speech(audio: &[f32]) -> bool {
             Ok(o) => o,
             Err(e) => {
                 println!("[vad] Silero inference error: {}", e);
-                return true; // On error, pass through (don't block audio)
+                return true; // On error, pass through
             }
         };
 
         // Extract speech probability
         if let Ok((_, prob_data)) = outputs["output"].try_extract_tensor::<f32>() {
             let prob: f32 = prob_data.first().copied().unwrap_or(0.0);
+            if prob > max_prob { max_prob = prob; }
             if prob > 0.5 {
                 speech_frames += 1;
             }
         }
 
-        // Update LSTM state for next window
+        // Update LSTM state
         if let Ok((_, new_state)) = outputs["stateN"].try_extract_tensor::<f32>() {
             *state_data = new_state.to_vec();
         }
+
+        offset += step;
     }
 
     let ratio = if total_frames > 0 { speech_frames as f32 / total_frames as f32 } else { 0.0 };
-    println!("[vad] Silero: {}/{} frames speech ({:.0}%)", speech_frames, total_frames, ratio * 100.0);
+    println!("[vad] Silero: {}/{} frames speech ({:.0}%), max_prob={:.3}, audio_len={}",
+        speech_frames, total_frames, ratio * 100.0, max_prob, audio.len());
 
-    // Consider chunk as speech if > 10% of frames contain speech
-    total_frames > 0 && ratio > 0.10
+    // Pass through if ANY frame has speech (>0.5 probability)
+    speech_frames > 0
 }
 
 /// Voice chunk returned to frontend: raw PCM base64 + sample rate.
