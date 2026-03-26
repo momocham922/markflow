@@ -18,6 +18,7 @@ export interface Document {
   isShared?: boolean;
   titlePinned?: boolean;
   docType?: DocType;
+  ownerName?: string;
 }
 
 export interface CustomPreviewTheme {

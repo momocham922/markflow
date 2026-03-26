@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ThemeCustomizer } from "@/components/ThemeCustomizer";
 import { useAppStore } from "@/stores/app-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { processImagePath } from "@/extensions/image-paste";
 import { isIOS } from "@/platform";
@@ -64,9 +65,17 @@ export function EditorToolbar({
   const ime = useIMEGuard();
 
   const { activeDocId, documents, updateDocument } = useAppStore();
+  const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const tags = activeDoc?.tags ?? [];
   const { view } = useEditorStore();
+
+  // Ownership badge for shared/team docs
+  const isSharedOrTeam = activeDoc?.isShared || activeDoc?.teamId;
+  const isOwner = isSharedOrTeam && activeDoc?.ownerId === user?.uid;
+  const ownerLabel = isOwner
+    ? (user?.displayName || user?.email || "You")
+    : (activeDoc?.ownerName || null);
 
   const addTag = (value: string) => {
     const tag = value.trim().toLowerCase();
@@ -169,6 +178,11 @@ export function EditorToolbar({
                 <Pencil className="h-2.5 w-2.5 opacity-50" />
               </span>
             )
+          )}
+          {isSharedOrTeam && (
+            <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${isOwner ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`} title={ownerLabel ? `Owner: ${ownerLabel}` : undefined}>
+              {activeDoc?.teamId ? "Team" : "Shared"}{ownerLabel ? ` · ${ownerLabel}` : ""}
+            </span>
           )}
           {collabSlot}
         </div>
@@ -280,6 +294,11 @@ export function EditorToolbar({
               <Pencil className="h-2.5 w-2.5 opacity-50" />
             </span>
           )
+        )}
+        {isSharedOrTeam && (
+          <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${isOwner ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`} title={ownerLabel ? `Owner: ${ownerLabel}` : undefined}>
+            {activeDoc?.teamId ? "Team" : "Shared"}{ownerLabel ? ` · ${ownerLabel}` : ""}
+          </span>
         )}
 
         <Separator orientation="vertical" className="h-4 mx-1" />

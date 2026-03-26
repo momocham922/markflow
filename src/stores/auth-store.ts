@@ -383,6 +383,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   folder: fullDoc.folder ?? "/",
                   tags: fullDoc.tags ?? [],
                   ownerId: fullDoc.ownerId,
+                  ownerName: fullDoc.ownerName,
                   isShared: true,
                   docType: (fullDoc.docType as DocType) || "markdown",
                 };
@@ -396,6 +397,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 const updates: Partial<Document> = {
                   isShared: true,
                   titlePinned: true,
+                  ownerName: fullDoc.ownerName,
                 };
                 // Only update title if cloud is newer
                 if (cloudUpdatedAt > localUpdatedAt) {
@@ -465,6 +467,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   folder: fullDoc.folder ?? "/",
                   tags: fullDoc.tags ?? [],
                   ownerId: fullDoc.ownerId,
+                  ownerName: fullDoc.ownerName,
                   teamId: entry.teamId,
                   isShared: true,
                   docType: (fullDoc.docType as DocType) || "markdown",
@@ -480,6 +483,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   isShared: true,
                   teamId: entry.teamId,
                   titlePinned: true,
+                  ownerName: fullDoc.ownerName,
                 };
                 // Only update title if cloud is newer
                 if (cloudTeamUpdatedAt > localTeamUpdatedAt) {
@@ -594,6 +598,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             title: d.title,
             content: d.content,
             ownerId: d.ownerId || user.uid,
+            ownerName: user.displayName || user.email || undefined,
             folder: d.folder,
             tags: d.tags,
             docType: d.docType,

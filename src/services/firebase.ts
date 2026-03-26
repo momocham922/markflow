@@ -387,6 +387,7 @@ export interface FirestoreDocument {
   title: string;
   content: string;
   ownerId: string;
+  ownerName?: string;
   docType?: string;
   collaborators: Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
   tags: string[];
@@ -426,6 +427,7 @@ export async function saveDocumentToFirestore(docData: {
   title: string;
   content: string;
   ownerId: string;
+  ownerName?: string;
   folder?: string;
   tags?: string[];
   docType?: string;
@@ -453,6 +455,7 @@ export async function saveDocumentToFirestore(docData: {
       tags: docData.tags ?? [],
       updatedAt: serverTimestamp(),
     };
+    if (docData.ownerName) payload.ownerName = docData.ownerName;
     if (docData.docType) payload.docType = docData.docType;
 
     if (snap.exists()) {
@@ -473,6 +476,7 @@ export async function createDocumentInFirestore(docData: {
   title: string;
   content: string;
   ownerId: string;
+  ownerName?: string;
   folder?: string;
   tags?: string[];
   docType?: string;
@@ -482,6 +486,7 @@ export async function createDocumentInFirestore(docData: {
     title: docData.title,
     content: docData.content || "",
     ownerId: docData.ownerId,
+    ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
     collaborators: {},
     collaboratorUids: [],
     tags: docData.tags ?? [],

@@ -385,7 +385,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
   if (!initialized) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background">
+      <div className="flex h-screen w-screen items-center justify-center bg-background" data-tauri-drag-region>
         <div className="text-sm text-muted-foreground">Loading...</div>
       </div>
     );
