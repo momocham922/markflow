@@ -19,7 +19,7 @@ import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel } from "./VoicePanel";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
-import { markCollabActive, markCollabInactive } from "@/stores/auth-store";
+import { useAuthStore, markCollabActive, markCollabInactive } from "@/stores/auth-store";
 import { VersionHistory } from "./VersionHistory";
 import { MindMapView } from "./MindMapView";
 import { MindMapEditor, createInitialMindMapData } from "./MindMapEditor";
@@ -136,6 +136,7 @@ mermaid.initialize({ startOnLoad: false, theme: "default" });
 
 export function Editor() {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
+  const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>(isIOS ? "edit" : "split");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -166,14 +167,16 @@ export function Editor() {
       if (!activeDocId) return;
       // Allow intentional content clearing from collab
       const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
-      // Skip auto-title for pinned, shared, or team docs
-      if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
+      // Auto-derive title from first heading for owned docs (or personal docs).
+      // Skip for pinned titles and non-owned shared/team docs (their title comes from cloud).
+      const isOwned = !activeDoc?.ownerId || activeDoc.ownerId === user?.uid;
+      if (!activeDoc?.titlePinned && isOwned) {
         const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, activeDoc?.isShared, activeDoc?.teamId, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, activeDoc?.ownerId, user?.uid, updateDocument],
   );
 
   // Callback: sync Y.Text content → frozen value BEFORE yCollab activates.
@@ -419,14 +422,16 @@ export function Editor() {
       if (!activeDocId) return;
       // Allow intentional content clearing — don't block empty content
       const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
-      // Skip auto-title for pinned, shared, or team docs
-      if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
+      // Auto-derive title from first heading for owned docs (or personal docs).
+      // Skip for pinned titles and non-owned shared/team docs (their title comes from cloud).
+      const isOwned = !activeDoc?.ownerId || activeDoc.ownerId === user?.uid;
+      if (!activeDoc?.titlePinned && isOwned) {
         const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, activeDoc?.isShared, activeDoc?.teamId, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, activeDoc?.ownerId, user?.uid, updateDocument],
   );
 
   const onCreateEditor = useCallback(
