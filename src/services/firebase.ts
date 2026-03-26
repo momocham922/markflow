@@ -758,6 +758,7 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
         title: activeDoc.title,
         content: activeDoc.content,
         ownerId: activeDoc.ownerId || currentUser.uid,
+        ownerName: currentUser.displayName || currentUser.email || undefined,
         folder: activeDoc.folder,
         tags: activeDoc.tags,
       };
@@ -801,6 +802,7 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
           title: activeDoc.title,
           content: activeDoc.content,
           ownerId: activeDoc.ownerId || currentUser.uid,
+          ownerName: currentUser.displayName || currentUser.email || undefined,
           folder: activeDoc.folder ?? "/",
           tags: activeDoc.tags ?? [],
           updatedAt: serverTimestamp(),
@@ -877,11 +879,11 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
       const currentUser = getAuth().currentUser;
       if (!currentUser) return "error:not_logged_in";
       const { createTeamDocument } = await import("./sharing");
-      const docId = await createTeamDocument(teamId, currentUser.uid);
+      const docId = await createTeamDocument(teamId, currentUser.uid, currentUser.displayName || currentUser.email || undefined);
       // Update title and content after creation
       const firestore = getFirestore();
       const ref = doc(firestore, "documents", docId);
-      await setDoc(ref, { title, content, updatedAt: serverTimestamp() }, { merge: true });
+      await setDoc(ref, { title, content, ownerName: currentUser.displayName || currentUser.email || undefined, updatedAt: serverTimestamp() }, { merge: true });
       return "ok:" + docId;
     } catch (e: unknown) {
       return "error:" + (e instanceof Error ? e.message : String(e));

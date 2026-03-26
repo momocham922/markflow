@@ -130,6 +130,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           title: activeDoc.title,
           content: activeDoc.content,
           ownerId: user.uid,
+          ownerName: user.displayName || user.email || undefined,
           folder: activeDoc.folder,
           tags: activeDoc.tags,
         });
@@ -197,6 +198,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           title: activeDoc.title,
           content: activeDoc.content,
           ownerId: activeDoc.ownerId || user?.uid || "",
+          ownerName: user?.displayName || user?.email || undefined,
           folder: activeDoc.folder,
           tags: activeDoc.tags,
         });

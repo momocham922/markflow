@@ -364,6 +364,7 @@ export async function moveTeamDocument(docId: string, folder: string): Promise<v
 export async function createTeamDocument(
   teamId: string,
   ownerId: string,
+  ownerName?: string,
 ): Promise<string> {
   const docId = crypto.randomUUID();
   const ref = doc(firestore, "documents", docId);
@@ -371,6 +372,7 @@ export async function createTeamDocument(
     title: "Untitled",
     content: "# Untitled\n",
     ownerId,
+    ...(ownerName ? { ownerName } : {}),
     teamId,
     collaborators: {},
     collaboratorUids: [],

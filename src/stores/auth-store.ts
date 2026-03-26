@@ -442,6 +442,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         }
 
+        // Build ownerId → ownerName lookup from team members
+        const teamOwnerMap = new Map<string, string>();
+        for (const team of teams) {
+          for (const m of team.members) {
+            if (m.uid && m.email) teamOwnerMap.set(m.uid, m.email);
+          }
+        }
+
         // Batch fetch team docs in parallel
         if (teamDocsToFetch.length > 0) {
           const batchSize = 10;
@@ -467,7 +475,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   folder: fullDoc.folder ?? "/",
                   tags: fullDoc.tags ?? [],
                   ownerId: fullDoc.ownerId,
-                  ownerName: fullDoc.ownerName,
+                  ownerName: fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
                   teamId: entry.teamId,
                   isShared: true,
                   docType: (fullDoc.docType as DocType) || "markdown",
@@ -483,7 +491,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   isShared: true,
                   teamId: entry.teamId,
                   titlePinned: true,
-                  ownerName: fullDoc.ownerName,
+                  ownerName: fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
                 };
                 // Only update title if cloud is newer
                 if (cloudTeamUpdatedAt > localTeamUpdatedAt) {

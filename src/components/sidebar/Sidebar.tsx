@@ -299,7 +299,7 @@ export function Sidebar() {
 
   const handleCreateTeamDoc = async (team: TeamWithDocs, folder = "/") => {
     if (!user) return;
-    const newDocId = await createTeamDocument(team.id, user.uid);
+    const newDocId = await createTeamDocument(team.id, user.uid, user.displayName || user.email || undefined);
     // Update folder in Firestore if not root
     if (folder !== "/") {
       await moveTeamDocument(newDocId, folder).catch(console.error);
