@@ -497,6 +497,30 @@ export async function createDocumentInFirestore(docData: {
   });
 }
 
+/** Fallback save using setDoc with merge — bypasses transaction issues, preserves collaborators/shareLink */
+export async function saveDocumentMerge(docData: {
+  id: string;
+  title: string;
+  content: string;
+  ownerId: string;
+  ownerName?: string;
+  folder?: string;
+  tags?: string[];
+  docType?: string;
+}): Promise<void> {
+  const ref = doc(firestore, DOCS_COLLECTION, docData.id);
+  await setDoc(ref, {
+    title: docData.title,
+    content: docData.content,
+    ownerId: docData.ownerId,
+    ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
+    folder: docData.folder ?? "/",
+    tags: docData.tags ?? [],
+    ...(docData.docType ? { docType: docData.docType } : {}),
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+}
+
 export async function deleteDocumentFromFirestore(
   docId: string,
 ): Promise<void> {

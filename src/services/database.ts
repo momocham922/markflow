@@ -289,6 +289,9 @@ export async function trackDeletedDoc(docId: string): Promise<void> {
 
 export async function getDeletedDocIds(): Promise<Set<string>> {
   const database = await getDb();
+  // Clean up entries older than 30 days to prevent permanent sync blocking
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  await database.execute("DELETE FROM deleted_docs WHERE deleted_at < $1", [thirtyDaysAgo]);
   const rows = await database.select<{ doc_id: string }[]>(
     "SELECT doc_id FROM deleted_docs",
   );

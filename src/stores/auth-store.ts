@@ -7,8 +7,8 @@ import {
   onAuthChange,
   fetchUserDocuments,
   fetchDocument,
-  createDocumentInFirestore,
   saveDocumentToFirestore,
+  saveDocumentMerge,
   deleteDocumentFromFirestore,
   saveUserSettingsToFirestore,
   fetchUserSettings,
@@ -170,8 +170,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
 
+    // Periodic sync: pull cloud changes every 60s so other devices' edits appear
+    const syncInterval = setInterval(() => {
+      const { user, isOnline, syncing } = get();
+      if (user && isOnline && !syncing) {
+        get().syncFromCloud();
+      }
+    }, 60_000);
+
     return () => {
       unsubAuth();
+      clearInterval(syncInterval);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
@@ -614,18 +623,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           try {
             await saveDocumentToFirestore(payload);
           } catch (saveErr) {
-            // FIX: Only fall back to create for genuinely new docs (not yet in Firestore).
-            // Check if doc exists before creating — createDocumentInFirestore wipes
-            // collaborators/shareLink because it uses setDoc without merge.
+            // Transaction failed — fall back to merge save (preserves collaborators/shareLink)
             try {
-              const existing = await fetchDocument(d.id);
-              if (!existing) {
-                await createDocumentInFirestore(payload);
-              } else {
-                console.error(`Failed to save existing document ${d.id}:`, saveErr);
-              }
-            } catch (createErr) {
-              console.error(`Failed to sync document ${d.id}:`, saveErr, createErr);
+              await saveDocumentMerge(payload);
+            } catch (mergeErr) {
+              console.error(`Failed to sync document ${d.id}:`, saveErr, mergeErr);
             }
           }
         }
