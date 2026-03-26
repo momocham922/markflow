@@ -231,6 +231,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           deletedDocIds = new Set();
         }
 
+        // Load last successful sync timestamp (0 = first sync ever)
+        let lastSyncAt = 0;
+        try {
+          const { getSetting } = await import("@/services/database");
+          const saved = await getSetting("lastSyncAt");
+          if (saved) lastSyncAt = parseInt(saved, 10) || 0;
+        } catch { /* DB not available */ }
+
         // Parallel fetch: user docs, shared docs, teams, and user settings
         const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all([
           fetchUserDocuments(user.uid),
@@ -524,19 +532,43 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         }
 
-        // Reconcile deletions: remove local shared/team docs that no longer exist in cloud.
-        // Only remove docs NOT owned by the current user (owned docs are source of truth locally).
-        // FIX: Also skip docs being actively edited (Yjs may not have synced to Firestore yet)
+        // Reconcile deletions: remove local docs that no longer exist in cloud.
+        // For own docs: only remove if last synced before this session (prevents deleting newly created docs)
+        // For shared/team docs: remove if not in cloud (non-owner, cloud is source of truth)
         const finalDocs = useAppStore.getState().documents;
         for (const local of finalDocs) {
-          if (local.ownerId === user.uid) continue; // never delete own docs
-          if (!local.isShared && !local.teamId) continue; // only shared/team docs
           if (collabActiveDocIds.has(local.id)) continue; // skip actively edited docs
-          if (!cloudDocIds.has(local.id)) {
-            console.warn(`[sync] Removing locally-cached doc ${local.id} (deleted from cloud)`);
+          if (cloudDocIds.has(local.id)) continue; // exists in cloud — keep
+
+          if (local.ownerId === user.uid) {
+            // Own doc not in cloud: deleted on another device OR newly created here
+            // If created/updated AFTER last sync → newly created on this device → keep
+            // If older than last sync → was known to cloud but now gone → deleted elsewhere
+            if (lastSyncAt > 0 && local.updatedAt < lastSyncAt) {
+              console.warn(`[sync] Removing own doc ${local.id} "${local.title}" (deleted on another device)`);
+              // Delete locally without re-tracking in deleted_docs (already gone from cloud)
+              useAppStore.setState((s) => ({
+                documents: s.documents.filter((d) => d.id !== local.id),
+                activeDocId: s.activeDocId === local.id ? null : s.activeDocId,
+              }));
+              try {
+                const { deleteDocument: dbDelete } = await import("@/services/database");
+                await dbDelete(local.id);
+              } catch { /* ignore */ }
+            }
+            // else: newer than lastSyncAt → keep (will be uploaded by syncToCloud)
+          } else if (local.isShared || local.teamId) {
+            // Non-owned shared/team doc not in cloud → removed by owner
+            console.warn(`[sync] Removing non-owned doc ${local.id} (deleted from cloud)`);
             await appStore.deleteDocument(local.id);
           }
         }
+
+        // Record successful sync timestamp
+        try {
+          const { setSetting } = await import("@/services/database");
+          await setSetting("lastSyncAt", String(Date.now()));
+        } catch { /* ignore */ }
       } catch (error) {
         console.error("Sync from cloud failed:", error);
       } finally {
@@ -611,10 +643,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         } catch { /* ignore */ }
 
-        // Only sync docs owned by this user. Non-owners rely on Yjs for sync.
-        const syncableDocs = documents.filter(
-          (d) => !d.ownerId || d.ownerId === user.uid,
-        );
+        // Only sync docs owned by this user that have been updated since last sync.
+        // This prevents re-uploading docs that were deleted on another device.
+        let lastSyncAt = 0;
+        try {
+          const { getSetting } = await import("@/services/database");
+          const saved = await getSetting("lastSyncAt");
+          if (saved) lastSyncAt = parseInt(saved, 10) || 0;
+        } catch { /* DB not available */ }
+
+        const syncableDocs = documents.filter((d) => {
+          if (d.ownerId && d.ownerId !== user.uid) return false; // non-owner
+          // If we have a lastSyncAt, only upload docs updated after it (or new docs)
+          if (lastSyncAt > 0 && d.updatedAt < lastSyncAt) return false;
+          return true;
+        });
         for (const d of syncableDocs) {
           const payload = {
             id: d.id,
