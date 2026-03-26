@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
-const CHUNK_MS = 5000; // 5 second audio chunks for better STT accuracy
+const CHUNK_MS = 8000; // 8 second chunks: fewer boundaries = better accuracy
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

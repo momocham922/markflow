@@ -23,6 +23,7 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0); // 0 = manual
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
+  const lastStructuredOutputRef = useRef(""); // previous structured markdown for context
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -67,13 +68,28 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
           body: JSON.stringify({
             system:
               "You are a document assistant. Convert voice transcripts into well-structured Markdown. " +
-              "Use appropriate headings (##, ###), bullet points, and formatting. " +
+              "Use appropriate headings, bullet points, and formatting. " +
               "Keep the same language as the transcript. " +
-              "Output ONLY the structured Markdown, no explanations.",
+              "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
+              "Output ONLY the structured Markdown content, no explanations or meta-commentary.",
             messages: [
+              ...(lastStructuredOutputRef.current
+                ? [
+                    {
+                      role: "user" as const,
+                      content: "Here is what has been structured so far:\n\n" + lastStructuredOutputRef.current,
+                    },
+                    {
+                      role: "assistant" as const,
+                      content: "Understood. I have the context of the previous structured content.",
+                    },
+                  ]
+                : []),
               {
                 role: "user",
-                content: `Convert this voice transcript into structured Markdown:\n\n${transcript}`,
+                content: lastStructuredOutputRef.current
+                  ? `Continue structuring. Here is the new transcript to incorporate (append/merge with the existing structure above, do not repeat what was already structured):\n\n${transcript.slice(lastStructuredRef.current.length)}`
+                  : `Convert this voice transcript into structured Markdown:\n\n${transcript}`,
               },
             ],
             max_tokens: 4096,
@@ -90,9 +106,15 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
           "";
 
         if (markdown.trim()) {
-          onInsertMarkdown(
-            `\n\n## 📝 Voice Notes\n\n${markdown.trim()}\n`,
-          );
+          if (lastStructuredOutputRef.current) {
+            // Append new content (AI was asked to continue, not repeat)
+            onInsertMarkdown(`\n\n${markdown.trim()}\n`);
+            lastStructuredOutputRef.current += "\n\n" + markdown.trim();
+          } else {
+            // First structuring
+            onInsertMarkdown(`\n\n${markdown.trim()}\n`);
+            lastStructuredOutputRef.current = markdown.trim();
+          }
           lastStructuredRef.current = transcript;
         }
       } catch (err) {
@@ -220,7 +242,7 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          onClick={clearTranscript}
+          onClick={() => { clearTranscript(); lastStructuredRef.current = ""; lastStructuredOutputRef.current = ""; }}
           disabled={!fullTranscript}
           title="Clear transcript"
         >

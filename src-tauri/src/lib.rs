@@ -782,6 +782,8 @@ static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
+/// Overlap buffer: last 0.5s of previous chunk for boundary accuracy
+static VOICE_OVERLAP: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 
 // ── Silero VAD ──
 // Session + LSTM state + 64-sample context (prepended to each 512-sample window)
@@ -951,6 +953,7 @@ fn start_voice_recording() -> Result<(), String> {
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
     VOICE_BUFFER.lock().unwrap().clear();
+    VOICE_OVERLAP.lock().unwrap().clear();
     // Reset Silero VAD state for new recording session
     if let Some(ref mut vs) = *VAD.lock().unwrap() {
         vs.state.fill(0.0);
@@ -1029,7 +1032,6 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
 
     let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
     let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
-    let _raw_sample_count = samples.len();
 
     // Mix to mono if multi-channel
     let mono: Vec<f32> = if channels > 1 {
@@ -1040,6 +1042,23 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     } else {
         samples
     };
+
+    // Prepend overlap from previous chunk (0.5s) for boundary accuracy
+    let overlap_samples = (sample_rate as usize) / 2; // 0.5 seconds
+    let with_overlap = {
+        let overlap = VOICE_OVERLAP.lock().unwrap();
+        let mut v = Vec::with_capacity(overlap.len() + mono.len());
+        v.extend_from_slice(&overlap);
+        v.extend_from_slice(&mono);
+        v
+    };
+    // Save last 0.5s as overlap for next chunk
+    {
+        let mut overlap = VOICE_OVERLAP.lock().unwrap();
+        let start = if mono.len() > overlap_samples { mono.len() - overlap_samples } else { 0 };
+        *overlap = mono[start..].to_vec();
+    }
+    let mono = with_overlap;
 
     // Resample to 16 kHz for optimal STT quality
     const TARGET_RATE: u32 = 16000;
