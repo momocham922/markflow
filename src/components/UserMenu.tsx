@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react";
-import { LogIn, LogOut, Cloud, CloudOff, RefreshCw, Users, Bell } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { LogIn, LogOut, Cloud, CloudOff, RefreshCw, Users, Bell, DatabaseZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
@@ -31,23 +31,39 @@ function UserAvatar({ user }: { user: { photoURL: string | null; displayName: st
 }
 
 export function UserMenu() {
-  const { user, loading, isOnline, syncing, loginError, login, logout, syncToCloud } =
+  const { user, loading, isOnline, syncing, loginError, login, logout, syncToCloud, resetCloudAndReSync } =
     useAuthStore();
   const [teamOpen, setTeamOpen] = useState(false);
   const [slackOpen, setSlackOpen] = useState(false);
   const [loginMenuOpen, setLoginMenuOpen] = useState(false);
+  const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const loginMenuRef = useRef<HTMLDivElement>(null);
+  const syncMenuRef = useRef<HTMLDivElement>(null);
+
+  const handleResetCloud = useCallback(async () => {
+    setSyncMenuOpen(false);
+    const ok = window.confirm(
+      "クラウドをリセットして、このデバイスのドキュメントで上書きします。\n\n" +
+      "正しいドキュメントがあるデバイスで実行してください。\n本当に実行しますか？"
+    );
+    if (!ok) return;
+    await resetCloudAndReSync();
+    window.alert("クラウドリセット完了。他のデバイスを再起動すると同期されます。");
+  }, [resetCloudAndReSync]);
 
   useEffect(() => {
-    if (!loginMenuOpen) return;
+    if (!loginMenuOpen && !syncMenuOpen) return;
     const handler = (e: MouseEvent) => {
-      if (loginMenuRef.current && !loginMenuRef.current.contains(e.target as Node)) {
+      if (loginMenuOpen && loginMenuRef.current && !loginMenuRef.current.contains(e.target as Node)) {
         setLoginMenuOpen(false);
+      }
+      if (syncMenuOpen && syncMenuRef.current && !syncMenuRef.current.contains(e.target as Node)) {
+        setSyncMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [loginMenuOpen]);
+  }, [loginMenuOpen, syncMenuOpen]);
 
   if (loading) return null;
 
@@ -109,22 +125,49 @@ export function UserMenu() {
       >
         <Bell className="h-3.5 w-3.5" />
       </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-7 w-7"
-        onClick={syncToCloud}
-        disabled={syncing || !isOnline}
-        title="Sync to cloud"
-      >
-        {syncing ? (
-          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-        ) : isOnline ? (
-          <Cloud className="h-3.5 w-3.5" />
-        ) : (
-          <CloudOff className="h-3.5 w-3.5" />
+      <div className="relative" ref={syncMenuRef}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={syncToCloud}
+          onPointerDown={(e) => {
+            if (e.button === 2) {
+              e.preventDefault();
+              setSyncMenuOpen((v) => !v);
+            }
+          }}
+          onContextMenu={(e) => e.preventDefault()}
+          disabled={syncing || !isOnline}
+          title="Sync to cloud (右クリックでメニュー)"
+        >
+          {syncing ? (
+            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          ) : isOnline ? (
+            <Cloud className="h-3.5 w-3.5" />
+          ) : (
+            <CloudOff className="h-3.5 w-3.5" />
+          )}
+        </Button>
+        {syncMenuOpen && (
+          <div className="absolute right-0 top-full mt-1 z-50 min-w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-xs hover:bg-accent text-left"
+              onClick={() => { setSyncMenuOpen(false); syncToCloud(); }}
+            >
+              <Cloud className="h-3 w-3" />
+              同期
+            </button>
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-xs hover:bg-accent text-left text-destructive"
+              onClick={handleResetCloud}
+            >
+              <DatabaseZap className="h-3 w-3" />
+              クラウドリセット＆再同期
+            </button>
+          </div>
         )}
-      </Button>
+      </div>
       <div className="flex items-center gap-1.5">
         <UserAvatar user={user} />
         {!isIOS && (

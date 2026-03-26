@@ -117,6 +117,7 @@ interface AuthState {
   syncToCloud: () => Promise<void>;
   syncFromCloud: () => Promise<void>;
   deleteFromCloud: (docId: string) => Promise<void>;
+  resetCloudAndReSync: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -590,6 +591,76 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       console.error("Failed to delete from cloud:", error);
       // Will be retried during next syncToCloud
     }
+  },
+
+  // Emergency recovery: wipe all own docs from Firestore, re-upload current local docs.
+  // Run this on the device with the CORRECT document list.
+  resetCloudAndReSync: async () => {
+    const { user, isOnline } = get();
+    if (!user || !isOnline) return;
+
+    await withSyncLock(async () => {
+      set({ syncing: true });
+      try {
+        // 1. Fetch all own docs from cloud
+        const cloudDocs = await fetchUserDocuments(user.uid);
+        const appState = useAppStore.getState();
+        const localIds = new Set(appState.documents.filter((d) => !d.ownerId || d.ownerId === user.uid).map((d) => d.id));
+
+        // 2. Delete cloud docs that don't exist locally (= garbage)
+        let deleted = 0;
+        for (const cd of cloudDocs) {
+          if (!localIds.has(cd.id)) {
+            try {
+              await deleteDocumentFromFirestore(cd.id);
+              deleted++;
+            } catch (e) {
+              console.error(`[resetCloud] Failed to delete ${cd.id}:`, e);
+            }
+          }
+        }
+        console.warn(`[resetCloud] Deleted ${deleted} garbage docs from cloud`);
+
+        // 3. Re-upload all local docs to ensure cloud matches local
+        const ownDocs = appState.documents.filter((d) => !d.ownerId || d.ownerId === user.uid);
+        for (const d of ownDocs) {
+          try {
+            await saveDocumentMerge({
+              id: d.id,
+              title: d.title,
+              content: d.content,
+              ownerId: user.uid,
+              ownerName: user.displayName || user.email || undefined,
+              folder: d.folder,
+              tags: d.tags,
+              docType: d.docType,
+            });
+          } catch (e) {
+            console.error(`[resetCloud] Failed to upload ${d.id}:`, e);
+          }
+        }
+        console.warn(`[resetCloud] Uploaded ${ownDocs.length} docs to cloud`);
+
+        // 4. Clear deleted_docs table and update lastSyncAt
+        try {
+          const { setSetting } = await import("@/services/database");
+          await setSetting("lastSyncAt", String(Date.now()));
+        } catch { /* ignore */ }
+        // Clear all deleted_docs entries
+        try {
+          const deletedIds = await getDeletedDocIds();
+          for (const id of deletedIds) {
+            await clearDeletedDoc(id);
+          }
+        } catch { /* ignore */ }
+
+        console.warn("[resetCloud] Cloud reset complete. Cloud now matches this device.");
+      } catch (error) {
+        console.error("[resetCloud] Failed:", error);
+      } finally {
+        set({ syncing: false });
+      }
+    });
   },
 
   syncToCloud: async () => {
