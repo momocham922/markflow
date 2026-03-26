@@ -141,6 +141,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // overwrite correct SQLite values with stale cloud values.
         const syncThenBackfill = async () => {
           await get().syncFromCloud();
+          // Push local docs to cloud (ensures all local-only docs get uploaded)
+          await get().syncToCloud();
           // Backfill local versions to Firestore (one-time, background)
           backfillLocalVersionsToCloud(
             user.uid,
@@ -161,20 +163,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     });
 
-    const handleOnline = () => {
+    const handleOnline = async () => {
       set({ isOnline: true });
-      if (get().user) get().syncToCloud();
+      if (get().user) {
+        await get().syncFromCloud();
+        await get().syncToCloud();
+      }
     };
     const handleOffline = () => set({ isOnline: false });
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
 
-    // Periodic sync: pull cloud changes every 60s so other devices' edits appear
-    const syncInterval = setInterval(() => {
+    // Periodic bidirectional sync every 60s — pull then push
+    const syncInterval = setInterval(async () => {
       const { user, isOnline, syncing } = get();
       if (user && isOnline && !syncing) {
-        get().syncFromCloud();
+        await get().syncFromCloud();
+        await get().syncToCloud();
       }
     }, 60_000);
 
