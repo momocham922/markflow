@@ -338,10 +338,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addDocument: async (doc) => {
-    set((s) => ({
-      documents: [...s.documents, doc],
-      folders: deriveFolders([...s.documents, doc], s.folders),
-    }));
+    set((s) => {
+      // Prevent duplicate: if doc with same ID exists, merge instead of append
+      const exists = s.documents.some((d) => d.id === doc.id);
+      if (exists) {
+        return {
+          documents: s.documents.map((d) => d.id === doc.id ? { ...d, ...doc } : d),
+        };
+      }
+      return {
+        documents: [...s.documents, doc],
+        folders: deriveFolders([...s.documents, doc], s.folders),
+      };
+    });
     try {
       await db.upsertDocument(doc);
     } catch {

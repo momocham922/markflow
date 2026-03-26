@@ -422,13 +422,6 @@ export function Sidebar() {
       updateDocument(docId, { titlePinned: false, updatedAt: Date.now() });
     } else if (trimmed !== documents.find((d) => d.id === docId)?.title) {
       updateDocument(docId, { title: trimmed, titlePinned: true, updatedAt: Date.now() });
-      // Also update team local state so title reflects immediately
-      setTeams((prev) =>
-        prev.map((t) => ({
-          ...t,
-          docs: t.docs.map((d) => d.id === docId ? { ...d, title: trimmed } : d),
-        })),
-      );
     }
     setRenamingDocId(null);
   };
