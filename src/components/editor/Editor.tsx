@@ -164,7 +164,7 @@ export function Editor() {
   const handleCollabChange = useCallback(
     (content: string) => {
       if (!activeDocId) return;
-      if (!content.trim()) return;
+      // Allow intentional content clearing from collab
       const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
       // Skip auto-title for pinned, shared, or team docs
       if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
@@ -417,7 +417,7 @@ export function Editor() {
   const onChange = useCallback(
     (value: string) => {
       if (!activeDocId) return;
-      if (!value.trim()) return;
+      // Allow intentional content clearing — don't block empty content
       const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
       // Skip auto-title for pinned, shared, or team docs
       if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {

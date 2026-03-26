@@ -1,6 +1,7 @@
 ##
-## Dockerfile for real Tauri E2E tests
-## Builds the Tauri app on Linux (WebKitGTK) and runs WebDriverIO tests via tauri-driver
+## Dockerfile for multi-instance sync E2E tests.
+## Builds frontend with VITE_TEST_MODE=1 (enables email/password auth helper).
+## Entrypoint starts Xvfb + dev server + tauri-driver and waits for WebDriver connections.
 ##
 FROM ubuntu:24.04
 
@@ -9,19 +10,13 @@ ENV DISPLAY=:99
 
 # System dependencies for WebKitGTK + Tauri
 RUN apt-get update && apt-get install -y \
-    # Build essentials
     build-essential curl wget git pkg-config \
-    # Tauri / WebKitGTK deps
     libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
     librsvg2-dev libssl-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
-    # WebKitWebDriver binary (required by tauri-driver)
     webkit2gtk-driver \
-    # Virtual display for headless GUI testing
     xvfb xauth dbus-x11 \
-    # SQLite
     libsqlite3-dev libasound2-dev \
-    # Additional deps
-    file \
+    file socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
@@ -40,8 +35,6 @@ WORKDIR /app
 
 # Copy package files first for caching
 COPY package.json pnpm-lock.yaml ./
-
-# Install Node deps
 RUN pnpm install --frozen-lockfile
 
 # Copy Rust files for dependency caching
@@ -51,23 +44,26 @@ COPY src-tauri/build.rs src-tauri/
 COPY src-tauri/capabilities/ src-tauri/capabilities/
 COPY src-tauri/icons/ src-tauri/icons/
 
-# Pre-build Rust dependencies
+# Copy resources (Silero VAD model etc.)
+COPY src-tauri/resources/ src-tauri/resources/
+
 RUN cd src-tauri && cargo fetch
 
 # Copy rest of the source
 COPY . .
 
-# Build the frontend
+# Build frontend with test mode enabled — injects __TEST_LOGIN__ on window.
+# Firebase env vars are passed via .env file at build time.
+ARG VITE_TEST_MODE=1
+ENV VITE_TEST_MODE=${VITE_TEST_MODE}
 RUN pnpm build
 
 # Build the Tauri app for Linux (debug mode for faster builds)
 RUN cd src-tauri && cargo build
 
-# Expose WebDriver port
 EXPOSE 4444
 
-# Start Xvfb + tauri-driver + the app, then run tests
-COPY e2e-tauri/docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+COPY e2e-tauri/docker-entrypoint-sync.sh /docker-entrypoint-sync.sh
+RUN chmod +x /docker-entrypoint-sync.sh
 
-ENTRYPOINT ["/docker-entrypoint.sh"]
+ENTRYPOINT ["/docker-entrypoint-sync.sh"]

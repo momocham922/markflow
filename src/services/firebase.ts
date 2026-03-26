@@ -6,6 +6,7 @@ import {
   GoogleAuthProvider,
   GithubAuthProvider,
   signInWithCredential,
+  signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   type User,
@@ -429,11 +430,6 @@ export async function saveDocumentToFirestore(docData: {
   tags?: string[];
   docType?: string;
 }): Promise<void> {
-  // Never sync empty content to cloud — protects against data loss propagation
-  if (!docData.content?.trim()) {
-    console.warn(`[firebase] Blocked save of doc ${docData.id} with empty content`);
-    return;
-  }
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
 
   // Use transaction for conditional write: only update if our content is newer
@@ -687,4 +683,203 @@ export async function logErrorToCloud(
   } catch {
     // Best-effort — don't throw if logging itself fails
   }
+}
+
+// --- Test-only: Email/Password login for E2E testing ---
+// Exposed as window.__TEST_LOGIN__ so WebDriverIO can call it via browser.execute()
+if (import.meta.env.VITE_TEST_MODE === "1") {
+  (window as unknown as Record<string, unknown>).__TEST_LOGIN__ = async (
+    email: string,
+    password: string,
+  ): Promise<string> => {
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    // Ensure user profile is saved to Firestore BEFORE returning.
+    // Without this, addCollaborator's email→UID lookup fails and
+    // collaboratorUids won't contain this user's UID.
+    const firestore = getFirestore();
+    await setDoc(
+      doc(firestore, "users", cred.user.uid),
+      {
+        email: cred.user.email || email,
+        displayName: cred.user.displayName,
+        lastSeen: serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return cred.user.uid;
+  };
+
+  // Force syncFromCloud — more reliable than page reload for E2E tests
+  (window as unknown as Record<string, unknown>).__TEST_FORCE_SYNC__ = async (): Promise<string> => {
+    try {
+      const { useAuthStore } = await import("../stores/auth-store");
+      await useAuthStore.getState().syncFromCloud();
+      return "ok";
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Verify sharing state — check if a doc has collaboratorUids for debugging
+  (window as unknown as Record<string, unknown>).__TEST_GET_SHARED_DOCS__ = async (): Promise<string> => {
+    try {
+      const currentUser = getAuth().currentUser;
+      if (!currentUser) return "error:not_logged_in";
+      const { fetchSharedWithMe } = await import("./sharing");
+      const docs = await fetchSharedWithMe(currentUser.uid);
+      return JSON.stringify(docs);
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Programmatic share: save doc to Firestore + add collaborator (bypasses UI)
+  (window as unknown as Record<string, unknown>).__TEST_SHARE_DOC__ = async (
+    email: string,
+    role: string,
+  ): Promise<string> => {
+    try {
+      const currentUser = getAuth().currentUser;
+      if (!currentUser) return "error:not_logged_in";
+      const { useAppStore } = await import("../stores/app-store");
+      const state = useAppStore.getState();
+      const activeDocId = state.activeDocId;
+      if (!activeDocId) return "error:no_active_doc";
+      const activeDoc = state.documents.find((d) => d.id === activeDocId);
+      if (!activeDoc) return "error:doc_not_found";
+
+      const docPayload = {
+        id: activeDocId,
+        title: activeDoc.title,
+        content: activeDoc.content,
+        ownerId: activeDoc.ownerId || currentUser.uid,
+        folder: activeDoc.folder,
+        tags: activeDoc.tags,
+      };
+
+      // Save to Firestore first — try save, fall back to create for new docs
+      try {
+        await saveDocumentToFirestore(docPayload);
+      } catch {
+        // saveDocumentToFirestore uses transaction.get which fails on
+        // non-existent docs due to Firestore read rules. Fall back to create.
+        await createDocumentInFirestore(docPayload);
+      }
+
+      // Add collaborator
+      const { addCollaborator } = await import("./sharing");
+      await addCollaborator(activeDocId, email, role as "editor" | "viewer");
+      return "ok:" + activeDocId;
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Save active doc directly to Firestore (bypasses syncToCloud transaction issues)
+  (window as unknown as Record<string, unknown>).__TEST_SAVE_TO_CLOUD__ = async (): Promise<string> => {
+    try {
+      const currentUser = getAuth().currentUser;
+      if (!currentUser) return "error:not_logged_in";
+      const { useAppStore } = await import("../stores/app-store");
+      const state = useAppStore.getState();
+      const activeDocId = state.activeDocId;
+      if (!activeDocId) return "error:no_active_doc";
+      const activeDoc = state.documents.find((d) => d.id === activeDocId);
+      if (!activeDoc) return "error:doc_not_found";
+
+      const firestore = getFirestore();
+      const ref = doc(firestore, "documents", activeDocId);
+      // Use set with merge to avoid transaction read-rule issues
+      await setDoc(
+        ref,
+        {
+          title: activeDoc.title,
+          content: activeDoc.content,
+          ownerId: activeDoc.ownerId || currentUser.uid,
+          folder: activeDoc.folder ?? "/",
+          tags: activeDoc.tags ?? [],
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return "ok";
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Debug: get current user UID
+  (window as unknown as Record<string, unknown>).__TEST_GET_UID__ = (): string => {
+    const currentUser = getAuth().currentUser;
+    return currentUser ? currentUser.uid : "not_logged_in";
+  };
+
+  // Debug: check document info in Firestore
+  (window as unknown as Record<string, unknown>).__TEST_DOC_INFO__ = async (
+    docId: string,
+  ): Promise<string> => {
+    try {
+      const firestore = getFirestore();
+      const snap = await getDoc(doc(firestore, "documents", docId));
+      if (!snap.exists()) return "not_found";
+      const data = snap.data();
+      return JSON.stringify({
+        title: data.title,
+        ownerId: data.ownerId,
+        collaborators: data.collaborators,
+        collaboratorUids: data.collaboratorUids,
+      });
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  (window as unknown as Record<string, unknown>).__TEST_CREATE_TEAM__ = async (
+    teamName: string,
+  ): Promise<string> => {
+    try {
+      const currentUser = getAuth().currentUser;
+      if (!currentUser) return "error:not_logged_in";
+      const { createTeam } = await import("./sharing");
+      const teamId = await createTeam(teamName, {
+        uid: currentUser.uid,
+        email: currentUser.email || "",
+      });
+      return "ok:" + teamId;
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  (window as unknown as Record<string, unknown>).__TEST_ADD_TEAM_MEMBER__ = async (
+    argsJson: string,
+  ): Promise<string> => {
+    try {
+      const { teamId, email, role } = JSON.parse(argsJson);
+      const { addTeamMember } = await import("./sharing");
+      await addTeamMember(teamId, { email, role: role || "member" });
+      return "ok";
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  (window as unknown as Record<string, unknown>).__TEST_CREATE_TEAM_DOC__ = async (
+    argsJson: string,
+  ): Promise<string> => {
+    try {
+      const { teamId, title, content } = JSON.parse(argsJson);
+      const currentUser = getAuth().currentUser;
+      if (!currentUser) return "error:not_logged_in";
+      const { createTeamDocument } = await import("./sharing");
+      const docId = await createTeamDocument(teamId, currentUser.uid);
+      // Update title and content after creation
+      const firestore = getFirestore();
+      const ref = doc(firestore, "documents", docId);
+      await setDoc(ref, { title, content, updatedAt: serverTimestamp() }, { merge: true });
+      return "ok:" + docId;
+    } catch (e: unknown) {
+      return "error:" + (e instanceof Error ? e.message : String(e));
+    }
+  };
 }

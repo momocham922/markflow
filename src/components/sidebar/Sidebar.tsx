@@ -77,7 +77,7 @@ function buildTree(folders: string[], docs: Document[]): FolderNode {
 // ── Types ────────────────────────────────────────────────────
 
 interface TeamWithDocs extends Team {
-  docs: { id: string; title: string; folder: string }[];
+  docs: { id: string; title: string; folder: string; updatedAt: number }[];
   folders: string[];
 }
 
@@ -161,7 +161,10 @@ export function Sidebar() {
         for (const td of team.docs) {
           const local = appStore.documents.find((d) => d.id === td.id);
           if (local && local.title !== td.title && local.ownerId !== uid) {
-            appStore.updateDocument(td.id, { title: td.title, titlePinned: true });
+            // Only update title if cloud version is newer than local
+            if (td.updatedAt > (local.updatedAt ?? 0)) {
+              appStore.updateDocument(td.id, { title: td.title, titlePinned: true });
+            }
           }
         }
       }
@@ -320,7 +323,7 @@ export function Sidebar() {
     setTeams((prev) =>
       prev.map((t) =>
         t.id === team.id
-          ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled", folder }] }
+          ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled", folder, updatedAt: Date.now() }] }
           : t,
       ),
     );
@@ -666,7 +669,7 @@ export function Sidebar() {
     );
   };
 
-  const renderTeamDoc = (td: { id: string; title: string; folder: string }, team: TeamWithDocs, depth: number) => {
+  const renderTeamDoc = (td: { id: string; title: string; folder: string; updatedAt: number }, team: TeamWithDocs, depth: number) => {
     const localDoc = documents.find((d) => d.id === td.id);
     const title = localDoc?.title || td.title;
     const isOwnDoc = localDoc?.ownerId === user?.uid;
@@ -734,7 +737,7 @@ export function Sidebar() {
     );
   };
 
-  const renderTeamFolder = (node: FolderNode, team: TeamWithDocs, allTeamDocs: { id: string; title: string; folder: string }[], depth = 0) => {
+  const renderTeamFolder = (node: FolderNode, team: TeamWithDocs, allTeamDocs: { id: string; title: string; folder: string; updatedAt: number }[], depth = 0) => {
     const key = `${team.id}:${node.path}`;
     const isExpanded = expandedTeamFolders.has(key);
     const isRoot = node.path === "/";
@@ -1044,9 +1047,9 @@ export function Sidebar() {
                         const localTeamDocs = documents.filter(
                           (d) => d.teamId === team.id && !firestoreIds.has(d.id),
                         );
-                        const allTeamDocs: { id: string; title: string; folder: string }[] = [
+                        const allTeamDocs: { id: string; title: string; folder: string; updatedAt: number }[] = [
                           ...team.docs,
-                          ...localTeamDocs.map((d) => ({ id: d.id, title: d.title, folder: d.folder || "/" })),
+                          ...localTeamDocs.map((d) => ({ id: d.id, title: d.title, folder: d.folder || "/", updatedAt: d.updatedAt ?? Date.now() })),
                         ];
                         // Build folder tree for this team's docs
                         const teamFolders = ["/", ...(team.folders || [])];

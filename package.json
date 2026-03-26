@@ -1,7 +1,7 @@
 {
   "name": "markflow",
   "private": true,
-  "version": "0.3.0-beta.40",
+  "version": "0.3.0-beta.41",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,9 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:tauri": "./scripts/run-e2e-tauri.sh",
-    "test:tauri:rebuild": "./scripts/run-e2e-tauri.sh --rebuild"
+    "test:tauri:rebuild": "./scripts/run-e2e-tauri.sh --rebuild",
+    "test:sync": "./scripts/run-e2e-sync.sh",
+    "test:sync:rebuild": "./scripts/run-e2e-sync.sh --rebuild"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.0",

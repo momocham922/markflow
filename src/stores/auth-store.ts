@@ -86,7 +86,11 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
 // --- Sync mutex: prevents concurrent syncFromCloud / syncToCloud ---
 let syncLock = false;
 async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
-  if (syncLock) return undefined;
+  if (syncLock) {
+    // Retry once after a short wait instead of silently dropping
+    await new Promise((r) => setTimeout(r, 2000));
+    if (syncLock) return undefined;
+  }
   syncLock = true;
   try {
     return await fn();
@@ -384,15 +388,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 };
                 await appStore.addDocument(newDoc);
               } else {
-                // Yjs owns content during collaboration — only update metadata.
-                // Always sync title so renames propagate in real-time.
+                // Non-owned shared docs: Yjs/IndexedDB is source of truth for content.
+                // Only update content if cloud version is genuinely newer.
+                const localDoc = useAppStore.getState().documents.find((d) => d.id === entry.id);
+                const cloudUpdatedAt = fullDoc.updatedAt?.toMillis() ?? 0;
+                const localUpdatedAt = localDoc?.updatedAt ?? 0;
                 const updates: Partial<Document> = {
                   isShared: true,
                   titlePinned: true,
-                  title: fullDoc.title,
-                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
                 };
-                if (!collabActiveDocIds.has(entry.id)) {
+                // Only update title if cloud is newer
+                if (cloudUpdatedAt > localUpdatedAt) {
+                  updates.title = fullDoc.title;
+                  updates.updatedAt = cloudUpdatedAt;
+                }
+                // Never overwrite content for collab-active docs.
+                // For inactive docs, only update if cloud is genuinely newer.
+                if (!collabActiveDocIds.has(entry.id) && cloudUpdatedAt > localUpdatedAt) {
                   updates.content = fullDoc.content;
                 }
                 appStore.updateDocument(entry.id, updates);
@@ -459,16 +471,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 };
                 await appStore.addDocument(newDoc);
               } else {
-                // Yjs owns content during collaboration — only update metadata.
-                // Always sync title so renames propagate in real-time.
+                // Non-owned team docs: Yjs/IndexedDB is source of truth for content.
+                // Only update content/title if cloud version is genuinely newer.
+                const localTeamDoc = useAppStore.getState().documents.find((d) => d.id === entry.id);
+                const cloudTeamUpdatedAt = fullDoc.updatedAt?.toMillis() ?? 0;
+                const localTeamUpdatedAt = localTeamDoc?.updatedAt ?? 0;
                 const updates: Partial<Document> = {
                   isShared: true,
                   teamId: entry.teamId,
                   titlePinned: true,
-                  title: fullDoc.title,
-                  updatedAt: fullDoc.updatedAt?.toMillis() ?? Date.now(),
                 };
-                if (!collabActiveDocIds.has(entry.id)) {
+                // Only update title if cloud is newer
+                if (cloudTeamUpdatedAt > localTeamUpdatedAt) {
+                  updates.title = fullDoc.title;
+                  updates.updatedAt = cloudTeamUpdatedAt;
+                }
+                // Never overwrite content for collab-active docs.
+                // For inactive docs, only update if cloud is genuinely newer.
+                if (!collabActiveDocIds.has(entry.id) && cloudTeamUpdatedAt > localTeamUpdatedAt) {
                   updates.content = fullDoc.content;
                 }
                 appStore.updateDocument(entry.id, updates);
@@ -564,11 +584,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         } catch { /* ignore */ }
 
-        // FIX: Only sync docs owned by this user. Non-owners should NEVER write
-        // document content to Firestore — Yjs handles real-time sync for shared docs,
-        // and non-owner writes can overwrite the owner's latest version.
+        // Only sync docs owned by this user. Non-owners rely on Yjs for sync.
         const syncableDocs = documents.filter(
-          (d) => d.content.trim() && (!d.ownerId || d.ownerId === user.uid),
+          (d) => !d.ownerId || d.ownerId === user.uid,
         );
         for (const d of syncableDocs) {
           const payload = {

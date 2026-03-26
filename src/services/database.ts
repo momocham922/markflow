@@ -150,12 +150,7 @@ export async function upsertDocument(doc: {
       [doc.id],
     );
     if (existing[0]) {
-      // LAYER 2: Block overwriting existing non-empty content with empty content
-      if (!doc.content.trim() && existing[0].content?.trim()) {
-        console.warn(`[db] Blocked empty overwrite of doc ${doc.id}`);
-        return;
-      }
-      // Save snapshot of current content before overwriting
+      // Save snapshot of current content before overwriting (preserves recovery ability)
       if (existing[0].content?.trim()) {
         await database.execute(
           `INSERT INTO document_snapshots (document_id, content, title, updated_at)
