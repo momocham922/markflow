@@ -319,14 +319,9 @@ export function Sidebar() {
     addDocument(newDoc);
     setActiveDocId(newDocId);
     setExpandedTeams((prev) => new Set([...prev, team.id]));
-    // Update local teams state immediately
-    setTeams((prev) =>
-      prev.map((t) =>
-        t.id === team.id
-          ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled", folder, updatedAt: Date.now() }] }
-          : t,
-      ),
-    );
+    // No need to manually update teams state here — the merge logic at render
+    // time (localTeamDocs) will pick up the new doc from app-store documents.
+    // Manually adding to team.docs causes duplicates when refreshTeams polls.
   };
 
   const handleDeleteTeamDoc = async (docId: string, team: TeamWithDocs) => {
