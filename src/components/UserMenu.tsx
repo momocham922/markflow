@@ -130,16 +130,9 @@ export function UserMenu() {
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          onClick={syncToCloud}
-          onPointerDown={(e) => {
-            if (e.button === 2) {
-              e.preventDefault();
-              setSyncMenuOpen((v) => !v);
-            }
-          }}
-          onContextMenu={(e) => e.preventDefault()}
+          onClick={() => setSyncMenuOpen((v) => !v)}
           disabled={syncing || !isOnline}
-          title="Sync to cloud (右クリックでメニュー)"
+          title="同期メニュー"
         >
           {syncing ? (
             <RefreshCw className="h-3.5 w-3.5 animate-spin" />
@@ -158,6 +151,7 @@ export function UserMenu() {
               <Cloud className="h-3 w-3" />
               同期
             </button>
+            <div className="my-1 border-t border-border" />
             <button
               className="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-xs hover:bg-accent text-left text-destructive"
               onClick={handleResetCloud}
