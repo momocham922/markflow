@@ -29,13 +29,20 @@ with open('$ROOT/src-tauri/Cargo.toml', 'w') as f:
     f.write(content)
 "
 
-# Verify all 3 match
+# 4. iOS project.yml (CFBundleShortVersionString and CFBundleVersion)
+IOS_PROJECT="$ROOT/src-tauri/gen/apple/project.yml"
+if [ -f "$IOS_PROJECT" ]; then
+  sed -i '' "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: $VERSION/" "$IOS_PROJECT"
+  sed -i '' "s/CFBundleVersion: .*/CFBundleVersion: \"$VERSION\"/" "$IOS_PROJECT"
+fi
+
+# Verify all 3 core files match
 V1=$(grep '"version"' "$ROOT/package.json" | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/')
 V2=$(grep '"version"' "$ROOT/src-tauri/tauri.conf.json" | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/')
 V3=$(grep '^version' "$ROOT/src-tauri/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
 
 if [ "$V1" = "$VERSION" ] && [ "$V2" = "$VERSION" ] && [ "$V3" = "$VERSION" ]; then
-  echo "All 3 files bumped to $VERSION"
+  echo "All files bumped to $VERSION"
 else
   echo "ERROR: Version mismatch!"
   echo "  package.json:     $V1"
