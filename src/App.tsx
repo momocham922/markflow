@@ -692,7 +692,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
         {/* Syncing overlay — initial sync or closing sync */}
         {(closingSyncVisible || (syncing && !initialSyncDoneRef.current)) && (
-          <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
+          <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]" data-tauri-drag-region>
             <div className="flex items-center gap-3 rounded-lg bg-card border border-border px-5 py-3 shadow-lg">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
               <span className="text-sm text-foreground">
