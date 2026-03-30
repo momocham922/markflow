@@ -177,10 +177,10 @@ export function CommandPalette({
               Print / Save as PDF
             </CommandItem>
           )}
-          {onPublish && !isPublished && (
+          {onPublish && (
             <CommandItem onSelect={() => handleSelect(onPublish)}>
               <Globe className="mr-2 h-4 w-4" />
-              Publish to Web
+              {isPublished ? "Update Published Page" : "Publish to Web"}
             </CommandItem>
           )}
           {onUnpublish && isPublished && (

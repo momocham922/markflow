@@ -582,15 +582,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   公開URL: <a href={publishUrl!} target="_blank" rel="noopener noreferrer" className="underline">{publishUrl}</a>
                   <span className="ml-2 opacity-70">(クリップボードにコピー済み)</span>
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
-                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors whitespace-nowrap"
                     onClick={async () => { try { await navigator.clipboard.writeText(publishUrl!); } catch {} }}
                   >
                     コピー
                   </button>
                   <button
-                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors whitespace-nowrap"
                     onClick={() => setPublishUrl(null)}
                   >
                     ✕
