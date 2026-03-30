@@ -147,7 +147,6 @@ body {
   flex: 1;
   min-width: 0;
   max-width: 780px;
-  margin: 0 auto;
   padding: 2em 2em 4em;
 }
 
@@ -183,49 +182,55 @@ body {
 }
 .theme-toggle:hover { border-color: var(--prose-links); }
 .branding {
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   color: var(--muted-foreground);
-  text-decoration: none;
+  opacity: 0.6;
+  letter-spacing: 0.02em;
 }
-.branding:hover { color: var(--prose-links); }
 
-/* TOC sidebar */
+/* TOC sidebar — left, modern, no scrollbar */
 .toc-sidebar {
   position: sticky;
   top: 60px;
-  width: 220px;
+  width: 200px;
   max-height: calc(100vh - 80px);
   overflow-y: auto;
-  padding: 1.5em 0 1.5em 1em;
+  padding: 1.5em 1.5em 1.5em 0;
   flex-shrink: 0;
-  border-left: 1px solid var(--border);
   margin-left: 2em;
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none;
 }
+.toc-sidebar::-webkit-scrollbar { display: none; }
 .toc-title {
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   color: var(--muted-foreground);
-  margin-bottom: 0.75em;
-  padding-left: 0.5em;
+  margin-bottom: 1em;
+  opacity: 0.7;
 }
 .toc-item {
   display: block;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   line-height: 1.4;
-  padding: 3px 0.5em;
-  margin-bottom: 2px;
+  padding: 4px 0 4px 12px;
+  margin-bottom: 1px;
   color: var(--muted-foreground);
   text-decoration: none;
-  border-radius: 4px;
-  transition: color 0.15s, background 0.15s;
+  border-left: 2px solid transparent;
+  transition: color 0.2s, border-color 0.2s;
 }
-.toc-item:hover { color: var(--prose-links); background: oklch(0.5 0 0 / 0.05); }
-.toc-item.active { color: var(--prose-links); font-weight: 600; background: oklch(0.5 0.1 250 / 0.08); }
-.toc-h2 { padding-left: 1.2em; }
-.toc-h3 { padding-left: 2em; font-size: 0.74rem; }
-.toc-h4 { padding-left: 2.8em; font-size: 0.72rem; }
+.toc-item:hover { color: var(--prose-body); border-left-color: oklch(0.5 0 0 / 0.2); }
+.toc-item.active {
+  color: var(--prose-links);
+  border-left-color: var(--prose-links);
+  font-weight: 500;
+}
+.toc-h2 { padding-left: 20px; }
+.toc-h3 { padding-left: 28px; font-size: 0.72rem; }
+.toc-h4 { padding-left: 36px; font-size: 0.7rem; opacity: 0.8; }
 
 /* Prose styles */
 .prose {
@@ -317,10 +322,10 @@ body {
 .prose strong { font-weight: 700; }
 .prose em { font-style: italic; }
 .prose img { max-width: 100%; border-radius: 0.5em; margin: 1em 0; box-shadow: 0 2px 8px oklch(0 0 0 / 0.1); }
-.prose table { width: 100%; border-collapse: collapse; margin: 1em 0; }
-.prose th { border-bottom: 2px solid var(--border); padding: 0.6em 0.75em; text-align: left; font-weight: 600; background: oklch(0 0 0 / 0.02); }
+.prose table { width: 100%; border-collapse: collapse; margin: 1em 0; table-layout: fixed; word-wrap: break-word; overflow-wrap: break-word; }
+.prose th { border-bottom: 2px solid var(--border); padding: 0.6em 0.75em; text-align: left; font-weight: 600; background: oklch(0 0 0 / 0.02); word-wrap: break-word; overflow-wrap: break-word; }
 html.dark .prose th { background: oklch(1 1 1 / 0.03); }
-.prose td { border-bottom: 1px solid var(--border); padding: 0.5em 0.75em; }
+.prose td { border-bottom: 1px solid var(--border); padding: 0.5em 0.75em; word-wrap: break-word; overflow-wrap: break-word; }
 
 /* Syntax highlighting */
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
@@ -359,14 +364,14 @@ ${customPreviewCss || ""}
       <button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark')">
         <span class="light-icon">&#9790;</span> / <span class="dark-icon">&#9788;</span>
       </button>
-      <a class="branding" href="https://github.com/momocham922/markflow" target="_blank" rel="noopener">Published with MarkFlow</a>
+      <span class="branding">Published with MarkFlow</span>
     </div>
   </header>
   <div class="page-wrapper">
+    ${hasToc ? tocHtml : ""}
     <article class="main-content prose">
 ${bodyHtml}
     </article>
-    ${hasToc ? tocHtml : ""}
   </div>
   ${hasToc ? `<script>
 (function() {
