@@ -10,7 +10,24 @@
 
 $ErrorActionPreference = "Stop"
 
+# Resolve repo root from script location
+$ROOT = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not $PSScriptRoot) { $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+# If script is at scripts/build-windows.ps1, parent of scripts/ is root
+$ROOT = Split-Path -Parent $PSScriptRoot
+
 Write-Host "=== MarkFlow Windows Build ===" -ForegroundColor Cyan
+Write-Host "Root: $ROOT"
+
+# Move to repo root
+Set-Location $ROOT
+
+# Verify we're in the right place
+if (-not (Test-Path "src-tauri\tauri.conf.json")) {
+    Write-Host "ERROR: src-tauri\tauri.conf.json not found in $ROOT" -ForegroundColor Red
+    Write-Host "Make sure you're running from the markflow repository." -ForegroundColor Red
+    exit 1
+}
 
 # Check prerequisites
 $missing = @()
@@ -36,8 +53,8 @@ pnpm install
 if ($LASTEXITCODE -ne 0) { Write-Host "pnpm install failed" -ForegroundColor Red; exit 1 }
 
 # Signing key: use if available, otherwise disable updater
-$keyFile = "$env:USERPROFILE\.tauri\markflow.key"
-$confPath = "src-tauri\tauri.conf.json"
+$keyFile = Join-Path $env:USERPROFILE ".tauri\markflow.key"
+$confPath = Join-Path $ROOT "src-tauri\tauri.conf.json"
 $confBackup = Get-Content $confPath -Raw
 $needRestore = $false
 
@@ -73,14 +90,14 @@ finally {
 }
 
 # Show output
-$version = (Get-Content package.json | ConvertFrom-Json).version
-$bundleDir = "src-tauri\target\release\bundle"
+$version = (Get-Content (Join-Path $ROOT "package.json") | ConvertFrom-Json).version
+$bundleDir = Join-Path $ROOT "src-tauri\target\release\bundle"
 
 Write-Host "`n=== Build complete! ===" -ForegroundColor Green
 Write-Host "Version: $version"
 Write-Host "`nArtifacts:"
 
-$nsis = Get-ChildItem "$bundleDir\nsis\*.exe" -ErrorAction SilentlyContinue
+$nsis = Get-ChildItem (Join-Path $bundleDir "nsis\*.exe") -ErrorAction SilentlyContinue
 
 if ($nsis) { Write-Host "  NSIS: $($nsis.FullName)" -ForegroundColor White }
 
