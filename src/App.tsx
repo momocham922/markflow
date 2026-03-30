@@ -391,12 +391,17 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
   const [publishUrl, setPublishUrl] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   const handlePublish = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
     const user = useAuthStore.getState().user;
-    if (!doc || !user) return;
+    if (!doc || !user) {
+      setPublishError("ドキュメントを選択してログインしてください");
+      return;
+    }
     setPublishing(true);
+    setPublishError(null);
     try {
       const { generatePublishHtml } = await import("@/lib/html-publish");
       const html = generatePublishHtml({
@@ -410,6 +415,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       const { invoke } = await import("@tauri-apps/api/core");
       const token = await user.getIdToken();
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
+      if (!bucket) throw new Error("VITE_FIREBASE_STORAGE_BUCKET is not configured");
       const url = await invoke<string>("upload_html_cloud", {
         html,
         docId: doc.id,
@@ -423,7 +429,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       // Copy to clipboard
       try { await navigator.clipboard.writeText(url); } catch {}
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       console.error("Publish failed:", e);
+      setPublishError(msg);
     } finally {
       setPublishing(false);
     }
@@ -551,10 +559,23 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         )}
         {/* Publish banner */}
-        {(publishUrl || publishing) && (
-          <div className="flex items-center justify-between gap-3 bg-green-600 px-4 py-1.5 text-white text-xs shrink-0">
+        {(publishUrl || publishing || publishError) && (
+          <div className={cn(
+            "flex items-center justify-between gap-3 px-4 py-1.5 text-white text-xs shrink-0",
+            publishError ? "bg-red-600" : "bg-green-600",
+          )}>
             {publishing ? (
               <span>公開中...</span>
+            ) : publishError ? (
+              <>
+                <span className="truncate">公開エラー: {publishError}</span>
+                <button
+                  className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                  onClick={() => setPublishError(null)}
+                >
+                  ✕
+                </button>
+              </>
             ) : (
               <>
                 <span className="truncate">
