@@ -27,7 +27,7 @@ import {
   where,
   orderBy,
   serverTimestamp,
-  type Timestamp,
+  Timestamp,
 } from "firebase/firestore";
 import {
   getStorage,
@@ -431,6 +431,7 @@ export async function saveDocumentToFirestore(docData: {
   folder?: string;
   tags?: string[];
   docType?: string;
+  updatedAt?: number;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
 
@@ -453,7 +454,7 @@ export async function saveDocumentToFirestore(docData: {
       ownerId: docData.ownerId,
       folder: docData.folder ?? "/",
       tags: docData.tags ?? [],
-      updatedAt: serverTimestamp(),
+      updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
     };
     if (docData.ownerName) payload.ownerName = docData.ownerName;
     if (docData.docType) payload.docType = docData.docType;
@@ -507,6 +508,7 @@ export async function saveDocumentMerge(docData: {
   folder?: string;
   tags?: string[];
   docType?: string;
+  updatedAt?: number;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(ref, {
@@ -517,7 +519,7 @@ export async function saveDocumentMerge(docData: {
     folder: docData.folder ?? "/",
     tags: docData.tags ?? [],
     ...(docData.docType ? { docType: docData.docType } : {}),
-    updatedAt: serverTimestamp(),
+    updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
   }, { merge: true });
 }
 

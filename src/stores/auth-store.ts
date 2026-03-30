@@ -102,6 +102,10 @@ async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
 // --- Active collab tracking: docs currently being edited via Yjs ---
 // Editor sets this so sync knows not to overwrite content
 const collabActiveDocIds = new Set<string>();
+
+// --- Track docs pulled from cloud during syncFromCloud ---
+// Prevents syncToCloud from re-uploading docs that were just downloaded
+const cloudPulledDocIds = new Set<string>();
 export function markCollabActive(docId: string) { collabActiveDocIds.add(docId); }
 export function markCollabInactive(docId: string) { collabActiveDocIds.delete(docId); }
 
@@ -142,8 +146,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // overwrite correct SQLite values with stale cloud values.
         const syncThenBackfill = async () => {
           await get().syncFromCloud();
-          // Push local docs to cloud (ensures all local-only docs get uploaded)
           await get().syncToCloud();
+          // Update lastSyncAt AFTER both steps complete
+          try {
+            const { setSetting } = await import("@/services/database");
+            await setSetting("lastSyncAt", String(Date.now()));
+          } catch { /* ignore */ }
+          cloudPulledDocIds.clear();
           // Backfill local versions to Firestore (one-time, background)
           backfillLocalVersionsToCloud(
             user.uid,
@@ -169,6 +178,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (get().user) {
         await get().syncFromCloud();
         await get().syncToCloud();
+        try {
+          const { setSetting } = await import("@/services/database");
+          await setSetting("lastSyncAt", String(Date.now()));
+        } catch { /* ignore */ }
+        cloudPulledDocIds.clear();
       }
     };
     const handleOffline = () => set({ isOnline: false });
@@ -182,6 +196,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (user && isOnline && !syncing) {
         await get().syncFromCloud();
         await get().syncToCloud();
+        try {
+          const { setSetting } = await import("@/services/database");
+          await setSetting("lastSyncAt", String(Date.now()));
+        } catch { /* ignore */ }
+        cloudPulledDocIds.clear();
       }
     }, 60_000);
 
@@ -350,6 +369,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               docType: (cloudDoc.docType as DocType) || "markdown",
             };
             await appStore.addDocument(newDoc);
+            cloudPulledDocIds.add(cloudDoc.id);
           } else {
             const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
             const hasShareLink = cloudDoc.shareLink?.enabled === true;
@@ -371,6 +391,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               updates.folder = cloudDoc.folder ?? local.folder;
               updates.tags = cloudDoc.tags ?? local.tags;
               updates.docType = (cloudDoc.docType as DocType) || local.docType;
+              // Mark as pulled from cloud — don't re-upload in syncToCloud
+              cloudPulledDocIds.add(local.id);
             }
             appStore.updateDocument(local.id, updates);
           }
@@ -577,11 +599,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         }
 
-        // Record successful sync timestamp
-        try {
-          const { setSetting } = await import("@/services/database");
-          await setSetting("lastSyncAt", String(Date.now()));
-        } catch { /* ignore */ }
+        // NOTE: lastSyncAt is updated by the CALLER after both syncFromCloud + syncToCloud complete.
+        // Do NOT update it here — otherwise syncToCloud would filter out all docs.
       } catch (error) {
         console.error("Sync from cloud failed:", error);
       } finally {
@@ -726,11 +745,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         } catch { /* ignore */ }
 
-        // Sync all docs owned by this user.
-        // syncFromCloud already reconciles deletions (removes locally-deleted docs),
-        // so there's no risk of re-uploading docs deleted on another device.
+        // Only upload docs that were locally modified since last sync cycle.
+        // Skip docs just pulled from cloud (cloudPulledDocIds) to avoid ping-pong.
+        // lastSyncAt is updated by the CALLER after both sync steps complete,
+        // so it reflects the PREVIOUS cycle — not the one currently running.
+        let lastSyncAt = 0;
+        try {
+          const { getSetting } = await import("@/services/database");
+          const saved = await getSetting("lastSyncAt");
+          if (saved) lastSyncAt = parseInt(saved, 10) || 0;
+        } catch { /* DB not available */ }
+
         const syncableDocs = documents.filter((d) => {
           if (d.ownerId && d.ownerId !== user.uid) return false; // non-owner
+          if (cloudPulledDocIds.has(d.id)) return false; // just pulled from cloud
+          // On first sync ever (lastSyncAt=0), upload everything.
+          // After that, only upload docs modified since last sync cycle.
+          if (lastSyncAt > 0 && d.updatedAt < lastSyncAt) return false;
           return true;
         });
         for (const d of syncableDocs) {
@@ -743,6 +774,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             folder: d.folder,
             tags: d.tags,
             docType: d.docType,
+            updatedAt: d.updatedAt,
           };
           try {
             await saveDocumentToFirestore(payload);
