@@ -29,11 +29,17 @@ with open('$ROOT/src-tauri/Cargo.toml', 'w') as f:
     f.write(content)
 "
 
-# 4. iOS project.yml (CFBundleShortVersionString and CFBundleVersion)
+# 4. iOS project.yml (CFBundleShortVersionString + auto-increment CFBundleVersion)
 IOS_PROJECT="$ROOT/src-tauri/gen/apple/project.yml"
 if [ -f "$IOS_PROJECT" ]; then
-  sed -i '' "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: $VERSION/" "$IOS_PROJECT"
-  sed -i '' "s/CFBundleVersion: .*/CFBundleVersion: \"$VERSION\"/" "$IOS_PROJECT"
+  # Strip prerelease for CFBundleShortVersionString (e.g. 0.3.0-beta.53 → 0.3.0)
+  SHORT_VERSION=$(echo "$VERSION" | sed 's/-.*//')
+  sed -i '' "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: $SHORT_VERSION/" "$IOS_PROJECT"
+  # Auto-increment integer build number
+  CURRENT_BUILD=$(grep 'CFBundleVersion:' "$IOS_PROJECT" | sed 's/.*"\([0-9]*\)".*/\1/')
+  NEXT_BUILD=$((CURRENT_BUILD + 1))
+  sed -i '' "s/CFBundleVersion: .*/CFBundleVersion: \"$NEXT_BUILD\"/" "$IOS_PROJECT"
+  echo "  iOS: version=$SHORT_VERSION build=$NEXT_BUILD"
 fi
 
 # Verify all 3 core files match

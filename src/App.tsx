@@ -20,6 +20,7 @@ import TurndownService from "turndown";
 import { marked } from "marked";
 import { getPlatform, isIOS } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
+import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -77,6 +78,7 @@ function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
   const { viewportHeight, keyboardVisible } = useIOSKeyboard();
+  const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(sidebarOpen, toggleSidebar);
   const [shareToken, setShareToken] = useState<string | null>(() => {
     const match = window.location.hash.match(/^#\/share\/(.+)$/);
     return match ? match[1] : null;
@@ -476,32 +478,42 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         )}
         <div className="flex flex-1 overflow-hidden">
-          {/* Sidebar — overlay on iOS, inline on desktop */}
-          {sidebarOpen && isIOS && (
+          {/* Sidebar — swipeable overlay on iOS, inline on desktop */}
+          {isIOS && (sidebarOpen || swiping) && (
             <div
-              className="fixed inset-0 z-40 bg-black/30"
+              className="fixed inset-0 z-40"
+              style={{ backgroundColor: `rgba(0,0,0,${0.3 * backdropOpacity})` }}
               onClick={toggleSidebar}
             />
           )}
-          {sidebarOpen && (
-            <>
+          {isIOS ? (
+            (sidebarOpen || swiping) && (
               <div
-                className={cn(
-                  "shrink-0 overflow-hidden",
-                  isIOS && "fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background"
-                )}
-                style={{ width: isIOS ? 280 : sidebarWidth }}
+                className="fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background overflow-hidden"
+                style={{
+                  width: 280,
+                  transform: `translateX(${sidebarTranslateX}px)`,
+                  transition: swiping ? "none" : "transform 0.3s ease-out",
+                }}
               >
                 <Sidebar />
               </div>
-              {/* Sidebar resize handle — desktop only */}
-              {!isIOS && (
+            )
+          ) : (
+            sidebarOpen && (
+              <>
+                <div
+                  className="shrink-0 overflow-hidden"
+                  style={{ width: sidebarWidth }}
+                >
+                  <Sidebar />
+                </div>
                 <div
                   className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
                   onPointerDown={(e) => handleResizeStart("sidebar", e)}
                 />
-              )}
-            </>
+              </>
+            )
           )}
 
           {/* Main content */}

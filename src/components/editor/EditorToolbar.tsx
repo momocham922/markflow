@@ -140,12 +140,12 @@ export function EditorToolbar({
     setRenaming(false);
   };
 
-  // ── iOS mobile layout ───────────────────────────────────
+  // ── iOS mobile layout (2 rows: info + tools) ───────────
   if (isIOS) {
     return (
-      <div className="relative flex items-center justify-between border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2">
-        {/* Left: document title */}
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1">
+      <div className="border-b border-border bg-background/80 backdrop-blur-sm">
+        {/* Row 1: document info */}
+        <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 text-xs text-muted-foreground min-w-0">
           {activeDoc && (
             renaming ? (
               <div className="flex items-center gap-1 shrink-0">
@@ -170,12 +170,12 @@ export function EditorToolbar({
               </div>
             ) : (
               <span
-                className="text-xs font-medium truncate max-w-[140px] cursor-pointer hover:text-foreground shrink-0 flex items-center gap-1"
+                className="text-xs font-medium truncate cursor-pointer hover:text-foreground flex items-center gap-1 min-w-0"
                 onClick={handleStartRename}
                 title="Click to rename"
               >
-                {activeDoc.title}
-                <Pencil className="h-2.5 w-2.5 opacity-50" />
+                <span className="truncate">{activeDoc.title}</span>
+                <Pencil className="h-2.5 w-2.5 opacity-50 shrink-0" />
               </span>
             )
           )}
@@ -187,65 +187,37 @@ export function EditorToolbar({
           {collabSlot}
         </div>
 
-        {/* Right: essential controls */}
-        <div className="flex items-center gap-1 shrink-0">
-          {voiceSupported && onVoiceToggle && (
-            <Button
-              variant={voiceActive ? "secondary" : "ghost"}
-              size="icon"
-              className={`h-7 w-7 ${voiceActive ? "text-red-500" : ""}`}
-              onClick={onVoiceToggle}
-              title={voiceActive ? "Close voice panel" : "Voice input"}
-            >
-              {voiceActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+        {/* Row 2: tool buttons */}
+        <div className="flex items-center justify-between px-3 pt-0.5 pb-1.5">
+          <div className="flex items-center gap-1">
+            {voiceSupported && onVoiceToggle && (
+              <Button
+                variant={voiceActive ? "secondary" : "ghost"}
+                size="icon"
+                className={`h-7 w-7 ${voiceActive ? "text-red-500" : ""}`}
+                onClick={onVoiceToggle}
+                title={voiceActive ? "Close voice panel" : "Voice input"}
+              >
+                {voiceActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+              </Button>
+            )}
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onHistoryOpen} title="Version History">
+              <History className="h-3.5 w-3.5" />
             </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={onHistoryOpen}
-            title="Version History"
-          >
-            <History className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setThemeOpen(true)}
-            title="Theme"
-          >
-            <Paintbrush className="h-3.5 w-3.5" />
-          </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setThemeOpen(true)} title="Theme">
+              <Paintbrush className="h-3.5 w-3.5" />
+            </Button>
+          </div>
 
-          {/* Preview mode toggle (no split on mobile) */}
+          {/* Preview mode toggle */}
           <div className="flex items-center rounded-md border border-border p-0.5">
-            <Button
-              variant={previewMode === "edit" ? "secondary" : "ghost"}
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => onPreviewModeChange("edit")}
-              title="Edit only"
-            >
+            <Button variant={previewMode === "edit" ? "secondary" : "ghost"} size="icon" className="h-6 w-6" onClick={() => onPreviewModeChange("edit")} title="Edit only">
               <PenLine className="h-3.5 w-3.5" />
             </Button>
-            <Button
-              variant={previewMode === "preview" ? "secondary" : "ghost"}
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => onPreviewModeChange("preview")}
-              title="Preview only"
-            >
+            <Button variant={previewMode === "preview" ? "secondary" : "ghost"} size="icon" className="h-6 w-6" onClick={() => onPreviewModeChange("preview")} title="Preview only">
               <Eye className="h-3.5 w-3.5" />
             </Button>
-            <Button
-              variant={previewMode === "mindmap" ? "secondary" : "ghost"}
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => onPreviewModeChange("mindmap")}
-              title="Mind Map"
-            >
+            <Button variant={previewMode === "mindmap" ? "secondary" : "ghost"} size="icon" className="h-6 w-6" onClick={() => onPreviewModeChange("mindmap")} title="Mind Map">
               <Network className="h-3.5 w-3.5" />
             </Button>
           </div>

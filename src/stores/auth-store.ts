@@ -353,12 +353,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           } else {
             const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
             const hasShareLink = cloudDoc.shareLink?.enabled === true;
+            const cloudUpdatedAt = cloudDoc.updatedAt?.toMillis() ?? 0;
             const updates: Partial<Document> = {
               ownerId: user.uid,
               isShared: hasCollaborators || hasShareLink,
             };
             if (cloudDoc.folder && cloudDoc.folder !== "/" && local.folder === "/") {
               updates.folder = cloudDoc.folder;
+            }
+            // Sync content/title from cloud if cloud version is newer
+            if (cloudUpdatedAt > local.updatedAt && !collabActiveDocIds.has(local.id)) {
+              if (cloudDoc.content?.trim()) {
+                updates.content = cloudDoc.content;
+              }
+              updates.title = cloudDoc.title;
+              updates.updatedAt = cloudUpdatedAt;
+              updates.folder = cloudDoc.folder ?? local.folder;
+              updates.tags = cloudDoc.tags ?? local.tags;
+              updates.docType = (cloudDoc.docType as DocType) || local.docType;
             }
             appStore.updateDocument(local.id, updates);
           }
@@ -714,19 +726,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         } catch { /* ignore */ }
 
-        // Only sync docs owned by this user that have been updated since last sync.
-        // This prevents re-uploading docs that were deleted on another device.
-        let lastSyncAt = 0;
-        try {
-          const { getSetting } = await import("@/services/database");
-          const saved = await getSetting("lastSyncAt");
-          if (saved) lastSyncAt = parseInt(saved, 10) || 0;
-        } catch { /* DB not available */ }
-
+        // Sync all docs owned by this user.
+        // syncFromCloud already reconciles deletions (removes locally-deleted docs),
+        // so there's no risk of re-uploading docs deleted on another device.
         const syncableDocs = documents.filter((d) => {
           if (d.ownerId && d.ownerId !== user.uid) return false; // non-owner
-          // If we have a lastSyncAt, only upload docs updated after it (or new docs)
-          if (lastSyncAt > 0 && d.updatedAt < lastSyncAt) return false;
           return true;
         });
         for (const d of syncableDocs) {
