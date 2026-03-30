@@ -35,10 +35,31 @@ Write-Host "`n=== Installing dependencies ===" -ForegroundColor Cyan
 pnpm install
 if ($LASTEXITCODE -ne 0) { Write-Host "pnpm install failed" -ForegroundColor Red; exit 1 }
 
-# Build
-Write-Host "`n=== Building MarkFlow ===" -ForegroundColor Cyan
-pnpm tauri build
-if ($LASTEXITCODE -ne 0) { Write-Host "Build failed" -ForegroundColor Red; exit 1 }
+# Temporarily disable updater artifacts (requires signing key we don't have on Windows)
+$confPath = "src-tauri\tauri.conf.json"
+$conf = Get-Content $confPath -Raw
+$needRestore = $false
+
+if ($conf -match '"createUpdaterArtifacts"\s*:\s*true') {
+    Write-Host "`n=== Disabling updater artifacts (no signing key) ===" -ForegroundColor Yellow
+    $conf -replace '"createUpdaterArtifacts"\s*:\s*true', '"createUpdaterArtifacts": false' | Set-Content $confPath -NoNewline
+    $needRestore = $true
+}
+
+try {
+    # Build
+    Write-Host "`n=== Building MarkFlow ===" -ForegroundColor Cyan
+    pnpm tauri build
+    if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+}
+finally {
+    # Restore tauri.conf.json
+    if ($needRestore) {
+        $restored = (Get-Content $confPath -Raw) -replace '"createUpdaterArtifacts"\s*:\s*false', '"createUpdaterArtifacts": true'
+        $restored | Set-Content $confPath -NoNewline
+        Write-Host "=== Restored createUpdaterArtifacts: true ===" -ForegroundColor Yellow
+    }
+}
 
 # Show output
 $version = (Get-Content package.json | ConvertFrom-Json).version
