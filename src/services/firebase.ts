@@ -536,6 +536,18 @@ export async function updateShareLink(
   await updateDoc(doc(firestore, DOCS_COLLECTION, docId), { shareLink });
 }
 
+// ─── Publish URL management ─────────────────────────────────
+
+export async function setPublishUrl(
+  docId: string,
+  publishUrl: string | null,
+): Promise<void> {
+  await updateDoc(doc(firestore, DOCS_COLLECTION, docId), {
+    publishUrl: publishUrl,
+    publishedAt: publishUrl ? serverTimestamp() : null,
+  });
+}
+
 // ─── Version history cloud sync ─────────────────────────────
 // Versions are stored as subcollections: documents/{docId}/versions/{versionId}
 // This matches Firestore security rules and scopes access to document collaborators.

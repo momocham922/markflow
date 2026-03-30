@@ -56,6 +56,8 @@ function App() {
     addDocument,
     setActiveDocId,
     setPendingRestoreContent,
+    themeSettings,
+    customPreviewThemes,
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
   const syncing = useAuthStore((s) => s.syncing);
@@ -385,6 +387,77 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
     }
   }, [activeDocId, documents]);
 
+  // ─── Publish to Web ────────────────────────────────────────
+
+  const [publishUrl, setPublishUrl] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+
+  const handlePublish = useCallback(async () => {
+    const doc = documents.find((d) => d.id === activeDocId);
+    const user = useAuthStore.getState().user;
+    if (!doc || !user) return;
+    setPublishing(true);
+    try {
+      const { generatePublishHtml } = await import("@/lib/html-publish");
+      const html = generatePublishHtml({
+        title: doc.title,
+        content: doc.content,
+        themeId: themeSettings.previewTheme,
+        isDark: theme === "dark",
+        customPreviewThemes,
+        customPreviewCss: themeSettings.customPreviewCss,
+      });
+      const { invoke } = await import("@tauri-apps/api/core");
+      const token = await user.getIdToken();
+      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
+      const url = await invoke<string>("upload_html_cloud", {
+        html,
+        docId: doc.id,
+        token,
+        bucket,
+      });
+      // Save publish URL to Firestore
+      const { setPublishUrl: saveUrl } = await import("@/services/firebase");
+      await saveUrl(doc.id, url);
+      setPublishUrl(url);
+      // Copy to clipboard
+      try { await navigator.clipboard.writeText(url); } catch {}
+    } catch (e) {
+      console.error("Publish failed:", e);
+    } finally {
+      setPublishing(false);
+    }
+  }, [activeDocId, documents, theme, themeSettings, customPreviewThemes]);
+
+  const handleUnpublish = useCallback(async () => {
+    const doc = documents.find((d) => d.id === activeDocId);
+    const user = useAuthStore.getState().user;
+    if (!doc || !user) return;
+    setPublishing(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const token = await user.getIdToken();
+      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
+      await invoke<void>("delete_published_html", {
+        docId: doc.id,
+        token,
+        bucket,
+      });
+      const { setPublishUrl: saveUrl } = await import("@/services/firebase");
+      await saveUrl(doc.id, null);
+      setPublishUrl(null);
+    } catch (e) {
+      console.error("Unpublish failed:", e);
+    } finally {
+      setPublishing(false);
+    }
+  }, [activeDocId, documents]);
+
+  // Clear publish URL when switching documents
+  useEffect(() => {
+    setPublishUrl(null);
+  }, [activeDocId]);
+
   if (!initialized) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background" data-tauri-drag-region>
@@ -475,6 +548,35 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 {updateStatus === "error" ? "再試行" : updateStatus === "downloading" ? "..." : "アップデート"}
               </button>
             </div>
+          </div>
+        )}
+        {/* Publish banner */}
+        {(publishUrl || publishing) && (
+          <div className="flex items-center justify-between gap-3 bg-green-600 px-4 py-1.5 text-white text-xs shrink-0">
+            {publishing ? (
+              <span>公開中...</span>
+            ) : (
+              <>
+                <span className="truncate">
+                  公開URL: <a href={publishUrl!} target="_blank" rel="noopener noreferrer" className="underline">{publishUrl}</a>
+                  <span className="ml-2 opacity-70">(クリップボードにコピー済み)</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                    onClick={async () => { try { await navigator.clipboard.writeText(publishUrl!); } catch {} }}
+                  >
+                    コピー
+                  </button>
+                  <button
+                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                    onClick={() => setPublishUrl(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
         <div className="flex flex-1 overflow-hidden">
@@ -726,6 +828,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           onImportMarkdown={handleImportMarkdown}
           onPrint={handlePrint}
           onShowShortcuts={() => setShortcutsOpen(true)}
+          onPublish={handlePublish}
+          onUnpublish={handleUnpublish}
+          isPublished={!!publishUrl}
         />
         {/* Hidden file input for markdown import */}
         <input

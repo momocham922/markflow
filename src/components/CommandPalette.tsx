@@ -22,6 +22,8 @@ import {
   Upload,
   Printer,
   Keyboard,
+  Globe,
+  GlobeLock,
 } from "lucide-react";
 import { useAppStore, type Document } from "@/stores/app-store";
 
@@ -35,6 +37,9 @@ interface CommandPaletteProps {
   onImportMarkdown?: () => void;
   onPrint?: () => void;
   onShowShortcuts?: () => void;
+  onPublish?: () => void;
+  onUnpublish?: () => void;
+  isPublished?: boolean;
 }
 
 export function CommandPalette({
@@ -47,6 +52,9 @@ export function CommandPalette({
   onImportMarkdown,
   onPrint,
   onShowShortcuts,
+  onPublish,
+  onUnpublish,
+  isPublished,
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const {
@@ -167,6 +175,18 @@ export function CommandPalette({
             <CommandItem onSelect={() => handleSelect(onPrint)}>
               <Printer className="mr-2 h-4 w-4" />
               Print / Save as PDF
+            </CommandItem>
+          )}
+          {onPublish && !isPublished && (
+            <CommandItem onSelect={() => handleSelect(onPublish)}>
+              <Globe className="mr-2 h-4 w-4" />
+              Publish to Web
+            </CommandItem>
+          )}
+          {onUnpublish && isPublished && (
+            <CommandItem onSelect={() => handleSelect(onUnpublish)}>
+              <GlobeLock className="mr-2 h-4 w-4" />
+              Unpublish from Web
             </CommandItem>
           )}
           <CommandItem onSelect={() => handleSelect(toggleTheme)}>
