@@ -35,22 +35,42 @@ Write-Host "`n=== Installing dependencies ===" -ForegroundColor Cyan
 pnpm install
 if ($LASTEXITCODE -ne 0) { Write-Host "pnpm install failed" -ForegroundColor Red; exit 1 }
 
-# Signing key for updater
+# Signing key: use if available, otherwise disable updater
 $keyFile = "$env:USERPROFILE\.tauri\markflow.key"
+$confPath = "src-tauri\tauri.conf.json"
+$confBackup = Get-Content $confPath -Raw
+$needRestore = $false
+
 if (Test-Path $keyFile) {
     $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyFile -Raw
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-    Write-Host "Signing key loaded from $keyFile"
+    Write-Host "Signing key loaded from $keyFile" -ForegroundColor Green
 } else {
-    Write-Host "Signing key not found at $keyFile" -ForegroundColor Red
-    Write-Host "Copy markflow.key from macOS: ~/.tauri/markflow.key -> $keyFile" -ForegroundColor Yellow
-    exit 1
+    Write-Host "`n=== No signing key found — disabling updater ===" -ForegroundColor Yellow
+    Write-Host "  (Copy from macOS: ~/.tauri/markflow.key -> $keyFile)" -ForegroundColor Yellow
+    $conf = $confBackup
+    $conf = $conf -replace '"createUpdaterArtifacts"\s*:\s*true', '"createUpdaterArtifacts": false'
+    $conf = $conf -replace '"pubkey"\s*:\s*"[^"]*"', '"pubkey": ""'
+    $conf | Set-Content $confPath -NoNewline
+    $env:TAURI_SIGNING_PRIVATE_KEY = "not-used"
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+    $needRestore = $true
 }
 
-# Build
-Write-Host "`n=== Building MarkFlow ===" -ForegroundColor Cyan
-pnpm tauri build --bundles nsis
-if ($LASTEXITCODE -ne 0) { Write-Host "Build failed" -ForegroundColor Red; exit 1 }
+try {
+    # Build
+    Write-Host "`n=== Building MarkFlow ===" -ForegroundColor Cyan
+    pnpm tauri build --bundles nsis
+    if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+}
+finally {
+    if ($needRestore) {
+        $confBackup | Set-Content $confPath -NoNewline
+        Write-Host "=== Restored tauri.conf.json ===" -ForegroundColor Yellow
+    }
+    Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+}
 
 # Show output
 $version = (Get-Content package.json | ConvertFrom-Json).version
