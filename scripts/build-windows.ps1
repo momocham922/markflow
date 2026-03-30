@@ -35,9 +35,21 @@ Write-Host "`n=== Installing dependencies ===" -ForegroundColor Cyan
 pnpm install
 if ($LASTEXITCODE -ne 0) { Write-Host "pnpm install failed" -ForegroundColor Red; exit 1 }
 
+# Signing key for updater
+$keyFile = "$env:USERPROFILE\.tauri\markflow.key"
+if (Test-Path $keyFile) {
+    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyFile -Raw
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+    Write-Host "Signing key loaded from $keyFile"
+} else {
+    Write-Host "Signing key not found at $keyFile" -ForegroundColor Red
+    Write-Host "Copy markflow.key from macOS: ~/.tauri/markflow.key -> $keyFile" -ForegroundColor Yellow
+    exit 1
+}
+
 # Build
 Write-Host "`n=== Building MarkFlow ===" -ForegroundColor Cyan
-pnpm tauri build
+pnpm tauri build --bundles nsis
 if ($LASTEXITCODE -ne 0) { Write-Host "Build failed" -ForegroundColor Red; exit 1 }
 
 # Show output
@@ -48,10 +60,8 @@ Write-Host "`n=== Build complete! ===" -ForegroundColor Green
 Write-Host "Version: $version"
 Write-Host "`nArtifacts:"
 
-$msi = Get-ChildItem "$bundleDir\msi\*.msi" -ErrorAction SilentlyContinue
 $nsis = Get-ChildItem "$bundleDir\nsis\*.exe" -ErrorAction SilentlyContinue
 
-if ($msi) { Write-Host "  MSI:  $($msi.FullName)" -ForegroundColor White }
 if ($nsis) { Write-Host "  NSIS: $($nsis.FullName)" -ForegroundColor White }
 
 Write-Host "`nNote: Unsigned build - Windows Defender may show a warning on install." -ForegroundColor Yellow
