@@ -21,7 +21,6 @@ import { marked } from "marked";
 import { getPlatform, isIOS } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
 import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
-import { useIOSPinchZoom } from "@/hooks/use-ios-pinch-zoom";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -57,8 +56,6 @@ function App() {
     addDocument,
     setActiveDocId,
     setPendingRestoreContent,
-    zoomLevel,
-    setZoomLevel,
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
   const syncing = useAuthStore((s) => s.syncing);
@@ -87,8 +84,6 @@ function App() {
     return match ? match[1] : null;
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const zoomContainerRef = useRef<HTMLDivElement>(null);
-  useIOSPinchZoom(zoomContainerRef, zoomLevel, setZoomLevel);
 
   // Resizable panel widths
   const [sidebarWidth, setSidebarWidth] = useState(240);
@@ -621,7 +616,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               </div>
             </div>
             <div className="flex flex-1 overflow-hidden">
-              <div className="flex-1 overflow-hidden" ref={zoomContainerRef}>
+              <div className="flex-1 overflow-hidden">
                 {diffState ? (
                   <div className="flex h-full flex-col">
                     <div className="flex items-center gap-2 border-b border-border px-4 py-2">

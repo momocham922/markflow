@@ -77,10 +77,6 @@ interface AppState {
   customPreviewThemes: CustomPreviewTheme[];
   addCustomPreviewTheme: (theme: CustomPreviewTheme) => void;
   removeCustomPreviewTheme: (id: string) => void;
-
-  // iOS zoom
-  zoomLevel: number;
-  setZoomLevel: (level: number) => void;
 }
 
 /** Sync a setting to cloud (fire-and-forget, lazy import to avoid circular deps) */
@@ -239,12 +235,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   customPreviewThemes: [],
 
-  zoomLevel: 1,
-  setZoomLevel: (level) => {
-    set({ zoomLevel: level });
-    db.setSetting("zoomLevel", String(level)).catch(console.error);
-  },
-
   loadDocuments: async () => {
     try {
       const rows = await db.getAllDocuments();
@@ -328,22 +318,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         try { customPreviewThemes = JSON.parse(savedCustomThemes); } catch { /* ignore */ }
       }
 
-      // Load zoom level (iOS)
-      let zoomLevel = 1;
-      const savedZoom = await db.getSetting("zoomLevel");
-      if (savedZoom) {
-        const parsed = parseFloat(savedZoom);
-        if (parsed >= 0.5 && parsed <= 3.0) zoomLevel = parsed;
-      }
-
       if (savedTheme === "light" || savedTheme === "dark") {
         document.documentElement.classList.toggle(
           "dark",
           savedTheme === "dark",
         );
-        set({ documents, folders, theme: savedTheme, themeSettings, customPreviewThemes, zoomLevel, initialized: true });
+        set({ documents, folders, theme: savedTheme, themeSettings, customPreviewThemes, initialized: true });
       } else {
-        set({ documents, folders, themeSettings, customPreviewThemes, zoomLevel, initialized: true });
+        set({ documents, folders, themeSettings, customPreviewThemes, initialized: true });
       }
     } catch {
       // Running in browser without Tauri — skip DB, but still restore themes from localStorage
