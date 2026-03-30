@@ -105,6 +105,42 @@ TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
 - **Beta**: Delete the `beta` release on GitHub → beta users won't see the update
 - **Stable**: Cannot un-release (users may have already updated). Fix forward with a new patch version.
 
+### iOS TestFlight Release (CRITICAL — 特殊フロー)
+
+#### Bundle ID問題
+- **macOS**: `com.markflow.editor` — `tauri.conf.json` の `identifier`。**絶対に変更禁止**（変更すると `~/Library/Application Support/` のパスが変わり既存ユーザーのデータが全て消失する）
+- **iOS (App Store Connect)**: `com.markflow.app` — Apple Developer Portalで登録済み
+- Tauriは `tauri.conf.json` の `identifier` を両プラットフォームに適用するため、分離不可
+- **解決策**: `release-testflight.sh` がビルド前に identifier を一時的に差し替え、ビルド後に自動復元する
+
+#### TestFlight ビルドコマンド
+```bash
+./scripts/bump-version.sh 0.3.0-beta.N    # version + iOS build番号を更新
+git add -A && git commit && git push
+./scripts/release-testflight.sh            # 1コマンドで完結
+```
+
+スクリプト内部処理:
+1. `tauri.conf.json` の identifier を `com.markflow.app` に一時変更
+2. `pnpm tauri ios build` 実行
+3. xcarchive内の CFBundleVersion を整数に修正（Tauriが `0.3.0.N` 形式で上書きするため）
+4. `xcodebuild -exportArchive` で App Store Connect にアップロード
+5. identifier を `com.markflow.editor` に復元（`trap EXIT` で失敗時も保証）
+
+#### TestFlight 設定
+- App Store Connect アプリ名: `Markflow - Markdown Editor`（「MarkFlow」は他者に取られている）
+- CFBundleVersion: 整数連番（1, 2, 3...）。`project.yml` で管理、`bump-version.sh` が自動インクリメント
+- CFBundleShortVersionString: セマンティックバージョン（プレリリースタグ不可、例: `0.3.0`）
+- ExportOptions.plist: `app-store-connect` + `automatic` signing
+- `ITSAppUsesNonExemptEncryption: false` が Info.plist に必須
+
+#### PC + iOS 同時リリース手順
+1. `./scripts/bump-version.sh X.Y.Z-beta.N`
+2. `git add -A && git commit && git push`
+3. **PC版**: `pnpm tauri build` → `./scripts/release-beta.sh`
+4. **iOS版**: `./scripts/release-testflight.sh`
+5. **PC → iOS の順で実行**（PC版がクラウドに同期してからiOS版が取得するため）
+
 ### Build Artifacts
 All at `src-tauri/target/release/bundle/`:
 - `dmg/MarkFlow_{VERSION}_aarch64.dmg` — installer
@@ -119,12 +155,8 @@ All at `src-tauri/target/release/bundle/`:
   - Only works on Linux (WebKitGTK) — Docker container handles this on macOS
 - **Unit tests**: `pnpm test` (Vitest)
 
-## Collaboration Architecture (Yjs)
-Shared documents use the Google Docs/Notion pattern:
-1. **Y.Doc** = single source of truth for shared document content
-2. **y-indexeddb** = client-side Y.Doc persistence (offline, instant load)
-3. **y-websocket** = real-time peer sync
-4. **SQLite** = one-time seed only; after first sync, Y.Doc owns content
-
-Editor.tsx: shared docs show "Syncing document..." until yCollab is ready,
-then mount CodeMirror in uncontrolled mode (no value prop transition).
+## Cloud Sync Design Rules (auth-store.ts)
+- **syncFromCloud → syncToCloud** の順で毎回実行（起動時、60秒周期、オンライン復帰時）
+- **syncToCloud に lastSyncAt フィルターを入れてはいけない**: syncFromCloud が `lastSyncAt = Date.now()` を書いた直後に syncToCloud が走ると、全ドキュメントの `updatedAt < lastSyncAt` で何もアップロードされなくなる
+- **自分のドキュメントも内容同期必須**: syncFromCloud で既存ローカルドキュメントの content/title を cloud の updatedAt > local の updatedAt なら更新すること（メタデータだけ更新して content を無視すると別デバイスの編集が反映されない）
+- **削除の reconciliation**: syncFromCloud が reconciliation でローカル削除済みドキュメントを除去した後に syncToCloud が走るので、削除済みドキュメントの再アップロードは起きない
