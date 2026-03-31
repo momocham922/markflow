@@ -95,9 +95,9 @@ export async function notifySlack(
   if (config.channel) body.channel = config.channel;
 
   try {
-    await fetch(config.webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("send_slack_webhook", {
+      webhookUrl: config.webhookUrl,
       body: JSON.stringify(body),
     });
   } catch {

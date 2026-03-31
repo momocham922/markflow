@@ -266,6 +266,28 @@ fn extract_title(html: &str) -> String {
 }
 
 #[tauri::command]
+async fn send_slack_webhook(webhook_url: String, body: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&webhook_url)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status >= 200 && status < 300 {
+        Ok(text)
+    } else {
+        Err(format!("Slack webhook failed ({}): {}", status, text))
+    }
+}
+
+#[tauri::command]
 async fn fetch_ogp(url: String) -> Result<OgpData, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
@@ -1358,7 +1380,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, start_voice_recording, stop_voice_recording, get_voice_chunk])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, start_voice_recording, stop_voice_recording, get_voice_chunk])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
