@@ -219,6 +219,63 @@ function App() {
     return () => { unlisten?.(); };
   }, []);
 
+  // ─── Debounced Slack edit notifications ───
+  // Fire on: 10min idle after last edit, document switch, or app close
+  const editedDocRef = useRef<{ id: string; title: string } | null>(null);
+  const editTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const EDIT_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
+
+  const flushEditNotification = useCallback(async () => {
+    if (editTimerRef.current) {
+      clearTimeout(editTimerRef.current);
+      editTimerRef.current = null;
+    }
+    const edited = editedDocRef.current;
+    if (!edited) return;
+    editedDocRef.current = null;
+    try {
+      const { notifySlack } = await import("@/services/slack-notify");
+      const user = useAuthStore.getState().user;
+      await notifySlack(edited.id, "edit", {
+        docTitle: edited.title,
+        authorName: user?.displayName || user?.email || undefined,
+      });
+    } catch { /* ignore */ }
+  }, []);
+
+  // Track edits — called from Editor onChange
+  const markDocEdited = useCallback((docId: string, title: string) => {
+    editedDocRef.current = { id: docId, title };
+    if (editTimerRef.current) clearTimeout(editTimerRef.current);
+    editTimerRef.current = setTimeout(flushEditNotification, EDIT_DEBOUNCE_MS);
+  }, [flushEditNotification]);
+
+  // Flush on document switch
+  useEffect(() => {
+    // When activeDocId changes, flush notification for the previously edited doc
+    return () => { flushEditNotification(); };
+  }, [activeDocId, flushEditNotification]);
+
+  // Detect edits via store subscription (updateDocument triggers updatedAt change)
+  const lastUpdatedAtRef = useRef<number>(0);
+  useEffect(() => {
+    const unsub = useAppStore.subscribe((state) => {
+      const doc = state.documents.find((d) => d.id === state.activeDocId);
+      if (doc && doc.updatedAt > lastUpdatedAtRef.current) {
+        lastUpdatedAtRef.current = doc.updatedAt;
+        markDocEdited(doc.id, doc.title);
+      }
+    });
+    return unsub;
+  }, [markDocEdited]);
+
+  // Flush on app close (augment existing onWindowClose)
+  useEffect(() => {
+    const handleBeforeUnload = () => { flushEditNotification(); };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [flushEditNotification]);
+
   // Signal to Rust that frontend is alive (cancels failsafe auto-updater).
   // Delayed 5s to ensure full React tree has rendered without crash.
   useEffect(() => {

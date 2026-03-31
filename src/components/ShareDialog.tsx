@@ -77,7 +77,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     webhookUrl: "",
     channel: "",
     enabled: false,
-    events: { onEdit: true, onShare: true, onComment: true },
+    events: { onEdit: true, onShare: true },
   });
   const [slackSaved, setSlackSaved] = useState(false);
 
@@ -100,8 +100,8 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     // Load collaborators (map → array)
     getCollaborators(activeDocId).then(setCollaborators).catch(() => {});
 
-    // Load Slack config
-    loadSlackNotifyConfig().then(setSlackConfig).catch(() => {});
+    // Load Slack config for this document
+    loadSlackNotifyConfig(activeDocId).then(setSlackConfig).catch(() => {});
   }, [open, activeDocId, user]);
 
   const getShareUrl = useCallback(
@@ -135,7 +135,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       setShareLink(link);
 
       // Notify Slack
-      notifySlack("share", {
+      notifySlack(activeDocId, "share", {
         docTitle: activeDoc?.title || "Untitled",
         authorName: user?.displayName || user?.email || undefined,
         shareUrl: getShareUrl(link.token),
@@ -207,7 +207,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       setInviteEmail("");
 
       // Notify Slack
-      notifySlack("share", {
+      notifySlack(activeDocId, "share", {
         docTitle: activeDoc?.title || "Untitled",
         authorName: user?.displayName || user?.email || undefined,
         detail: `Invited ${inviteEmail.trim()} as ${inviteRole}`,
@@ -232,8 +232,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
   // ─── Slack notification handlers ──────────────────────
 
   const handleSaveSlackConfig = async () => {
+    if (!activeDocId) return;
     try {
-      await saveSlackNotifyConfig(slackConfig);
+      await saveSlackNotifyConfig(activeDocId, slackConfig);
       setSlackSaved(true);
       setTimeout(() => setSlackSaved(false), 2000);
     } catch {

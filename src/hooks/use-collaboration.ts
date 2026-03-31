@@ -135,16 +135,20 @@ export function useCollaboration(
         setCollabDocId(docId);
       };
 
+      // Connect WebSocket immediately so remote updates start flowing ASAP.
+      // Previously this was deferred until after IDB sync, which caused a race
+      // where finalization completed before WS connected, delaying remote edits.
+      provider.connect();
+
       // IDB synced → if Y.Text already has content from IDB, finalize immediately
       // (no risk of duplication — these are persisted operations from previous sessions).
-      // Otherwise, connect WS and wait for server state.
+      // Otherwise, wait for WS sync to deliver server state.
       idb.once("synced", () => {
         idbSynced = true;
         if (ytext.toString().trim()) {
           wsSynced = true;
           tryFinalize();
         }
-        provider.connect();
       });
 
       // WS sync — handles both initial sync and reconnections.

@@ -14,7 +14,6 @@ import {
   fetchUserSettings,
 } from "@/services/firebase";
 import { saveUserProfile, fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments } from "@/services/sharing";
-import { notifySlack } from "@/services/slack-notify";
 import { useAppStore, type Document, type DocType } from "./app-store";
 import { getDeletedDocIds, clearDeletedDoc } from "@/services/database";
 
@@ -787,16 +786,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             }
           }
         }
-        // Notify Slack about edits (once per sync, not per doc)
-        if (syncableDocs.length > 0) {
-          const titles = syncableDocs.slice(0, 3).map((d) => d.title).join(", ");
-          const extra = syncableDocs.length > 3 ? ` +${syncableDocs.length - 3} more` : "";
-          notifySlack("edit", {
-            docTitle: titles + extra,
-            authorName: user.displayName || user.email || undefined,
-            detail: `${syncableDocs.length} document(s) synced to cloud`,
-          }).catch(() => {});
-        }
+        // Edit notifications are handled by debounce in App.tsx
+        // (10min idle / document switch / app close)
       } catch (error) {
         console.error("Sync to cloud failed:", error);
       } finally {

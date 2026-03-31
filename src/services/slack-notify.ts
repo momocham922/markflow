@@ -1,6 +1,4 @@
-import * as db from "@/services/database";
-import { useAuthStore } from "@/stores/auth-store";
-import { saveUserSettingsToFirestore } from "@/services/firebase";
+import { getFirestore, doc, getDoc, updateDoc } from "firebase/firestore";
 
 export interface SlackNotifyConfig {
   webhookUrl: string;
@@ -9,7 +7,6 @@ export interface SlackNotifyConfig {
   events: {
     onEdit: boolean;
     onShare: boolean;
-    onComment: boolean;
   };
 }
 
@@ -17,32 +14,32 @@ const DEFAULT_CONFIG: SlackNotifyConfig = {
   webhookUrl: "",
   channel: "",
   enabled: false,
-  events: { onEdit: true, onShare: true, onComment: true },
+  events: { onEdit: true, onShare: true },
 };
 
-/** Load Slack notification config from local DB */
-export async function loadSlackNotifyConfig(): Promise<SlackNotifyConfig> {
+/** Load Slack notification config from Firestore document */
+export async function loadSlackNotifyConfig(docId: string): Promise<SlackNotifyConfig> {
   try {
-    const raw = await db.getSetting("slack_notify_config");
-    if (raw) return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    const firestore = getFirestore();
+    const snap = await getDoc(doc(firestore, "documents", docId));
+    const data = snap.data();
+    if (data?.slackConfig) {
+      return { ...DEFAULT_CONFIG, ...data.slackConfig };
+    }
   } catch { /* ignore */ }
-  return DEFAULT_CONFIG;
+  return { ...DEFAULT_CONFIG };
 }
 
-/** Save Slack notification config (local + cloud) */
-export async function saveSlackNotifyConfig(config: SlackNotifyConfig): Promise<void> {
-  const json = JSON.stringify(config);
-  await db.setSetting("slack_notify_config", json);
-  // Cloud sync
-  const uid = useAuthStore.getState().user?.uid;
-  if (uid) {
-    saveUserSettingsToFirestore(uid, { slack_notify_config: json }).catch(() => {});
-  }
+/** Save Slack notification config to Firestore document */
+export async function saveSlackNotifyConfig(docId: string, config: SlackNotifyConfig): Promise<void> {
+  const firestore = getFirestore();
+  await updateDoc(doc(firestore, "documents", docId), { slackConfig: config });
 }
 
 /** Send a notification to Slack about a document event */
 export async function notifySlack(
-  event: "edit" | "share" | "delete",
+  docId: string,
+  event: "edit" | "share",
   data: {
     docTitle: string;
     authorName?: string;
@@ -50,16 +47,15 @@ export async function notifySlack(
     shareUrl?: string;
   },
 ): Promise<void> {
-  const config = await loadSlackNotifyConfig();
+  const config = await loadSlackNotifyConfig(docId);
   if (!config.enabled || !config.webhookUrl) return;
 
   // Check if this event type is enabled
   if (event === "edit" && !config.events.onEdit) return;
   if (event === "share" && !config.events.onShare) return;
 
-  const emoji = event === "edit" ? "✏️" : event === "share" ? "🔗" : "🗑️";
-  const action =
-    event === "edit" ? "updated" : event === "share" ? "shared" : "deleted";
+  const emoji = event === "edit" ? "✏️" : "🔗";
+  const action = event === "edit" ? "updated" : "shared";
 
   const blocks: Record<string, unknown>[] = [
     {
