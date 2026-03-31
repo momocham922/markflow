@@ -134,18 +134,59 @@ git add -A && git commit && git push
 - ExportOptions.plist: `app-store-connect` + `automatic` signing
 - `ITSAppUsesNonExemptEncryption: false` が Info.plist に必須
 
-#### PC + iOS 同時リリース手順
+#### 全プラットフォーム同時リリース手順
 1. `./scripts/bump-version.sh X.Y.Z-beta.N`
 2. `git add -A && git commit && git push`
-3. **PC版**: `pnpm tauri build` → `./scripts/release-beta.sh`
+3. **macOS版**: `pnpm tauri build` → `./scripts/release-beta.sh`
 4. **iOS版**: `./scripts/release-testflight.sh`
-5. **PC → iOS の順で実行**（PC版がクラウドに同期してからiOS版が取得するため）
+5. **Windows版**: Windowsマシンで `git pull` → `.\scripts\build-windows.ps1` → `.\scripts\release-windows-beta.ps1`
+6. **macOS → iOS → Windows の順で実行**
+
+### Windows Release
+
+#### 初回セットアップ（Windowsマシンで1回だけ）
+```powershell
+# 1. 必須ツール
+winget install Rustlang.Rustup
+winget install OpenJS.NodeJS.LTS
+npm install -g pnpm
+winget install Microsoft.VisualStudio.2022.BuildTools
+#    → インストーラで「C++ によるデスクトップ開発」にチェック
+winget install GitHub.cli
+gh auth login
+
+# 2. 署名キーをmacOSからコピー
+mkdir $env:USERPROFILE\.tauri
+scp mac:~/.tauri/markflow.key $env:USERPROFILE\.tauri\markflow.key
+```
+
+#### Beta Release（Windowsマシンで実行）
+```powershell
+git pull
+.\scripts\build-windows.ps1            # ビルド + 署名
+.\scripts\release-windows-beta.ps1     # 既存betaリリースにWindows版を追加
+```
+
+#### Stable Release（Windowsマシンで実行）
+```powershell
+git pull
+.\scripts\build-windows.ps1            # ビルド + 署名
+.\scripts\release-windows-stable.ps1   # 既存stableリリースにWindows版を追加
+```
+
+#### 仕組み
+- macOS側で先にGitHub Releaseを作成 → Windows側が既存リリースのJSONをダウンロード → `windows-x86_64` プラットフォームを追加してアップロード
+- テストユーザーへの初回配布: `.exe` インストーラーを共有（ダブルクリックでインストール）
+- 以降のアップデート: アプリが自動でチェック → 自動更新（macOS版と同じ）
 
 ### Build Artifacts
 All at `src-tauri/target/release/bundle/`:
-- `dmg/MarkFlow_{VERSION}_aarch64.dmg` — installer
-- `macos/MarkFlow.app.tar.gz` — updater payload
-- `macos/MarkFlow.app.tar.gz.sig` — update signature
+- `dmg/MarkFlow_{VERSION}_aarch64.dmg` — macOS installer
+- `macos/MarkFlow.app.tar.gz` — macOS updater payload
+- `macos/MarkFlow.app.tar.gz.sig` — macOS update signature
+- `nsis/MarkFlow_{VERSION}_x64-setup.exe` — Windows installer
+- `nsis/MarkFlow_{VERSION}_x64-setup.nsis.zip` — Windows updater payload
+- `nsis/MarkFlow_{VERSION}_x64-setup.nsis.zip.sig` — Windows update signature
 
 ### Testing
 - **Playwright E2E** (`e2e/`): Runs against `pnpm dev` (frontend only, no Tauri plugins)
