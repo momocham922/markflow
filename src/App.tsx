@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
-import { getPlatform, isIOS } from "@/platform";
+import { getPlatform, isIOS, isMac } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
 import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
 
@@ -525,7 +525,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         } : undefined}
       >
         {/* Window drag region — desktop only (macOS title bar) */}
-        {!isIOS && (
+        {/* macOS overlay title bar drag region — Windows has its own title bar */}
+        {isMac && (
           <div
             className="h-7 w-full shrink-0"
             data-tauri-drag-region
