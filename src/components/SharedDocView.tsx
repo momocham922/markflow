@@ -46,6 +46,7 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -84,6 +85,7 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
 
   const handleSave = useCallback(async () => {
     if (!doc) return;
+    setSaveError(null);
     try {
       const { updateDoc, doc: firestoreDoc } = await import("firebase/firestore");
       const { firestore } = await import("@/services/firebase");
@@ -94,7 +96,7 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
       setDoc((prev) => prev ? { ...prev, content: editContent } : null);
       setEditing(false);
     } catch {
-      // Silently fail
+      setSaveError("保存に失敗しました。編集権限がない可能性があります。");
     }
   }, [doc, editContent]);
 
@@ -180,6 +182,13 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
           </Button>
         </div>
       </div>
+
+      {/* Save error */}
+      {saveError && (
+        <div className="mx-4 mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {saveError}
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-auto">

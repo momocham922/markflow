@@ -28,16 +28,25 @@ service cloud.firestore {
               && request.auth.uid in resource.data.collaboratorUids);
       }
 
+      // Check if collaborator has editor role (not viewer)
+      function isEditor() {
+        return request.auth.uid in resource.data.collaborators.keys()
+          && resource.data.collaborators[request.auth.uid].role == "editor";
+      }
+
       allow read: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
         isCollaborator() ||
         isTeamMember() ||
         (resource.data.shareLink != null && resource.data.shareLink.enabled == true)
       );
-      allow update, delete: if request.auth != null && (
+      allow update: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
-        isCollaborator() ||
+        isEditor() ||
         isTeamMember()
+      );
+      allow delete: if request.auth != null && (
+        resource.data.ownerId == request.auth.uid
       );
 
       // Versions subcollection — owner, collaborators (map + array), and team members

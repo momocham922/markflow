@@ -106,10 +106,6 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
   const getShareUrl = useCallback(
     (token: string) => {
-      const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
-      if (projectId) {
-        return `https://${projectId}.web.app/share/${token}`;
-      }
       return `markflow://share/${token}`;
     },
     [],
@@ -409,10 +405,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
               {shareLink?.enabled && (
                 <p className="text-[10px] text-muted-foreground">
-                  Anyone with this link can {linkPermission === "edit" ? "edit" : "view"} this
-                  document.
+                  MarkFlowユーザーがこのリンクでドキュメントを{linkPermission === "edit" ? "編集" : "閲覧"}できます。
                   {shareLink.expiresAt && (
-                    <> Expires {new Date(shareLink.expiresAt).toLocaleDateString()}.</>
+                    <> 有効期限: {new Date(shareLink.expiresAt).toLocaleDateString()}</>
                   )}
                 </p>
               )}

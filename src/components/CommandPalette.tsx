@@ -24,6 +24,7 @@ import {
   Keyboard,
   Globe,
   GlobeLock,
+  Link,
 } from "lucide-react";
 import { useAppStore, type Document } from "@/stores/app-store";
 
@@ -37,6 +38,7 @@ interface CommandPaletteProps {
   onImportMarkdown?: () => void;
   onPrint?: () => void;
   onShowShortcuts?: () => void;
+  onOpenShareLink?: (link: string) => void;
   onPublish?: () => void;
   onUnpublish?: () => void;
   isPublished?: boolean;
@@ -52,11 +54,14 @@ export function CommandPalette({
   onImportMarkdown,
   onPrint,
   onShowShortcuts,
+  onOpenShareLink,
   onPublish,
   onUnpublish,
   isPublished,
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
+  const [linkInputOpen, setLinkInputOpen] = useState(false);
+  const [linkValue, setLinkValue] = useState("");
   const {
     documents,
     setActiveDocId,
@@ -97,6 +102,41 @@ export function CommandPalette({
   };
 
   return (
+    <>
+    {linkInputOpen && (
+      <div
+        className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] bg-black/50"
+        onClick={() => { setLinkInputOpen(false); setLinkValue(""); }}
+      >
+        <div
+          className="w-full max-w-md rounded-lg border border-border bg-popover p-4 shadow-lg"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="mb-2 text-sm font-medium">共有リンクを貼り付け</p>
+          <p className="mb-3 text-xs text-muted-foreground">
+            markflow://share/... 形式のリンク、またはトークンを入力してください
+          </p>
+          <input
+            autoFocus
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+            placeholder="markflow://share/abc123... or token"
+            value={linkValue}
+            onChange={(e) => setLinkValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && linkValue.trim()) {
+                onOpenShareLink?.(linkValue);
+                setLinkInputOpen(false);
+                setLinkValue("");
+              }
+              if (e.key === "Escape") {
+                setLinkInputOpen(false);
+                setLinkValue("");
+              }
+            }}
+          />
+        </div>
+      </div>
+    )}
     <CommandDialog open={open} onOpenChange={setOpen}>
       <CommandInput placeholder="Type a command or search..." />
       <CommandList>
@@ -157,6 +197,12 @@ export function CommandPalette({
             <Share2 className="mr-2 h-4 w-4" />
             Share Document
           </CommandItem>
+          {onOpenShareLink && (
+            <CommandItem onSelect={() => handleSelect(() => setLinkInputOpen(true))}>
+              <Link className="mr-2 h-4 w-4" />
+              Open Share Link
+            </CommandItem>
+          )}
           <CommandItem onSelect={() => handleSelect(onExportHtml)}>
             <Download className="mr-2 h-4 w-4" />
             Export as HTML
@@ -206,5 +252,6 @@ export function CommandPalette({
         </CommandGroup>
       </CommandList>
     </CommandDialog>
+    </>
   );
 }

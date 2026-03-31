@@ -135,15 +135,37 @@ function App() {
     [sidebarWidth, rightPanelWidth, rightPanel],
   );
 
+  /** Parse a share token from various URL formats */
+  const parseShareToken = useCallback((input: string): string | null => {
+    const trimmed = input.trim();
+    // markflow://share/{token}
+    const proto = trimmed.match(/^markflow:\/\/share\/(.+)$/);
+    if (proto) return proto[1];
+    // #/share/{token}
+    const hash = trimmed.match(/#\/share\/(.+)$/);
+    if (hash) return hash[1];
+    // raw token (32 alphanumeric chars)
+    if (/^[a-z0-9]{32}$/.test(trimmed)) return trimmed;
+    return null;
+  }, []);
+
+  /** Open a shared document by link/token */
+  const openShareLink = useCallback((input: string) => {
+    const token = parseShareToken(input);
+    if (token) {
+      setShareToken(token);
+    }
+  }, [parseShareToken]);
+
   // Listen for hash changes (share links)
   useEffect(() => {
     const handleHash = () => {
-      const match = window.location.hash.match(/^#\/share\/(.+)$/);
-      setShareToken(match ? match[1] : null);
+      const token = parseShareToken(window.location.hash);
+      setShareToken(token);
     };
     window.addEventListener("hashchange", handleHash);
     return () => window.removeEventListener("hashchange", handleHash);
-  }, []);
+  }, [parseShareToken]);
 
   useEffect(() => {
     loadDocuments();
@@ -850,6 +872,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           onImportMarkdown={handleImportMarkdown}
           onPrint={handlePrint}
           onShowShortcuts={() => setShortcutsOpen(true)}
+          onOpenShareLink={openShareLink}
           onPublish={handlePublish}
           onUnpublish={handleUnpublish}
           isPublished={!!publishUrl}
