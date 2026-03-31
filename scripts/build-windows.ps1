@@ -7,31 +7,27 @@
 #   npm install -g pnpm
 #   winget install Microsoft.VisualStudio.2022.BuildTools
 #     -> Select "C++ desktop development" workload
+#
+# Signing key (required for auto-updater):
+#   Copy from macOS: ~/.tauri/markflow.key -> %USERPROFILE%\.tauri\markflow.key
 
 $ErrorActionPreference = "Stop"
 
 # Resolve repo root from script location
-$ROOT = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $PSScriptRoot) { $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
-# If script is at scripts/build-windows.ps1, parent of scripts/ is root
 $ROOT = Split-Path -Parent $PSScriptRoot
 
 Write-Host "=== MarkFlow Windows Build ===" -ForegroundColor Cyan
 Write-Host "Root: $ROOT"
 
-# Move to repo root
 Set-Location $ROOT
 
-# Verify we're in the right place
 if (-not (Test-Path "src-tauri\tauri.conf.json")) {
     Write-Host "ERROR: src-tauri\tauri.conf.json not found in $ROOT" -ForegroundColor Red
-    Write-Host "Make sure you're running from the markflow repository." -ForegroundColor Red
     exit 1
 }
 
 # Check prerequisites
 $missing = @()
-
 if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) { $missing += "Rust (winget install Rustlang.Rustup)" }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { $missing += "Node.js (winget install OpenJS.NodeJS.LTS)" }
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) { $missing += "pnpm (npm install -g pnpm)" }
@@ -39,7 +35,6 @@ if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) { $missing += "pnpm (
 if ($missing.Count -gt 0) {
     Write-Host "`nMissing prerequisites:" -ForegroundColor Red
     $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
-    Write-Host "`nInstall them and restart your terminal.`n" -ForegroundColor Red
     exit 1
 }
 
@@ -47,44 +42,30 @@ Write-Host "Rust:  $(rustc --version)"
 Write-Host "Node:  $(node --version)"
 Write-Host "pnpm:  $(pnpm --version)"
 
-# Install dependencies
-Write-Host "`n=== Installing dependencies ===" -ForegroundColor Cyan
-pnpm install
-if ($LASTEXITCODE -ne 0) { Write-Host "pnpm install failed" -ForegroundColor Red; exit 1 }
-
-# Signing key: use if available, otherwise disable updater
+# Signing key (required)
 $keyFile = Join-Path $env:USERPROFILE ".tauri\markflow.key"
-$confPath = Join-Path $ROOT "src-tauri\tauri.conf.json"
-$confBackup = Get-Content $confPath -Raw
-$needRestore = $false
-
-if (Test-Path $keyFile) {
-    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyFile -Raw
-    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-    Write-Host "Signing key loaded from $keyFile" -ForegroundColor Green
-} else {
-    Write-Host "`n=== No signing key found — disabling updater ===" -ForegroundColor Yellow
-    Write-Host "  (Copy from macOS: ~/.tauri/markflow.key -> $keyFile)" -ForegroundColor Yellow
-    $conf = $confBackup
-    $conf = $conf -replace '"createUpdaterArtifacts"\s*:\s*true', '"createUpdaterArtifacts": false'
-    $conf = $conf -replace '"pubkey"\s*:\s*"[^"]*"', '"pubkey": ""'
-    $conf | Set-Content $confPath -NoNewline
-    $env:TAURI_SIGNING_PRIVATE_KEY = "not-used"
-    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-    $needRestore = $true
+if (-not (Test-Path $keyFile)) {
+    Write-Host "`nERROR: Signing key not found at $keyFile" -ForegroundColor Red
+    Write-Host "Copy from macOS: scp mac:~/.tauri/markflow.key $keyFile" -ForegroundColor Yellow
+    exit 1
 }
 
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyFile -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+Write-Host "Signing key loaded" -ForegroundColor Green
+
 try {
+    # Install dependencies
+    Write-Host "`n=== Installing dependencies ===" -ForegroundColor Cyan
+    pnpm install
+    if ($LASTEXITCODE -ne 0) { throw "pnpm install failed" }
+
     # Build
     Write-Host "`n=== Building MarkFlow ===" -ForegroundColor Cyan
-    pnpm tauri build --bundles nsis
+    pnpm tauri build
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 }
 finally {
-    if ($needRestore) {
-        $confBackup | Set-Content $confPath -NoNewline
-        Write-Host "=== Restored tauri.conf.json ===" -ForegroundColor Yellow
-    }
     Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
     Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 }
@@ -98,7 +79,11 @@ Write-Host "Version: $version"
 Write-Host "`nArtifacts:"
 
 $nsis = Get-ChildItem (Join-Path $bundleDir "nsis\*.exe") -ErrorAction SilentlyContinue
+$nsisZip = Get-ChildItem (Join-Path $bundleDir "nsis\*.nsis.zip") -ErrorAction SilentlyContinue
+$nsisSig = Get-ChildItem (Join-Path $bundleDir "nsis\*.nsis.zip.sig") -ErrorAction SilentlyContinue
 
-if ($nsis) { Write-Host "  NSIS: $($nsis.FullName)" -ForegroundColor White }
+if ($nsis) { Write-Host "  Installer: $($nsis.FullName)" -ForegroundColor White }
+if ($nsisZip) { Write-Host "  Updater:   $($nsisZip.FullName)" -ForegroundColor White }
+if ($nsisSig) { Write-Host "  Signature: $($nsisSig.FullName)" -ForegroundColor White }
 
-Write-Host "`nNote: Unsigned build - Windows Defender may show a warning on install." -ForegroundColor Yellow
+Write-Host "`nNext: run .\scripts\release-windows-beta.ps1 to publish" -ForegroundColor Cyan
