@@ -184,9 +184,8 @@ All at `src-tauri/target/release/bundle/`:
 - `dmg/MarkFlow_{VERSION}_aarch64.dmg` — macOS installer
 - `macos/MarkFlow.app.tar.gz` — macOS updater payload
 - `macos/MarkFlow.app.tar.gz.sig` — macOS update signature
-- `nsis/MarkFlow_{VERSION}_x64-setup.exe` — Windows installer
-- `nsis/MarkFlow_{VERSION}_x64-setup.nsis.zip` — Windows updater payload
-- `nsis/MarkFlow_{VERSION}_x64-setup.nsis.zip.sig` — Windows update signature
+- `nsis/MarkFlow_{VERSION}_x64-setup.exe` — Windows installer & updater payload
+- `nsis/MarkFlow_{VERSION}_x64-setup.exe.sig` — Windows update signature
 
 ### Testing
 - **Playwright E2E** (`e2e/`): Runs against `pnpm dev` (frontend only, no Tauri plugins)

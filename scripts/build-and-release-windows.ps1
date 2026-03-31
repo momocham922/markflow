@@ -24,14 +24,14 @@ $needsRestart = $false
 # Rust
 if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
     Write-Host "Installing Rust..." -ForegroundColor Yellow
-    winget install Rustlang.Rustup --accept-package-agreements --accept-source-agreements
+    winget install Rustlang.Rustup --source winget --accept-package-agreements --accept-source-agreements
     $needsRestart = $true
 }
 
 # Node.js
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Write-Host "Installing Node.js..." -ForegroundColor Yellow
-    winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
+    winget install OpenJS.NodeJS.LTS --source winget --accept-package-agreements --accept-source-agreements
     $needsRestart = $true
 }
 
@@ -44,7 +44,7 @@ if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
 # gh CLI
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Write-Host "Installing GitHub CLI..." -ForegroundColor Yellow
-    winget install GitHub.cli --accept-package-agreements --accept-source-agreements
+    winget install GitHub.cli --source winget --accept-package-agreements --accept-source-agreements
     $needsRestart = $true
 }
 
@@ -111,7 +111,7 @@ $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyFile -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 
 try {
-    pnpm tauri build
+    pnpm tauri build --bundles nsis
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 }
 finally {
@@ -125,12 +125,11 @@ Write-Host "`n--- Releasing ($Channel) ---" -ForegroundColor Cyan
 $version = (Get-Content (Join-Path $ROOT "package.json") | ConvertFrom-Json).version
 $bundleDir = Join-Path $ROOT "src-tauri\target\release\bundle\nsis"
 
-$nsisExe = Get-ChildItem (Join-Path $bundleDir "*.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
-$nsisZip = Get-ChildItem (Join-Path $bundleDir "*.nsis.zip") -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
-$nsisSig = Get-ChildItem (Join-Path $bundleDir "*.nsis.zip.sig") -ErrorAction SilentlyContinue | Select-Object -First 1
+$nsisExe = Get-ChildItem (Join-Path $bundleDir "*.exe") -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "\.sig$" } | Select-Object -First 1
+$nsisSig = Get-ChildItem (Join-Path $bundleDir "*.exe.sig") -ErrorAction SilentlyContinue | Select-Object -First 1
 
-if (-not $nsisExe -or -not $nsisZip -or -not $nsisSig) {
-    Write-Host "ERROR: Build artifacts not found" -ForegroundColor Red
+if (-not $nsisExe -or -not $nsisSig) {
+    Write-Host "ERROR: Build artifacts not found (.exe and .exe.sig required)" -ForegroundColor Red
     exit 1
 }
 
@@ -158,18 +157,17 @@ $sigContent = (Get-Content $nsisSig.FullName -Raw).Trim()
 $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
 $winPlatform = [PSCustomObject]@{
     signature = $sigContent
-    url = "${downloadBase}/$($nsisZip.Name)"
+    url = "${downloadBase}/$($nsisExe.Name)"
 }
 $json.platforms | Add-Member -NotePropertyName "windows-x86_64" -NotePropertyValue $winPlatform -Force
 $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath -NoNewline
 
 # Upload to GitHub
 gh release delete-asset $tag $nsisExe.Name --yes 2>$null
-gh release delete-asset $tag $nsisZip.Name --yes 2>$null
 gh release delete-asset $tag $nsisSig.Name --yes 2>$null
 gh release delete-asset $tag $jsonName --yes 2>$null
 
-gh release upload $tag $nsisExe.FullName $nsisZip.FullName $nsisSig.FullName $jsonPath --clobber
+gh release upload $tag $nsisExe.FullName $nsisSig.FullName $jsonPath --clobber
 
 Remove-Item $jsonPath -ErrorAction SilentlyContinue
 
