@@ -1,4 +1,4 @@
-name: Stable Release (macOS + Windows)
+name: Windows Stable Release
 
 on:
   push:
@@ -16,43 +16,7 @@ env:
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - run: pnpm install
-
-      - name: Build (macOS aarch64)
-        run: pnpm tauri build --target aarch64-apple-darwin
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-artifacts
-          path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz.sig
-
-  build-windows:
+  build-and-release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,80 +41,74 @@ jobs:
       - name: Build (Windows x64)
         run: pnpm tauri build --bundles nsis
 
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-artifacts
-          path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/*.exe.sig
-
-  release:
-    needs: [build-macos, build-windows]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version
-        id: version
-        run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-artifacts
-          path: artifacts/macos
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-artifacts
-          path: artifacts/windows
-
-      - name: List artifacts
-        run: find artifacts -type f | sort
-
-      - name: Generate latest.json
+      - name: Get version and artifacts
+        id: info
+        shell: bash
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          MAC_SIG=$(cat artifacts/macos/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz.sig)
-          WIN_SIG=$(cat artifacts/windows/src-tauri/target/release/bundle/nsis/*.exe.sig)
-          WIN_EXE=$(basename artifacts/windows/src-tauri/target/release/bundle/nsis/*.exe | grep -v '\.sig$')
+          VERSION=$(jq -r .version package.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-          cat > latest.json << EOF
-          {
-            "version": "${VERSION}",
-            "notes": "MarkFlow v${VERSION}",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "${MAC_SIG}",
-                "url": "https://github.com/momocham922/markflow/releases/latest/download/MarkFlow.app.tar.gz"
-              },
-              "windows-x86_64": {
-                "signature": "${WIN_SIG}",
-                "url": "https://github.com/momocham922/markflow/releases/latest/download/${WIN_EXE}"
-              }
-            }
-          }
-          EOF
-          cat latest.json
+          EXE=$(ls src-tauri/target/release/bundle/nsis/*.exe | grep -v '\.sig$' | head -1)
+          SIG=$(ls src-tauri/target/release/bundle/nsis/*.exe.sig | head -1)
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+          echo "exe_name=$(basename $EXE)" >> "$GITHUB_OUTPUT"
 
-      - name: Collect release files
-        run: |
-          mkdir -p release-files
-          cp artifacts/macos/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-files/
-          cp artifacts/macos/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz release-files/
-          cp artifacts/macos/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz.sig release-files/
-          cp artifacts/windows/src-tauri/target/release/bundle/nsis/*.exe release-files/
-          cp artifacts/windows/src-tauri/target/release/bundle/nsis/*.exe.sig release-files/
-          cp latest.json release-files/
-          ls -la release-files/
-
-      - name: Create stable release
+      - name: Download existing latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          gh release create "v${VERSION}" \
-            release-files/* \
-            --title "MarkFlow v${VERSION}" \
-            --generate-notes
+          TAG="${{ steps.info.outputs.tag }}"
+          gh release download "$TAG" --pattern "latest.json" --dir . --clobber 2>/dev/null || echo '{}' > latest.json
+
+      - name: Update latest.json with Windows platform
+        shell: bash
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          TAG="${{ steps.info.outputs.tag }}"
+          WIN_SIG=$(cat "${{ steps.info.outputs.sig }}")
+          WIN_EXE="${{ steps.info.outputs.exe_name }}"
+
+          if jq -e '.platforms["darwin-aarch64"]' latest.json >/dev/null 2>&1; then
+            jq --arg sig "$WIN_SIG" \
+               --arg url "https://github.com/momocham922/markflow/releases/download/$TAG/$WIN_EXE" \
+               '.platforms["windows-x86_64"] = {"signature": $sig, "url": $url}' \
+               latest.json > latest_updated.json
+            mv latest_updated.json latest.json
+          else
+            jq -n --arg ver "$VERSION" \
+                  --arg sig "$WIN_SIG" \
+                  --arg url "https://github.com/momocham922/markflow/releases/download/$TAG/$WIN_EXE" \
+              '{version: $ver, notes: ("MarkFlow v" + $ver), pub_date: (now | strftime("%Y-%m-%dT%H:%M:%SZ")), platforms: {"windows-x86_64": {signature: $sig, url: $url}}}' \
+              > latest.json
+          fi
+          cat latest.json
+
+      - name: Upload to stable release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.info.outputs.tag }}"
+
+          gh release delete-asset "$TAG" "${{ steps.info.outputs.exe_name }}" --yes 2>/dev/null || true
+          gh release delete-asset "$TAG" "${{ steps.info.outputs.exe_name }}.sig" --yes 2>/dev/null || true
+          gh release delete-asset "$TAG" "latest.json" --yes 2>/dev/null || true
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "${{ steps.info.outputs.exe }}" \
+              "${{ steps.info.outputs.sig }}" \
+              latest.json \
+              --clobber
+          else
+            VERSION="${{ steps.info.outputs.version }}"
+            gh release create "$TAG" \
+              "${{ steps.info.outputs.exe }}" \
+              "${{ steps.info.outputs.sig }}" \
+              latest.json \
+              --title "MarkFlow v${VERSION}" \
+              --generate-notes
+          fi

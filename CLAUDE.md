@@ -134,19 +134,17 @@ git add -A && git commit && git push
 - ExportOptions.plist: `app-store-connect` + `automatic` signing
 - `ITSAppUsesNonExemptEncryption: false` が Info.plist に必須
 
-#### 全プラットフォーム同時リリース手順（推奨: GitHub Actions）
+#### 全プラットフォームリリース手順
 1. `./scripts/bump-version.sh X.Y.Z-beta.N`
 2. `git add -A && git commit && git push`
-3. **macOS + Windows**: GitHub Actionsが `package.json` 変更を検知して自動ビルド＆リリース
-4. **iOS版**: Macローカルで `./scripts/release-testflight.sh`
+3. **macOS**: ローカルで署名ビルド → `./scripts/release-beta.sh`
+4. **Windows**: GitHub Actionsが `package.json` 変更を検知して自動ビルド → 既存リリースにWindows版を追加
+5. **iOS**: ローカルで `./scripts/release-testflight.sh`
 
-- Beta: `release/beta` ブランチへのpushで `.github/workflows/release-beta.yml` が発火
-- Stable: `main` ブランチへのpushで `.github/workflows/release-stable.yml` が発火
-- 手動実行（workflow_dispatch）も引き続き可能
-
-#### ローカルビルドで手動リリースする場合
-`release-beta.sh` / `release-stable.sh` はmacOSローカルビルド用に残してある。
-Windowsローカルビルドは `build-and-release-windows.ps1`（ワンライナー）。
+- Beta CI: `release/beta` pushで `.github/workflows/release-beta.yml` 発火（Windowsのみ）
+- Stable CI: `main` pushで `.github/workflows/release-stable.yml` 発火（Windowsのみ）
+- macOSはApple署名証明書がCI未登録のため、ローカルビルド
+- 手動実行（workflow_dispatch）も可能
 
 ### Windows 注意事項
 - MSIバンドラーはプレリリース版 (beta.X) に非対応 → `--bundles nsis` 必須
