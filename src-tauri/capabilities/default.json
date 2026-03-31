@@ -27,6 +27,7 @@
     "fs:allow-write-text-file",
     "fs:read-all",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "deep-link:default"
   ]
 }

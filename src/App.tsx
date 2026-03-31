@@ -167,6 +167,23 @@ function App() {
     return () => window.removeEventListener("hashchange", handleHash);
   }, [parseShareToken]);
 
+  // Listen for deep link events (markflow://share/{token})
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/plugin-deep-link").then(({ onOpenUrl }) => {
+      onOpenUrl((urls) => {
+        for (const url of urls) {
+          const token = parseShareToken(url);
+          if (token) {
+            setShareToken(token);
+            break;
+          }
+        }
+      }).then((fn) => { unlisten = fn; });
+    }).catch(() => {});
+    return () => { unlisten?.(); };
+  }, [parseShareToken]);
+
   useEffect(() => {
     loadDocuments();
   }, [loadDocuments]);

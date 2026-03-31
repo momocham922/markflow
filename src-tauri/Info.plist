@@ -4,5 +4,16 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>MarkFlow uses the microphone for voice-to-text input.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.markflow.editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>markflow</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

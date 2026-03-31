@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.3.0-beta.66"
+version = "0.3.0-beta.67"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -25,6 +25,7 @@ tauri-plugin-fs = "2.4.5"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-deep-link = "2"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
