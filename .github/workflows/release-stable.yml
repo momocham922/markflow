@@ -1,6 +1,11 @@
 name: Stable Release (macOS + Windows)
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
   workflow_dispatch:
 
 permissions:

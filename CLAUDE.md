@@ -134,50 +134,26 @@ git add -A && git commit && git push
 - ExportOptions.plist: `app-store-connect` + `automatic` signing
 - `ITSAppUsesNonExemptEncryption: false` が Info.plist に必須
 
-#### 全プラットフォーム同時リリース手順
+#### 全プラットフォーム同時リリース手順（推奨: GitHub Actions）
 1. `./scripts/bump-version.sh X.Y.Z-beta.N`
 2. `git add -A && git commit && git push`
-3. **macOS版**: `pnpm tauri build` → `./scripts/release-beta.sh`
-4. **iOS版**: `./scripts/release-testflight.sh`
-5. **Windows版**: Windowsマシンで `git pull` → `.\scripts\build-windows.ps1` → `.\scripts\release-windows-beta.ps1`
-6. **macOS → iOS → Windows の順で実行**
+3. **macOS + Windows**: GitHub Actionsが `package.json` 変更を検知して自動ビルド＆リリース
+4. **iOS版**: Macローカルで `./scripts/release-testflight.sh`
 
-### Windows Release
+- Beta: `release/beta` ブランチへのpushで `.github/workflows/release-beta.yml` が発火
+- Stable: `main` ブランチへのpushで `.github/workflows/release-stable.yml` が発火
+- 手動実行（workflow_dispatch）も引き続き可能
 
-#### 初回セットアップ（Windowsマシンで1回だけ）
-```powershell
-# 1. 必須ツール
-winget install Rustlang.Rustup
-winget install OpenJS.NodeJS.LTS
-npm install -g pnpm
-winget install Microsoft.VisualStudio.2022.BuildTools
-#    → インストーラで「C++ によるデスクトップ開発」にチェック
-winget install GitHub.cli
-gh auth login
+#### ローカルビルドで手動リリースする場合
+`release-beta.sh` / `release-stable.sh` はmacOSローカルビルド用に残してある。
+Windowsローカルビルドは `build-and-release-windows.ps1`（ワンライナー）。
 
-# 2. 署名キーをmacOSからコピー
-mkdir $env:USERPROFILE\.tauri
-scp mac:~/.tauri/markflow.key $env:USERPROFILE\.tauri\markflow.key
-```
-
-#### Beta Release（Windowsマシンで実行）
-```powershell
-git pull
-.\scripts\build-windows.ps1            # ビルド + 署名
-.\scripts\release-windows-beta.ps1     # 既存betaリリースにWindows版を追加
-```
-
-#### Stable Release（Windowsマシンで実行）
-```powershell
-git pull
-.\scripts\build-windows.ps1            # ビルド + 署名
-.\scripts\release-windows-stable.ps1   # 既存stableリリースにWindows版を追加
-```
-
-#### 仕組み
-- macOS側で先にGitHub Releaseを作成 → Windows側が既存リリースのJSONをダウンロード → `windows-x86_64` プラットフォームを追加してアップロード
+### Windows 注意事項
+- MSIバンドラーはプレリリース版 (beta.X) に非対応 → `--bundles nsis` 必須
+- 成果物: `.exe` + `.exe.sig`（`.nsis.zip` は生成されない）
 - テストユーザーへの初回配布: `.exe` インストーラーを共有（ダブルクリックでインストール）
 - 以降のアップデート: アプリが自動でチェック → 自動更新（macOS版と同じ）
+- `TAURI_SIGNING_PRIVATE_KEY` はGitHub Secretsに登録済み
 
 ### Build Artifacts
 All at `src-tauri/target/release/bundle/`:
