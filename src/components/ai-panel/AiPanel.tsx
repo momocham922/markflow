@@ -1167,7 +1167,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() =>
-                        navigator.clipboard.writeText(msg.content)
+                        navigator.clipboard.writeText(msg.generatedImage?.markdown || msg.content)
                       }
                       title="Copy raw text"
                     >
@@ -1178,10 +1178,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
+                        const text = msg.generatedImage?.markdown || msg.content;
                         if (isIOS) {
-                          setPendingInsert({ text: msg.content, mode: "replace" });
+                          setPendingInsert({ text, mode: "replace" });
                           onClose();
-                        } else if (!replaceSelection(msg.content)) {
+                        } else if (!replaceSelection(text)) {
                           alert("エディタが利用できません。エディタ表示に切り替えてください。");
                         }
                       }}
@@ -1194,10 +1195,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
+                        const text = msg.generatedImage?.markdown || msg.content;
                         if (isIOS) {
-                          setPendingInsert({ text: msg.content, mode: "append" });
+                          setPendingInsert({ text, mode: "append" });
                           onClose();
-                        } else if (!appendToDoc(msg.content)) {
+                        } else if (!appendToDoc(text)) {
                           alert("エディタが利用できません。エディタ表示に切り替えてください。");
                         }
                       }}
