@@ -41,10 +41,10 @@ async function clickTeamHeader(instance: WebdriverIO.Browser, teamName: string) 
   await instance.pause(500);
 }
 
-describe("Team document sync", () => {
-  before(async () => {
+describe("Team document sync", function () {
+  before(async function () {
     if (!USER_A_EMAIL || !USER_B_EMAIL) {
-      throw new Error("TEST_USER env vars required");
+      return this.skip();
     }
 
     await waitForAppReady(browser.getInstance("userA"));

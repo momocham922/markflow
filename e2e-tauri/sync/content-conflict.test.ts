@@ -24,10 +24,10 @@ const USER_A_PASSWORD = process.env.TEST_USER_A_PASSWORD!;
 const USER_B_EMAIL = process.env.TEST_USER_B_EMAIL!;
 const USER_B_PASSWORD = process.env.TEST_USER_B_PASSWORD!;
 
-describe("Content conflict resolution", () => {
-  before(async () => {
+describe("Content conflict resolution", function () {
+  before(async function () {
     if (!USER_A_EMAIL || !USER_B_EMAIL) {
-      throw new Error("TEST_USER env vars required");
+      return this.skip();
     }
     await waitForAppReady(browser.getInstance("userA"));
     await waitForAppReady(browser.getInstance("userB"));
