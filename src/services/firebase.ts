@@ -392,6 +392,7 @@ export interface FirestoreDocument {
   collaborators: Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
   tags: string[];
   folder: string;
+  titlePinned?: boolean;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
   teamId?: string | null;
@@ -431,6 +432,7 @@ export async function saveDocumentToFirestore(docData: {
   folder?: string;
   tags?: string[];
   docType?: string;
+  titlePinned?: boolean;
   updatedAt?: number;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
@@ -454,6 +456,7 @@ export async function saveDocumentToFirestore(docData: {
       ownerId: docData.ownerId,
       folder: docData.folder ?? "/",
       tags: docData.tags ?? [],
+      titlePinned: docData.titlePinned ?? false,
       updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
     };
     if (docData.ownerName) payload.ownerName = docData.ownerName;
@@ -481,6 +484,7 @@ export async function createDocumentInFirestore(docData: {
   folder?: string;
   tags?: string[];
   docType?: string;
+  titlePinned?: boolean;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   await setDoc(ref, {
@@ -492,6 +496,7 @@ export async function createDocumentInFirestore(docData: {
     collaboratorUids: [],
     tags: docData.tags ?? [],
     folder: docData.folder ?? "/",
+    titlePinned: docData.titlePinned ?? false,
     ...(docData.docType ? { docType: docData.docType } : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -508,6 +513,7 @@ export async function saveDocumentMerge(docData: {
   folder?: string;
   tags?: string[];
   docType?: string;
+  titlePinned?: boolean;
   updatedAt?: number;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
@@ -518,6 +524,7 @@ export async function saveDocumentMerge(docData: {
     ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
     folder: docData.folder ?? "/",
     tags: docData.tags ?? [],
+    titlePinned: docData.titlePinned ?? false,
     ...(docData.docType ? { docType: docData.docType } : {}),
     updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
   }, { merge: true });

@@ -385,7 +385,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               if (cloudDoc.content?.trim()) {
                 updates.content = cloudDoc.content;
               }
-              updates.title = cloudDoc.title;
+              // Respect pinned titles: if local has a pinned title and cloud doesn't,
+              // keep the local title. Otherwise sync from cloud.
+              if (local.titlePinned && !cloudDoc.titlePinned) {
+                // Keep local pinned title
+              } else {
+                updates.title = cloudDoc.title;
+                if (cloudDoc.titlePinned) {
+                  updates.titlePinned = true;
+                }
+              }
               updates.updatedAt = cloudUpdatedAt;
               updates.folder = cloudDoc.folder ?? local.folder;
               updates.tags = cloudDoc.tags ?? local.tags;
@@ -549,6 +558,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   teamId: entry.teamId,
                   titlePinned: true,
                   ownerName: fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
+                  folder: fullDoc.folder ?? localTeamDoc?.folder ?? "/",
                 };
                 // Only update title if cloud is newer
                 if (cloudTeamUpdatedAt > localTeamUpdatedAt) {
@@ -773,6 +783,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             folder: d.folder,
             tags: d.tags,
             docType: d.docType,
+            titlePinned: d.titlePinned,
             updatedAt: d.updatedAt,
           };
           try {
