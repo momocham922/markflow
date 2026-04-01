@@ -1326,7 +1326,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
       />
 
       {/* Input — textarea, Cmd+Enter to send */}
-      <div className="border-t border-border p-2">
+      <div className={`border-t border-border p-2 ${isIOS ? "safe-bottom" : ""}`}>
         <div className="flex gap-1 items-end">
           <Button
             variant="ghost"

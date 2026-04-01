@@ -908,7 +908,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
         {/* Right panels — fullscreen overlay on iOS */}
         {isIOS && viewMode === "editor" && rightPanel !== "none" && (
-          <div className="fixed inset-0 z-40 flex flex-col safe-top safe-bottom bg-background">
+          <div
+            className="fixed z-40 flex flex-col safe-top bg-background"
+            style={{
+              top: 0, left: 0, right: 0,
+              ...(keyboardVisible
+                ? { bottom: "auto", height: viewportHeight }
+                : { bottom: 0 }),
+            }}
+          >
             {rightPanel === "versions" && (
               <VersionPanel
                 onClose={() => setRightPanel("none")}

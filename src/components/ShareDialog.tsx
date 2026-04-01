@@ -80,6 +80,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     events: { onEdit: true, onShare: true },
   });
   const [slackSaved, setSlackSaved] = useState(false);
+  const [slackTestStatus, setSlackTestStatus] = useState<"idle" | "sending" | "ok" | "fail">("idle");
 
   // Load existing share data when dialog opens
   useEffect(() => {
@@ -570,24 +571,53 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                 </label>
               </div>
 
-              <Button
-                size="sm"
-                className="w-full gap-2"
-                onClick={handleSaveSlackConfig}
-                disabled={!slackConfig.webhookUrl}
-              >
-                {slackSaved ? (
-                  <>
-                    <Check className="h-3.5 w-3.5" />
-                    Saved!
-                  </>
-                ) : (
-                  <>
-                    <Bell className="h-3.5 w-3.5" />
-                    Save Settings
-                  </>
-                )}
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1 gap-2"
+                  onClick={handleSaveSlackConfig}
+                  disabled={!slackConfig.webhookUrl}
+                >
+                  {slackSaved ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      Saved!
+                    </>
+                  ) : (
+                    <>
+                      <Bell className="h-3.5 w-3.5" />
+                      Save
+                    </>
+                  )}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  disabled={!slackConfig.webhookUrl || slackTestStatus === "sending"}
+                  onClick={async () => {
+                    setSlackTestStatus("sending");
+                    try {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      const body = JSON.stringify({
+                        blocks: [{
+                          type: "section",
+                          text: { type: "mrkdwn", text: ":white_check_mark: *MarkFlow* — テスト通知" },
+                        }],
+                        ...(slackConfig.channel ? { channel: slackConfig.channel } : {}),
+                      });
+                      await invoke("send_slack_webhook", { webhookUrl: slackConfig.webhookUrl, body });
+                      setSlackTestStatus("ok");
+                    } catch {
+                      setSlackTestStatus("fail");
+                    }
+                    setTimeout(() => setSlackTestStatus("idle"), 3000);
+                  }}
+                >
+                  <Send className="h-3 w-3" />
+                  {slackTestStatus === "ok" ? "OK!" : slackTestStatus === "fail" ? "Failed" : "Test"}
+                </Button>
+              </div>
             </div>
           </div>
         )}
