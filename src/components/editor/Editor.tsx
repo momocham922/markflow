@@ -496,6 +496,24 @@ export function Editor() {
     }
   }, [pendingRestoreContent, handleRestoreVersion, clearPendingRestore]);
 
+  // Apply pending insert from AI panel (iOS: panel closes first, then insert fires)
+  const pendingInsert = useEditorStore((s) => s.pendingInsert);
+  const clearPendingInsert = useEditorStore((s) => s.setPendingInsert);
+  useEffect(() => {
+    if (pendingInsert && viewRef.current) {
+      const view = viewRef.current;
+      if (pendingInsert.mode === "replace") {
+        const { from, to } = view.state.selection.main;
+        view.dispatch({ changes: { from, to, insert: pendingInsert.text } });
+      } else {
+        const len = view.state.doc.length;
+        view.dispatch({ changes: { from: len, insert: `\n\n${pendingInsert.text}` } });
+      }
+      view.focus();
+      clearPendingInsert(null);
+    }
+  }, [pendingInsert, clearPendingInsert]);
+
   // Cleanup on unmount only
   useEffect(() => {
     return () => {

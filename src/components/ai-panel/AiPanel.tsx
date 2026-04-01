@@ -147,7 +147,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const { activeDocId, documents } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const { getSelectedText, replaceSelection, appendToDoc, insertAtCursor } = useEditorStore();
+  const { getSelectedText, replaceSelection, appendToDoc, insertAtCursor, setPendingInsert } = useEditorStore();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [apiMessages, setApiMessages] = useState<ClaudeMessage[]>([]);
@@ -1178,11 +1178,14 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
-                        if (!replaceSelection(msg.content)) {
+                        if (isIOS) {
+                          setPendingInsert({ text: msg.content, mode: "replace" });
+                          onClose();
+                        } else if (!replaceSelection(msg.content)) {
                           alert("エディタが利用できません。エディタ表示に切り替えてください。");
                         }
                       }}
-                      title="Replace selection / Insert at cursor"
+                      title={isIOS ? "Insert and return to editor" : "Replace selection / Insert at cursor"}
                     >
                       <Replace className="h-2.5 w-2.5" />
                     </Button>
@@ -1191,11 +1194,14 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
-                        if (!appendToDoc(msg.content)) {
+                        if (isIOS) {
+                          setPendingInsert({ text: msg.content, mode: "append" });
+                          onClose();
+                        } else if (!appendToDoc(msg.content)) {
                           alert("エディタが利用できません。エディタ表示に切り替えてください。");
                         }
                       }}
-                      title="Append to document"
+                      title={isIOS ? "Append and return to editor" : "Append to document"}
                     >
                       <CornerDownLeft className="h-2.5 w-2.5" />
                     </Button>
@@ -1237,7 +1243,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
                             size="sm"
                             className="text-[10px] h-6 gap-1 cursor-pointer"
                             onClick={() => {
-                              if (!insertAtCursor(msg.generatedImage!.markdown)) {
+                              if (isIOS) {
+                                setPendingInsert({ text: msg.generatedImage!.markdown, mode: "replace" });
+                                onClose();
+                              } else if (!insertAtCursor(msg.generatedImage!.markdown)) {
                                 appendToDoc(msg.generatedImage!.markdown);
                               }
                             }}
