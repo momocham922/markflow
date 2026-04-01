@@ -384,6 +384,44 @@ export async function createTeamDocument(
   return docId;
 }
 
+/** Copy a team document to personal documents */
+export async function copyTeamDocToPersonal(
+  sourceDocId: string,
+  ownerId: string,
+  folder: string = "/",
+): Promise<{ id: string; title: string; content: string }> {
+  const sourceRef = doc(firestore, "documents", sourceDocId);
+  const snap = await getDoc(sourceRef);
+  if (!snap.exists()) throw new Error("Source document not found");
+  const data = snap.data();
+
+  const newId = crypto.randomUUID();
+  const newRef = doc(firestore, "documents", newId);
+  await setDoc(newRef, {
+    title: data.title || "Untitled",
+    content: data.content || "",
+    ownerId,
+    teamId: null,
+    collaborators: {},
+    collaboratorUids: [],
+    tags: data.tags || [],
+    folder,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return { id: newId, title: data.title || "Untitled", content: data.content || "" };
+}
+
+/** Move a personal document into a team */
+export async function moveDocToTeam(
+  docId: string,
+  teamId: string,
+  folder: string = "/",
+): Promise<void> {
+  const ref = doc(firestore, "documents", docId);
+  await updateDoc(ref, { teamId, folder });
+}
+
 // ─── User Profile (for looking up users by email) ──────────────
 
 /** Save/update user profile on login */

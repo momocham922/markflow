@@ -25,7 +25,7 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, type Team } from "@/services/sharing";
+import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, copyTeamDocToPersonal, moveDocToTeam, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
 import { isIOS } from "@/platform";
 
@@ -110,6 +110,8 @@ export function Sidebar() {
   const moveDocRef = useRef(moveDocument);
   moveDocRef.current = moveDocument;
   const moveTeamDocFnRef = useRef<(docId: string, folder: string) => void>(() => {});
+  const crossCopyRef = useRef<(docId: string, folder: string) => void>(() => {});
+  const crossMoveToTeamRef = useRef<(docId: string, teamId: string, folder: string) => void>(() => {});
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
   const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -385,6 +387,49 @@ export function Sidebar() {
     }
   };
   moveTeamDocFnRef.current = handleMoveTeamDoc;
+
+  // Cross-section: Team doc → Personal (copy)
+  const handleCopyTeamDocToPersonal = async (docId: string, folder: string) => {
+    if (!user) return;
+    try {
+      const result = await copyTeamDocToPersonal(docId, user.uid, folder);
+      addDocument({
+        id: result.id,
+        title: result.title,
+        content: result.content,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        folder,
+        tags: [],
+        ownerId: user.uid,
+      });
+      setActiveDocId(result.id);
+    } catch (err) {
+      console.error("Failed to copy team doc:", err);
+    }
+  };
+  crossCopyRef.current = handleCopyTeamDocToPersonal;
+
+  // Cross-section: Personal doc → Team (move)
+  const handleMoveDocToTeam = async (docId: string, teamId: string, folder: string) => {
+    try {
+      await moveDocToTeam(docId, teamId, folder);
+      // Update local store
+      updateDocument(docId, { teamId, folder, isShared: true, updatedAt: Date.now() });
+      // Add to team docs list
+      const localDoc = documents.find((d) => d.id === docId);
+      setTeams((prev) =>
+        prev.map((t) =>
+          t.id === teamId
+            ? { ...t, docs: [...t.docs, { id: docId, title: localDoc?.title || "Untitled", folder, updatedAt: Date.now() }] }
+            : t,
+        ),
+      );
+    } catch (err) {
+      console.error("Failed to move doc to team:", err);
+    }
+  };
+  crossMoveToTeamRef.current = handleMoveDocToTeam;
 
   const openTeamOrSharedDoc = async (docIdToOpen: string, teamId?: string) => {
     const existing = documents.find((d) => d.id === docIdToOpen);
@@ -873,10 +918,20 @@ export function Sidebar() {
         const targetFolder = folderEl?.dataset.folderPath;
         const targetTeamId = folderEl?.dataset.teamId;
         if (targetFolder) {
-          if (dragRef.current.teamId && targetTeamId) {
-            moveTeamDocFnRef.current(dragRef.current.docId, targetFolder);
-          } else if (!dragRef.current.teamId && !targetTeamId) {
-            moveDocRef.current(dragRef.current.docId, targetFolder);
+          const srcTeamId = dragRef.current.teamId;
+          const docId = dragRef.current.docId;
+          if (srcTeamId && targetTeamId) {
+            // Team → Team (same or different): move within team folders
+            moveTeamDocFnRef.current(docId, targetFolder);
+          } else if (!srcTeamId && !targetTeamId) {
+            // Personal → Personal: move within personal folders
+            moveDocRef.current(docId, targetFolder);
+          } else if (srcTeamId && !targetTeamId) {
+            // Team → Personal: copy document to my documents
+            crossCopyRef.current(docId, targetFolder);
+          } else if (!srcTeamId && targetTeamId) {
+            // Personal → Team: move document into team
+            crossMoveToTeamRef.current(docId, targetTeamId, targetFolder);
           }
         }
         dragHappenedRef.current = true;
