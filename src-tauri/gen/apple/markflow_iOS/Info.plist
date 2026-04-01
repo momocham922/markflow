@@ -17,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.3.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.3.0.70</string>
+	<string>0.3.0.72</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -44,5 +44,16 @@
 	<string>MarkFlow uses the microphone for voice-to-text input.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.markflow.editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>markflow</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

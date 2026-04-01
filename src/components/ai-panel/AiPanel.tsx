@@ -835,7 +835,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   if (!user) {
     return (
-      <div className="flex h-full w-full flex-col border-l border-border bg-background">
+      <div className={`flex h-full w-full flex-col bg-background ${isIOS ? "" : "border-l border-border"}`}>
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <div className="flex items-center gap-2">
             <Bot className="h-4 w-4" />
@@ -935,7 +935,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   );
 
   return (
-    <div className="relative flex h-full w-full flex-col border-l border-border bg-background">
+    <div className={`relative flex h-full w-full flex-col bg-background ${isIOS ? "" : "border-l border-border"}`}>
       {/* Custom Rules Editor (overlay) */}
       <RulesEditor
         open={rulesOpen}
