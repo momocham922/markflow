@@ -509,7 +509,7 @@ export function Sidebar() {
           e.preventDefault();
           const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
           setContextMenu({ docId: doc.id, x: e.clientX, y: rect.top });
-        } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
+        } else if (e.button === 0 && !e.ctrlKey && !isIOS && renamingDocId !== doc.id) {
           dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
         }
       }}
@@ -716,7 +716,7 @@ export function Sidebar() {
               e.preventDefault();
               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
               setContextMenu({ docId: td.id, x: e.clientX, y: rect.top });
-            } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== td.id) {
+            } else if (e.button === 0 && !e.ctrlKey && !isIOS && renamingDocId !== td.id) {
               dragRef.current = { docId: td.id, teamId: team.id, startX: e.clientX, startY: e.clientY, active: false };
             }
           }}
@@ -1235,8 +1235,8 @@ export function Sidebar() {
         <span className="opacity-50">v{__APP_VERSION__}</span>
       </div>
 
-      {/* Floating context menu */}
-      {contextMenu && (() => {
+      {/* Floating context menu — portaled to body to avoid overflow clipping on iOS */}
+      {contextMenu && createPortal((() => {
         const doc = documents.find((d) => d.id === contextMenu.docId);
         const teamDoc = teams.flatMap((t) => t.docs.map((d) => ({ ...d, team: t }))).find((d) => d.id === contextMenu.docId);
         const isTeam = !!teamDoc;
@@ -1340,7 +1340,7 @@ export function Sidebar() {
             </div>
           </>
         );
-      })()}
+      })(), document.body)}
 
       {/* Drag indicator — follows pointer during drag */}
       {dragIndicator && createPortal(

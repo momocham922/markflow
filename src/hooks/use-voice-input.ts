@@ -92,6 +92,8 @@ export function useVoiceInput({
         const byteLen = Math.round((base64.length * 3) / 4);
         console.log(`[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`);
 
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60_000);
         const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
           method: "POST",
           headers: {
@@ -109,7 +111,9 @@ export function useVoiceInput({
                 }
               : {}),
           }),
+          signal: controller.signal,
         });
+        clearTimeout(timeout);
 
         if (!res.ok) {
           const errText = await res.text();
@@ -192,6 +196,7 @@ export function useVoiceInput({
 
         // Poll Rust buffer every CHUNK_MS and send to transcription API.
         // Use a queue to avoid losing audio chunks during API calls.
+        const MAX_QUEUE = 30; // prevent unbounded memory growth
         const chunkQueue: Array<{ audio: string; sample_rate: number }> = [];
         let sending = false;
 
@@ -220,6 +225,10 @@ export function useVoiceInput({
             } | null>("get_voice_chunk");
             if (result) {
               console.log(`[voice] Got chunk from Rust: ${result.audio.length} base64 chars, rate=${result.sample_rate}`);
+              if (chunkQueue.length >= MAX_QUEUE) {
+                console.warn("[voice] Queue full, dropping oldest chunk");
+                chunkQueue.shift();
+              }
               chunkQueue.push(result);
               processQueue();
             } else {
