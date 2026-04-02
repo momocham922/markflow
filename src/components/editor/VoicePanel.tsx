@@ -9,6 +9,7 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
 interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
+  onReplaceMarkdown: (oldMarkdown: string, newMarkdown: string) => void;
 }
 
 function formatDuration(seconds: number): string {
@@ -17,7 +18,7 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
+export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0); // 0 = manual
@@ -67,29 +68,16 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
           },
           body: JSON.stringify({
             system:
-              "You are a document assistant. Convert voice transcripts into well-structured Markdown. " +
+              "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
+              "Integrate all content coherently — do not produce fragments or partial updates. " +
               "Use appropriate headings, bullet points, and formatting. " +
               "Keep the same language as the transcript. " +
               "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
               "Output ONLY the structured Markdown content, no explanations or meta-commentary.",
             messages: [
-              ...(lastStructuredOutputRef.current
-                ? [
-                    {
-                      role: "user" as const,
-                      content: "Here is what has been structured so far:\n\n" + lastStructuredOutputRef.current,
-                    },
-                    {
-                      role: "assistant" as const,
-                      content: "Understood. I have the context of the previous structured content.",
-                    },
-                  ]
-                : []),
               {
                 role: "user",
-                content: lastStructuredOutputRef.current
-                  ? `Continue structuring. Here is the new transcript to incorporate (append/merge with the existing structure above, do not repeat what was already structured):\n\n${transcript.slice(lastStructuredRef.current.length)}`
-                  : `Convert this voice transcript into structured Markdown:\n\n${transcript}`,
+                content: `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`,
               },
             ],
             max_tokens: 4096,
@@ -106,15 +94,15 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
           "";
 
         if (markdown.trim()) {
+          const newOutput = `\n\n${markdown.trim()}\n`;
           if (lastStructuredOutputRef.current) {
-            // Append new content (AI was asked to continue, not repeat)
-            onInsertMarkdown(`\n\n${markdown.trim()}\n`);
-            lastStructuredOutputRef.current += "\n\n" + markdown.trim();
+            // Replace previous structured output with new complete version
+            onReplaceMarkdown(lastStructuredOutputRef.current, newOutput);
           } else {
-            // First structuring
-            onInsertMarkdown(`\n\n${markdown.trim()}\n`);
-            lastStructuredOutputRef.current = markdown.trim();
+            // First structuring — insert at end
+            onInsertMarkdown(newOutput);
           }
+          lastStructuredOutputRef.current = newOutput;
           lastStructuredRef.current = transcript;
         }
       } catch (err) {
@@ -123,7 +111,7 @@ export function VoicePanel({ onInsertMarkdown }: VoicePanelProps) {
         setStructuring(false);
       }
     },
-    [fullTranscript, structuring, onInsertMarkdown],
+    [fullTranscript, structuring, onInsertMarkdown, onReplaceMarkdown],
   );
 
   // Auto-structure timer

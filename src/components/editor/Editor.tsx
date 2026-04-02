@@ -602,9 +602,31 @@ export function Editor() {
       const current = activeDoc?.content ?? "";
       const newContent = current.trimEnd() + markdown;
       updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
-      // Also update Y.Doc for collab documents
       if (isCollabReady) {
         collabReplaceContent(newContent);
+      }
+    },
+    [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
+  );
+
+  const handleReplaceMarkdown = useCallback(
+    (oldMarkdown: string, newMarkdown: string) => {
+      if (!activeDocId) return;
+      const current = activeDoc?.content ?? "";
+      const idx = current.indexOf(oldMarkdown);
+      if (idx >= 0) {
+        const newContent = current.slice(0, idx) + newMarkdown + current.slice(idx + oldMarkdown.length);
+        updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+        if (isCollabReady) {
+          collabReplaceContent(newContent);
+        }
+      } else {
+        // Fallback: append if old content not found (e.g., user edited it)
+        const newContent = current.trimEnd() + newMarkdown;
+        updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+        if (isCollabReady) {
+          collabReplaceContent(newContent);
+        }
       }
     },
     [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
@@ -763,7 +785,7 @@ export function Editor() {
           </div>
         )}
       </div>
-      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} />}
+      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} />}
       <VersionHistory
         open={historyOpen}
         onOpenChange={setHistoryOpen}
