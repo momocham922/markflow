@@ -674,6 +674,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               folder: d.folder,
               tags: d.tags,
               docType: d.docType,
+              titlePinned: d.titlePinned,
             });
           } catch (e) {
             console.error(`[resetCloud] Failed to upload ${d.id}:`, e);

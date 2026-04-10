@@ -130,6 +130,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           ownerName: user.displayName || user.email || undefined,
           folder: activeDoc.folder,
           tags: activeDoc.tags,
+          titlePinned: activeDoc.titlePinned,
         });
       }
       const link = await enableShareLink(activeDocId, linkPermission);
@@ -198,6 +199,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           ownerName: user?.displayName || user?.email || undefined,
           folder: activeDoc.folder,
           tags: activeDoc.tags,
+          titlePinned: activeDoc.titlePinned,
         });
       }
       await addCollaborator(activeDocId, inviteEmail.trim(), inviteRole);

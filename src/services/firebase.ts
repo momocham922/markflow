@@ -806,6 +806,7 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
         ownerName: currentUser.displayName || currentUser.email || undefined,
         folder: activeDoc.folder,
         tags: activeDoc.tags,
+        titlePinned: activeDoc.titlePinned,
       };
 
       // Save to Firestore first — try save, fall back to create for new docs
@@ -850,6 +851,7 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
           ownerName: currentUser.displayName || currentUser.email || undefined,
           folder: activeDoc.folder ?? "/",
           tags: activeDoc.tags ?? [],
+          titlePinned: activeDoc.titlePinned ?? false,
           updatedAt: serverTimestamp(),
         },
         { merge: true },

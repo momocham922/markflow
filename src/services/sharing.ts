@@ -378,6 +378,7 @@ export async function createTeamDocument(
     collaboratorUids: [],
     tags: [],
     folder: "/",
+    titlePinned: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -406,6 +407,7 @@ export async function copyTeamDocToPersonal(
     collaboratorUids: [],
     tags: data.tags || [],
     folder,
+    titlePinned: data.titlePinned ?? false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
