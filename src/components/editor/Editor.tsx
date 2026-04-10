@@ -193,6 +193,12 @@ export function Editor() {
     useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
   const isCollabReady = Boolean(activeDocId && collabExtension && collabDocId === activeDocId);
 
+  // Keep frozenContentRef fresh while CodeMirror is unmounted (during collab reconnection).
+  // Without this, remounting after "Syncing document..." overlay shows stale/empty content.
+  if (activeDocId && activeDoc?.isShared && !isCollabReady) {
+    frozenContentRef.current[activeDocId] = activeDoc.content || "";
+  }
+
   // Track active collab docs so syncFromCloud/syncToCloud skip them
   useEffect(() => {
     if (isCollabReady && activeDocId) {
