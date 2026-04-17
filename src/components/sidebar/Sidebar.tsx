@@ -309,7 +309,7 @@ export function Sidebar() {
     const newDoc: Document = {
       id: newDocId,
       title: "Untitled",
-      content: "# Untitled\n",
+      content: "",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       folder,

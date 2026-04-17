@@ -131,12 +131,12 @@ function cloudSyncDebounced() {
 
 // Flush all pending saves immediately (called on app close)
 export function flushPendingSaves() {
-  for (const [id, doc] of pendingDocs) {
+  for (const [id, pendingDoc] of pendingDocs) {
     const timer = saveTimers.get(id);
     if (timer) clearTimeout(timer);
     saveTimers.delete(id);
     pendingDocs.delete(id);
-    db.upsertDocument(doc).catch(console.error);
+    db.upsertDocument(pendingDoc).catch(console.error);
   }
 }
 

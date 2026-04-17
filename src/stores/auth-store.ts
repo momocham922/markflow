@@ -769,6 +769,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const syncableDocs = documents.filter((d) => {
           if (d.ownerId && d.ownerId !== user.uid) return false; // non-owner
           if (cloudPulledDocIds.has(d.id)) return false; // just pulled from cloud
+          if (!d.content?.trim()) return false; // never upload empty content
           // On first sync ever (lastSyncAt=0), upload everything.
           // After that, only upload docs modified since last sync cycle.
           if (lastSyncAt > 0 && d.updatedAt < lastSyncAt) return false;

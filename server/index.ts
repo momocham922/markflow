@@ -123,7 +123,8 @@ function getYDoc(docName: string): Promise<Y.Doc> {
           const docSnap = await docRef.get();
           if (docSnap.exists) {
             const data = docSnap.data();
-            if (data?.content?.trim()) {
+            const seedContent = data?.content?.trim();
+            if (seedContent && seedContent !== "# Untitled") {
               doc.transact(() => {
                 ytext.insert(0, data.content);
               });

@@ -370,7 +370,7 @@ export async function createTeamDocument(
   const ref = doc(firestore, "documents", docId);
   await setDoc(ref, {
     title: "Untitled",
-    content: "# Untitled\n",
+    content: "",
     ownerId,
     ...(ownerName ? { ownerName } : {}),
     teamId,

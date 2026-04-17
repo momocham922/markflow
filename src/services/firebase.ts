@@ -444,10 +444,17 @@ export async function saveDocumentToFirestore(docData: {
     const snap = await transaction.get(ref);
     if (snap.exists()) {
       const cloudData = snap.data();
-      // If cloud has longer/different content from another user, skip stale overwrites.
-      // Only the document owner should update content in Firestore.
       if (cloudData.ownerId && cloudData.ownerId !== docData.ownerId) {
         return; // Non-owner should not overwrite
+      }
+      // Skip if cloud has newer content (prevents stale local data overwriting remote edits)
+      const cloudUpdatedAt = cloudData.updatedAt?.toMillis?.() ?? 0;
+      if (docData.updatedAt && cloudUpdatedAt > docData.updatedAt) {
+        return;
+      }
+      // Never overwrite non-empty cloud content with empty local content
+      if (!docData.content?.trim() && cloudData.content?.trim()) {
+        return;
       }
     }
     const payload: Record<string, unknown> = {
@@ -517,6 +524,15 @@ export async function saveDocumentMerge(docData: {
   updatedAt?: number;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
+  // Safety checks: owner, timestamp, and empty content — same guards as saveDocumentToFirestore
+  const snap = await getDoc(ref);
+  if (snap.exists()) {
+    const cloudData = snap.data();
+    if (cloudData.ownerId && cloudData.ownerId !== docData.ownerId) return;
+    const cloudUpdatedAt = cloudData.updatedAt?.toMillis?.() ?? 0;
+    if (docData.updatedAt && cloudUpdatedAt > docData.updatedAt) return;
+    if (!docData.content?.trim() && cloudData.content?.trim()) return;
+  }
   await setDoc(ref, {
     title: docData.title,
     content: docData.content,
