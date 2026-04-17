@@ -83,18 +83,18 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
 }
 
 // --- Sync mutex: prevents concurrent syncFromCloud / syncToCloud ---
-let syncLock = false;
+// Promise-based queue ensures operations never interleave or silently drop.
+let syncQueue: Promise<unknown> = Promise.resolve();
 async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
-  if (syncLock) {
-    // Retry once after a short wait instead of silently dropping
-    await new Promise((r) => setTimeout(r, 2000));
-    if (syncLock) return undefined;
-  }
-  syncLock = true;
+  let resolve!: () => void;
+  const gate = new Promise<void>((r) => { resolve = r; });
+  const prev = syncQueue;
+  syncQueue = gate;
+  await prev;
   try {
     return await fn();
   } finally {
-    syncLock = false;
+    resolve();
   }
 }
 
@@ -347,10 +347,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         // Merge user's own cloud docs
         for (const cloudDoc of cloudDocs) {
-          if (!cloudDoc.content?.trim()) continue;
           if (deletedDocIds.has(cloudDoc.id)) continue; // skip locally deleted
 
           cloudDocIds.add(cloudDoc.id);
+          if (!cloudDoc.content?.trim()) continue; // track existence but skip empty content
           const local = localDocs.find((d) => d.id === cloudDoc.id);
           if (!local) {
             const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
@@ -586,9 +586,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
           if (local.ownerId === user.uid) {
             // Own doc not in cloud: deleted on another device OR newly created here
-            // If created/updated AFTER last sync → newly created on this device → keep
-            // If older than last sync → was known to cloud but now gone → deleted elsewhere
-            if (lastSyncAt > 0 && local.updatedAt < lastSyncAt) {
+            // Keep if created OR updated after last sync (protects unsynced new docs)
+            if (lastSyncAt > 0 && local.updatedAt < lastSyncAt && local.createdAt < lastSyncAt) {
               console.warn(`[sync] Removing own doc ${local.id} "${local.title}" (deleted on another device)`);
               // Delete locally without re-tracking in deleted_docs (already gone from cloud)
               useAppStore.setState((s) => ({
@@ -662,7 +661,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         console.warn(`[resetCloud] Deleted ${deleted} garbage docs from cloud`);
 
         // 3. Re-upload all local docs to ensure cloud matches local
-        const ownDocs = appState.documents.filter((d) => !d.ownerId || d.ownerId === user.uid);
+        const ownDocs = appState.documents.filter((d) => (!d.ownerId || d.ownerId === user.uid) && d.content?.trim());
         for (const d of ownDocs) {
           try {
             await saveDocumentMerge({
@@ -771,8 +770,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           if (cloudPulledDocIds.has(d.id)) return false; // just pulled from cloud
           if (!d.content?.trim()) return false; // never upload empty content
           // On first sync ever (lastSyncAt=0), upload everything.
-          // After that, only upload docs modified since last sync cycle.
-          if (lastSyncAt > 0 && d.updatedAt < lastSyncAt) return false;
+          // After that, only upload docs modified OR created since last sync cycle.
+          if (lastSyncAt > 0 && d.updatedAt < lastSyncAt && d.createdAt < lastSyncAt) return false;
           return true;
         });
         for (const d of syncableDocs) {
@@ -787,6 +786,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             docType: d.docType,
             titlePinned: d.titlePinned,
             updatedAt: d.updatedAt,
+            teamId: d.teamId ?? null,
           };
           try {
             await saveDocumentToFirestore(payload);

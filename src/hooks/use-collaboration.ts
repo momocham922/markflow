@@ -120,11 +120,12 @@ export function useCollaboration(
         // This prevents @uiw/react-codemirror's value prop from conflicting
         // with yCollab's initial sync (which would cause content duplication).
         const finalContent = ytext.toString();
-        if (finalContent.trim() && docId) {
+        // Always sync Y.Text → frozenContentRef, even if empty (prevents stale frozen value)
+        if (docId) {
           onBeforeCollabRef.current?.(docId, finalContent);
         }
 
-        // Also push Y.Text content to store immediately for preview sync
+        // Push Y.Text content to store for preview sync (skip empty to avoid clearing store)
         if (finalContent.trim()) {
           onContentChangeRef.current(finalContent);
         }

@@ -434,6 +434,7 @@ export async function saveDocumentToFirestore(docData: {
   docType?: string;
   titlePinned?: boolean;
   updatedAt?: number;
+  teamId?: string | null;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
 
@@ -468,6 +469,7 @@ export async function saveDocumentToFirestore(docData: {
     };
     if (docData.ownerName) payload.ownerName = docData.ownerName;
     if (docData.docType) payload.docType = docData.docType;
+    if (docData.teamId !== undefined) payload.teamId = docData.teamId;
 
     if (snap.exists()) {
       transaction.update(ref, payload);
@@ -522,6 +524,7 @@ export async function saveDocumentMerge(docData: {
   docType?: string;
   titlePinned?: boolean;
   updatedAt?: number;
+  teamId?: string | null;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   // Safety checks: owner, timestamp, and empty content — same guards as saveDocumentToFirestore
@@ -542,6 +545,7 @@ export async function saveDocumentMerge(docData: {
     tags: docData.tags ?? [],
     titlePinned: docData.titlePinned ?? false,
     ...(docData.docType ? { docType: docData.docType } : {}),
+    ...(docData.teamId !== undefined ? { teamId: docData.teamId } : {}),
     updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
   }, { merge: true });
 }
