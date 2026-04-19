@@ -144,12 +144,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // Without this, syncFromCloud may see default themeSettings and
         // overwrite correct SQLite values with stale cloud values.
         const syncThenBackfill = async () => {
+          const syncStartedAt = Date.now();
           await get().syncFromCloud();
           await get().syncToCloud();
-          // Update lastSyncAt AFTER both steps complete
+          // Use sync START time so docs created during the cycle are included next time
           try {
             const { setSetting } = await import("@/services/database");
-            await setSetting("lastSyncAt", String(Date.now()));
+            await setSetting("lastSyncAt", String(syncStartedAt));
           } catch { /* ignore */ }
           cloudPulledDocIds.clear();
           // Backfill local versions to Firestore (one-time, background)
@@ -175,11 +176,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const handleOnline = async () => {
       set({ isOnline: true });
       if (get().user) {
+        const syncStartedAt = Date.now();
         await get().syncFromCloud();
         await get().syncToCloud();
         try {
           const { setSetting } = await import("@/services/database");
-          await setSetting("lastSyncAt", String(Date.now()));
+          await setSetting("lastSyncAt", String(syncStartedAt));
         } catch { /* ignore */ }
         cloudPulledDocIds.clear();
       }
@@ -193,11 +195,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const syncInterval = setInterval(async () => {
       const { user, isOnline, syncing } = get();
       if (user && isOnline && !syncing) {
+        const syncStartedAt = Date.now();
         await get().syncFromCloud();
         await get().syncToCloud();
         try {
           const { setSetting } = await import("@/services/database");
-          await setSetting("lastSyncAt", String(Date.now()));
+          await setSetting("lastSyncAt", String(syncStartedAt));
         } catch { /* ignore */ }
         cloudPulledDocIds.clear();
       }
