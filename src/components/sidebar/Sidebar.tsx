@@ -273,6 +273,7 @@ export function Sidebar() {
     const content = isMindMap
       ? JSON.stringify({ nodes: [{ id: "root", label: title, children: [] }] })
       : "# Untitled\n";
+    const authUser = useAuthStore.getState().user;
     const doc: Document = {
       id: crypto.randomUUID(),
       title,
@@ -281,12 +282,26 @@ export function Sidebar() {
       updatedAt: Date.now(),
       folder,
       tags: [],
-      ownerId: null,
+      ownerId: authUser?.uid ?? null,
       docType,
     };
     addDocument(doc);
     setActiveDocId(doc.id);
     setExpandedFolders((prev) => new Set([...prev, folder]));
+    if (authUser) {
+      import("@/services/firebase").then(({ saveDocumentToFirestore }) => {
+        saveDocumentToFirestore({
+          id: doc.id,
+          title: doc.title,
+          content: doc.content,
+          ownerId: authUser.uid,
+          ownerName: authUser.displayName || authUser.email || undefined,
+          folder: doc.folder,
+          tags: doc.tags,
+          updatedAt: doc.updatedAt,
+        }).catch((err) => console.error("[new] Cloud upload failed:", err));
+      }).catch(() => {});
+    }
   };
 
   const handleCreateFolder = (parentPath: string) => {

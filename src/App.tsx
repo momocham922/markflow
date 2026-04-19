@@ -432,6 +432,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
       reader.onload = () => {
         const content = reader.result as string;
         const title = file.name.replace(/\.md$/i, "").slice(0, 50) || "Imported";
+        const authUser = useAuthStore.getState().user;
         const doc: Document = {
           id: crypto.randomUUID(),
           title,
@@ -440,10 +441,25 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
           updatedAt: Date.now(),
           folder: "/",
           tags: [],
-          ownerId: null,
+          ownerId: authUser?.uid ?? null,
         };
         addDocument(doc);
         setActiveDocId(doc.id);
+        // Cloud-first: upload to Firestore immediately so reconciliation never deletes it
+        if (authUser) {
+          import("@/services/firebase").then(({ saveDocumentToFirestore }) => {
+            saveDocumentToFirestore({
+              id: doc.id,
+              title: doc.title,
+              content: doc.content,
+              ownerId: authUser.uid,
+              ownerName: authUser.displayName || authUser.email || undefined,
+              folder: doc.folder,
+              tags: doc.tags,
+              updatedAt: doc.updatedAt,
+            }).catch((err) => console.error("[import] Cloud upload failed:", err));
+          }).catch(() => {});
+        }
       };
       reader.readAsText(file);
       // Reset so the same file can be imported again

@@ -114,7 +114,7 @@ interface AuthState {
   init: () => () => void;
   login: (provider?: "google" | "github") => Promise<void>;
   logout: () => Promise<void>;
-  syncToCloud: () => Promise<void>;
+  syncToCloud: () => Promise<boolean>;
   syncFromCloud: () => Promise<void>;
   deleteFromCloud: (docId: string) => Promise<void>;
   resetCloudAndReSync: () => Promise<void>;
@@ -143,12 +143,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const syncThenBackfill = async () => {
           const syncStartedAt = Date.now();
           await get().syncFromCloud();
-          await get().syncToCloud();
-          // Use sync START time so docs created during the cycle are included next time
-          try {
-            const { setSetting } = await import("@/services/database");
-            await setSetting("lastSyncAt", String(syncStartedAt));
-          } catch { /* ignore */ }
+          const uploaded = await get().syncToCloud();
+          // Only advance lastSyncAt if syncToCloud actually ran (not dropped by lock)
+          if (uploaded) {
+            try {
+              const { setSetting } = await import("@/services/database");
+              await setSetting("lastSyncAt", String(syncStartedAt));
+            } catch { /* ignore */ }
+          }
           cloudPulledDocIds.clear();
           // Backfill local versions to Firestore (one-time, background)
           backfillLocalVersionsToCloud(
@@ -175,11 +177,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (get().user) {
         const syncStartedAt = Date.now();
         await get().syncFromCloud();
-        await get().syncToCloud();
-        try {
-          const { setSetting } = await import("@/services/database");
-          await setSetting("lastSyncAt", String(syncStartedAt));
-        } catch { /* ignore */ }
+        const uploaded = await get().syncToCloud();
+        if (uploaded) {
+          try {
+            const { setSetting } = await import("@/services/database");
+            await setSetting("lastSyncAt", String(syncStartedAt));
+          } catch { /* ignore */ }
+        }
         cloudPulledDocIds.clear();
       }
     };
@@ -194,11 +198,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (user && isOnline && !syncing) {
         const syncStartedAt = Date.now();
         await get().syncFromCloud();
-        await get().syncToCloud();
-        try {
-          const { setSetting } = await import("@/services/database");
-          await setSetting("lastSyncAt", String(syncStartedAt));
-        } catch { /* ignore */ }
+        const uploaded = await get().syncToCloud();
+        if (uploaded) {
+          try {
+            const { setSetting } = await import("@/services/database");
+            await setSetting("lastSyncAt", String(syncStartedAt));
+          } catch { /* ignore */ }
+        }
         cloudPulledDocIds.clear();
       }
     }, 60_000);
@@ -705,9 +711,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   syncToCloud: async () => {
     const { user, isOnline } = get();
-    if (!user || !isOnline) return;
+    if (!user || !isOnline) return false;
 
-    await withSyncLock(async () => {
+    const result = await withSyncLock(async () => {
       set({ syncing: true });
       try {
         const appState = useAppStore.getState();
@@ -801,11 +807,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
         // Edit notifications are handled by debounce in App.tsx
         // (10min idle / document switch / app close)
+        return true;
       } catch (error) {
         console.error("Sync to cloud failed:", error);
+        return false;
       } finally {
         set({ syncing: false });
       }
     });
+    return result === true;
   },
 }));
