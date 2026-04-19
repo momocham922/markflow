@@ -524,20 +524,38 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         customPreviewThemes,
         customPreviewCss: themeSettings.customPreviewCss,
       });
-      // Ensure doc exists in Firestore before publishing (updateDoc fails on non-existent docs)
-      const { setPublishUrl: saveUrl, saveDocumentToFirestore } = await import("@/services/firebase");
-      await saveDocumentToFirestore({
-        id: doc.id,
-        title: doc.title,
-        content: doc.content,
-        ownerId: user.uid,
-        ownerName: user.displayName || user.email || undefined,
-        folder: doc.folder,
-        tags: doc.tags,
-        titlePinned: doc.titlePinned,
-        updatedAt: doc.updatedAt,
-        teamId: doc.teamId ?? null,
-      });
+
+      // Step 1: Ensure doc exists in Firestore (setDoc+merge, no transaction)
+      const { getDoc: fsGetDoc, setDoc: fsSetDoc, doc: fsDoc, collection: fsColl, serverTimestamp: fsSt } =
+        await import("firebase/firestore");
+      const { firestore } = await import("@/services/firebase");
+      const docRef = fsDoc(fsColl(firestore, "documents"), doc.id);
+      const snap = await fsGetDoc(docRef);
+      if (snap.exists()) {
+        // Doc exists — just make sure ownerId is correct
+        const cd = snap.data();
+        if (cd.ownerId && cd.ownerId !== user.uid) {
+          throw new Error("このドキュメントのオーナーではありません");
+        }
+      } else {
+        // Doc doesn't exist — create with all required fields
+        await fsSetDoc(docRef, {
+          title: doc.title,
+          content: doc.content,
+          ownerId: user.uid,
+          ownerName: user.displayName || user.email || undefined,
+          folder: doc.folder ?? "/",
+          tags: doc.tags ?? [],
+          collaborators: {},
+          collaboratorUids: [],
+          titlePinned: doc.titlePinned ?? false,
+          ...(doc.teamId ? { teamId: doc.teamId } : {}),
+          createdAt: fsSt(),
+          updatedAt: fsSt(),
+        });
+      }
+
+      // Step 2: Upload HTML to Firebase Storage
       const { invoke } = await import("@tauri-apps/api/core");
       const token = await user.getIdToken();
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
@@ -548,9 +566,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         token,
         bucket,
       });
-      await saveUrl(doc.id, url);
+
+      // Step 3: Set publish URL on the doc (merge — works for both existing and new)
+      await fsSetDoc(docRef, {
+        publishUrl: url,
+        publishedAt: fsSt(),
+      }, { merge: true });
+
       setPublishUrl(url);
-      // Copy to clipboard
       try { await navigator.clipboard.writeText(url); } catch {}
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
