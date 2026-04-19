@@ -35,6 +35,7 @@ service cloud.firestore {
       }
 
       allow read: if request.auth != null && (
+        resource == null ||
         resource.data.ownerId == request.auth.uid ||
         isCollaborator() ||
         isTeamMember() ||
