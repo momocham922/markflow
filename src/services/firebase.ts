@@ -20,7 +20,6 @@ import {
   getDoc,
   setDoc,
   deleteDoc,
-  updateDoc,
   runTransaction,
   addDoc,
   query,
@@ -560,7 +559,7 @@ export async function updateShareLink(
   docId: string,
   shareLink: { enabled: boolean; token: string; permission: "view" | "edit" },
 ): Promise<void> {
-  await updateDoc(doc(firestore, DOCS_COLLECTION, docId), { shareLink });
+  await setDoc(doc(firestore, DOCS_COLLECTION, docId), { shareLink }, { merge: true });
 }
 
 // ─── Publish URL management ─────────────────────────────────
@@ -569,10 +568,10 @@ export async function setPublishUrl(
   docId: string,
   publishUrl: string | null,
 ): Promise<void> {
-  await updateDoc(doc(firestore, DOCS_COLLECTION, docId), {
+  await setDoc(doc(firestore, DOCS_COLLECTION, docId), {
     publishUrl: publishUrl,
     publishedAt: publishUrl ? serverTimestamp() : null,
-  });
+  }, { merge: true });
 }
 
 // ─── Version history cloud sync ─────────────────────────────

@@ -256,14 +256,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           deletedDocIds = new Set();
         }
 
-        // Load last successful sync timestamp (0 = first sync ever)
-        let lastSyncAt = 0;
-        try {
-          const { getSetting } = await import("@/services/database");
-          const saved = await getSetting("lastSyncAt");
-          if (saved) lastSyncAt = parseInt(saved, 10) || 0;
-        } catch { /* DB not available */ }
-
         // Parallel fetch: user docs, shared docs, teams, and user settings
         const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all([
           fetchUserDocuments(user.uid),
@@ -583,7 +575,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
 
         // Reconcile deletions: remove local docs that no longer exist in cloud.
-        // For own docs: only remove if last synced before this session (prevents deleting newly created docs)
+        // For own docs: verify deletion by checking Firestore directly (never rely on timing alone)
         // For shared/team docs: remove if not in cloud (non-owner, cloud is source of truth)
         const finalDocs = useAppStore.getState().documents;
         for (const local of finalDocs) {
@@ -591,21 +583,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           if (cloudDocIds.has(local.id)) continue; // exists in cloud — keep
 
           if (local.ownerId === user.uid) {
-            // Own doc not in cloud: deleted on another device OR newly created here
-            // Keep if created OR updated after last sync (protects unsynced new docs)
-            if (lastSyncAt > 0 && local.updatedAt < lastSyncAt && local.createdAt < lastSyncAt) {
-              console.warn(`[sync] Removing own doc ${local.id} "${local.title}" (deleted on another device)`);
-              // Delete locally without re-tracking in deleted_docs (already gone from cloud)
-              useAppStore.setState((s) => ({
-                documents: s.documents.filter((d) => d.id !== local.id),
-                activeDocId: s.activeDocId === local.id ? null : s.activeDocId,
-              }));
-              try {
-                const { deleteDocument: dbDelete } = await import("@/services/database");
-                await dbDelete(local.id);
-              } catch { /* ignore */ }
+            // Own doc not in query results. Could be:
+            // a) Deleted on another device → should delete locally
+            // b) Never synced / upload failed → must NOT delete
+            // Direct Firestore check is authoritative — no timing heuristics.
+            try {
+              const cloudDoc = await fetchDocument(local.id);
+              if (!cloudDoc) {
+                console.warn(`[sync] Removing own doc ${local.id} "${local.title}" (confirmed deleted from cloud)`);
+                useAppStore.setState((s) => ({
+                  documents: s.documents.filter((d) => d.id !== local.id),
+                  activeDocId: s.activeDocId === local.id ? null : s.activeDocId,
+                }));
+                try {
+                  const { deleteDocument: dbDelete } = await import("@/services/database");
+                  await dbDelete(local.id);
+                } catch { /* ignore */ }
+              }
+              // else: doc exists in Firestore but query missed it — keep locally, syncToCloud will handle
+            } catch {
+              // Firestore check failed (network?) — err on the side of keeping the doc
             }
-            // else: newer than lastSyncAt → keep (will be uploaded by syncToCloud)
           } else if (local.isShared || local.teamId) {
             // Non-owned shared/team doc not in cloud → removed by owner
             console.warn(`[sync] Removing non-owned doc ${local.id} (deleted from cloud)`);
