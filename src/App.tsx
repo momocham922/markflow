@@ -508,6 +508,20 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         customPreviewThemes,
         customPreviewCss: themeSettings.customPreviewCss,
       });
+      // Ensure doc exists in Firestore before publishing (updateDoc fails on non-existent docs)
+      const { setPublishUrl: saveUrl, saveDocumentToFirestore } = await import("@/services/firebase");
+      await saveDocumentToFirestore({
+        id: doc.id,
+        title: doc.title,
+        content: doc.content,
+        ownerId: user.uid,
+        ownerName: user.displayName || user.email || undefined,
+        folder: doc.folder,
+        tags: doc.tags,
+        titlePinned: doc.titlePinned,
+        updatedAt: doc.updatedAt,
+        teamId: doc.teamId ?? null,
+      });
       const { invoke } = await import("@tauri-apps/api/core");
       const token = await user.getIdToken();
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
@@ -518,8 +532,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         token,
         bucket,
       });
-      // Save publish URL to Firestore
-      const { setPublishUrl: saveUrl } = await import("@/services/firebase");
       await saveUrl(doc.id, url);
       setPublishUrl(url);
       // Copy to clipboard
