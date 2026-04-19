@@ -83,18 +83,15 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
 }
 
 // --- Sync mutex: prevents concurrent syncFromCloud / syncToCloud ---
-// Promise-based queue ensures operations never interleave or silently drop.
-let syncQueue: Promise<unknown> = Promise.resolve();
+// Try-lock: if already running, drop the call (next 60s interval will catch up).
+let syncLocked = false;
 async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
-  let resolve!: () => void;
-  const gate = new Promise<void>((r) => { resolve = r; });
-  const prev = syncQueue;
-  syncQueue = gate;
-  await prev;
+  if (syncLocked) return undefined;
+  syncLocked = true;
   try {
     return await fn();
   } finally {
-    resolve();
+    syncLocked = false;
   }
 }
 
