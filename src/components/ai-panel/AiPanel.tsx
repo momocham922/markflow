@@ -564,21 +564,25 @@ export function AiPanel({ onClose }: AiPanelProps) {
     ]);
 
     try {
-      // Build a detailed image prompt using Claude with conversation context
+      // Build a detailed image prompt using Claude with document + conversation context
       let imagePrompt = prompt;
-      if (apiMessages.length > 0) {
+      {
         setToolStatus("Building image prompt from context...");
+        const docContext = buildContextPrefix();
         const contextMessages: ClaudeMessage[] = [
+          ...(docContext
+            ? [{ role: "user" as const, content: docContext }, { role: "assistant" as const, content: "I've read the document context." }]
+            : []),
           ...apiMessages.slice(-10),
           {
             role: "user" as const,
-            content: `Based on the conversation above, create a detailed image generation prompt for an AI image generator. The user's request is: "${prompt}"\n\nRespond with ONLY the image generation prompt (no explanation, no markdown, no quotes). The prompt should be detailed, specific, and in the language that best describes the visual content. Include style, composition, colors, and content details.`,
+            content: `Based on the document and conversation above, create a detailed image generation prompt for an AI image generator. The user's request is: "${prompt}"\n\nRespond with ONLY the image generation prompt (no explanation, no markdown, no quotes). The prompt should be detailed, specific, and in the language that best describes the visual content. Include style, composition, colors, and content details.`,
           },
         ];
         try {
           const detailedPrompt = await sendToClaude(
             "",
-            "You are a prompt engineer for AI image generation. Convert user requests into detailed, specific image generation prompts.",
+            "You are a prompt engineer for AI image generation. Convert user requests into detailed, specific image generation prompts. Use the document context to inform your prompts with relevant details.",
             contextMessages,
           );
           if (detailedPrompt.trim()) {
