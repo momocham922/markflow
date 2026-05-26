@@ -21,11 +21,19 @@ function formatDuration(seconds: number): string {
 export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0); // 0 = manual
+  const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0);
+  const [autoElapsed, setAutoElapsed] = useState(0);
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
-  const lastStructuredOutputRef = useRef(""); // previous structured markdown for context
+  const lastStructuredOutputRef = useRef("");
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Refs to avoid stale closures in setInterval callbacks
+  const fullTranscriptRef = useRef("");
+  const structuringRef = useRef(false);
+  const onInsertRef = useRef(onInsertMarkdown);
+  const onReplaceRef = useRef(onReplaceMarkdown);
 
   const {
     isRecording,
@@ -40,92 +48,106 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
     onError: (msg) => setVoiceError(msg),
   });
 
-  // Auto-scroll to bottom when new text arrives
+  // Keep refs in sync
+  useEffect(() => { fullTranscriptRef.current = fullTranscript; }, [fullTranscript]);
+  useEffect(() => { structuringRef.current = structuring; }, [structuring]);
+  useEffect(() => { onInsertRef.current = onInsertMarkdown; }, [onInsertMarkdown]);
+  useEffect(() => { onReplaceRef.current = onReplaceMarkdown; }, [onReplaceMarkdown]);
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [fullTranscript, interimText]);
 
-  const structureTranscript = useCallback(
-    async (text?: string) => {
-      const transcript = text || fullTranscript;
-      if (!transcript.trim() || structuring) return;
-      if (transcript === lastStructuredRef.current) return;
+  const doStructure = useCallback(async () => {
+    const transcript = fullTranscriptRef.current;
+    if (!transcript.trim() || structuringRef.current) return;
+    if (transcript === lastStructuredRef.current) return;
 
-      setStructuring(true);
-      try {
-        const user = useAuthStore.getState().user;
-        if (!user) throw new Error("Not authenticated");
-        const token = await auth.currentUser?.getIdToken();
-        if (!token) throw new Error("No token");
+    setStructuring(true);
+    structuringRef.current = true;
+    try {
+      const user = useAuthStore.getState().user;
+      if (!user) throw new Error("Not authenticated");
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error("No token");
 
-        const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            system:
-              "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
-              "Integrate all content coherently — do not produce fragments or partial updates. " +
-              "Use appropriate headings, bullet points, and formatting. " +
-              "Keep the same language as the transcript. " +
-              "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
-              "Output ONLY the structured Markdown content, no explanations or meta-commentary.",
-            messages: [
-              {
-                role: "user",
-                content: `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`,
-              },
-            ],
-            max_tokens: 4096,
-            stream: false,
-          }),
-        });
+      const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          system:
+            "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
+            "Integrate all content coherently — do not produce fragments or partial updates. " +
+            "Use appropriate headings, bullet points, and formatting. " +
+            "Keep the same language as the transcript. " +
+            "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
+            "Output ONLY the structured Markdown content, no explanations or meta-commentary.",
+          messages: [
+            {
+              role: "user",
+              content: `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`,
+            },
+          ],
+          max_tokens: 4096,
+          stream: false,
+        }),
+      });
 
-        if (!res.ok) throw new Error(`Structure failed: ${res.status}`);
+      if (!res.ok) throw new Error(`Structure failed: ${res.status}`);
 
-        const data = await res.json();
-        const markdown =
-          data.content?.[0]?.text ||
-          data.content?.map((c: { text?: string }) => c.text || "").join("") ||
-          "";
+      const data = await res.json();
+      const markdown =
+        data.content?.[0]?.text ||
+        data.content?.map((c: { text?: string }) => c.text || "").join("") ||
+        "";
 
-        if (markdown.trim()) {
-          const newOutput = `\n\n${markdown.trim()}\n`;
-          if (lastStructuredOutputRef.current) {
-            // Replace previous structured output with new complete version
-            onReplaceMarkdown(lastStructuredOutputRef.current, newOutput);
-          } else {
-            // First structuring — insert at end
-            onInsertMarkdown(newOutput);
-          }
-          lastStructuredOutputRef.current = newOutput;
-          lastStructuredRef.current = transcript;
+      if (markdown.trim()) {
+        const newOutput = `\n\n${markdown.trim()}\n`;
+        if (lastStructuredOutputRef.current) {
+          onReplaceRef.current(lastStructuredOutputRef.current, newOutput);
+        } else {
+          onInsertRef.current(newOutput);
         }
-      } catch (err) {
-        console.error("[voice] Structuring failed:", err);
-      } finally {
-        setStructuring(false);
+        lastStructuredOutputRef.current = newOutput;
+        lastStructuredRef.current = transcript;
       }
-    },
-    [fullTranscript, structuring, onInsertMarkdown, onReplaceMarkdown],
-  );
+    } catch (err) {
+      console.error("[voice] Structuring failed:", err);
+    } finally {
+      setStructuring(false);
+      structuringRef.current = false;
+    }
+  }, []);
 
-  // Auto-structure timer
+  // Auto-structure timer — stable callback, no deps on fullTranscript/structuring
   useEffect(() => {
     if (autoTimerRef.current) clearInterval(autoTimerRef.current);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    setAutoElapsed(0);
+
     if (autoStructureInterval > 0 && isRecording) {
       autoTimerRef.current = setInterval(() => {
-        structureTranscript();
+        doStructure();
+        setAutoElapsed(0);
       }, autoStructureInterval * 1000);
+
+      countdownTimerRef.current = setInterval(() => {
+        setAutoElapsed((prev) => {
+          const next = prev + 1;
+          return next >= autoStructureInterval ? 0 : next;
+        });
+      }, 1000);
     }
     return () => {
       if (autoTimerRef.current) clearInterval(autoTimerRef.current);
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     };
-  }, [autoStructureInterval, isRecording, structureTranscript]);
+  }, [autoStructureInterval, isRecording, doStructure]);
 
   if (!isSupported) {
     return (
@@ -135,15 +157,17 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
     );
   }
 
+  const progress = autoStructureInterval > 0 && isRecording
+    ? autoElapsed / autoStructureInterval
+    : 0;
+
   return (
     <div className="border-t border-border bg-background">
-      {/* Error banner */}
       {voiceError && (
         <div className="px-4 py-2 text-xs text-destructive bg-destructive/10 border-b border-destructive/20">
           {voiceError}
         </div>
       )}
-      {/* Transcript area */}
       {(fullTranscript || isRecording) && (
         <div
           ref={scrollRef}
@@ -165,9 +189,25 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         </div>
       )}
 
+      {/* Auto-structure progress bar */}
+      {autoStructureInterval > 0 && isRecording && (
+        <div className="px-3 pb-1">
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary/60 transition-all duration-1000 ease-linear"
+                style={{ width: `${progress * 100}%` }}
+              />
+            </div>
+            <span className="text-[10px] text-muted-foreground font-mono tabular-nums w-8 text-right">
+              {autoStructureInterval - autoElapsed}s
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Controls */}
       <div className="flex items-center gap-2 px-3 py-2 border-t border-border/50">
-        {/* Record toggle */}
         <Button
           variant={isRecording ? "destructive" : "default"}
           size="sm"
@@ -187,7 +227,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           )}
         </Button>
 
-        {/* Duration */}
         {isRecording && (
           <span className="text-xs text-muted-foreground font-mono tabular-nums">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse mr-1.5" />
@@ -197,24 +236,26 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
 
         <div className="flex-1" />
 
-        {/* Auto-structure select */}
         <select
           className="h-7 rounded-md border border-input bg-background px-2 text-[11px] outline-none"
           value={autoStructureInterval}
           onChange={(e) => setAutoStructureInterval(Number(e.target.value))}
         >
           <option value={0}>Manual</option>
+          <option value={15}>15s auto</option>
           <option value={30}>30s auto</option>
+          <option value={45}>45s auto</option>
           <option value={60}>1min auto</option>
           <option value={120}>2min auto</option>
+          <option value={180}>3min auto</option>
+          <option value={300}>5min auto</option>
         </select>
 
-        {/* Structure button */}
         <Button
           variant="outline"
           size="sm"
           className="gap-1.5 text-xs"
-          onClick={() => structureTranscript()}
+          onClick={() => doStructure()}
           disabled={!fullTranscript.trim() || structuring}
         >
           {structuring ? (
@@ -225,7 +266,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           Structure
         </Button>
 
-        {/* Clear */}
         <Button
           variant="ghost"
           size="icon"

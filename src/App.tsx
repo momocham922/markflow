@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
-import { getPlatform, isIOS, isMac } from "@/platform";
+import { getPlatform, isIOS, isMobile, isMac } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
 import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
 
@@ -628,16 +628,16 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <div
           className={cn(
             "flex flex-col overflow-hidden bg-background",
-            !isIOS && "h-screen w-screen",
-            isIOS && "safe-top",
+            !isMobile && "h-screen w-screen",
+            isMobile && "safe-top",
           )}
-          style={isIOS ? {
+          style={isMobile ? {
             position: "fixed",
             top: 0, left: 0, right: 0,
-            ...(keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
+            ...(isIOS && keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
           } : undefined}
         >
-          {!isIOS && (
+          {!isMobile && (
             <div
               className="h-7 w-full shrink-0"
               data-tauri-drag-region
@@ -662,13 +662,13 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       <div
         className={cn(
           "flex flex-col overflow-hidden bg-background",
-          !isIOS && "h-screen w-screen",
-          isIOS && "safe-top",
+          !isMobile && "h-screen w-screen",
+          isMobile && "safe-top",
         )}
-        style={isIOS ? {
+        style={isMobile ? {
           position: "fixed",
           top: 0, left: 0, right: 0,
-          ...(keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
+          ...(isIOS && keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
         } : undefined}
       >
         {/* Window drag region — desktop only (macOS title bar) */}
@@ -750,21 +750,22 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         )}
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar — swipeable overlay on iOS, inline on desktop */}
-          {isIOS && (sidebarOpen || swiping) && (
+          {isMobile && (sidebarOpen || swiping) && (
             <div
               className="fixed inset-0 z-40"
               style={{ backgroundColor: `rgba(0,0,0,${0.3 * backdropOpacity})` }}
               onClick={toggleSidebar}
             />
           )}
-          {isIOS ? (
+          {isMobile ? (
             (sidebarOpen || swiping) && (
               <div
                 className="fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background overflow-hidden"
                 style={{
                   width: 280,
                   transform: `translateX(${sidebarTranslateX}px)`,
-                  transition: swiping ? "none" : "transform 0.3s ease-out",
+                  transition: swiping ? "none" : "transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+                  willChange: "transform",
                 }}
               >
                 <Sidebar />
@@ -791,18 +792,18 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* Top bar — draggable on desktop, normal on iOS */}
             <div
-              className={cn("flex items-center justify-between border-b border-border px-3 pb-1.5", isIOS && "pt-1 safe-left safe-right")}
-              {...(!isIOS ? { "data-tauri-drag-region": true } : {})}
+              className={cn("flex items-center justify-between border-b border-border px-3 pb-1.5", isMobile && "pt-1 safe-left safe-right")}
+              {...(!isMobile ? { "data-tauri-drag-region": true } : {})}
             >
               <div className="flex items-center gap-1">
                 {!sidebarOpen && (
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-7 w-7"
+                    className={isMobile ? "h-9 w-9" : "h-7 w-7"}
                     onClick={toggleSidebar}
                   >
-                    <PanelLeft className="h-4 w-4" />
+                    <PanelLeft className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                   </Button>
                 )}
                 {/* View mode toggle */}
@@ -810,42 +811,42 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   <Button
                     variant={viewMode === "editor" ? "secondary" : "ghost"}
                     size="icon"
-                    className="h-6 w-6"
+                    className={isMobile ? "h-7 w-7" : "h-6 w-6"}
                     onClick={() => setViewMode("editor")}
                     title="Editor"
                   >
-                    <PenLine className="h-3.5 w-3.5" />
+                    <PenLine className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
                   </Button>
                   <Button
                     variant={viewMode === "canvas" ? "secondary" : "ghost"}
                     size="icon"
-                    className="h-6 w-6"
+                    className={isMobile ? "h-7 w-7" : "h-6 w-6"}
                     onClick={() => setViewMode("canvas")}
                     title="Canvas"
                   >
-                    <LayoutGrid className="h-3.5 w-3.5" />
+                    <LayoutGrid className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
                   </Button>
                   <Button
                     variant={viewMode === "visualization" ? "secondary" : "ghost"}
                     size="icon"
-                    className="h-6 w-6"
+                    className={isMobile ? "h-7 w-7" : "h-6 w-6"}
                     onClick={() => setViewMode("visualization")}
                     title="Visualization"
                   >
-                    <Network className="h-3.5 w-3.5" />
+                    <Network className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
                   </Button>
                 </div>
                 {/* Import markdown */}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
+                  className={isMobile ? "h-9 w-9" : "h-7 w-7"}
                   onClick={handleImportMarkdown}
                   title="Import .md file"
                 >
-                  <Upload className="h-3.5 w-3.5" />
+                  <Upload className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
                 </Button>
-                {!isIOS && (
+                {!isMobile && (
                   <span className="ml-1 text-[10px] text-muted-foreground hidden sm:inline">
                     Cmd+K search · Cmd+Shift+/ shortcuts
                   </span>
@@ -855,31 +856,31 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
+                  className={isMobile ? "h-9 w-9" : "h-7 w-7"}
                   onClick={() => setShareOpen(true)}
                   title="Share"
                 >
-                  <Share2 className="h-4 w-4" />
+                  <Share2 className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                 </Button>
                 {viewMode === "editor" && (
                   <>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn("h-7 w-7", rightPanel === "ai" && "bg-accent")}
+                      className={cn(isMobile ? "h-9 w-9" : "h-7 w-7", rightPanel === "ai" && "bg-accent")}
                       onClick={() => togglePanel("ai")}
                       title="Claude AI"
                     >
-                      <Bot className="h-4 w-4" />
+                      <Bot className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                     </Button>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn("h-7 w-7", rightPanel === "versions" && "bg-accent")}
+                      className={cn(isMobile ? "h-9 w-9" : "h-7 w-7", rightPanel === "versions" && "bg-accent")}
                       onClick={() => togglePanel("versions")}
                       title="Version history"
                     >
-                      <History className="h-4 w-4" />
+                      <History className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                     </Button>
                   </>
                 )}
@@ -909,7 +910,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     </div>
                   </div>
                 ) : viewMode === "editor" ? (
-                  <Editor />
+                  <Editor onVersionPanelToggle={() => togglePanel("versions")} />
                 ) : viewMode === "visualization" ? (
                   <Suspense
                     fallback={
@@ -932,7 +933,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   </Suspense>
                 )}
               </div>
-              {viewMode === "editor" && rightPanel !== "none" && !isIOS && (
+              {viewMode === "editor" && rightPanel !== "none" && !isMobile && (
                 <>
                   {/* Right panel resize handle — desktop */}
                   <div
@@ -958,7 +959,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         </div>
 
         {/* Right panels — fullscreen overlay on iOS */}
-        {isIOS && viewMode === "editor" && rightPanel !== "none" && (
+        {isMobile && viewMode === "editor" && rightPanel !== "none" && (
           <div
             className="fixed z-40 flex flex-col safe-top bg-background"
             style={{
@@ -992,7 +993,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             </div>
           </div>
         )}
-        {!(isIOS && keyboardVisible) && <StatusBar />}
+        {!(isMobile && keyboardVisible) && <StatusBar />}
         <ShareDialog open={shareOpen} onOpenChange={setShareOpen} />
         <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
         <CommandPalette

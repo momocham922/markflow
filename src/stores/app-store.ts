@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import * as db from "@/services/database";
 import { fetchDocument } from "@/services/firebase";
-import { isIOS } from "@/platform";
+import { isMobile } from "@/platform";
 
 export type DocType = "markdown" | "mindmap";
 
@@ -192,7 +192,7 @@ function scheduleCloudRecovery(docIds: string[]) {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  sidebarOpen: !isIOS,
+  sidebarOpen: !isMobile,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
   theme: (window.matchMedia("(prefers-color-scheme: dark)").matches
@@ -226,7 +226,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
 
   activeDocId: null,
-  setActiveDocId: (id) => set({ activeDocId: id, ...(isIOS ? { sidebarOpen: false } : {}) }),
+  setActiveDocId: (id) => set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) }),
 
   documents: [],
   folders: ["/"],

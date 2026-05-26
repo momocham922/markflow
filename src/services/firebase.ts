@@ -107,16 +107,16 @@ export async function checkPendingOAuthCode(): Promise<User | null> {
 }
 
 export async function signInWithGoogle(): Promise<User | null> {
-  const { getPlatform, isIOS } = await import("@/platform");
+  const { getPlatform, isMobile } = await import("@/platform");
   const platform = await getPlatform();
 
   const port = 19847;
   const redirectUri = `http://localhost:${port}/callback`;
 
-  // iOS: open SFSafariViewController (system browser sheet) for OAuth
-  // Google blocks embedded WKWebView OAuth, but SFSafariViewController is allowed.
+  // Mobile (iOS/Android): use Rust localhost server + system browser for OAuth
+  // Google blocks embedded WebView OAuth, but system browser is allowed.
   // The Rust localhost server captures the callback and emits an event.
-  if (isIOS) {
+  if (isMobile) {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
@@ -165,8 +165,14 @@ export async function signInWithGoogle(): Promise<User | null> {
         }
       }, 300000);
 
-      // Open SFSafariViewController (stays in-app, not blocked by Google)
-      invoke("open_safari_vc", { url: authUrl }).catch(reject);
+      // Open system browser for OAuth
+      import("@/platform").then(({ isIOS: isIOSPlatform }) => {
+        if (isIOSPlatform) {
+          invoke("open_safari_vc", { url: authUrl }).catch(reject);
+        } else {
+          invoke("open_external_url", { url: authUrl }).catch(reject);
+        }
+      }).catch(reject);
     });
 
     // Exchange code for tokens
@@ -266,7 +272,7 @@ export async function signInWithGoogle(): Promise<User | null> {
 }
 
 export async function signInWithGitHub(): Promise<User | null> {
-  const { getPlatform, isIOS } = await import("@/platform");
+  const { getPlatform, isMobile } = await import("@/platform");
   const platform = await getPlatform();
 
   const port = 19847;
@@ -276,8 +282,8 @@ export async function signInWithGitHub(): Promise<User | null> {
     throw new Error("GitHub OAuth credentials not configured");
   }
 
-  // iOS: use SFSafariViewController
-  if (isIOS) {
+  // Mobile: use system browser for OAuth
+  if (isMobile) {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
@@ -301,7 +307,13 @@ export async function signInWithGitHub(): Promise<User | null> {
       setTimeout(() => {
         if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); invoke("dismiss_safari_vc").catch(() => {}); reject(new Error("Authentication timed out")); }
       }, 300000);
-      invoke("open_safari_vc", { url: authUrl }).catch(reject);
+      import("@/platform").then(({ isIOS: isIOSPlatform }) => {
+        if (isIOSPlatform) {
+          invoke("open_safari_vc", { url: authUrl }).catch(reject);
+        } else {
+          invoke("open_external_url", { url: authUrl }).catch(reject);
+        }
+      }).catch(reject);
     });
 
     const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {

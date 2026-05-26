@@ -211,6 +211,13 @@ fn open_safari_vc(_url: String) {}
 #[tauri::command]
 fn dismiss_safari_vc() {}
 
+/// Open a URL in the system browser (works on all platforms including Android)
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize, Default)]
 struct OgpData {
     title: String,
@@ -473,14 +480,14 @@ async fn print_html(html: String) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
     let path = temp_dir.join("markflow-print.html");
     std::fs::write(&path, &html).map_err(|e| e.to_string())?;
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(desktop)]
     {
         std::process::Command::new("/usr/bin/open")
             .arg(path.to_str().ok_or("Invalid path")?)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-    // iOS: print is handled in JS via window.print() or WKWebView
+    // Mobile: print is handled in JS via window.print() or WebView
     Ok(())
 }
 
@@ -1233,6 +1240,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(
@@ -1309,7 +1317,7 @@ pub fn run() {
             // If the frontend crashes (e.g. React hooks violation → black screen),
             // it can't check for updates. This Rust-side task ensures the app
             // still self-heals by auto-installing any available update.
-            #[cfg(not(target_os = "ios"))]
+            #[cfg(desktop)]
             {
                 let update_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -1380,7 +1388,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, start_voice_recording, stop_voice_recording, get_voice_chunk])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, start_voice_recording, stop_voice_recording, get_voice_chunk])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -34,7 +34,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { processImagePath } from "@/extensions/image-paste";
-import { isIOS } from "@/platform";
+import { isMobile } from "@/platform";
 import type { PreviewMode } from "./Editor";
 
 interface EditorToolbarProps {
@@ -140,8 +140,8 @@ export function EditorToolbar({
     setRenaming(false);
   };
 
-  // ── iOS mobile layout (2 rows: info + tools) ───────────
-  if (isIOS) {
+  // ── Mobile layout (2 rows: info + tools) ───────────
+  if (isMobile) {
     return (
       <div className="border-b border-border bg-background/80 backdrop-blur-sm">
         {/* Row 1: document info */}
@@ -189,36 +189,36 @@ export function EditorToolbar({
 
         {/* Row 2: tool buttons */}
         <div className="flex items-center justify-between px-3 pt-0.5 pb-1.5">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             {voiceSupported && onVoiceToggle && (
               <Button
                 variant={voiceActive ? "secondary" : "ghost"}
                 size="icon"
-                className={`h-7 w-7 ${voiceActive ? "text-red-500" : ""}`}
+                className={`h-9 w-9 ${voiceActive ? "text-red-500" : ""}`}
                 onClick={onVoiceToggle}
                 title={voiceActive ? "Close voice panel" : "Voice input"}
               >
-                {voiceActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+                {voiceActive ? <MicOff className="h-4.5 w-4.5" /> : <Mic className="h-4.5 w-4.5" />}
               </Button>
             )}
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onHistoryOpen} title="Version History">
-              <History className="h-3.5 w-3.5" />
+            <Button variant="ghost" size="icon" className="h-9 w-9" onClick={onHistoryOpen} title="Version History">
+              <History className="h-4.5 w-4.5" />
             </Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setThemeOpen(true)} title="Theme">
-              <Paintbrush className="h-3.5 w-3.5" />
+            <Button variant="ghost" size="icon" className="h-9 w-9" onClick={() => setThemeOpen(true)} title="Theme">
+              <Paintbrush className="h-4.5 w-4.5" />
             </Button>
           </div>
 
           {/* Preview mode toggle */}
           <div className="flex items-center rounded-md border border-border p-0.5">
-            <Button variant={previewMode === "edit" ? "secondary" : "ghost"} size="icon" className="h-6 w-6" onClick={() => onPreviewModeChange("edit")} title="Edit only">
-              <PenLine className="h-3.5 w-3.5" />
+            <Button variant={previewMode === "edit" ? "secondary" : "ghost"} size="icon" className="h-7 w-7" onClick={() => onPreviewModeChange("edit")} title="Edit only">
+              <PenLine className="h-4 w-4" />
             </Button>
-            <Button variant={previewMode === "preview" ? "secondary" : "ghost"} size="icon" className="h-6 w-6" onClick={() => onPreviewModeChange("preview")} title="Preview only">
-              <Eye className="h-3.5 w-3.5" />
+            <Button variant={previewMode === "preview" ? "secondary" : "ghost"} size="icon" className="h-7 w-7" onClick={() => onPreviewModeChange("preview")} title="Preview only">
+              <Eye className="h-4 w-4" />
             </Button>
-            <Button variant={previewMode === "mindmap" ? "secondary" : "ghost"} size="icon" className="h-6 w-6" onClick={() => onPreviewModeChange("mindmap")} title="Mind Map">
-              <Network className="h-3.5 w-3.5" />
+            <Button variant={previewMode === "mindmap" ? "secondary" : "ghost"} size="icon" className="h-7 w-7" onClick={() => onPreviewModeChange("mindmap")} title="Mind Map">
+              <Network className="h-4 w-4" />
             </Button>
           </div>
         </div>

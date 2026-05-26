@@ -17,6 +17,12 @@ function detectIOS(): boolean {
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
+/** Detect Android */
+function detectAndroid(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android/.test(navigator.userAgent);
+}
+
 /** Detect macOS (non-iOS) */
 function detectMac(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -25,6 +31,12 @@ function detectMac(): boolean {
 
 /** True when running on iOS (Tauri iOS or Safari) — cached after first call */
 export const isIOS = detectIOS();
+
+/** True when running on Android */
+export const isAndroid = detectAndroid();
+
+/** True when running on any mobile platform (iOS or Android) */
+export const isMobile = isIOS || isAndroid;
 
 /** True when running on macOS desktop */
 export const isMac = detectMac();

@@ -128,8 +128,8 @@ export function useVoiceInput({
         if (text) {
           // Multi-pattern hallucination suppression
           const isHallucination = (() => {
-            // 1. Repeated short phrases: え、え、え / はい。はい。 / ん、ん、ん
-            if (text.length <= 30 && /^(.{1,5}[、。,.!？\s]*)\1{2,}/.test(text)) return true;
+            // 1. Repeated short phrases (2+ repetitions): え、え / はい。はい / ん、ん
+            if (text.length <= 40 && /^(.{1,5}[、。,.!？\s]*)\1{1,}$/.test(text)) return true;
             // 2. Single filler character repeated with punctuation
             if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
             // 3. Common STT silence hallucinations (Japanese)
@@ -138,6 +138,10 @@ export function useVoiceInput({
             if (/^[\d、。,.\s-]+$/.test(text)) return true;
             // 5. Very short text (1-2 chars) that's just a filler
             if (text.length <= 2 && /^[えあうんはへほおいのでがをにと]$/.test(text)) return true;
+            // 6. Standalone backchannel responses (相槌)
+            if (/^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお)[、。.!？\s]*$/.test(text)) return true;
+            // 7. Repeated common words with varied punctuation
+            if (text.length <= 30 && /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(text) && !/[ぁ-ん]{3,}/.test(text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""))) return true;
             return false;
           })();
           if (isHallucination) {

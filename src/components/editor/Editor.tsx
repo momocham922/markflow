@@ -20,7 +20,6 @@ import { VoicePanel } from "./VoicePanel";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import { useAuthStore, markCollabActive, markCollabInactive } from "@/stores/auth-store";
-import { VersionHistory } from "./VersionHistory";
 import { MindMapView } from "./MindMapView";
 import { MindMapEditor, createInitialMindMapData } from "./MindMapEditor";
 import mermaid from "mermaid";
@@ -134,12 +133,15 @@ marked.use({ renderer });
 // Initialize mermaid — render on demand, not on load
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
-export function Editor() {
+interface EditorProps {
+  onVersionPanelToggle?: () => void;
+}
+
+export function Editor({ onVersionPanelToggle }: EditorProps = {}) {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>(isIOS ? "edit" : "split");
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
@@ -671,7 +673,7 @@ export function Editor() {
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
-        onHistoryOpen={() => setHistoryOpen(true)}
+        onHistoryOpen={onVersionPanelToggle}
         voiceActive={voiceOpen}
         voiceSupported={voiceSupported}
         onVoiceToggle={() => setVoiceOpen((v) => !v)}
@@ -792,13 +794,6 @@ export function Editor() {
         )}
       </div>
       {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} />}
-      <VersionHistory
-        open={historyOpen}
-        onOpenChange={setHistoryOpen}
-        docId={activeDocId}
-        currentTitle={activeDoc?.title ?? ""}
-        onRestore={handleRestoreVersion}
-      />
     </div>
   );
 }
