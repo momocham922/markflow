@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useIMEGuard } from "@/hooks/use-ime-guard";
-import { isIOS } from "@/platform";
+import { isMobile } from "@/platform";
 import {
   History,
   Save,
@@ -207,8 +207,8 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
           <History className="h-4 w-4" />
           <span className="text-sm font-medium">Versions</span>
         </div>
-        <Button variant="ghost" size="icon" className={isIOS ? "h-9 w-9" : "h-6 w-6"} onClick={onClose}>
-          <X className={isIOS ? "h-5 w-5" : "h-3.5 w-3.5"} />
+        <Button variant="ghost" size="icon" className={isMobile ? "h-9 w-9" : "h-6 w-6"} onClick={onClose}>
+          <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
         </Button>
       </div>
 
