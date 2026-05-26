@@ -191,28 +191,28 @@ export function EditorToolbar({
               <Button
                 variant={voiceActive ? "secondary" : "ghost"}
                 size="icon"
-                className={`h-9 w-9 ${voiceActive ? "text-red-500" : ""}`}
+                className={`h-11 w-11 ${voiceActive ? "text-red-500" : ""}`}
                 onClick={onVoiceToggle}
                 title={voiceActive ? "Close voice panel" : "Voice input"}
               >
-                {voiceActive ? <MicOff className="h-4.5 w-4.5" /> : <Mic className="h-4.5 w-4.5" />}
+                {voiceActive ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
               </Button>
             )}
-            <Button variant="ghost" size="icon" className="h-9 w-9" onClick={() => setThemeOpen(true)} title="Theme">
-              <Paintbrush className="h-4.5 w-4.5" />
+            <Button variant="ghost" size="icon" className="h-11 w-11" onClick={() => setThemeOpen(true)} title="Theme">
+              <Paintbrush className="h-5 w-5" />
             </Button>
           </div>
 
           {/* Preview mode toggle */}
           <div className="flex items-center rounded-md border border-border p-0.5">
-            <Button variant={previewMode === "edit" ? "secondary" : "ghost"} size="icon" className="h-7 w-7" onClick={() => onPreviewModeChange("edit")} title="Edit only">
-              <PenLine className="h-4 w-4" />
+            <Button variant={previewMode === "edit" ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => onPreviewModeChange("edit")} title="Edit only">
+              <PenLine className="h-4.5 w-4.5" />
             </Button>
-            <Button variant={previewMode === "preview" ? "secondary" : "ghost"} size="icon" className="h-7 w-7" onClick={() => onPreviewModeChange("preview")} title="Preview only">
-              <Eye className="h-4 w-4" />
+            <Button variant={previewMode === "preview" ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => onPreviewModeChange("preview")} title="Preview only">
+              <Eye className="h-4.5 w-4.5" />
             </Button>
-            <Button variant={previewMode === "mindmap" ? "secondary" : "ghost"} size="icon" className="h-7 w-7" onClick={() => onPreviewModeChange("mindmap")} title="Mind Map">
-              <Network className="h-4 w-4" />
+            <Button variant={previewMode === "mindmap" ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => onPreviewModeChange("mindmap")} title="Mind Map">
+              <Network className="h-4.5 w-4.5" />
             </Button>
           </div>
         </div>
@@ -443,15 +443,17 @@ export function EditorToolbar({
           >
             <PenLine className="h-3.5 w-3.5" />
           </Button>
-          <Button
-            variant={previewMode === "split" ? "secondary" : "ghost"}
-            size="icon"
-            className="h-6 w-6"
-            onClick={() => onPreviewModeChange("split")}
-            title="Split view"
-          >
-            <Columns2 className="h-3.5 w-3.5" />
-          </Button>
+          {!isMobile && (
+            <Button
+              variant={previewMode === "split" ? "secondary" : "ghost"}
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => onPreviewModeChange("split")}
+              title="Split view"
+            >
+              <Columns2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
           <Button
             variant={previewMode === "preview" ? "secondary" : "ghost"}
             size="icon"

@@ -7,7 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
-import { getPlatform, isIOS } from "@/platform";
+import { getPlatform, isIOS, isMobile } from "@/platform";
 import { isHtmlContent, extractYouTubeId, escapeHtml } from "@/lib/editor-utils";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
@@ -137,7 +137,7 @@ export function Editor() {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>(isIOS ? "edit" : "split");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(isMobile ? "edit" : "split");
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);

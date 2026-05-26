@@ -72,19 +72,19 @@ export function UserMenu() {
         <Button
           variant="ghost"
           size={isMobile ? "icon" : "sm"}
-          className={isMobile ? "h-9 w-9" : "gap-2 text-xs"}
+          className={isMobile ? "h-11 w-11" : "gap-2 text-xs"}
           onClick={() => login("google")}
           title="Sign in with Google"
         >
-          <LogIn className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
+          <LogIn className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           {!isMobile && "Sign in"}
         </Button>
       </div>
     );
   }
 
-  const btnSize = isMobile ? "h-9 w-9" : "h-7 w-7";
-  const iconSize = isMobile ? "h-4 w-4" : "h-3.5 w-3.5";
+  const btnSize = isMobile ? "h-11 w-11" : "h-7 w-7";
+  const iconSize = isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
 
   return (
     <div className="flex items-center gap-2">

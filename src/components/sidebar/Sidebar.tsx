@@ -27,7 +27,7 @@ import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, copyTeamDocToPersonal, moveDocToTeam, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
-import { isIOS } from "@/platform";
+import { isIOS, isMobile } from "@/platform";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -976,10 +976,10 @@ export function Sidebar() {
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 text-sidebar-foreground"
+          className={isMobile ? "h-11 w-11 text-sidebar-foreground" : "h-7 w-7 text-sidebar-foreground"}
           onClick={toggleSidebar}
         >
-          <PanelLeftClose className="h-4 w-4" />
+          <PanelLeftClose className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
         </Button>
       </div>
 

@@ -848,7 +848,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isMobile ? "h-9 w-9 cursor-pointer" : "h-6 w-6 cursor-pointer"}
+            className={isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"}
             onClick={onClose}
           >
             <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
@@ -1033,7 +1033,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isMobile ? "h-9 w-9 cursor-pointer" : "h-6 w-6 cursor-pointer"}
+            className={isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"}
             onClick={onClose}
           >
             <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
@@ -1346,22 +1346,22 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7 shrink-0 cursor-pointer"
+            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
             onClick={handleImageAttach}
             disabled={streaming || generatingImage}
             title="Attach image"
           >
-            <Paperclip className="h-3.5 w-3.5" />
+            <Paperclip className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7 shrink-0 cursor-pointer"
+            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
             onClick={handleImageGen}
             disabled={streaming || generatingImage || !input.trim()}
             title="Generate image from prompt"
           >
-            <Wand2 className="h-3.5 w-3.5" />
+            <Wand2 className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>
           <textarea
             ref={textareaRef}
@@ -1381,11 +1381,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
           />
           <Button
             size="icon"
-            className="h-7 w-7 shrink-0 cursor-pointer"
+            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
             onClick={handleChat}
             disabled={streaming || generatingImage || (!input.trim() && attachedImages.length === 0)}
           >
-            <Send className="h-3.5 w-3.5" />
+            <Send className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
       </div>

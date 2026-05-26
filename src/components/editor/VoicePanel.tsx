@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Mic, MicOff, Sparkles, Trash2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { isMobile } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { auth } from "@/services/firebase";
@@ -269,7 +270,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          className={isMobile ? "h-11 w-11" : "h-7 w-7"}
           onClick={() => { clearTranscript(); lastStructuredRef.current = ""; lastStructuredOutputRef.current = ""; }}
           disabled={!fullTranscript}
           title="Clear transcript"

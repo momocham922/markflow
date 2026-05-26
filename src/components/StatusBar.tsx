@@ -25,10 +25,10 @@ export function StatusBar() {
           {!user ? "Local" : syncing ? "Sync..." : isOnline ? "Online" : "Offline"}
         </span>
         <button
-          className="h-8 w-8 flex items-center justify-center text-muted-foreground"
+          className="h-11 w-11 flex items-center justify-center text-muted-foreground"
           onClick={toggleTheme}
         >
-          {theme === "light" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+          {theme === "light" ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}
         </button>
       </div>
     );

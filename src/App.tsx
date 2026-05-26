@@ -800,52 +800,69 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   <Button
                     variant="ghost"
                     size="icon"
-                    className={isMobile ? "h-9 w-9" : "h-7 w-7"}
+                    className={isMobile ? "h-11 w-11" : "h-7 w-7"}
                     onClick={toggleSidebar}
                   >
                     <PanelLeft className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                   </Button>
                 )}
                 {/* View mode toggle */}
-                <div className="flex items-center rounded-md border border-border p-0.5">
+                {isMobile ? (
                   <Button
-                    variant={viewMode === "editor" ? "secondary" : "ghost"}
+                    variant="ghost"
                     size="icon"
-                    className={isMobile ? "h-7 w-7" : "h-6 w-6"}
-                    onClick={() => setViewMode("editor")}
-                    title="Editor"
+                    className="h-11 w-11"
+                    onClick={() => {
+                      const modes: ViewMode[] = ["editor", "canvas", "visualization"];
+                      setViewMode(modes[(modes.indexOf(viewMode) + 1) % modes.length]);
+                    }}
+                    title={viewMode === "editor" ? "Editor" : viewMode === "canvas" ? "Canvas" : "Visualization"}
                   >
-                    <PenLine className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
+                    {viewMode === "editor" ? <PenLine className="h-5 w-5" /> : viewMode === "canvas" ? <LayoutGrid className="h-5 w-5" /> : <Network className="h-5 w-5" />}
                   </Button>
+                ) : (
+                  <div className="flex items-center rounded-md border border-border p-0.5">
+                    <Button
+                      variant={viewMode === "editor" ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setViewMode("editor")}
+                      title="Editor"
+                    >
+                      <PenLine className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant={viewMode === "canvas" ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setViewMode("canvas")}
+                      title="Canvas"
+                    >
+                      <LayoutGrid className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant={viewMode === "visualization" ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setViewMode("visualization")}
+                      title="Visualization"
+                    >
+                      <Network className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
+                {/* Import markdown — desktop only */}
+                {!isMobile && (
                   <Button
-                    variant={viewMode === "canvas" ? "secondary" : "ghost"}
+                    variant="ghost"
                     size="icon"
-                    className={isMobile ? "h-7 w-7" : "h-6 w-6"}
-                    onClick={() => setViewMode("canvas")}
-                    title="Canvas"
+                    className="h-7 w-7"
+                    onClick={handleImportMarkdown}
+                    title="Import .md file"
                   >
-                    <LayoutGrid className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
+                    <Upload className="h-3.5 w-3.5" />
                   </Button>
-                  <Button
-                    variant={viewMode === "visualization" ? "secondary" : "ghost"}
-                    size="icon"
-                    className={isMobile ? "h-7 w-7" : "h-6 w-6"}
-                    onClick={() => setViewMode("visualization")}
-                    title="Visualization"
-                  >
-                    <Network className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
-                  </Button>
-                </div>
-                {/* Import markdown */}
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className={isMobile ? "h-9 w-9" : "h-7 w-7"}
-                  onClick={handleImportMarkdown}
-                  title="Import .md file"
-                >
-                  <Upload className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
-                </Button>
+                )}
                 {!isMobile && (
                   <span className="ml-1 text-[10px] text-muted-foreground hidden sm:inline">
                     Cmd+K search · Cmd+Shift+/ shortcuts
@@ -856,7 +873,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className={isMobile ? "h-9 w-9" : "h-7 w-7"}
+                  className={isMobile ? "h-11 w-11" : "h-7 w-7"}
                   onClick={() => setShareOpen(true)}
                   title="Share"
                 >
@@ -867,7 +884,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn(isMobile ? "h-9 w-9" : "h-7 w-7", rightPanel === "ai" && "bg-accent")}
+                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "ai" && "bg-accent")}
                       onClick={() => togglePanel("ai")}
                       title="Claude AI"
                     >
@@ -876,7 +893,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn(isMobile ? "h-9 w-9" : "h-7 w-7", rightPanel === "versions" && "bg-accent")}
+                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "versions" && "bg-accent")}
                       onClick={() => togglePanel("versions")}
                       title="Version history"
                     >

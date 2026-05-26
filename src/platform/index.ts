@@ -35,8 +35,10 @@ export const isIOS = detectIOS();
 /** True when running on Android */
 export const isAndroid = detectAndroid();
 
-/** True when running on any mobile platform (iOS or Android) */
-export const isMobile = isIOS || isAndroid;
+/** True when running on any mobile platform (iOS or Android, with fallback for custom UAs) */
+export const isMobile = isIOS || isAndroid ||
+  (typeof window !== "undefined" && typeof navigator !== "undefined" &&
+    window.innerWidth <= 768 && navigator.maxTouchPoints > 0);
 
 /** True when running on macOS desktop */
 export const isMac = detectMac();
