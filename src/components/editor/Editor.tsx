@@ -133,11 +133,7 @@ marked.use({ renderer });
 // Initialize mermaid — render on demand, not on load
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
-interface EditorProps {
-  onVersionPanelToggle?: () => void;
-}
-
-export function Editor({ onVersionPanelToggle }: EditorProps = {}) {
+export function Editor() {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
@@ -673,7 +669,6 @@ export function Editor({ onVersionPanelToggle }: EditorProps = {}) {
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
-        onHistoryOpen={onVersionPanelToggle}
         voiceActive={voiceOpen}
         voiceSupported={voiceSupported}
         onVoiceToggle={() => setVoiceOpen((v) => !v)}

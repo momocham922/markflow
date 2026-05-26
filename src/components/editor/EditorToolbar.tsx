@@ -22,7 +22,6 @@ import {
   Image,
   Pencil,
   Check,
-  History,
   Network,
   Mic,
   MicOff,
@@ -41,7 +40,6 @@ interface EditorToolbarProps {
   previewMode: PreviewMode;
   onPreviewModeChange: (mode: PreviewMode) => void;
   collabSlot?: ReactNode;
-  onHistoryOpen?: () => void;
   voiceActive?: boolean;
   voiceSupported?: boolean;
   onVoiceToggle?: () => void;
@@ -51,7 +49,6 @@ export function EditorToolbar({
   previewMode,
   onPreviewModeChange,
   collabSlot,
-  onHistoryOpen,
   voiceActive = false,
   voiceSupported = false,
   onVoiceToggle,
@@ -201,9 +198,6 @@ export function EditorToolbar({
                 {voiceActive ? <MicOff className="h-4.5 w-4.5" /> : <Mic className="h-4.5 w-4.5" />}
               </Button>
             )}
-            <Button variant="ghost" size="icon" className="h-9 w-9" onClick={onHistoryOpen} title="Version History">
-              <History className="h-4.5 w-4.5" />
-            </Button>
             <Button variant="ghost" size="icon" className="h-9 w-9" onClick={() => setThemeOpen(true)} title="Theme">
               <Paintbrush className="h-4.5 w-4.5" />
             </Button>
@@ -425,18 +419,6 @@ export function EditorToolbar({
             {voiceActive ? "Stop" : "Voice"}
           </Button>
         )}
-
-        {/* History */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 gap-1 px-2 text-[11px] text-muted-foreground"
-          onClick={onHistoryOpen}
-          title="Version History"
-        >
-          <History className="h-3.5 w-3.5" />
-          History
-        </Button>
 
         {/* Theme customizer */}
         <Button

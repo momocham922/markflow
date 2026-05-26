@@ -910,7 +910,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     </div>
                   </div>
                 ) : viewMode === "editor" ? (
-                  <Editor onVersionPanelToggle={() => togglePanel("versions")} />
+                  <Editor />
                 ) : viewMode === "visualization" ? (
                   <Suspense
                     fallback={
