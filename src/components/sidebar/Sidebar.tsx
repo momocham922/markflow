@@ -665,14 +665,14 @@ export function Sidebar() {
             }}
           >
             {isExpanded ? (
-              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronDown className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             ) : (
-              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronRight className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             )}
             {isExpanded ? (
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <FolderOpen className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             ) : (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <Folder className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             )}
             {renamingFolderPath === node.path ? (
               <input
@@ -804,7 +804,7 @@ export function Sidebar() {
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
           )}
         >
-          <FileText className="h-3.5 w-3.5 shrink-0" />
+          <FileText className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
           {renamingDocId === td.id ? (
             <input
               autoFocus
@@ -870,14 +870,14 @@ export function Sidebar() {
             onClick={toggleExpand}
           >
             {isExpanded ? (
-              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronDown className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             ) : (
-              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronRight className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             )}
             {isExpanded ? (
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <FolderOpen className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             ) : (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <Folder className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             )}
             <span className="flex-1 truncate">{node.name}</span>
             <div className="flex gap-0.5 opacity-0 group-hover:opacity-100">
@@ -1111,8 +1111,8 @@ export function Sidebar() {
                   className={cn("flex flex-1 items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-1" : "py-1.5")}
                   onClick={() => setMyDocsExpanded((v) => !v)}
                 >
-                  {myDocsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                  <Lock className="h-3 w-3" />
+                  {myDocsExpanded ? <ChevronDown className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} /> : <ChevronRight className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />}
+                  <Lock className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                   <span className="font-medium">My Documents</span>
                   <span className="ml-auto text-[10px]">{personalDocs.length}</span>
                 </button>
@@ -1152,8 +1152,8 @@ export function Sidebar() {
                     className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-1" : "py-1.5")}
                     onClick={() => setTeamsExpanded((v) => !v)}
                   >
-                    {teamsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                    <Users className="h-3 w-3" />
+                    {teamsExpanded ? <ChevronDown className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} /> : <ChevronRight className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />}
+                    <Users className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     <span className="font-medium">Teams</span>
                     <span className="ml-auto text-[10px]">{teams.length}</span>
                   </button>
@@ -1203,18 +1203,18 @@ export function Sidebar() {
                                   return next;
                                 })}
                               >
-                                {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-                                <Users className="h-3 w-3 shrink-0" />
+                                {isExpanded ? <ChevronDown className={cn("shrink-0", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} /> : <ChevronRight className={cn("shrink-0", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />}
+                                <Users className={cn("shrink-0", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
                                 <span className="flex-1 truncate">{team.name || "(no name)"}</span>
                                 <span className="text-[10px] text-muted-foreground">{allTeamDocs.length}</span>
                               </button>
                               <div className="flex gap-0.5 pr-1">
                                 <Plus
-                                  className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                                  className={cn("text-muted-foreground hover:text-foreground shrink-0 cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3 w-3")}
                                   onClick={() => handleCreateTeamDoc(team)}
                                 />
                                 <FolderPlus
-                                  className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                                  className={cn("text-muted-foreground hover:text-foreground shrink-0 cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3 w-3")}
                                   onClick={() => { setCreatingTeamFolderIn({ teamId: team.id, parent: "/" }); setNewTeamFolderName(""); setExpandedTeams((prev) => new Set([...prev, team.id])); }}
                                 />
                               </div>
@@ -1247,11 +1247,11 @@ export function Sidebar() {
                     onClick={() => setSharedExpanded((v) => !v)}
                   >
                     {sharedExpanded ? (
-                      <ChevronDown className="h-3 w-3" />
+                      <ChevronDown className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     ) : (
-                      <ChevronRight className="h-3 w-3" />
+                      <ChevronRight className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     )}
-                    <Share2 className="h-3 w-3" />
+                    <Share2 className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     <span className="font-medium">Shared with me</span>
                     <span className="ml-auto text-[10px]">{sharedDocs.length}</span>
                   </button>
@@ -1274,7 +1274,7 @@ export function Sidebar() {
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
                           )}
                         >
-                          <FileText className="h-3.5 w-3.5 shrink-0" />
+                          <FileText className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
                           <span className="flex-1 truncate">{sd.title}</span>
                           <span className="text-[9px] text-muted-foreground capitalize shrink-0">
                             {sd.role}

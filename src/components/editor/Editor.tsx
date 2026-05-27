@@ -807,7 +807,7 @@ export function Editor() {
         {previewMode !== "edit" && previewMode !== "mindmap" && (
           <div
             ref={previewScrollRef}
-            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"} ${isIOS ? "overflow-x-hidden" : ""}`}
+            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"} ${isMobile ? "overflow-x-hidden" : ""}`}
           >
             {previewThemeCss && <style>{previewThemeCss}</style>}
             {themeSettings.customPreviewCss && (
@@ -815,7 +815,7 @@ export function Editor() {
             )}
             <div
               ref={previewRef}
-              className={`prose max-w-none ${isIOS ? "ios-preview" : "px-12 py-8"}`}
+              className={`prose max-w-none ${isMobile ? "mobile-preview" : "px-12 py-8"}`}
               dangerouslySetInnerHTML={{ __html: previewHtml }}
               onClick={(e) => {
                 const target = (e.target as HTMLElement).closest(".wikilink");
@@ -828,7 +828,7 @@ export function Editor() {
             />
             {/* Backlinks */}
             {backlinks.length > 0 && (
-              <div className={isIOS ? "px-4 pb-4" : "px-12 pb-8"}>
+              <div className={isMobile ? "px-4 pb-4" : "px-12 pb-8"}>
                 <div className="border-t border-border pt-4 mt-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wider mb-2">
                     Backlinks ({backlinks.length})
