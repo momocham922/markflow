@@ -556,12 +556,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   teamId: entry.teamId,
                   titlePinned: true,
                   ownerName: fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
-                  folder: fullDoc.folder ?? localTeamDoc?.folder ?? "/",
                 };
-                // Only update title if cloud is newer
+                // Only update title/folder if cloud is newer (preserves local folder moves)
                 if (cloudTeamUpdatedAt > localTeamUpdatedAt) {
                   updates.title = fullDoc.title;
                   updates.updatedAt = cloudTeamUpdatedAt;
+                  updates.folder = fullDoc.folder ?? localTeamDoc?.folder ?? "/";
                 }
                 // Never overwrite content for collab-active docs.
                 // For inactive docs, only update if cloud is genuinely newer.

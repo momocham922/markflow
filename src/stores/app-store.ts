@@ -67,6 +67,7 @@ interface AppState {
   folders: string[];
   createFolder: (path: string) => void;
   deleteFolder: (path: string) => void;
+  renameFolder: (oldPath: string, newPath: string) => void;
   moveDocument: (docId: string, folder: string) => void;
 
   // Version restore (VersionPanel → Editor bridge for collab docs)
@@ -426,6 +427,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       const folders = s.folders.filter(
         (f) => f !== path && !f.startsWith(path + "/"),
       );
+      const toSave = folders.filter((f) => f !== "/");
+      db.setSetting("folders", JSON.stringify(toSave)).catch(console.error);
+      syncSettingToCloud({ folders: toSave });
+      return { folders };
+    });
+  },
+
+  renameFolder: (oldPath, newPath) => {
+    const { updateDocument } = get();
+    const state = get();
+    for (const doc of state.documents) {
+      if (doc.folder === oldPath) {
+        updateDocument(doc.id, { folder: newPath, updatedAt: Date.now() });
+      } else if (doc.folder.startsWith(oldPath + "/")) {
+        updateDocument(doc.id, { folder: newPath + doc.folder.slice(oldPath.length), updatedAt: Date.now() });
+      }
+    }
+    set((s) => {
+      const folders = s.folders.map((f) => {
+        if (f === oldPath) return newPath;
+        if (f.startsWith(oldPath + "/")) return newPath + f.slice(oldPath.length);
+        return f;
+      });
       const toSave = folders.filter((f) => f !== "/");
       db.setSetting("folders", JSON.stringify(toSave)).catch(console.error);
       syncSettingToCloud({ folders: toSave });

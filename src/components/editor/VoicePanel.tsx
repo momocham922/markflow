@@ -47,6 +47,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   } = useVoiceInput({
     language: "ja-JP",
     onError: (msg) => setVoiceError(msg),
+    onMaxDuration: () => setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
 
   // Keep refs in sync

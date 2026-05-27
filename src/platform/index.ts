@@ -38,7 +38,8 @@ export const isAndroid = detectAndroid();
 /** True when running on any mobile platform (iOS or Android, with fallback for custom UAs) */
 export const isMobile = isIOS || isAndroid ||
   (typeof window !== "undefined" && typeof navigator !== "undefined" &&
-    window.innerWidth <= 768 && navigator.maxTouchPoints > 0);
+    window.innerWidth <= 1024 && navigator.maxTouchPoints > 0) ||
+  (typeof navigator !== "undefined" && /Mobile|wv|WebView/i.test(navigator.userAgent));
 
 /** True when running on macOS desktop */
 export const isMac = detectMac();

@@ -16,6 +16,7 @@ import {
   Lock,
   PenLine,
   Network,
+  Pencil,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
@@ -95,6 +96,7 @@ export function Sidebar() {
     folders,
     createFolder,
     deleteFolder,
+    renameFolder,
     moveDocument,
   } = useAppStore();
 
@@ -104,7 +106,7 @@ export function Sidebar() {
   const [creatingFolderIn, setCreatingFolderIn] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
-  const dragRef = useRef<{ docId: string; teamId?: string; startX: number; startY: number; active: boolean } | null>(null);
+  const dragRef = useRef<{ docId?: string; folderPath?: string; teamId?: string; startX: number; startY: number; active: boolean } | null>(null);
   const dragHappenedRef = useRef(false);
   const [dragIndicator, setDragIndicator] = useState<{ docId: string; x: number; y: number } | null>(null);
   const moveDocRef = useRef(moveDocument);
@@ -114,6 +116,8 @@ export function Sidebar() {
   const crossMoveToTeamRef = useRef<(docId: string, teamId: string, folder: string) => void>(() => {});
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
   const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
+  const [renamingFolderPath, setRenamingFolderPath] = useState<string | null>(null);
+  const [renameFolderValue, setRenameFolderValue] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const ime = useIMEGuard();
 
@@ -486,6 +490,20 @@ export function Sidebar() {
     setRenamingDocId(null);
   };
 
+  const commitFolderRename = (oldPath: string) => {
+    const newName = renameFolderValue.trim();
+    if (!newName || /[/\\]/.test(newName)) {
+      setRenamingFolderPath(null);
+      return;
+    }
+    const parent = oldPath.substring(0, oldPath.lastIndexOf("/")) || "";
+    const newPath = parent ? `${parent}/${newName}` : `/${newName}`;
+    if (newPath !== oldPath) {
+      renameFolder(oldPath, newPath);
+    }
+    setRenamingFolderPath(null);
+  };
+
   const isDark = typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 
   // ── Context menu open helper ────────────────────────────────
@@ -509,7 +527,7 @@ export function Sidebar() {
       onPointerDown={(e) => {
         e.stopPropagation();
       }}
-      style={{ background: "none", border: "none", padding: "0 2px", margin: 0, cursor: "pointer", flexShrink: 0, fontSize: 14, lineHeight: 1, color: "var(--muted-foreground, #888)" }}
+      style={{ background: "none", border: "none", padding: isMobile ? "4px 8px" : "0 2px", margin: 0, cursor: "pointer", flexShrink: 0, fontSize: isMobile ? 18 : 14, lineHeight: 1, color: "var(--muted-foreground, #888)", minWidth: isMobile ? 32 : undefined, minHeight: isMobile ? 32 : undefined, display: "flex", alignItems: "center", justifyContent: "center" }}
     >
       ⋮
     </button>
@@ -537,13 +555,14 @@ export function Sidebar() {
         setRenameValue(doc.title);
       }}
       className={cn(
-        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
+        "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
+        isMobile ? "py-2.5" : "py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
       )}
     >
-      {doc.docType === "mindmap" ? <Network className="h-3.5 w-3.5 shrink-0" /> : <FileText className="h-3.5 w-3.5 shrink-0" />}
+      {doc.docType === "mindmap" ? <Network className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"} /> : <FileText className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"} />}
       {renamingDocId === doc.id ? (
         <input
           autoFocus
@@ -628,10 +647,21 @@ export function Sidebar() {
             data-folder-path={node.path}
             className={cn(
               "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile && "py-2",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
-            onClick={() => toggleFolder(node.path)}
+            onClick={() => { if (renamingFolderPath !== node.path) toggleFolder(node.path); }}
+            onPointerDown={(e) => {
+              if (e.button === 0 && !isIOS && renamingFolderPath !== node.path) {
+                dragRef.current = { folderPath: node.path, startX: e.clientX, startY: e.clientY, active: false };
+              }
+            }}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              setRenamingFolderPath(node.path);
+              setRenameFolderValue(node.name);
+            }}
           >
             {isExpanded ? (
               <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -643,8 +673,30 @@ export function Sidebar() {
             ) : (
               <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             )}
-            <span className="flex-1 truncate">{node.name}</span>
+            {renamingFolderPath === node.path ? (
+              <input
+                autoFocus
+                className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs"
+                value={renameFolderValue}
+                onChange={(e) => setRenameFolderValue(e.target.value)}
+                onCompositionStart={ime.onCompositionStart}
+                onCompositionEnd={ime.onCompositionEnd}
+                onBlur={() => commitFolderRename(node.path)}
+                onKeyDown={(e) => {
+                  if (ime.isComposing()) return;
+                  if (e.key === "Enter") commitFolderRename(node.path);
+                  if (e.key === "Escape") setRenamingFolderPath(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span className="flex-1 truncate">{node.name}</span>
+            )}
             <div className="flex gap-0.5 opacity-0 group-hover:opacity-100">
+              <Pencil
+                className="h-3 w-3 text-muted-foreground hover:text-foreground"
+                onClick={(e) => { e.stopPropagation(); setRenamingFolderPath(node.path); setRenameFolderValue(node.name); }}
+              />
               <Plus
                 className="h-3 w-3 text-muted-foreground hover:text-foreground"
                 onClick={(e) => { e.stopPropagation(); handleNew(node.path); }}
@@ -698,7 +750,7 @@ export function Sidebar() {
             {node.children.map((child) => renderFolder(child, isRoot ? depth : depth + 1))}
             <div data-folder-path={node.path}>
               {node.docs.map((doc) => (
-                <div key={doc.id} style={{ paddingLeft: `${(isRoot ? depth : depth + 1) * 12}px` }}>
+                <div key={doc.id} style={{ paddingLeft: `${(isRoot ? depth : depth + 1) * 12 + 16}px` }}>
                   {renderDoc(doc)}
                 </div>
               ))}
@@ -722,7 +774,7 @@ export function Sidebar() {
     const title = localDoc?.title || td.title;
     const isOwnDoc = localDoc?.ownerId === user?.uid;
     return (
-      <div key={td.id} style={{ paddingLeft: `${depth * 12}px` }}>
+      <div key={td.id} style={{ paddingLeft: `${depth * 12 + 16}px` }}>
         <div
           role="button"
           tabIndex={0}
@@ -744,7 +796,8 @@ export function Sidebar() {
             setRenameValue(title);
           }}
           className={cn(
-            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
+            "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
+            isMobile ? "py-2.5" : "py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -808,7 +861,8 @@ export function Sidebar() {
             data-folder-path={node.path}
             data-team-id={team.id}
             className={cn(
-              "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              "group flex items-center gap-1 rounded-md px-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile ? "py-2" : "py-1",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -902,13 +956,14 @@ export function Sidebar() {
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
       if (!dragRef.current) return;
-      const { startX, startY, docId } = dragRef.current;
+      const { startX, startY } = dragRef.current;
       const dist = Math.sqrt((e.clientX - startX) ** 2 + (e.clientY - startY) ** 2);
       if (!dragRef.current.active && dist > 5) {
         dragRef.current.active = true;
       }
       if (dragRef.current.active) {
-        setDragIndicator({ docId, x: e.clientX, y: e.clientY });
+        const label = dragRef.current.docId || dragRef.current.folderPath?.split("/").pop() || "";
+        setDragIndicator({ docId: label, x: e.clientX, y: e.clientY });
         const el = document.elementFromPoint(e.clientX, e.clientY);
         const folderEl = (el as HTMLElement)?.closest?.("[data-folder-path]") as HTMLElement | null;
         const fp = folderEl?.dataset.folderPath || null;
@@ -932,20 +987,28 @@ export function Sidebar() {
         const folderEl = (el as HTMLElement)?.closest?.("[data-folder-path]") as HTMLElement | null;
         const targetFolder = folderEl?.dataset.folderPath;
         const targetTeamId = folderEl?.dataset.teamId;
-        if (targetFolder) {
+
+        if (dragRef.current.folderPath && targetFolder) {
+          // Folder → Folder: move folder into target
+          const srcPath = dragRef.current.folderPath;
+          if (srcPath !== targetFolder && !targetFolder.startsWith(srcPath + "/")) {
+            const folderName = srcPath.split("/").pop() || "";
+            const newPath = targetFolder === "/" ? `/${folderName}` : `${targetFolder}/${folderName}`;
+            if (newPath !== srcPath) {
+              const { renameFolder: rf } = useAppStore.getState();
+              rf(srcPath, newPath);
+            }
+          }
+        } else if (dragRef.current.docId && targetFolder) {
           const srcTeamId = dragRef.current.teamId;
           const docId = dragRef.current.docId;
           if (srcTeamId && targetTeamId) {
-            // Team → Team (same or different): move within team folders
             moveTeamDocFnRef.current(docId, targetFolder);
           } else if (!srcTeamId && !targetTeamId) {
-            // Personal → Personal: move within personal folders
             moveDocRef.current(docId, targetFolder);
           } else if (srcTeamId && !targetTeamId) {
-            // Team → Personal: copy document to my documents
             crossCopyRef.current(docId, targetFolder);
           } else if (!srcTeamId && targetTeamId) {
-            // Personal → Team: move document into team
             crossMoveToTeamRef.current(docId, targetTeamId, targetFolder);
           }
         }
@@ -985,8 +1048,8 @@ export function Sidebar() {
 
       {/* Search */}
       <div className="px-3 pb-2">
-        <div className="flex items-center gap-2 rounded-md bg-sidebar-accent px-2 py-1.5">
-          <Search className="h-3.5 w-3.5 text-muted-foreground" />
+        <div className={cn("flex items-center gap-2 rounded-md bg-sidebar-accent px-2", isMobile ? "py-2.5" : "py-1.5")}>
+          <Search className={isMobile ? "h-4.5 w-4.5 text-muted-foreground" : "h-3.5 w-3.5 text-muted-foreground"} />
           <input
             type="text"
             placeholder="Search title & content..."
@@ -1044,7 +1107,7 @@ export function Sidebar() {
             <div className="px-1 pb-0">
               <div className="flex items-center justify-between">
                 <button
-                  className="flex flex-1 items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  className={cn("flex flex-1 items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2.5" : "py-1.5")}
                   onClick={() => setMyDocsExpanded((v) => !v)}
                 >
                   {myDocsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -1083,7 +1146,7 @@ export function Sidebar() {
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
                   <button
-                    className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2.5" : "py-1.5")}
                     onClick={() => setTeamsExpanded((v) => !v)}
                   >
                     {teamsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -1129,7 +1192,7 @@ export function Sidebar() {
                           <div key={team.id}>
                             <div className="flex items-center">
                               <button
-                                className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                                className={cn("flex flex-1 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors", isMobile ? "py-2.5" : "py-1.5")}
                                 onClick={() => setExpandedTeams((prev) => {
                                   const next = new Set(prev);
                                   if (next.has(team.id)) next.delete(team.id);
@@ -1177,7 +1240,7 @@ export function Sidebar() {
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
                   <button
-                    className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2.5" : "py-1.5")}
                     onClick={() => setSharedExpanded((v) => !v)}
                   >
                     {sharedExpanded ? (
@@ -1201,7 +1264,8 @@ export function Sidebar() {
                           key={sd.id}
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
-                            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                            "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors",
+                            isMobile ? "py-2.5" : "py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -1376,7 +1440,7 @@ export function Sidebar() {
             fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif",
           }}
         >
-          {documents.find((d) => d.id === dragIndicator.docId)?.title || ""}
+          {documents.find((d) => d.id === dragIndicator.docId)?.title || dragIndicator.docId}
         </div>,
         document.body,
       )}

@@ -624,14 +624,8 @@ export function Editor() {
         if (isCollabReady) {
           collabReplaceContent(newContent);
         }
-      } else {
-        // Fallback: append if old content not found (e.g., user edited it)
-        const newContent = current.trimEnd() + newMarkdown;
-        updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
-        if (isCollabReady) {
-          collabReplaceContent(newContent);
-        }
       }
+      // If old content not found (user edited it), skip — don't append to avoid duplication
     },
     [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
   );

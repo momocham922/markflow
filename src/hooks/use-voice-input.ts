@@ -3,6 +3,7 @@ import { useAuthStore } from "@/stores/auth-store";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 8000; // 8 second chunks: fewer boundaries = better accuracy
+const MAX_DURATION_SECONDS = 60 * 60; // 60 minutes hard limit
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -11,6 +12,7 @@ export interface UseVoiceInputOptions {
   language?: string;
   onTranscript?: (text: string) => void;
   onError?: (error: string) => void;
+  onMaxDuration?: () => void;
 }
 
 export interface UseVoiceInputReturn {
@@ -41,6 +43,7 @@ export function useVoiceInput({
   language = "ja-JP",
   onTranscript,
   onError,
+  onMaxDuration,
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [interimText, setInterimText] = useState("");
@@ -55,9 +58,11 @@ export function useVoiceInput({
   const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
+  const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transcriptRef = useRef("");
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
+  const onMaxDurationRef = useRef(onMaxDuration);
 
   useEffect(() => {
     onTranscriptRef.current = onTranscript;
@@ -65,6 +70,9 @@ export function useVoiceInput({
   useEffect(() => {
     onErrorRef.current = onError;
   }, [onError]);
+  useEffect(() => {
+    onMaxDurationRef.current = onMaxDuration;
+  }, [onMaxDuration]);
 
   const sendChunk = useCallback(
     async (
@@ -178,8 +186,10 @@ export function useVoiceInput({
     streamRef.current = null;
     if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
     if (durationIntervalRef.current) clearInterval(durationIntervalRef.current);
+    if (maxDurationTimerRef.current) clearTimeout(maxDurationTimerRef.current);
     chunkIntervalRef.current = null;
     durationIntervalRef.current = null;
+    maxDurationTimerRef.current = null;
     setIsRecording(false);
     setInterimText("");
   }, []);
@@ -306,6 +316,12 @@ export function useVoiceInput({
         setDuration((d) => d + 1);
       }, 1000);
 
+      // Auto-stop after MAX_DURATION_SECONDS
+      maxDurationTimerRef.current = setTimeout(() => {
+        stopRecording();
+        onMaxDurationRef.current?.();
+      }, MAX_DURATION_SECONDS * 1000);
+
       setIsRecording(true);
       transcriptRef.current = "";
       setFullTranscript("");
@@ -345,6 +361,8 @@ export function useVoiceInput({
       if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
       if (durationIntervalRef.current)
         clearInterval(durationIntervalRef.current);
+      if (maxDurationTimerRef.current)
+        clearTimeout(maxDurationTimerRef.current);
     };
   }, []);
 
