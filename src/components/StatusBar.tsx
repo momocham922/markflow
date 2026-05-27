@@ -13,8 +13,8 @@ export function StatusBar() {
   if (isMobile) {
     return (
       <div
-        className="flex items-center justify-between border-t border-border bg-background pt-1 px-3 text-[9px] text-muted-foreground shrink-0 safe-bottom"
-        style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.75rem)" }}
+        className="flex items-center justify-between border-t border-border bg-background pt-1 px-5 text-[9px] text-muted-foreground shrink-0 safe-bottom"
+        style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 1.75rem)" }}
       >
         <span className="flex items-center gap-1">
           <span
