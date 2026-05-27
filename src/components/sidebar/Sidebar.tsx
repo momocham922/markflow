@@ -555,13 +555,14 @@ export function Sidebar() {
         setRenameValue(doc.title);
       }}
       className={cn(
-        "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "py-1" : "py-1.5",
+        "group flex w-full items-center gap-1 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
+        isMobile ? "py-0.5" : "py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
       )}
     >
+      <span className={cn("shrink-0", isMobile ? "w-3.5" : "w-3")} />
       {doc.docType === "mindmap" ? <Network className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"} /> : <FileText className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"} />}
       {renamingDocId === doc.id ? (
         <input
@@ -797,13 +798,14 @@ export function Sidebar() {
             setRenameValue(title);
           }}
           className={cn(
-            "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "py-1" : "py-1.5",
+            "group flex w-full items-center gap-1 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
+            isMobile ? "py-0.5" : "py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
           )}
         >
+          <span className={cn("shrink-0", isMobile ? "w-3.5" : "w-3")} />
           <FileText className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
           {renamingDocId === td.id ? (
             <input
@@ -1267,13 +1269,14 @@ export function Sidebar() {
                           key={sd.id}
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
-                            "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors",
-                            isMobile ? "py-1" : "py-1.5",
+                            "group flex w-full items-center gap-1 rounded-md px-2 text-left text-xs transition-colors",
+                            isMobile ? "py-0.5" : "py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
                           )}
                         >
+                          <span className={cn("shrink-0", isMobile ? "w-3.5" : "w-3")} />
                           <FileText className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
                           <span className="flex-1 truncate">{sd.title}</span>
                           <span className="text-[9px] text-muted-foreground capitalize shrink-0">

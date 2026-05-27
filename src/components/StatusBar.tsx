@@ -2,7 +2,8 @@ import { Moon, Sun, FlaskConical } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { isMobile, isTauri } from "@/platform";
+import { isIOS, isMobile, isTauri } from "@/platform";
+import { cn } from "@/lib/utils";
 import * as db from "@/services/database";
 
 export function StatusBar() {
@@ -13,8 +14,10 @@ export function StatusBar() {
   if (isMobile) {
     return (
       <div
-        className="flex items-center justify-between border-t border-border bg-background pt-1 px-5 text-[9px] text-muted-foreground shrink-0 safe-bottom"
-        style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 1.75rem)" }}
+        className={cn(
+          "flex items-center justify-between border-t border-border bg-background pt-2 text-[10px] text-muted-foreground shrink-0",
+          isIOS ? "pb-7 px-6" : "pb-2 px-4",
+        )}
       >
         <span className="flex items-center gap-1">
           <span
@@ -25,10 +28,10 @@ export function StatusBar() {
           {!user ? "Local" : syncing ? "Sync..." : isOnline ? "Online" : "Offline"}
         </span>
         <button
-          className="h-8 w-8 flex items-center justify-center text-muted-foreground"
+          className="flex items-center justify-center text-muted-foreground"
           onClick={toggleTheme}
         >
-          {theme === "light" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+          {theme === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
         </button>
       </div>
     );

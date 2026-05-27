@@ -787,18 +787,19 @@ export function Editor() {
             <MindMapView
               content={activeDoc.content || ""}
               title={activeDoc.title}
-              onNodeClick={(lineNumber) => {
-                setPreviewMode("edit");
-                requestAnimationFrame(() => {
-                  const view = viewRef.current;
-                  if (!view) return;
-                  const lineNum = Math.min(lineNumber + 1, view.state.doc.lines);
-                  const line = view.state.doc.line(lineNum);
-                  view.dispatch({
-                    effects: EditorView.scrollIntoView(line.from, { y: "start" }),
-                  });
-                  view.focus();
-                });
+              onNodeClick={({ text }) => {
+                setPreviewMode("preview");
+                setTimeout(() => {
+                  const container = previewScrollRef.current;
+                  if (!container) return;
+                  const headings = container.querySelectorAll("h1, h2, h3, h4, h5, h6");
+                  for (const heading of headings) {
+                    if (heading.textContent?.trim() === text) {
+                      heading.scrollIntoView({ behavior: "smooth", block: "start" });
+                      return;
+                    }
+                  }
+                }, 150);
               }}
             />
           </div>

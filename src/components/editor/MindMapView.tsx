@@ -168,7 +168,7 @@ function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { 
 interface MindMapViewProps {
   content: string;
   title: string;
-  onNodeClick?: (lineNumber: number) => void;
+  onNodeClick?: (info: { lineNumber: number; text: string }) => void;
 }
 
 export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
@@ -203,8 +203,8 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
         nodesConnectable={false}
         elementsSelectable={!!onNodeClick}
         onNodeClick={onNodeClick ? (_event, node) => {
-          const lineNum = (node.data as unknown as MindMapNodeData).lineNumber;
-          if (lineNum != null) onNodeClick(lineNum);
+          const data = node.data as unknown as MindMapNodeData;
+          if (data.lineNumber != null) onNodeClick({ lineNumber: data.lineNumber, text: data.label });
         } : undefined}
         panOnDrag
         zoomOnScroll
