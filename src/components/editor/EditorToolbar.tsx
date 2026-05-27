@@ -19,6 +19,7 @@ import {
   ListOrdered,
   Quote,
   Link,
+  Link2,
   Image,
   Pencil,
   Check,
@@ -43,6 +44,8 @@ interface EditorToolbarProps {
   voiceActive?: boolean;
   voiceSupported?: boolean;
   onVoiceToggle?: () => void;
+  scrollSyncEnabled?: boolean;
+  onScrollSyncToggle?: () => void;
 }
 
 export function EditorToolbar({
@@ -52,6 +55,8 @@ export function EditorToolbar({
   voiceActive = false,
   voiceSupported = false,
   onVoiceToggle,
+  scrollSyncEnabled = false,
+  onScrollSyncToggle,
 }: EditorToolbarProps) {
   const [themeOpen, setThemeOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
@@ -473,6 +478,17 @@ export function EditorToolbar({
             <Network className="h-3.5 w-3.5" />
           </Button>
         </div>
+        {previewMode === "split" && !isMobile && (
+          <Button
+            variant={scrollSyncEnabled ? "secondary" : "ghost"}
+            size="icon"
+            className="h-6 w-6"
+            onClick={onScrollSyncToggle}
+            title={scrollSyncEnabled ? "Disable scroll sync" : "Enable scroll sync"}
+          >
+            <Link2 className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
 
       <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />

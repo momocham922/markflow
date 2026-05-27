@@ -105,6 +105,7 @@ export interface MindMapNodeData {
   level: number;
   themeId?: MindMapThemeId;
   editing?: boolean;
+  lineNumber?: number;
 }
 
 export const levelSizes = [

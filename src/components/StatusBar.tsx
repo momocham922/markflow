@@ -13,8 +13,8 @@ export function StatusBar() {
   if (isMobile) {
     return (
       <div
-        className="flex items-center justify-between border-t border-border bg-background pt-1 px-5 text-[9px] text-muted-foreground shrink-0 safe-bottom"
-        style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 1.75rem)" }}
+        className="flex items-center justify-between border-t border-border bg-background pt-1 px-3 text-[9px] text-muted-foreground shrink-0 safe-bottom"
+        style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.75rem)" }}
       >
         <span className="flex items-center gap-1">
           <span
@@ -25,10 +25,10 @@ export function StatusBar() {
           {!user ? "Local" : syncing ? "Sync..." : isOnline ? "Online" : "Offline"}
         </span>
         <button
-          className="h-11 w-11 flex items-center justify-center text-muted-foreground"
+          className="h-8 w-8 flex items-center justify-center text-muted-foreground"
           onClick={toggleTheme}
         >
-          {theme === "light" ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}
+          {theme === "light" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
         </button>
       </div>
     );

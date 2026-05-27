@@ -762,7 +762,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               <div
                 className="fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background overflow-hidden"
                 style={{
-                  width: 280,
+                  width: "min(320px, 85vw)",
                   transform: `translateX(${sidebarTranslateX}px)`,
                   transition: swiping ? "none" : "transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
                   willChange: "transform",
@@ -873,8 +873,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className={isMobile ? "h-11 w-11" : "h-7 w-7"}
+                  className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", "disabled:opacity-40 disabled:pointer-events-none")}
                   onClick={() => setShareOpen(true)}
+                  disabled={!activeDocId}
                   title="Share"
                 >
                   <Share2 className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
@@ -884,8 +885,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "ai" && "bg-accent")}
+                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "ai" && "bg-accent", "disabled:opacity-40 disabled:pointer-events-none")}
                       onClick={() => togglePanel("ai")}
+                      disabled={!activeDocId}
                       title="Claude AI"
                     >
                       <Bot className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
@@ -893,8 +895,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "versions" && "bg-accent")}
+                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "versions" && "bg-accent", "disabled:opacity-40 disabled:pointer-events-none")}
                       onClick={() => togglePanel("versions")}
+                      disabled={!activeDocId}
                       title="Version history"
                     >
                       <History className={isMobile ? "h-5 w-5" : "h-4 w-4"} />

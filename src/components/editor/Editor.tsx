@@ -138,6 +138,7 @@ export function Editor() {
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [previewMode, setPreviewMode] = useState<PreviewMode>(isMobile ? "edit" : "split");
+  const [scrollSyncEnabled, setScrollSyncEnabled] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
@@ -339,6 +340,7 @@ export function Editor() {
 
   // Render mermaid diagrams after preview HTML updates or theme change
   const previewRef = useRef<HTMLDivElement>(null);
+  const previewScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = previewRef.current;
     if (!container) return;
@@ -527,6 +529,53 @@ export function Editor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Scroll sync between editor and preview in split mode
+  useEffect(() => {
+    if (!scrollSyncEnabled || previewMode !== "split" || isMobile) return;
+    const editorScrollDOM = viewRef.current?.scrollDOM;
+    const previewDOM = previewScrollRef.current;
+    if (!editorScrollDOM || !previewDOM) return;
+
+    let syncSource: "editor" | "preview" | null = null;
+    let rafId: number | null = null;
+
+    const getScrollPercent = (el: HTMLElement) => {
+      const max = el.scrollHeight - el.clientHeight;
+      return max > 0 ? el.scrollTop / max : 0;
+    };
+    const setScrollPercent = (el: HTMLElement, pct: number) => {
+      const max = el.scrollHeight - el.clientHeight;
+      el.scrollTop = max * pct;
+    };
+
+    const onEditorScroll = () => {
+      if (syncSource === "preview") return;
+      syncSource = "editor";
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        setScrollPercent(previewDOM, getScrollPercent(editorScrollDOM));
+        syncSource = null;
+      });
+    };
+    const onPreviewScroll = () => {
+      if (syncSource === "editor") return;
+      syncSource = "preview";
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        setScrollPercent(editorScrollDOM, getScrollPercent(previewDOM));
+        syncSource = null;
+      });
+    };
+
+    editorScrollDOM.addEventListener("scroll", onEditorScroll, { passive: true });
+    previewDOM.addEventListener("scroll", onPreviewScroll, { passive: true });
+    return () => {
+      editorScrollDOM.removeEventListener("scroll", onEditorScroll);
+      previewDOM.removeEventListener("scroll", onPreviewScroll);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [scrollSyncEnabled, previewMode, activeDocId]);
+
   // Handle Tauri native file drag-and-drop for images
   // WKWebView cannot receive browser-native drop events from Finder,
   // so we must use Tauri's event API with dragDropEnabled: true.
@@ -666,6 +715,8 @@ export function Editor() {
         voiceActive={voiceOpen}
         voiceSupported={voiceSupported}
         onVoiceToggle={() => setVoiceOpen((v) => !v)}
+        scrollSyncEnabled={scrollSyncEnabled}
+        onScrollSyncToggle={() => setScrollSyncEnabled((v) => !v)}
         collabSlot={
           (collabConnected || collabExtension) ? (
             <div className="flex items-center gap-1.5 shrink-0 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5">
@@ -733,12 +784,29 @@ export function Editor() {
         {/* Mind map view */}
         {previewMode === "mindmap" && (
           <div className="flex-1">
-            <MindMapView content={activeDoc.content || ""} title={activeDoc.title} />
+            <MindMapView
+              content={activeDoc.content || ""}
+              title={activeDoc.title}
+              onNodeClick={(lineNumber) => {
+                setPreviewMode("edit");
+                requestAnimationFrame(() => {
+                  const view = viewRef.current;
+                  if (!view) return;
+                  const lineNum = Math.min(lineNumber + 1, view.state.doc.lines);
+                  const line = view.state.doc.line(lineNum);
+                  view.dispatch({
+                    effects: EditorView.scrollIntoView(line.from, { y: "start" }),
+                  });
+                  view.focus();
+                });
+              }}
+            />
           </div>
         )}
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && previewMode !== "mindmap" && (
           <div
+            ref={previewScrollRef}
             className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"} ${isIOS ? "overflow-x-hidden" : ""}`}
           >
             {previewThemeCss && <style>{previewThemeCss}</style>}

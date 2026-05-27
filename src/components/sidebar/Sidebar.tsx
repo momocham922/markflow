@@ -556,7 +556,7 @@ export function Sidebar() {
       }}
       className={cn(
         "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "py-2.5" : "py-1.5",
+        isMobile ? "py-1.5" : "py-1",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -647,7 +647,7 @@ export function Sidebar() {
             data-folder-path={node.path}
             className={cn(
               "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
-              isMobile && "py-2",
+              isMobile && "py-1.5",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -797,7 +797,7 @@ export function Sidebar() {
           }}
           className={cn(
             "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "py-2.5" : "py-1.5",
+            isMobile ? "py-1.5" : "py-1",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -862,7 +862,7 @@ export function Sidebar() {
             data-team-id={team.id}
             className={cn(
               "group flex items-center gap-1 rounded-md px-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
-              isMobile ? "py-2" : "py-1",
+              isMobile ? "py-1.5" : "py-1",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1048,7 +1048,7 @@ export function Sidebar() {
 
       {/* Search */}
       <div className="px-3 pb-2">
-        <div className={cn("flex items-center gap-2 rounded-md bg-sidebar-accent px-2", isMobile ? "py-2.5" : "py-1.5")}>
+        <div className={cn("flex items-center gap-2 rounded-md bg-sidebar-accent px-2", isMobile ? "py-2" : "py-1.5")}>
           <Search className={isMobile ? "h-4.5 w-4.5 text-muted-foreground" : "h-3.5 w-3.5 text-muted-foreground"} />
           <input
             type="text"
@@ -1107,7 +1107,7 @@ export function Sidebar() {
             <div className="px-1 pb-0">
               <div className="flex items-center justify-between">
                 <button
-                  className={cn("flex flex-1 items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2.5" : "py-1.5")}
+                  className={cn("flex flex-1 items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2" : "py-1.5")}
                   onClick={() => setMyDocsExpanded((v) => !v)}
                 >
                   {myDocsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -1117,13 +1117,15 @@ export function Sidebar() {
                 </button>
                 <div className="flex gap-0.5 pr-2">
                   <span title="New document" onClick={() => { handleNew(); setMyDocsExpanded(true); }}>
-                    <Plus className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
+                    <Plus className={cn("text-muted-foreground hover:text-foreground cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
                   </span>
-                  <span title="New mind map" onClick={() => { handleNew("/", "mindmap"); setMyDocsExpanded(true); }}>
-                    <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
-                  </span>
+                  {!isMobile && (
+                    <span title="New mind map" onClick={() => { handleNew("/", "mindmap"); setMyDocsExpanded(true); }}>
+                      <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
+                    </span>
+                  )}
                   <FolderPlus
-                    className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer"
+                    className={cn("text-muted-foreground hover:text-foreground cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")}
                     onClick={() => { setCreatingFolderIn("/"); setNewFolderName(""); setMyDocsExpanded(true); }}
                   />
                 </div>
@@ -1146,7 +1148,7 @@ export function Sidebar() {
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
                   <button
-                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2.5" : "py-1.5")}
+                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2" : "py-1.5")}
                     onClick={() => setTeamsExpanded((v) => !v)}
                   >
                     {teamsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -1192,7 +1194,7 @@ export function Sidebar() {
                           <div key={team.id}>
                             <div className="flex items-center">
                               <button
-                                className={cn("flex flex-1 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors", isMobile ? "py-2.5" : "py-1.5")}
+                                className={cn("flex flex-1 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors", isMobile ? "py-2" : "py-1.5")}
                                 onClick={() => setExpandedTeams((prev) => {
                                   const next = new Set(prev);
                                   if (next.has(team.id)) next.delete(team.id);
@@ -1240,7 +1242,7 @@ export function Sidebar() {
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
                   <button
-                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2.5" : "py-1.5")}
+                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-2" : "py-1.5")}
                     onClick={() => setSharedExpanded((v) => !v)}
                   >
                     {sharedExpanded ? (
@@ -1265,7 +1267,7 @@ export function Sidebar() {
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
                             "group flex w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors",
-                            isMobile ? "py-2.5" : "py-1.5",
+                            isMobile ? "py-1.5" : "py-1",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
