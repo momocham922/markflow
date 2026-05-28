@@ -910,6 +910,9 @@ static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
+/// ScreenCaptureKit stream handle for system audio capture (macOS only)
+#[cfg(target_os = "macos")]
+static SC_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Overlap buffer: last 0.5s of previous chunk for boundary accuracy
 static VOICE_OVERLAP: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 
@@ -1168,6 +1171,82 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
 #[tauri::command]
 fn stop_voice_recording() {
     stop_voice_recording_inner();
+    #[cfg(target_os = "macos")]
+    stop_system_audio_capture();
+}
+
+/// Start capturing system audio via ScreenCaptureKit (macOS 13+).
+/// Audio samples are written into the shared VOICE_BUFFER alongside mic input.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn start_system_audio_capture() -> Result<(), String> {
+    use screencapturekit::prelude::*;
+
+    if SC_STREAM_ACTIVE.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    let content = SCShareableContent::get()
+        .map_err(|e| format!("ScreenCaptureKit初期化失敗: {:?}。\nSystem Settings → Privacy & Security → Screen & System Audio Recordingで許可してください。", e))?;
+    let display = content.displays().into_iter().next()
+        .ok_or("ディスプレイが見つかりません")?;
+
+    let filter = SCContentFilter::create()
+        .with_display(&display)
+        .with_excluding_windows(&[])
+        .build();
+
+    let config = SCStreamConfiguration::new()
+        .with_width(2)
+        .with_height(2)
+        .with_captures_audio(true)
+        .with_sample_rate(16000)
+        .with_channel_count(1);
+
+    struct AudioHandler;
+    impl SCStreamOutputTrait for AudioHandler {
+        fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
+            if of_type != SCStreamOutputType::Audio { return; }
+            if !VOICE_ACTIVE.load(Ordering::Relaxed) && !SC_STREAM_ACTIVE.load(Ordering::Relaxed) { return; }
+            if let Some(abl) = sample.audio_buffer_list() {
+                for buf in abl.iter() {
+                    let bytes = buf.data();
+                    let floats: &[f32] = unsafe {
+                        std::slice::from_raw_parts(
+                            bytes.as_ptr() as *const f32,
+                            bytes.len() / 4,
+                        )
+                    };
+                    if let Ok(mut voice_buf) = VOICE_BUFFER.try_lock() {
+                        voice_buf.extend_from_slice(floats);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut stream = SCStream::new(&filter, &config);
+    stream.add_output_handler(AudioHandler, SCStreamOutputType::Audio);
+    stream.start_capture()
+        .map_err(|e| format!("システム音声キャプチャ開始失敗: {:?}", e))?;
+
+    SC_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+    let ptr = Box::into_raw(Box::new(stream)) as usize;
+    *VOICE_STREAM_RAW.lock().unwrap() = ptr;
+    println!("[voice] System audio capture started via ScreenCaptureKit");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn stop_system_audio_capture() {
+    if !SC_STREAM_ACTIVE.swap(false, Ordering::SeqCst) { return; }
+    println!("[voice] System audio capture stopped");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn start_system_audio_capture() -> Result<(), String> {
+    Err("システム音声キャプチャはmacOSでのみ利用可能です".to_string())
 }
 
 /// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
@@ -1415,7 +1494,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, get_voice_chunk])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

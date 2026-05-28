@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Mic, MicOff, Sparkles, Trash2, Loader2 } from "lucide-react";
+import { Mic, MicOff, Sparkles, Trash2, Loader2, Monitor } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
@@ -32,6 +32,8 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
 
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
+  const [systemAudio, setSystemAudio] = useState(false);
+  const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -227,7 +229,19 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           variant={isRecording ? "destructive" : "default"}
           size="sm"
           className="gap-1.5"
-          onClick={() => { setVoiceError(null); toggle(); }}
+          onClick={async () => {
+            setVoiceError(null);
+            if (!isRecording && systemAudio && isTauri) {
+              try {
+                const { invoke } = await import("@tauri-apps/api/core");
+                await invoke("start_system_audio_capture");
+              } catch (e) {
+                setVoiceError(e instanceof Error ? e.message : String(e));
+                return;
+              }
+            }
+            toggle();
+          }}
         >
           {isRecording ? (
             <>
@@ -250,6 +264,19 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         )}
 
         <div className="flex-1" />
+
+        {isTauri && isMac && !isRecording && (
+          <Button
+            variant={systemAudio ? "secondary" : "ghost"}
+            size="sm"
+            className="gap-1 text-[11px] h-7"
+            onClick={() => setSystemAudio((v) => !v)}
+            title={systemAudio ? "System audio ON (click to disable)" : "Include system audio (meetings, etc.)"}
+          >
+            <Monitor className="h-3 w-3" />
+            {systemAudio ? "System" : "Sys"}
+          </Button>
+        )}
 
         {isTauri && audioDevices.length > 1 && !isRecording && (
           <select

@@ -533,45 +533,37 @@ export function Editor() {
   // Scroll sync between editor and preview in split mode
   useEffect(() => {
     if (!scrollSyncEnabled || previewMode !== "split" || isMobile) return;
-    const editorScrollDOM = editorScrollRef.current;
+    const editorDOM = editorScrollRef.current;
     const previewDOM = previewScrollRef.current;
-    if (!editorScrollDOM || !previewDOM) return;
+    if (!editorDOM || !previewDOM) return;
 
-    let syncSource: "editor" | "preview" | null = null;
+    let lockUntil = 0;
+    let lockedBy: "editor" | "preview" | null = null;
     let rafId: number | null = null;
+    const LOCK_MS = 120;
 
-    const getScrollPercent = (el: HTMLElement) => {
-      const max = el.scrollHeight - el.clientHeight;
-      return max > 0 ? el.scrollTop / max : 0;
-    };
-    const setScrollPercent = (el: HTMLElement, pct: number) => {
-      const max = el.scrollHeight - el.clientHeight;
-      el.scrollTop = max * pct;
-    };
-
-    const onEditorScroll = () => {
-      if (syncSource === "preview") return;
-      syncSource = "editor";
+    const syncTo = (target: HTMLElement, source: HTMLElement, origin: "editor" | "preview") => {
+      const now = performance.now();
+      if (lockedBy && lockedBy !== origin && now < lockUntil) return;
+      lockedBy = origin;
+      lockUntil = now + LOCK_MS;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
-        setScrollPercent(previewDOM, getScrollPercent(editorScrollDOM));
-        requestAnimationFrame(() => { syncSource = null; });
-      });
-    };
-    const onPreviewScroll = () => {
-      if (syncSource === "editor") return;
-      syncSource = "preview";
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        setScrollPercent(editorScrollDOM, getScrollPercent(previewDOM));
-        requestAnimationFrame(() => { syncSource = null; });
+        const srcMax = source.scrollHeight - source.clientHeight;
+        if (srcMax <= 0) return;
+        const pct = source.scrollTop / srcMax;
+        const tgtMax = target.scrollHeight - target.clientHeight;
+        target.scrollTop = Math.round(tgtMax * pct);
       });
     };
 
-    editorScrollDOM.addEventListener("scroll", onEditorScroll, { passive: true });
+    const onEditorScroll = () => syncTo(previewDOM, editorDOM, "editor");
+    const onPreviewScroll = () => syncTo(editorDOM, previewDOM, "preview");
+
+    editorDOM.addEventListener("scroll", onEditorScroll, { passive: true });
     previewDOM.addEventListener("scroll", onPreviewScroll, { passive: true });
     return () => {
-      editorScrollDOM.removeEventListener("scroll", onEditorScroll);
+      editorDOM.removeEventListener("scroll", onEditorScroll);
       previewDOM.removeEventListener("scroll", onPreviewScroll);
       if (rafId) cancelAnimationFrame(rafId);
     };
