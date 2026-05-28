@@ -77,13 +77,27 @@ async function ensureMigrations(database: DatabaseLike) {
       value TEXT NOT NULL
     )`);
 
-    // document_snapshots table (migration v6) — last-known-good content backup
-    await database.execute(`CREATE TABLE IF NOT EXISTS document_snapshots (
-      document_id TEXT PRIMARY KEY,
+    // document_snapshots table — multi-generation content backup (keeps last 3 per doc)
+    await database.execute(`CREATE TABLE IF NOT EXISTS document_snapshots_v2 (
+      document_id TEXT NOT NULL,
       content TEXT NOT NULL,
       title TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (document_id, updated_at)
     )`);
+    // Migrate from v1 single-entry table if it exists
+    try {
+      const old = await database.select<{ document_id: string; content: string; title: string; updated_at: number }[]>(
+        "SELECT * FROM document_snapshots",
+      );
+      for (const row of old) {
+        await database.execute(
+          `INSERT OR IGNORE INTO document_snapshots_v2 (document_id, content, title, updated_at) VALUES ($1, $2, $3, $4)`,
+          [row.document_id, row.content, row.title, row.updated_at],
+        );
+      }
+      await database.execute("DROP TABLE IF EXISTS document_snapshots");
+    } catch { /* old table doesn't exist — fine */ }
 
     // deleted_docs table (migration v9) — tracks locally deleted docs to prevent re-sync
     await database.execute(`CREATE TABLE IF NOT EXISTS deleted_docs (
@@ -150,18 +164,20 @@ export async function upsertDocument(doc: {
       [doc.id],
     );
     if (existing[0]) {
-      // LAYER 2: Block overwriting existing non-empty content with empty content
-      if (!doc.content.trim() && existing[0].content?.trim()) {
-        console.warn(`[db] Blocked empty overwrite of doc ${doc.id}`);
-        return;
-      }
-      // Save snapshot of current content before overwriting
+      // Save snapshot of current content before overwriting (preserves recovery ability)
       if (existing[0].content?.trim()) {
+        const now = Date.now();
         await database.execute(
-          `INSERT INTO document_snapshots (document_id, content, title, updated_at)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT(document_id) DO UPDATE SET content = $2, title = $3, updated_at = $4`,
-          [doc.id, existing[0].content, existing[0].title, Date.now()],
+          `INSERT OR IGNORE INTO document_snapshots_v2 (document_id, content, title, updated_at)
+           VALUES ($1, $2, $3, $4)`,
+          [doc.id, existing[0].content, existing[0].title, now],
+        );
+        // Prune old snapshots: keep only the 3 most recent per document
+        await database.execute(
+          `DELETE FROM document_snapshots_v2 WHERE document_id = $1 AND updated_at NOT IN (
+             SELECT updated_at FROM document_snapshots_v2 WHERE document_id = $1 ORDER BY updated_at DESC LIMIT 3
+           )`,
+          [doc.id],
         );
       }
     }
@@ -241,6 +257,14 @@ export async function createVersion(version: {
   );
 }
 
+/** Get ALL versions across all documents (for backfill migration) */
+export async function getAllVersions(): Promise<DbVersion[]> {
+  const database = await getDb();
+  return database.select<DbVersion[]>(
+    "SELECT * FROM versions ORDER BY created_at ASC",
+  );
+}
+
 export async function deleteVersion(versionId: string): Promise<void> {
   const database = await getDb();
   await database.execute("DELETE FROM versions WHERE id = $1", [versionId]);
@@ -254,11 +278,11 @@ export async function deleteVersionsForDocument(documentId: string): Promise<voi
   );
 }
 
-// Snapshot management — last-known-good content backup
+// Snapshot management — multi-generation content backup
 export async function getSnapshot(documentId: string): Promise<{ content: string; title: string } | null> {
   const database = await getDb();
   const rows = await database.select<{ content: string; title: string }[]>(
-    "SELECT content, title FROM document_snapshots WHERE document_id = $1",
+    "SELECT content, title FROM document_snapshots_v2 WHERE document_id = $1 ORDER BY updated_at DESC LIMIT 1",
     [documentId],
   );
   const row = rows[0];
@@ -268,7 +292,7 @@ export async function getSnapshot(documentId: string): Promise<{ content: string
 export async function deleteSnapshot(documentId: string): Promise<void> {
   const database = await getDb();
   await database.execute(
-    "DELETE FROM document_snapshots WHERE document_id = $1",
+    "DELETE FROM document_snapshots_v2 WHERE document_id = $1",
     [documentId],
   );
 }
@@ -286,6 +310,9 @@ export async function trackDeletedDoc(docId: string): Promise<void> {
 
 export async function getDeletedDocIds(): Promise<Set<string>> {
   const database = await getDb();
+  // Clean up entries older than 30 days to prevent permanent sync blocking
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  await database.execute("DELETE FROM deleted_docs WHERE deleted_at < $1", [thirtyDaysAgo]);
   const rows = await database.select<{ doc_id: string }[]>(
     "SELECT doc_id FROM deleted_docs",
   );

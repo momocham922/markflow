@@ -33,6 +33,7 @@ import {
   addCollaborator,
   removeCollaborator,
   getCollaborators,
+  checkUserExists,
   type ShareLink,
   type Collaborator,
 } from "@/services/sharing";
@@ -77,9 +78,10 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     webhookUrl: "",
     channel: "",
     enabled: false,
-    events: { onEdit: true, onShare: true, onComment: true },
+    events: { onEdit: true, onShare: true },
   });
   const [slackSaved, setSlackSaved] = useState(false);
+  const [slackTestStatus, setSlackTestStatus] = useState<"idle" | "sending" | "ok" | "fail">("idle");
 
   // Load existing share data when dialog opens
   useEffect(() => {
@@ -100,16 +102,12 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     // Load collaborators (map → array)
     getCollaborators(activeDocId).then(setCollaborators).catch(() => {});
 
-    // Load Slack config
-    loadSlackNotifyConfig().then(setSlackConfig).catch(() => {});
+    // Load Slack config for this document
+    loadSlackNotifyConfig(activeDocId).then(setSlackConfig).catch(() => {});
   }, [open, activeDocId, user]);
 
   const getShareUrl = useCallback(
     (token: string) => {
-      const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
-      if (projectId) {
-        return `https://${projectId}.web.app/share/${token}`;
-      }
       return `markflow://share/${token}`;
     },
     [],
@@ -130,15 +128,17 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           title: activeDoc.title,
           content: activeDoc.content,
           ownerId: user.uid,
+          ownerName: user.displayName || user.email || undefined,
           folder: activeDoc.folder,
           tags: activeDoc.tags,
+          titlePinned: activeDoc.titlePinned,
         });
       }
       const link = await enableShareLink(activeDocId, linkPermission);
       setShareLink(link);
 
       // Notify Slack
-      notifySlack("share", {
+      notifySlack(activeDocId, "share", {
         docTitle: activeDoc?.title || "Untitled",
         authorName: user?.displayName || user?.email || undefined,
         shareUrl: getShareUrl(link.token),
@@ -189,6 +189,18 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     setInviting(true);
     setError("");
     try {
+      const exists = await checkUserExists(inviteEmail.trim());
+      if (!exists) {
+        const proceed = window.confirm(
+          `「${inviteEmail.trim()}」はまだMarkFlowに登録されていません。\n\n` +
+          "招待を続行すると、相手がアプリをインストール・ログインした時点で共有が有効になります。\n" +
+          "招待を続行しますか？",
+        );
+        if (!proceed) {
+          setInviting(false);
+          return;
+        }
+      }
       // Save current content to Firestore before sharing — ensures
       // the collaborator gets the latest content, not a stale version.
       if (activeDoc) {
@@ -197,8 +209,10 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           title: activeDoc.title,
           content: activeDoc.content,
           ownerId: activeDoc.ownerId || user?.uid || "",
+          ownerName: user?.displayName || user?.email || undefined,
           folder: activeDoc.folder,
           tags: activeDoc.tags,
+          titlePinned: activeDoc.titlePinned,
         });
       }
       await addCollaborator(activeDocId, inviteEmail.trim(), inviteRole);
@@ -209,7 +223,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       setInviteEmail("");
 
       // Notify Slack
-      notifySlack("share", {
+      notifySlack(activeDocId, "share", {
         docTitle: activeDoc?.title || "Untitled",
         authorName: user?.displayName || user?.email || undefined,
         detail: `Invited ${inviteEmail.trim()} as ${inviteRole}`,
@@ -234,8 +248,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
   // ─── Slack notification handlers ──────────────────────
 
   const handleSaveSlackConfig = async () => {
+    if (!activeDocId) return;
     try {
-      await saveSlackNotifyConfig(slackConfig);
+      await saveSlackNotifyConfig(activeDocId, slackConfig);
       setSlackSaved(true);
       setTimeout(() => setSlackSaved(false), 2000);
     } catch {
@@ -407,10 +422,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
               {shareLink?.enabled && (
                 <p className="text-[10px] text-muted-foreground">
-                  Anyone with this link can {linkPermission === "edit" ? "edit" : "view"} this
-                  document.
+                  MarkFlowユーザーがこのリンクでドキュメントを{linkPermission === "edit" ? "編集" : "閲覧"}できます。
                   {shareLink.expiresAt && (
-                    <> Expires {new Date(shareLink.expiresAt).toLocaleDateString()}.</>
+                    <> 有効期限: {new Date(shareLink.expiresAt).toLocaleDateString()}</>
                   )}
                 </p>
               )}
@@ -572,24 +586,53 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                 </label>
               </div>
 
-              <Button
-                size="sm"
-                className="w-full gap-2"
-                onClick={handleSaveSlackConfig}
-                disabled={!slackConfig.webhookUrl}
-              >
-                {slackSaved ? (
-                  <>
-                    <Check className="h-3.5 w-3.5" />
-                    Saved!
-                  </>
-                ) : (
-                  <>
-                    <Bell className="h-3.5 w-3.5" />
-                    Save Settings
-                  </>
-                )}
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1 gap-2"
+                  onClick={handleSaveSlackConfig}
+                  disabled={!slackConfig.webhookUrl}
+                >
+                  {slackSaved ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      Saved!
+                    </>
+                  ) : (
+                    <>
+                      <Bell className="h-3.5 w-3.5" />
+                      Save
+                    </>
+                  )}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  disabled={!slackConfig.webhookUrl || slackTestStatus === "sending"}
+                  onClick={async () => {
+                    setSlackTestStatus("sending");
+                    try {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      const body = JSON.stringify({
+                        blocks: [{
+                          type: "section",
+                          text: { type: "mrkdwn", text: ":white_check_mark: *MarkFlow* — テスト通知" },
+                        }],
+                        ...(slackConfig.channel ? { channel: slackConfig.channel } : {}),
+                      });
+                      await invoke("send_slack_webhook", { webhookUrl: slackConfig.webhookUrl, body });
+                      setSlackTestStatus("ok");
+                    } catch {
+                      setSlackTestStatus("fail");
+                    }
+                    setTimeout(() => setSlackTestStatus("idle"), 3000);
+                  }}
+                >
+                  <Send className="h-3 w-3" />
+                  {slackTestStatus === "ok" ? "OK!" : slackTestStatus === "fail" ? "Failed" : "Test"}
+                </Button>
+              </div>
             </div>
           </div>
         )}

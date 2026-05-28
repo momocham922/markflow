@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
     # Virtual display for headless GUI testing
     xvfb xauth dbus-x11 \
     # SQLite
-    libsqlite3-dev \
+    libsqlite3-dev libasound2-dev \
     # Additional deps
     file \
     && rm -rf /var/lib/apt/lists/*

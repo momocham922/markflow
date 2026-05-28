@@ -28,24 +28,42 @@ service cloud.firestore {
               && request.auth.uid in resource.data.collaboratorUids);
       }
 
+      // Check if collaborator has editor role (not viewer)
+      function isEditor() {
+        return request.auth.uid in resource.data.collaborators.keys()
+          && resource.data.collaborators[request.auth.uid].role == "editor";
+      }
+
       allow read: if request.auth != null && (
+        resource == null ||
         resource.data.ownerId == request.auth.uid ||
         isCollaborator() ||
         isTeamMember() ||
         (resource.data.shareLink != null && resource.data.shareLink.enabled == true)
       );
-      allow update, delete: if request.auth != null && (
+      allow update: if request.auth != null && (
         resource.data.ownerId == request.auth.uid ||
-        isCollaborator() ||
+        isEditor() ||
         isTeamMember()
       );
+      allow delete: if request.auth != null && (
+        resource.data.ownerId == request.auth.uid
+      );
 
-      // Versions subcollection
+      // Versions subcollection — owner, collaborators (map + array), and team members
       match /versions/{versionId} {
-        allow read, write: if request.auth != null && (
-          get(/databases/$(database)/documents/documents/$(docId)).data.ownerId == request.auth.uid ||
-          request.auth.uid in get(/databases/$(database)/documents/documents/$(docId)).data.collaborators.keys()
-        );
+        function canAccessVersions() {
+          let parent = get(/databases/$(database)/documents/documents/$(docId)).data;
+          return parent.ownerId == request.auth.uid
+            || ('collaborators' in parent && parent.collaborators != null
+                && request.auth.uid in parent.collaborators.keys())
+            || ('collaboratorUids' in parent && parent.collaboratorUids != null
+                && request.auth.uid in parent.collaboratorUids)
+            || ('teamId' in parent && parent.teamId != null && parent.teamId != ""
+                && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids);
+        }
+
+        allow read, write: if request.auth != null && canAccessVersions();
       }
 
       // Comments subcollection
@@ -68,6 +86,16 @@ service cloud.firestore {
         resource.data.ownerId == request.auth.uid;
     }
 
+    // User settings: only the owner can read/write their own settings
+    match /user_settings/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // AI chat history subcollection
+      match /ai_chats/{chatId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
     // Workspaces
     match /workspaces/{workspaceId} {
       allow read: if request.auth != null &&
@@ -75,6 +103,12 @@ service cloud.firestore {
       allow create: if request.auth != null;
       allow update, delete: if request.auth != null &&
         resource.data.ownerId == request.auth.uid;
+    }
+
+    // Error logs: any authenticated user can create, only own logs readable
+    match /error_logs/{logId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null;
     }
   }
 }

@@ -1,0 +1,23 @@
+##
+## Docker Compose for multi-instance sync E2E tests.
+## Both containers run tauri-driver on port 4444 internally.
+## External ports are mapped differently (4444 → app-a, 4445 → app-b).
+##
+services:
+  app-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-sync
+    environment:
+      - DISPLAY=:99
+    ports:
+      - "4444:4444"
+
+  app-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-sync
+    environment:
+      - DISPLAY=:99
+    ports:
+      - "4445:4444"

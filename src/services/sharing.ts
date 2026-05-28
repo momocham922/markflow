@@ -8,6 +8,7 @@ import {
   updateDoc,
   deleteDoc,
   deleteField,
+  runTransaction,
   query,
   where,
   serverTimestamp,
@@ -101,7 +102,17 @@ export interface Collaborator {
   addedAt: number;
 }
 
-/** Add a collaborator to a document by email */
+/** Check if a user with the given email has ever signed in to the app */
+export async function checkUserExists(email: string): Promise<boolean> {
+  const usersQ = query(
+    collection(firestore, "users"),
+    where("email", "==", email),
+  );
+  const snap = await getDocs(usersQ);
+  return !snap.empty;
+}
+
+/** Add a collaborator to a document by email (atomic transaction) */
 export async function addCollaborator(
   docId: string,
   email: string,
@@ -118,23 +129,25 @@ export async function addCollaborator(
   const key = uid || email.replace(/[.#$/\[\]]/g, "_");
 
   const ref = doc(firestore, "documents", docId);
-  const updates: Record<string, unknown> = {
-    [`collaborators.${key}`]: { email, role, addedAt: Date.now() },
-  };
 
-  // Maintain collaboratorUids array for efficient querying
-  if (uid) {
-    const snap = await getDoc(ref);
-    const existing = (snap.data()?.collaboratorUids || []) as string[];
-    if (!existing.includes(uid)) {
-      updates.collaboratorUids = [...existing, uid];
+  // Use transaction to prevent TOCTOU race: read + write atomically
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const updates: Record<string, unknown> = {
+      [`collaborators.${key}`]: { email, role, addedAt: Date.now() },
+    };
+    if (uid) {
+      const existing = (data.collaboratorUids || []) as string[];
+      if (!existing.includes(uid)) {
+        updates.collaboratorUids = [...existing, uid];
+      }
     }
-  }
-
-  await updateDoc(ref, updates);
+    transaction.update(ref, updates);
+  });
 }
 
-/** Remove a collaborator from a document */
+/** Remove a collaborator from a document (atomic transaction) */
 export async function removeCollaborator(
   docId: string,
   collaborator: Collaborator,
@@ -142,18 +155,18 @@ export async function removeCollaborator(
   const key = collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
   const ref = doc(firestore, "documents", docId);
 
-  const updates: Record<string, unknown> = {
-    [`collaborators.${key}`]: deleteField(),
-  };
-
-  // Also remove from collaboratorUids array
-  if (collaborator.uid) {
-    const snap = await getDoc(ref);
-    const existing = (snap.data()?.collaboratorUids || []) as string[];
-    updates.collaboratorUids = existing.filter((u) => u !== collaborator.uid);
-  }
-
-  await updateDoc(ref, updates);
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const updates: Record<string, unknown> = {
+      [`collaborators.${key}`]: deleteField(),
+    };
+    if (collaborator.uid) {
+      const existing = (data.collaboratorUids || []) as string[];
+      updates.collaboratorUids = existing.filter((u) => u !== collaborator.uid);
+    }
+    transaction.update(ref, updates);
+  });
 }
 
 /** Update a collaborator's role */
@@ -258,7 +271,7 @@ export async function fetchUserTeams(uid: string): Promise<Team[]> {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Team);
 }
 
-/** Add a member to a team */
+/** Add a member to a team (atomic transaction) */
 export async function addTeamMember(
   teamId: string,
   member: { email: string; uid?: string; role: "admin" | "member" },
@@ -279,32 +292,38 @@ export async function addTeamMember(
   };
 
   const ref = doc(firestore, TEAMS_COLLECTION, teamId);
-  // Get current members, add new one
-  const snap = await getDoc(ref);
-  const data = snap.data();
-  const members = (data?.members || []) as TeamMember[];
-  const memberUids = (data?.memberUids || []) as string[];
 
-  if (!members.some((m) => m.email === member.email)) {
-    members.push(teamMember);
-    if (uid && !memberUids.includes(uid)) memberUids.push(uid);
-    await updateDoc(ref, { members, memberUids });
-  }
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const members = [...((data.members || []) as TeamMember[])];
+    const memberUids = [...((data.memberUids || []) as string[])];
+
+    if (!members.some((m) => m.email === member.email)) {
+      members.push(teamMember);
+      if (uid && !memberUids.includes(uid)) memberUids.push(uid);
+      transaction.update(ref, { members, memberUids });
+    }
+  });
 }
 
-/** Remove a member from a team */
+/** Remove a member from a team (atomic transaction) */
 export async function removeTeamMember(
   teamId: string,
   member: TeamMember,
 ): Promise<void> {
   const ref = doc(firestore, TEAMS_COLLECTION, teamId);
-  const snap = await getDoc(ref);
-  const data = snap.data();
-  const members = ((data?.members || []) as TeamMember[]).filter(
-    (m) => m.email !== member.email,
-  );
-  const memberUids = members.map((m) => m.uid).filter(Boolean);
-  await updateDoc(ref, { members, memberUids });
+
+  await runTransaction(firestore, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const data = snap.data() || {};
+    const members = ((data.members || []) as TeamMember[]).filter(
+      (m) => m.email !== member.email,
+    );
+    // Rebuild memberUids from remaining members with valid UIDs
+    const memberUids = members.map((m) => m.uid).filter(Boolean);
+    transaction.update(ref, { members, memberUids });
+  });
 }
 
 /** Delete a team */
@@ -355,22 +374,64 @@ export async function moveTeamDocument(docId: string, folder: string): Promise<v
 export async function createTeamDocument(
   teamId: string,
   ownerId: string,
+  ownerName?: string,
 ): Promise<string> {
   const docId = crypto.randomUUID();
   const ref = doc(firestore, "documents", docId);
   await setDoc(ref, {
     title: "Untitled",
-    content: "# Untitled\n",
+    content: "",
     ownerId,
+    ...(ownerName ? { ownerName } : {}),
     teamId,
     collaborators: {},
     collaboratorUids: [],
     tags: [],
     folder: "/",
+    titlePinned: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
   return docId;
+}
+
+/** Copy a team document to personal documents */
+export async function copyTeamDocToPersonal(
+  sourceDocId: string,
+  ownerId: string,
+  folder: string = "/",
+): Promise<{ id: string; title: string; content: string }> {
+  const sourceRef = doc(firestore, "documents", sourceDocId);
+  const snap = await getDoc(sourceRef);
+  if (!snap.exists()) throw new Error("Source document not found");
+  const data = snap.data();
+
+  const newId = crypto.randomUUID();
+  const newRef = doc(firestore, "documents", newId);
+  await setDoc(newRef, {
+    title: data.title || "Untitled",
+    content: data.content || "",
+    ownerId,
+    teamId: null,
+    collaborators: {},
+    collaboratorUids: [],
+    tags: data.tags || [],
+    folder,
+    titlePinned: data.titlePinned ?? false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return { id: newId, title: data.title || "Untitled", content: data.content || "" };
+}
+
+/** Move a personal document into a team */
+export async function moveDocToTeam(
+  docId: string,
+  teamId: string,
+  folder: string = "/",
+): Promise<void> {
+  const ref = doc(firestore, "documents", docId);
+  await updateDoc(ref, { teamId, folder });
 }
 
 // ─── User Profile (for looking up users by email) ──────────────

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import * as db from "@/services/database";
 import { fetchDocument } from "@/services/firebase";
-import { isIOS } from "@/platform";
+import { isMobile } from "@/platform";
 
 export type DocType = "markdown" | "mindmap";
 
@@ -18,6 +18,7 @@ export interface Document {
   isShared?: boolean;
   titlePinned?: boolean;
   docType?: DocType;
+  ownerName?: string;
 }
 
 export interface CustomPreviewTheme {
@@ -66,12 +67,28 @@ interface AppState {
   folders: string[];
   createFolder: (path: string) => void;
   deleteFolder: (path: string) => void;
+  renameFolder: (oldPath: string, newPath: string) => void;
   moveDocument: (docId: string, folder: string) => void;
+
+  // Version restore (VersionPanel → Editor bridge for collab docs)
+  pendingRestoreContent: string | null;
+  setPendingRestoreContent: (content: string | null) => void;
 
   // Custom themes
   customPreviewThemes: CustomPreviewTheme[];
   addCustomPreviewTheme: (theme: CustomPreviewTheme) => void;
   removeCustomPreviewTheme: (id: string) => void;
+}
+
+/** Sync a setting to cloud (fire-and-forget, lazy import to avoid circular deps) */
+function syncSettingToCloud(data: Record<string, unknown>) {
+  import("@/stores/auth-store").then(({ useAuthStore }) => {
+    const uid = useAuthStore.getState().user?.uid;
+    if (!uid) return;
+    import("@/services/firebase").then(({ saveUserSettingsToFirestore }) => {
+      saveUserSettingsToFirestore(uid, data).catch(() => {});
+    });
+  });
 }
 
 // Debounce save to avoid excessive writes
@@ -81,12 +98,6 @@ const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingDocs = new Map<string, Document>();
 
 function debouncedSave(doc: Document) {
-  // Never persist a document with empty content — this is almost always a bug
-  if (!doc.content.trim()) {
-    console.warn(`[app-store] Skipped saving doc ${doc.id} with empty content`);
-    return;
-  }
-
   const existing = saveTimers.get(doc.id);
   if (existing) clearTimeout(existing);
   pendingDocs.set(doc.id, doc);
@@ -121,12 +132,12 @@ function cloudSyncDebounced() {
 
 // Flush all pending saves immediately (called on app close)
 export function flushPendingSaves() {
-  for (const [id, doc] of pendingDocs) {
+  for (const [id, pendingDoc] of pendingDocs) {
     const timer = saveTimers.get(id);
     if (timer) clearTimeout(timer);
     saveTimers.delete(id);
     pendingDocs.delete(id);
-    db.upsertDocument(doc).catch(console.error);
+    db.upsertDocument(pendingDoc).catch(console.error);
   }
 }
 
@@ -182,7 +193,7 @@ function scheduleCloudRecovery(docIds: string[]) {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  sidebarOpen: !isIOS,
+  sidebarOpen: !isMobile,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
   theme: (window.matchMedia("(prefers-color-scheme: dark)").matches
@@ -193,6 +204,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const next = s.theme === "light" ? "dark" : "light";
       document.documentElement.classList.toggle("dark", next === "dark");
       db.setSetting("theme", next).catch(console.error);
+      syncSettingToCloud({ theme: next });
       return { theme: next };
     }),
 
@@ -207,16 +219,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
       // Backup: localStorage (always works in WebView)
       try { localStorage.setItem("markflow:themeSettings", json); } catch {}
+      // Cloud sync
+      syncSettingToCloud({ themeSettings });
       return { themeSettings };
     }),
 
   initialized: false,
 
   activeDocId: null,
-  setActiveDocId: (id) => set({ activeDocId: id, ...(isIOS ? { sidebarOpen: false } : {}) }),
+  setActiveDocId: (id) => set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) }),
 
   documents: [],
   folders: ["/"],
+  pendingRestoreContent: null,
+  setPendingRestoreContent: (content) => set({ pendingRestoreContent: content }),
+
   customPreviewThemes: [],
 
   loadDocuments: async () => {
@@ -323,10 +340,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addDocument: async (doc) => {
-    set((s) => ({
-      documents: [...s.documents, doc],
-      folders: deriveFolders([...s.documents, doc], s.folders),
-    }));
+    set((s) => {
+      // Prevent duplicate: if doc with same ID exists, merge instead of append
+      const exists = s.documents.some((d) => d.id === doc.id);
+      if (exists) {
+        return {
+          documents: s.documents.map((d) => d.id === doc.id ? { ...d, ...doc } : d),
+        };
+      }
+      return {
+        documents: [...s.documents, doc],
+        folders: deriveFolders([...s.documents, doc], s.folders),
+      };
+    });
     try {
       await db.upsertDocument(doc);
     } catch {
@@ -339,22 +365,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const existing = s.documents.find((d) => d.id === id);
       if (!existing) return {};
 
-      // CRITICAL: Never overwrite non-empty content with empty content.
-      // This prevents data loss from Yjs reconnect, CodeMirror remount,
-      // cloud sync race conditions, etc.
-      let safeUpdates = updates;
-      if (
-        "content" in updates &&
-        !updates.content?.trim() &&
-        existing.content.trim()
-      ) {
-        // Strip the empty content from the update — keep everything else
-        const { content: _dropped, ...rest } = updates;
-        safeUpdates = rest;
-        console.warn(`[app-store] Blocked empty content overwrite for doc ${id}`);
-      }
-
-      if (Object.keys(safeUpdates).length === 0) return {};
+      const safeUpdates = updates;
 
       const documents = s.documents.map((d) =>
         d.id === id ? { ...d, ...safeUpdates } : d,
@@ -393,8 +404,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const folders = deriveFolders(s.documents, [...s.folders, path]);
       const toSave = folders.filter((f) => f !== "/");
-      db.setSetting("folders", JSON.stringify(toSave))
-        .catch(() => {});
+      db.setSetting("folders", JSON.stringify(toSave)).catch(() => {});
+      syncSettingToCloud({ folders: toSave });
       return { folders };
     });
   },
@@ -416,7 +427,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       const folders = s.folders.filter(
         (f) => f !== path && !f.startsWith(path + "/"),
       );
-      db.setSetting("folders", JSON.stringify(folders.filter((f) => f !== "/"))).catch(console.error);
+      const toSave = folders.filter((f) => f !== "/");
+      db.setSetting("folders", JSON.stringify(toSave)).catch(console.error);
+      syncSettingToCloud({ folders: toSave });
+      return { folders };
+    });
+  },
+
+  renameFolder: (oldPath, newPath) => {
+    const { updateDocument } = get();
+    const state = get();
+    for (const doc of state.documents) {
+      if (doc.folder === oldPath) {
+        updateDocument(doc.id, { folder: newPath, updatedAt: Date.now() });
+      } else if (doc.folder.startsWith(oldPath + "/")) {
+        updateDocument(doc.id, { folder: newPath + doc.folder.slice(oldPath.length), updatedAt: Date.now() });
+      }
+    }
+    set((s) => {
+      const folders = s.folders.map((f) => {
+        if (f === oldPath) return newPath;
+        if (f.startsWith(oldPath + "/")) return newPath + f.slice(oldPath.length);
+        return f;
+      });
+      const toSave = folders.filter((f) => f !== "/");
+      db.setSetting("folders", JSON.stringify(toSave)).catch(console.error);
+      syncSettingToCloud({ folders: toSave });
       return { folders };
     });
   },
@@ -430,6 +466,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const customPreviewThemes = [...s.customPreviewThemes.filter((t) => t.id !== theme.id), theme];
       db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      syncSettingToCloud({ customPreviewThemes });
       return { customPreviewThemes };
     });
   },
@@ -438,6 +475,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const customPreviewThemes = s.customPreviewThemes.filter((t) => t.id !== id);
       db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      syncSettingToCloud({ customPreviewThemes });
       // Reset to default if the removed theme was active
       if (s.themeSettings.previewTheme === id) {
         const themeSettings = { ...s.themeSettings, previewTheme: "github" };

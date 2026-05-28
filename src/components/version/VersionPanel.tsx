@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useIMEGuard } from "@/hooks/use-ime-guard";
-import { isIOS } from "@/platform";
+import { isMobile } from "@/platform";
 import {
   History,
   Save,
@@ -39,9 +39,10 @@ export interface DiffState {
 interface VersionPanelProps {
   onClose: () => void;
   onViewDiff?: (diff: DiffState) => void;
+  onRestore?: (content: string) => void;
 }
 
-export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
+export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelProps) {
   const { activeDocId, documents, updateDocument } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [versions, setVersions] = useState<Version[]>([]);
@@ -54,45 +55,52 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
 
   const loadVersions = useCallback(async () => {
     if (!activeDocId) return;
+
+    const allVersions: Version[] = [];
+
+    // Cloud-first: fetch Firestore versions as source of truth
+    // These contain ownerName from each user who created them
+    if (user) {
+      try {
+        const cloudVersions = await fetchVersionsFromCloud(activeDocId);
+        for (const cv of cloudVersions) {
+          allVersions.push({
+            id: cv.id,
+            documentId: cv.documentId,
+            content: cv.content,
+            title: cv.title,
+            message: cv.message,
+            createdAt: cv.createdAt,
+            ownerName: cv.ownerName,
+          });
+        }
+      } catch (err) {
+        console.warn("[versions] Cloud fetch failed:", err);
+      }
+    }
+
+    // Fallback: add local-only versions not present in cloud
     try {
       const rows = await db.getVersions(activeDocId);
-      const localVersions: Version[] = rows.map((r) => ({
-        id: r.id,
-        documentId: r.document_id,
-        content: r.content,
-        title: r.title,
-        message: r.message,
-        createdAt: r.created_at,
-      }));
-
-      // Merge cloud versions if user is logged in
-      if (user) {
-        try {
-          const cloudVersions = await fetchVersionsFromCloud(activeDocId);
-          const localIds = new Set(localVersions.map((v) => v.id));
-          for (const cv of cloudVersions) {
-            if (!localIds.has(cv.id)) {
-              localVersions.push({
-                id: cv.id,
-                documentId: cv.documentId,
-                content: cv.content,
-                title: cv.title,
-                message: cv.message,
-                createdAt: cv.createdAt,
-                ownerName: cv.ownerName,
-              });
-            }
-          }
-          localVersions.sort((a, b) => b.createdAt - a.createdAt);
-        } catch {
-          // Cloud fetch failed, use local only
-        }
+      const cloudIds = new Set(allVersions.map((v) => v.id));
+      for (const r of rows) {
+        if (cloudIds.has(r.id)) continue;
+        allVersions.push({
+          id: r.id,
+          documentId: r.document_id,
+          content: r.content,
+          title: r.title,
+          message: r.message,
+          createdAt: r.created_at,
+          ownerName: user?.displayName || user?.email || undefined,
+        });
       }
-
-      setVersions(localVersions);
     } catch {
       // No DB available (browser mode)
     }
+
+    allVersions.sort((a, b) => b.createdAt - a.createdAt);
+    setVersions(allVersions);
   }, [activeDocId, user]);
 
   useEffect(() => {
@@ -120,7 +128,9 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
         syncVersionToCloud(activeDoc.id, {
           ...versionData,
           createdAt: Date.now(),
-        }, user.uid, user.displayName || user.email || "Unknown").catch(() => {});
+        }, user.uid, user.displayName || user.email || "Unknown").catch((err) => {
+          console.warn("[versions] Cloud sync failed:", err);
+        });
       }
       setSnapshotMsg("");
       await loadVersions();
@@ -133,21 +143,38 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
 
   const handleRestore = async (version: Version) => {
     if (!activeDocId || !activeDoc) return;
+
+    // Create backup of current content before restore
+    const backupId = crypto.randomUUID();
+    const backupData = {
+      id: backupId,
+      documentId: activeDoc.id,
+      content: activeDoc.content,
+      title: `Before restore: ${activeDoc.title}`,
+      message: null,
+    };
     try {
-      await db.createVersion({
-        id: crypto.randomUUID(),
-        documentId: activeDoc.id,
-        content: activeDoc.content,
-        title: `Before restore: ${activeDoc.title}`,
-        message: null,
-      });
+      await db.createVersion(backupData);
     } catch {
-      // Best-effort backup
+      // Best-effort local backup
     }
-    updateDocument(activeDocId, {
-      content: version.content,
-      updatedAt: Date.now(),
-    });
+    // Sync backup to cloud
+    if (user) {
+      syncVersionToCloud(activeDoc.id, {
+        ...backupData,
+        createdAt: Date.now(),
+      }, user.uid, user.displayName || user.email || "Unknown").catch(() => {});
+    }
+
+    // Restore via callback (handles Y.Doc for collab) or direct store update
+    if (onRestore) {
+      onRestore(version.content);
+    } else {
+      updateDocument(activeDocId, {
+        content: version.content,
+        updatedAt: Date.now(),
+      });
+    }
     setExpandedId(null);
     await loadVersions();
   };
@@ -180,8 +207,8 @@ export function VersionPanel({ onClose, onViewDiff }: VersionPanelProps) {
           <History className="h-4 w-4" />
           <span className="text-sm font-medium">Versions</span>
         </div>
-        <Button variant="ghost" size="icon" className={isIOS ? "h-9 w-9" : "h-6 w-6"} onClick={onClose}>
-          <X className={isIOS ? "h-5 w-5" : "h-3.5 w-3.5"} />
+        <Button variant="ghost" size="icon" className={isMobile ? "h-11 w-11" : "h-6 w-6"} onClick={onClose}>
+          <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
         </Button>
       </div>
 

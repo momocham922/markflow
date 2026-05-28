@@ -1,0 +1,16 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Images: authenticated users can upload to their own folder
+    match /images/{uid}/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Published HTML pages: authenticated users can write, anyone can read
+    match /published/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+  }
+}

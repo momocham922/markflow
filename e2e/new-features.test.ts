@@ -1,37 +1,30 @@
 import { test, expect } from "@playwright/test";
 import { waitForAppReady, createNewDocument, typeInEditor, setPreviewMode } from "./helpers";
 
-test.describe("Version History dialog", () => {
+test.describe("Version History panel", () => {
   test.beforeEach(async ({ page }) => {
     await waitForAppReady(page);
     await createNewDocument(page);
   });
 
-  test("History button is visible in editor toolbar", async ({ page }) => {
-    const historyBtn = page.locator('button:has-text("History")');
+  test("History button is visible in toolbar", async ({ page }) => {
+    const historyBtn = page.locator('button[title="Version history"]');
     await expect(historyBtn).toBeVisible();
   });
 
-  test("History button opens version history dialog", async ({ page }) => {
-    await page.locator('button:has-text("History")').click();
-    const dialog = page.locator('[role="dialog"]');
-    await expect(dialog).toBeVisible({ timeout: 3_000 });
-    await expect(dialog.locator("text=Version History")).toBeVisible();
+  test("History button toggles version panel", async ({ page }) => {
+    await page.locator('button[title="Version history"]').click();
+    const panel = page.locator("text=Versions").first();
+    await expect(panel).toBeVisible({ timeout: 3_000 });
   });
 
-  test("Version history shows empty state for new document", async ({ page }) => {
-    await page.locator('button:has-text("History")').click();
-    const dialog = page.locator('[role="dialog"]');
-    await expect(dialog).toBeVisible({ timeout: 3_000 });
-    await expect(dialog.locator("text=No versions yet")).toBeVisible();
-  });
-
-  test("Version history dialog can be closed", async ({ page }) => {
-    await page.locator('button:has-text("History")').click();
-    const dialog = page.locator('[role="dialog"]');
-    await expect(dialog).toBeVisible({ timeout: 3_000 });
-    await page.keyboard.press("Escape");
-    await expect(dialog).toBeHidden({ timeout: 2_000 });
+  test("Version panel can be closed", async ({ page }) => {
+    await page.locator('button[title="Version history"]').click();
+    const panel = page.locator("text=Versions").first();
+    await expect(panel).toBeVisible({ timeout: 3_000 });
+    // Click button again to toggle off
+    await page.locator('button[title="Version history"]').click();
+    await expect(panel).toBeHidden({ timeout: 2_000 });
   });
 });
 

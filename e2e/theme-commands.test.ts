@@ -117,6 +117,7 @@ test.describe("View modes", () => {
 test.describe("Panel toggles", () => {
   test("AI panel toggles on/off", async ({ page }) => {
     await waitForAppReady(page);
+    await createNewDocument(page);
     const aiBtn = page.locator('button[title="Claude AI"]');
     await aiBtn.click();
     await page.waitForTimeout(500);
@@ -128,6 +129,7 @@ test.describe("Panel toggles", () => {
 
   test("Version panel toggles on/off", async ({ page }) => {
     await waitForAppReady(page);
+    await createNewDocument(page);
     const versionBtn = page.locator('button[title="Version history"]');
     await versionBtn.click();
     await page.waitForTimeout(500);
@@ -138,6 +140,7 @@ test.describe("Panel toggles", () => {
 
   test("Share dialog opens", async ({ page }) => {
     await waitForAppReady(page);
+    await createNewDocument(page);
     await page.locator('button[title="Share"]').click();
     // Share dialog should appear
     const dialog = page.locator('[role="dialog"]').first();

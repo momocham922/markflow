@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Windows setup bundle (contains signing key)
+.windows-setup/
+
 # Build
 dist/
 src-tauri/target/

@@ -16,6 +16,7 @@ import {
   Lock,
   PenLine,
   Network,
+  Pencil,
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
@@ -25,9 +26,9 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, type Team } from "@/services/sharing";
+import { fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments, createTeamDocument, removeCollaborator, getTeamFolders, setTeamFolders, moveTeamDocument, copyTeamDocToPersonal, moveDocToTeam, type Team } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
-import { isIOS } from "@/platform";
+import { isIOS, isMobile } from "@/platform";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -77,7 +78,7 @@ function buildTree(folders: string[], docs: Document[]): FolderNode {
 // ── Types ────────────────────────────────────────────────────
 
 interface TeamWithDocs extends Team {
-  docs: { id: string; title: string; folder: string }[];
+  docs: { id: string; title: string; folder: string; updatedAt: number }[];
   folders: string[];
 }
 
@@ -95,6 +96,7 @@ export function Sidebar() {
     folders,
     createFolder,
     deleteFolder,
+    renameFolder,
     moveDocument,
   } = useAppStore();
 
@@ -104,14 +106,18 @@ export function Sidebar() {
   const [creatingFolderIn, setCreatingFolderIn] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
-  const dragRef = useRef<{ docId: string; teamId?: string; startX: number; startY: number; active: boolean } | null>(null);
+  const dragRef = useRef<{ docId?: string; folderPath?: string; teamId?: string; startX: number; startY: number; active: boolean } | null>(null);
   const dragHappenedRef = useRef(false);
   const [dragIndicator, setDragIndicator] = useState<{ docId: string; x: number; y: number } | null>(null);
   const moveDocRef = useRef(moveDocument);
   moveDocRef.current = moveDocument;
   const moveTeamDocFnRef = useRef<(docId: string, folder: string) => void>(() => {});
+  const crossCopyRef = useRef<(docId: string, folder: string) => void>(() => {});
+  const crossMoveToTeamRef = useRef<(docId: string, teamId: string, folder: string) => void>(() => {});
   const [contextMenu, setContextMenu] = useState<{ docId: string; x: number; y: number } | null>(null);
   const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
+  const [renamingFolderPath, setRenamingFolderPath] = useState<string | null>(null);
+  const [renameFolderValue, setRenameFolderValue] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const ime = useIMEGuard();
 
@@ -151,19 +157,22 @@ export function Sidebar() {
       if (teamsWithDocs.length === 1) {
         setExpandedTeams(new Set([teamsWithDocs[0].id]));
       }
-
-      // Reconcile: remove local team docs that were deleted from Firestore
-      const firestoreTeamDocIds = new Set<string>();
-      for (const team of teamsWithDocs) {
-        for (const doc of team.docs) firestoreTeamDocIds.add(doc.id);
-      }
+      // Sync team doc titles to app-store so Editor toolbar reflects renames.
+      // Only update titles for non-owned docs — the owner's local title is
+      // authoritative and will be pushed to Firestore via syncToCloud.
+      // Overwriting owned docs here causes a race condition where a stale
+      // Firestore title ("Untitled") reverts a local rename.
       const appStore = useAppStore.getState();
-      for (const doc of appStore.documents) {
-        if (!doc.teamId) continue;
-        if (firestoreTeamDocIds.has(doc.id)) continue;
-        // Grace period: skip docs created in the last 30s (might not be indexed yet)
-        if (Date.now() - doc.createdAt < 30_000) continue;
-        appStore.deleteDocument(doc.id);
+      for (const team of teamsWithDocs) {
+        for (const td of team.docs) {
+          const local = appStore.documents.find((d) => d.id === td.id);
+          if (local && local.title !== td.title && local.ownerId !== uid) {
+            // Only update title if cloud version is newer than local
+            if (td.updatedAt > (local.updatedAt ?? 0)) {
+              appStore.updateDocument(td.id, { title: td.title, titlePinned: true });
+            }
+          }
+        }
       }
     } catch { /* ignore */ }
   }, []);
@@ -268,6 +277,7 @@ export function Sidebar() {
     const content = isMindMap
       ? JSON.stringify({ nodes: [{ id: "root", label: title, children: [] }] })
       : "# Untitled\n";
+    const authUser = useAuthStore.getState().user;
     const doc: Document = {
       id: crypto.randomUUID(),
       title,
@@ -276,12 +286,26 @@ export function Sidebar() {
       updatedAt: Date.now(),
       folder,
       tags: [],
-      ownerId: null,
+      ownerId: authUser?.uid ?? null,
       docType,
     };
     addDocument(doc);
     setActiveDocId(doc.id);
     setExpandedFolders((prev) => new Set([...prev, folder]));
+    if (authUser) {
+      import("@/services/firebase").then(({ saveDocumentToFirestore }) => {
+        saveDocumentToFirestore({
+          id: doc.id,
+          title: doc.title,
+          content: doc.content,
+          ownerId: authUser.uid,
+          ownerName: authUser.displayName || authUser.email || undefined,
+          folder: doc.folder,
+          tags: doc.tags,
+          updatedAt: doc.updatedAt,
+        }).catch((err) => console.error("[new] Cloud upload failed:", err));
+      }).catch(() => {});
+    }
   };
 
   const handleCreateFolder = (parentPath: string) => {
@@ -296,7 +320,7 @@ export function Sidebar() {
 
   const handleCreateTeamDoc = async (team: TeamWithDocs, folder = "/") => {
     if (!user) return;
-    const newDocId = await createTeamDocument(team.id, user.uid);
+    const newDocId = await createTeamDocument(team.id, user.uid, user.displayName || user.email || undefined);
     // Update folder in Firestore if not root
     if (folder !== "/") {
       await moveTeamDocument(newDocId, folder).catch(console.error);
@@ -304,7 +328,7 @@ export function Sidebar() {
     const newDoc: Document = {
       id: newDocId,
       title: "Untitled",
-      content: "# Untitled\n",
+      content: "",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       folder,
@@ -316,24 +340,14 @@ export function Sidebar() {
     addDocument(newDoc);
     setActiveDocId(newDocId);
     setExpandedTeams((prev) => new Set([...prev, team.id]));
-    // Update local teams state immediately
-    setTeams((prev) =>
-      prev.map((t) =>
-        t.id === team.id
-          ? { ...t, docs: [...t.docs, { id: newDocId, title: "Untitled", folder }] }
-          : t,
-      ),
-    );
+    // No need to manually update teams state here — the merge logic at render
+    // time (localTeamDocs) will pick up the new doc from app-store documents.
+    // Manually adding to team.docs causes duplicates when refreshTeams polls.
   };
 
   const handleDeleteTeamDoc = async (docId: string, team: TeamWithDocs) => {
-    // Remove from local store
-    deleteDocument(docId);
-    // Remove from Firestore
-    try {
-      const { deleteDocumentFromFirestore } = await import("@/services/firebase");
-      await deleteDocumentFromFirestore(docId);
-    } catch { /* ignore */ }
+    // deleteDocument handles both local removal and cloud deletion (via deleteFromCloud)
+    await deleteDocument(docId);
     // Update local teams state immediately
     setTeams((prev) =>
       prev.map((t) =>
@@ -393,6 +407,49 @@ export function Sidebar() {
   };
   moveTeamDocFnRef.current = handleMoveTeamDoc;
 
+  // Cross-section: Team doc → Personal (copy)
+  const handleCopyTeamDocToPersonal = async (docId: string, folder: string) => {
+    if (!user) return;
+    try {
+      const result = await copyTeamDocToPersonal(docId, user.uid, folder);
+      addDocument({
+        id: result.id,
+        title: result.title,
+        content: result.content,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        folder,
+        tags: [],
+        ownerId: user.uid,
+      });
+      setActiveDocId(result.id);
+    } catch (err) {
+      console.error("Failed to copy team doc:", err);
+    }
+  };
+  crossCopyRef.current = handleCopyTeamDocToPersonal;
+
+  // Cross-section: Personal doc → Team (move)
+  const handleMoveDocToTeam = async (docId: string, teamId: string, folder: string) => {
+    try {
+      await moveDocToTeam(docId, teamId, folder);
+      // Update local store
+      updateDocument(docId, { teamId, folder, isShared: true, updatedAt: Date.now() });
+      // Add to team docs list
+      const localDoc = documents.find((d) => d.id === docId);
+      setTeams((prev) =>
+        prev.map((t) =>
+          t.id === teamId
+            ? { ...t, docs: [...t.docs, { id: docId, title: localDoc?.title || "Untitled", folder, updatedAt: Date.now() }] }
+            : t,
+        ),
+      );
+    } catch (err) {
+      console.error("Failed to move doc to team:", err);
+    }
+  };
+  crossMoveToTeamRef.current = handleMoveDocToTeam;
+
   const openTeamOrSharedDoc = async (docIdToOpen: string, teamId?: string) => {
     const existing = documents.find((d) => d.id === docIdToOpen);
     if (existing) {
@@ -429,15 +486,22 @@ export function Sidebar() {
       updateDocument(docId, { titlePinned: false, updatedAt: Date.now() });
     } else if (trimmed !== documents.find((d) => d.id === docId)?.title) {
       updateDocument(docId, { title: trimmed, titlePinned: true, updatedAt: Date.now() });
-      // Also update team local state so title reflects immediately
-      setTeams((prev) =>
-        prev.map((t) => ({
-          ...t,
-          docs: t.docs.map((d) => d.id === docId ? { ...d, title: trimmed } : d),
-        })),
-      );
     }
     setRenamingDocId(null);
+  };
+
+  const commitFolderRename = (oldPath: string) => {
+    const newName = renameFolderValue.trim();
+    if (!newName || /[/\\]/.test(newName)) {
+      setRenamingFolderPath(null);
+      return;
+    }
+    const parent = oldPath.substring(0, oldPath.lastIndexOf("/")) || "";
+    const newPath = parent ? `${parent}/${newName}` : `/${newName}`;
+    if (newPath !== oldPath) {
+      renameFolder(oldPath, newPath);
+    }
+    setRenamingFolderPath(null);
   };
 
   const isDark = typeof document !== "undefined" && document.documentElement.classList.contains("dark");
@@ -463,7 +527,7 @@ export function Sidebar() {
       onPointerDown={(e) => {
         e.stopPropagation();
       }}
-      style={{ background: "none", border: "none", padding: "0 2px", margin: 0, cursor: "pointer", flexShrink: 0, fontSize: 14, lineHeight: 1, color: "var(--muted-foreground, #888)" }}
+      style={{ background: "none", border: "none", padding: isMobile ? "4px 8px" : "0 2px", margin: 0, cursor: "pointer", flexShrink: 0, fontSize: isMobile ? 18 : 14, lineHeight: 1, color: "var(--muted-foreground, #888)", minWidth: isMobile ? 32 : undefined, minHeight: isMobile ? 32 : undefined, display: "flex", alignItems: "center", justifyContent: "center" }}
     >
       ⋮
     </button>
@@ -478,7 +542,7 @@ export function Sidebar() {
           e.preventDefault();
           const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
           setContextMenu({ docId: doc.id, x: e.clientX, y: rect.top });
-        } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== doc.id) {
+        } else if (e.button === 0 && !e.ctrlKey && !isIOS && renamingDocId !== doc.id) {
           dragRef.current = { docId: doc.id, startX: e.clientX, startY: e.clientY, active: false };
         }
       }}
@@ -491,13 +555,14 @@ export function Sidebar() {
         setRenameValue(doc.title);
       }}
       className={cn(
-        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
+        "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
+        isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
       )}
     >
-      {doc.docType === "mindmap" ? <Network className="h-3.5 w-3.5 shrink-0" /> : <FileText className="h-3.5 w-3.5 shrink-0" />}
+      {doc.docType === "mindmap" ? <Network className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"} /> : <FileText className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"} />}
       {renamingDocId === doc.id ? (
         <input
           autoFocus
@@ -547,7 +612,8 @@ export function Sidebar() {
         key={doc.id}
         onClick={() => setActiveDocId(doc.id)}
         className={cn(
-          "group flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+          "group flex w-full flex-col gap-0.5 rounded-md px-2 text-left text-xs transition-colors",
+          isMobile ? "py-1" : "py-1.5",
           activeDocId === doc.id
             ? "bg-sidebar-accent text-sidebar-accent-foreground"
             : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -581,24 +647,57 @@ export function Sidebar() {
           <div
             data-folder-path={node.path}
             className={cn(
-              "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              "group flex items-center gap-1.5 rounded-md px-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile ? "py-1" : "py-1.5",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
-            onClick={() => toggleFolder(node.path)}
+            onClick={() => { if (renamingFolderPath !== node.path) toggleFolder(node.path); }}
+            onPointerDown={(e) => {
+              if (e.button === 0 && !isIOS && renamingFolderPath !== node.path) {
+                dragRef.current = { folderPath: node.path, startX: e.clientX, startY: e.clientY, active: false };
+              }
+            }}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              setRenamingFolderPath(node.path);
+              setRenameFolderValue(node.name);
+            }}
           >
             {isExpanded ? (
-              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronDown className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             ) : (
-              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronRight className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             )}
             {isExpanded ? (
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <FolderOpen className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             ) : (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <Folder className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             )}
-            <span className="flex-1 truncate">{node.name}</span>
+            {renamingFolderPath === node.path ? (
+              <input
+                autoFocus
+                className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-xs"
+                value={renameFolderValue}
+                onChange={(e) => setRenameFolderValue(e.target.value)}
+                onCompositionStart={ime.onCompositionStart}
+                onCompositionEnd={ime.onCompositionEnd}
+                onBlur={() => commitFolderRename(node.path)}
+                onKeyDown={(e) => {
+                  if (ime.isComposing()) return;
+                  if (e.key === "Enter") commitFolderRename(node.path);
+                  if (e.key === "Escape") setRenamingFolderPath(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span className="flex-1 truncate">{node.name}</span>
+            )}
             <div className="flex gap-0.5 opacity-0 group-hover:opacity-100">
+              <Pencil
+                className="h-3 w-3 text-muted-foreground hover:text-foreground"
+                onClick={(e) => { e.stopPropagation(); setRenamingFolderPath(node.path); setRenameFolderValue(node.name); }}
+              />
               <Plus
                 className="h-3 w-3 text-muted-foreground hover:text-foreground"
                 onClick={(e) => { e.stopPropagation(); handleNew(node.path); }}
@@ -652,7 +751,7 @@ export function Sidebar() {
             {node.children.map((child) => renderFolder(child, isRoot ? depth : depth + 1))}
             <div data-folder-path={node.path}>
               {node.docs.map((doc) => (
-                <div key={doc.id} style={{ paddingLeft: `${(isRoot ? depth : depth + 1) * 12}px` }}>
+                <div key={doc.id} style={{ paddingLeft: `${(isRoot ? depth : depth + 1) * 12 + 16}px` }}>
                   {renderDoc(doc)}
                 </div>
               ))}
@@ -671,12 +770,12 @@ export function Sidebar() {
     );
   };
 
-  const renderTeamDoc = (td: { id: string; title: string; folder: string }, team: TeamWithDocs, depth: number) => {
+  const renderTeamDoc = (td: { id: string; title: string; folder: string; updatedAt: number }, team: TeamWithDocs, depth: number) => {
     const localDoc = documents.find((d) => d.id === td.id);
     const title = localDoc?.title || td.title;
     const isOwnDoc = localDoc?.ownerId === user?.uid;
     return (
-      <div key={td.id} style={{ paddingLeft: `${depth * 12}px` }}>
+      <div key={td.id} style={{ paddingLeft: `${depth * 12 + 16}px` }}>
         <div
           role="button"
           tabIndex={0}
@@ -685,7 +784,7 @@ export function Sidebar() {
               e.preventDefault();
               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
               setContextMenu({ docId: td.id, x: e.clientX, y: rect.top });
-            } else if (e.button === 0 && !e.ctrlKey && renamingDocId !== td.id) {
+            } else if (e.button === 0 && !e.ctrlKey && !isIOS && renamingDocId !== td.id) {
               dragRef.current = { docId: td.id, teamId: team.id, startX: e.clientX, startY: e.clientY, active: false };
             }
           }}
@@ -698,13 +797,14 @@ export function Sidebar() {
             setRenameValue(title);
           }}
           className={cn(
-            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer",
+            "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
+            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
           )}
         >
-          <FileText className="h-3.5 w-3.5 shrink-0" />
+          <FileText className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
           {renamingDocId === td.id ? (
             <input
               autoFocus
@@ -739,7 +839,7 @@ export function Sidebar() {
     );
   };
 
-  const renderTeamFolder = (node: FolderNode, team: TeamWithDocs, allTeamDocs: { id: string; title: string; folder: string }[], depth = 0) => {
+  const renderTeamFolder = (node: FolderNode, team: TeamWithDocs, allTeamDocs: { id: string; title: string; folder: string; updatedAt: number }[], depth = 0) => {
     const key = `${team.id}:${node.path}`;
     const isExpanded = expandedTeamFolders.has(key);
     const isRoot = node.path === "/";
@@ -762,21 +862,22 @@ export function Sidebar() {
             data-folder-path={node.path}
             data-team-id={team.id}
             className={cn(
-              "group flex items-center gap-1 rounded-md px-2 py-1 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              "group flex items-center gap-1.5 rounded-md px-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile ? "py-1" : "py-1.5",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
             onClick={toggleExpand}
           >
             {isExpanded ? (
-              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronDown className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             ) : (
-              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <ChevronRight className={cn("shrink-0 text-muted-foreground", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
             )}
             {isExpanded ? (
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <FolderOpen className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             ) : (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <Folder className={cn("shrink-0 text-muted-foreground", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
             )}
             <span className="flex-1 truncate">{node.name}</span>
             <div className="flex gap-0.5 opacity-0 group-hover:opacity-100">
@@ -856,13 +957,14 @@ export function Sidebar() {
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
       if (!dragRef.current) return;
-      const { startX, startY, docId } = dragRef.current;
+      const { startX, startY } = dragRef.current;
       const dist = Math.sqrt((e.clientX - startX) ** 2 + (e.clientY - startY) ** 2);
       if (!dragRef.current.active && dist > 5) {
         dragRef.current.active = true;
       }
       if (dragRef.current.active) {
-        setDragIndicator({ docId, x: e.clientX, y: e.clientY });
+        const label = dragRef.current.docId || dragRef.current.folderPath?.split("/").pop() || "";
+        setDragIndicator({ docId: label, x: e.clientX, y: e.clientY });
         const el = document.elementFromPoint(e.clientX, e.clientY);
         const folderEl = (el as HTMLElement)?.closest?.("[data-folder-path]") as HTMLElement | null;
         const fp = folderEl?.dataset.folderPath || null;
@@ -886,11 +988,29 @@ export function Sidebar() {
         const folderEl = (el as HTMLElement)?.closest?.("[data-folder-path]") as HTMLElement | null;
         const targetFolder = folderEl?.dataset.folderPath;
         const targetTeamId = folderEl?.dataset.teamId;
-        if (targetFolder) {
-          if (dragRef.current.teamId && targetTeamId) {
-            moveTeamDocFnRef.current(dragRef.current.docId, targetFolder);
-          } else if (!dragRef.current.teamId && !targetTeamId) {
-            moveDocRef.current(dragRef.current.docId, targetFolder);
+
+        if (dragRef.current.folderPath && targetFolder) {
+          // Folder → Folder: move folder into target
+          const srcPath = dragRef.current.folderPath;
+          if (srcPath !== targetFolder && !targetFolder.startsWith(srcPath + "/")) {
+            const folderName = srcPath.split("/").pop() || "";
+            const newPath = targetFolder === "/" ? `/${folderName}` : `${targetFolder}/${folderName}`;
+            if (newPath !== srcPath) {
+              const { renameFolder: rf } = useAppStore.getState();
+              rf(srcPath, newPath);
+            }
+          }
+        } else if (dragRef.current.docId && targetFolder) {
+          const srcTeamId = dragRef.current.teamId;
+          const docId = dragRef.current.docId;
+          if (srcTeamId && targetTeamId) {
+            moveTeamDocFnRef.current(docId, targetFolder);
+          } else if (!srcTeamId && !targetTeamId) {
+            moveDocRef.current(docId, targetFolder);
+          } else if (srcTeamId && !targetTeamId) {
+            crossCopyRef.current(docId, targetFolder);
+          } else if (!srcTeamId && targetTeamId) {
+            crossMoveToTeamRef.current(docId, targetTeamId, targetFolder);
           }
         }
         dragHappenedRef.current = true;
@@ -920,17 +1040,17 @@ export function Sidebar() {
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 text-sidebar-foreground"
+          className={isMobile ? "h-11 w-11 text-sidebar-foreground" : "h-7 w-7 text-sidebar-foreground"}
           onClick={toggleSidebar}
         >
-          <PanelLeftClose className="h-4 w-4" />
+          <PanelLeftClose className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
         </Button>
       </div>
 
       {/* Search */}
       <div className="px-3 pb-2">
-        <div className="flex items-center gap-2 rounded-md bg-sidebar-accent px-2 py-1.5">
-          <Search className="h-3.5 w-3.5 text-muted-foreground" />
+        <div className={cn("flex items-center gap-2 rounded-md bg-sidebar-accent px-2", isMobile ? "py-1" : "py-1.5")}>
+          <Search className={isMobile ? "h-4.5 w-4.5 text-muted-foreground" : "h-3.5 w-3.5 text-muted-foreground"} />
           <input
             type="text"
             placeholder="Search title & content..."
@@ -988,23 +1108,25 @@ export function Sidebar() {
             <div className="px-1 pb-0">
               <div className="flex items-center justify-between">
                 <button
-                  className="flex flex-1 items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  className={cn("flex flex-1 items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-1" : "py-1.5")}
                   onClick={() => setMyDocsExpanded((v) => !v)}
                 >
-                  {myDocsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                  <Lock className="h-3 w-3" />
+                  {myDocsExpanded ? <ChevronDown className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} /> : <ChevronRight className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />}
+                  <Lock className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                   <span className="font-medium">My Documents</span>
                   <span className="ml-auto text-[10px]">{personalDocs.length}</span>
                 </button>
                 <div className="flex gap-0.5 pr-2">
                   <span title="New document" onClick={() => { handleNew(); setMyDocsExpanded(true); }}>
-                    <Plus className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
+                    <Plus className={cn("text-muted-foreground hover:text-foreground cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
                   </span>
-                  <span title="New mind map" onClick={() => { handleNew("/", "mindmap"); setMyDocsExpanded(true); }}>
-                    <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
-                  </span>
+                  {!isMobile && (
+                    <span title="New mind map" onClick={() => { handleNew("/", "mindmap"); setMyDocsExpanded(true); }}>
+                      <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
+                    </span>
+                  )}
                   <FolderPlus
-                    className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer"
+                    className={cn("text-muted-foreground hover:text-foreground cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")}
                     onClick={() => { setCreatingFolderIn("/"); setNewFolderName(""); setMyDocsExpanded(true); }}
                   />
                 </div>
@@ -1027,11 +1149,11 @@ export function Sidebar() {
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
                   <button
-                    className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-1" : "py-1.5")}
                     onClick={() => setTeamsExpanded((v) => !v)}
                   >
-                    {teamsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                    <Users className="h-3 w-3" />
+                    {teamsExpanded ? <ChevronDown className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} /> : <ChevronRight className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />}
+                    <Users className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     <span className="font-medium">Teams</span>
                     <span className="ml-auto text-[10px]">{teams.length}</span>
                   </button>
@@ -1049,9 +1171,9 @@ export function Sidebar() {
                         const localTeamDocs = documents.filter(
                           (d) => d.teamId === team.id && !firestoreIds.has(d.id),
                         );
-                        const allTeamDocs: { id: string; title: string; folder: string }[] = [
+                        const allTeamDocs: { id: string; title: string; folder: string; updatedAt: number }[] = [
                           ...team.docs,
-                          ...localTeamDocs.map((d) => ({ id: d.id, title: d.title, folder: d.folder || "/" })),
+                          ...localTeamDocs.map((d) => ({ id: d.id, title: d.title, folder: d.folder || "/", updatedAt: d.updatedAt ?? Date.now() })),
                         ];
                         // Build folder tree for this team's docs
                         const teamFolders = ["/", ...(team.folders || [])];
@@ -1073,7 +1195,7 @@ export function Sidebar() {
                           <div key={team.id}>
                             <div className="flex items-center">
                               <button
-                                className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                                className={cn("flex flex-1 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors", isMobile ? "py-1" : "py-1.5")}
                                 onClick={() => setExpandedTeams((prev) => {
                                   const next = new Set(prev);
                                   if (next.has(team.id)) next.delete(team.id);
@@ -1081,18 +1203,18 @@ export function Sidebar() {
                                   return next;
                                 })}
                               >
-                                {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-                                <Users className="h-3 w-3 shrink-0" />
+                                {isExpanded ? <ChevronDown className={cn("shrink-0", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} /> : <ChevronRight className={cn("shrink-0", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />}
+                                <Users className={cn("shrink-0", isMobile ? "h-3.5 w-3.5" : "h-3 w-3")} />
                                 <span className="flex-1 truncate">{team.name || "(no name)"}</span>
                                 <span className="text-[10px] text-muted-foreground">{allTeamDocs.length}</span>
                               </button>
                               <div className="flex gap-0.5 pr-1">
                                 <Plus
-                                  className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                                  className={cn("text-muted-foreground hover:text-foreground shrink-0 cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3 w-3")}
                                   onClick={() => handleCreateTeamDoc(team)}
                                 />
                                 <FolderPlus
-                                  className="h-3 w-3 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                                  className={cn("text-muted-foreground hover:text-foreground shrink-0 cursor-pointer", isMobile ? "h-4.5 w-4.5" : "h-3 w-3")}
                                   onClick={() => { setCreatingTeamFolderIn({ teamId: team.id, parent: "/" }); setNewTeamFolderName(""); setExpandedTeams((prev) => new Set([...prev, team.id])); }}
                                 />
                               </div>
@@ -1121,15 +1243,15 @@ export function Sidebar() {
                 <Separator className="my-2" />
                 <div className="px-1 pb-1">
                   <button
-                    className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn("flex w-full items-center gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors", isMobile ? "py-1" : "py-1.5")}
                     onClick={() => setSharedExpanded((v) => !v)}
                   >
                     {sharedExpanded ? (
-                      <ChevronDown className="h-3 w-3" />
+                      <ChevronDown className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     ) : (
-                      <ChevronRight className="h-3 w-3" />
+                      <ChevronRight className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     )}
-                    <Share2 className="h-3 w-3" />
+                    <Share2 className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
                     <span className="font-medium">Shared with me</span>
                     <span className="ml-auto text-[10px]">{sharedDocs.length}</span>
                   </button>
@@ -1145,13 +1267,14 @@ export function Sidebar() {
                           key={sd.id}
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
-                            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                            "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors",
+                            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
                           )}
                         >
-                          <FileText className="h-3.5 w-3.5 shrink-0" />
+                          <FileText className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")} />
                           <span className="flex-1 truncate">{sd.title}</span>
                           <span className="text-[9px] text-muted-foreground capitalize shrink-0">
                             {sd.role}
@@ -1194,8 +1317,8 @@ export function Sidebar() {
         <span className="opacity-50">v{__APP_VERSION__}</span>
       </div>
 
-      {/* Floating context menu */}
-      {contextMenu && (() => {
+      {/* Floating context menu — portaled to body to avoid overflow clipping on iOS */}
+      {contextMenu && createPortal((() => {
         const doc = documents.find((d) => d.id === contextMenu.docId);
         const teamDoc = teams.flatMap((t) => t.docs.map((d) => ({ ...d, team: t }))).find((d) => d.id === contextMenu.docId);
         const isTeam = !!teamDoc;
@@ -1299,7 +1422,7 @@ export function Sidebar() {
             </div>
           </>
         );
-      })()}
+      })(), document.body)}
 
       {/* Drag indicator — follows pointer during drag */}
       {dragIndicator && createPortal(
@@ -1320,7 +1443,7 @@ export function Sidebar() {
             fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif",
           }}
         >
-          {documents.find((d) => d.id === dragIndicator.docId)?.title || ""}
+          {documents.find((d) => d.id === dragIndicator.docId)?.title || dragIndicator.docId}
         </div>,
         document.body,
       )}

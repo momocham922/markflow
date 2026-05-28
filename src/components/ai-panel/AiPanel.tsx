@@ -20,6 +20,11 @@ import {
   Paperclip,
   Settings,
   Image as ImageIcon,
+  Wrench,
+  Wand2,
+  Plus,
+  MessageSquare,
+  ChevronDown,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -36,8 +41,15 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
-import { signInWithGoogle } from "@/services/firebase";
-import { isIOS } from "@/platform";
+import {
+  signInWithGoogle,
+  saveAiChatToCloud,
+  fetchAiChatFromCloud,
+  deleteAiChatFromCloud,
+  saveAiThreadsToCloud,
+  fetchAiThreadsFromCloud,
+} from "@/services/firebase";
+import { isIOS, isMobile } from "@/platform";
 import * as db from "@/services/database";
 
 const iconMap: Record<string, React.ElementType> = {
@@ -62,6 +74,13 @@ interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   images?: { data: string; mediaType: string }[];
+  generatedImage?: { url: string; markdown: string };
+}
+
+interface ChatThread {
+  id: string;
+  title: string;
+  createdAt: number;
 }
 
 // --- Custom Rules Dialog (inline) ---
@@ -116,10 +135,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const { activeDocId, documents } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const { getSelectedText, replaceSelection, appendToDoc } = useEditorStore();
+  const { getSelectedText, replaceSelection, appendToDoc, insertAtCursor, setPendingInsert } = useEditorStore();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [apiMessages, setApiMessages] = useState<ClaudeMessage[]>([]);
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [threadListOpen, setThreadListOpen] = useState(false);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -132,6 +154,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prevDocIdRef = useRef<string | null>(null);
+  const threadListRef = useRef<HTMLDivElement>(null);
 
   // Load custom rules from DB on mount
   useEffect(() => {
@@ -143,20 +166,247 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const saveCustomRules = useCallback((rules: string) => {
     setCustomRules(rules);
     db.setSetting("ai_custom_rules", rules).catch(() => {});
+    // Cloud sync
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) {
+      import("@/services/firebase").then(({ saveUserSettingsToFirestore }) => {
+        saveUserSettingsToFirestore(uid, { ai_custom_rules: rules }).catch(() => {});
+      });
+    }
   }, []);
 
-  // Reset conversation on document switch
+  // ─── Thread-based chat persistence ─────────────────────────
+
+  /** Save thread list metadata (local + cloud) */
+  const saveThreadList = useCallback((docId: string, threadList: ChatThread[]) => {
+    db.setSetting(`ai_chat_threads_${docId}`, JSON.stringify(threadList)).catch(() => {});
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) saveAiThreadsToCloud(uid, docId, threadList).catch(() => {});
+  }, []);
+
+  /** Save chat content for a specific thread (local + cloud) */
+  const saveChatHistory = useCallback((docId: string, threadId: string, msgs: ChatMessage[], apiMsgs: ClaudeMessage[]) => {
+    if (!docId || !threadId || msgs.length === 0) return;
+    const toSave = { messages: msgs, apiMessages: apiMsgs };
+    const key = `ai_chat_${docId}_${threadId}`;
+    db.setSetting(key, JSON.stringify(toSave)).catch(() => {});
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) saveAiChatToCloud(uid, `${docId}__${threadId}`, toSave).catch(() => {});
+  }, []);
+
+  /** Load thread content (cloud-first, local fallback) */
+  const loadThreadContent = useCallback(async (docId: string, threadId: string) => {
+    const uid = useAuthStore.getState().user?.uid;
+    // Cloud first
+    if (uid) {
+      try {
+        const cloudData = await fetchAiChatFromCloud(uid, `${docId}__${threadId}`);
+        if (cloudData && Array.isArray(cloudData.messages) && cloudData.messages.length > 0) {
+          setMessages(cloudData.messages as ChatMessage[]);
+          setApiMessages((cloudData.apiMessages || []) as ClaudeMessage[]);
+          return;
+        }
+      } catch { /* cloud unavailable */ }
+    }
+    // Local fallback
+    try {
+      const raw = await db.getSetting(`ai_chat_${docId}_${threadId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setMessages(parsed.messages || []);
+        setApiMessages(parsed.apiMessages || []);
+        return;
+      }
+    } catch { /* ignore */ }
+    setMessages([]);
+    setApiMessages([]);
+  }, []);
+
+  /** Load all threads for a document (with backward compat migration) */
+  const loadDocThreads = useCallback(async (docId: string) => {
+    let threadList: ChatThread[] = [];
+
+    // Try cloud first for thread metadata
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) {
+      try {
+        const cloudThreads = await fetchAiThreadsFromCloud(uid, docId);
+        if (cloudThreads && cloudThreads.length > 0) {
+          threadList = cloudThreads;
+        }
+      } catch { /* cloud unavailable */ }
+    }
+
+    // Local fallback
+    if (threadList.length === 0) {
+      try {
+        const raw = await db.getSetting(`ai_chat_threads_${docId}`);
+        if (raw) threadList = JSON.parse(raw);
+      } catch { /* ignore */ }
+    }
+
+    // Backward compatibility: migrate old single-thread data
+    if (threadList.length === 0) {
+      let hasOldData = false;
+      if (uid) {
+        try {
+          const oldCloud = await fetchAiChatFromCloud(uid, docId);
+          if (oldCloud && Array.isArray(oldCloud.messages) && oldCloud.messages.length > 0) {
+            hasOldData = true;
+            // Migrate to new format
+            const defaultId = "default";
+            const firstMsg = (oldCloud.messages[0] as ChatMessage)?.content || "Chat";
+            threadList = [{ id: defaultId, title: firstMsg.slice(0, 40), createdAt: Date.now() }];
+            // Save migrated data under new key
+            saveChatHistory(docId, defaultId, oldCloud.messages as ChatMessage[], (oldCloud.apiMessages || []) as ClaudeMessage[]);
+            saveThreadList(docId, threadList);
+            // Delete old format
+            deleteAiChatFromCloud(uid, docId).catch(() => {});
+          }
+        } catch { /* ignore */ }
+      }
+      if (!hasOldData) {
+        try {
+          const oldLocal = await db.getSetting(`ai_chat_${docId}`);
+          if (oldLocal) {
+            const parsed = JSON.parse(oldLocal);
+            if (parsed.messages?.length > 0) {
+              const defaultId = "default";
+              const firstMsg = (parsed.messages[0] as ChatMessage)?.content || "Chat";
+              threadList = [{ id: defaultId, title: firstMsg.slice(0, 40), createdAt: Date.now() }];
+              saveChatHistory(docId, defaultId, parsed.messages, parsed.apiMessages || []);
+              saveThreadList(docId, threadList);
+              db.setSetting(`ai_chat_${docId}`, "").catch(() => {}); // Clear old
+            }
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    setThreads(threadList);
+    const latestId = threadList.length > 0 ? threadList[threadList.length - 1].id : null;
+    setActiveThreadId(latestId);
+    if (latestId && docId) {
+      await loadThreadContent(docId, latestId);
+    } else {
+      setMessages([]);
+      setApiMessages([]);
+    }
+  }, [saveChatHistory, saveThreadList, loadThreadContent]);
+
+  /** Create a new thread */
+  const createNewThread = useCallback(() => {
+    if (!activeDocId) return;
+    // Save current thread first
+    if (activeThreadId && messages.length > 0) {
+      saveChatHistory(activeDocId, activeThreadId, messages, apiMessages);
+    }
+    const newThread: ChatThread = {
+      id: crypto.randomUUID().slice(0, 8),
+      title: "New topic",
+      createdAt: Date.now(),
+    };
+    const newList = [...threads, newThread];
+    setThreads(newList);
+    setActiveThreadId(newThread.id);
+    setMessages([]);
+    setApiMessages([]);
+    setStreamingText("");
+    saveThreadList(activeDocId, newList);
+  }, [activeDocId, activeThreadId, messages, apiMessages, threads, saveChatHistory, saveThreadList]);
+
+  /** Switch to a thread */
+  const switchThread = useCallback(async (threadId: string) => {
+    if (!activeDocId || threadId === activeThreadId) return;
+    // Save current
+    if (activeThreadId && messages.length > 0) {
+      saveChatHistory(activeDocId, activeThreadId, messages, apiMessages);
+    }
+    setActiveThreadId(threadId);
+    setStreamingText("");
+    setThreadListOpen(false);
+    await loadThreadContent(activeDocId, threadId);
+  }, [activeDocId, activeThreadId, messages, apiMessages, saveChatHistory, loadThreadContent]);
+
+  /** Delete a thread */
+  const deleteThread = useCallback(async (threadId: string) => {
+    if (!activeDocId) return;
+    const newList = threads.filter((t) => t.id !== threadId);
+    setThreads(newList);
+    saveThreadList(activeDocId, newList);
+    // Delete data
+    const key = `ai_chat_${activeDocId}_${threadId}`;
+    db.setSetting(key, "").catch(() => {});
+    const uid = useAuthStore.getState().user?.uid;
+    if (uid) deleteAiChatFromCloud(uid, `${activeDocId}__${threadId}`).catch(() => {});
+    // Switch if needed
+    if (activeThreadId === threadId) {
+      if (newList.length > 0) {
+        const nextId = newList[newList.length - 1].id;
+        setActiveThreadId(nextId);
+        await loadThreadContent(activeDocId, nextId);
+      } else {
+        setActiveThreadId(null);
+        setMessages([]);
+        setApiMessages([]);
+      }
+    }
+  }, [activeDocId, activeThreadId, threads, saveThreadList, loadThreadContent]);
+
+  // Save/restore on document switch
   useEffect(() => {
     if (
       prevDocIdRef.current !== null &&
       prevDocIdRef.current !== activeDocId
     ) {
-      setMessages([]);
-      setApiMessages([]);
+      // Save previous thread
+      if (prevDocIdRef.current && activeThreadId && messages.length > 0) {
+        saveChatHistory(prevDocIdRef.current, activeThreadId, messages, apiMessages);
+      }
       setStreamingText("");
+      setThreadListOpen(false);
+      if (activeDocId) loadDocThreads(activeDocId);
+      else { setThreads([]); setActiveThreadId(null); setMessages([]); setApiMessages([]); }
+    } else if (prevDocIdRef.current === null && activeDocId) {
+      loadDocThreads(activeDocId);
     }
     prevDocIdRef.current = activeDocId;
-  }, [activeDocId]);
+  }, [activeDocId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-save chat history on message changes (debounced)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!activeDocId || !activeThreadId || messages.length === 0) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    const docId = activeDocId;
+    const threadId = activeThreadId;
+    saveTimerRef.current = setTimeout(() => {
+      saveChatHistory(docId, threadId, messages, apiMessages);
+      // Auto-update thread title from first user message
+      const firstUserMsg = messages.find((m) => m.role === "user");
+      if (firstUserMsg) {
+        const title = firstUserMsg.content.slice(0, 40);
+        setThreads((prev) => {
+          const updated = prev.map((t) => t.id === threadId ? { ...t, title } : t);
+          saveThreadList(docId, updated);
+          return updated;
+        });
+      }
+    }, 1000);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [messages, apiMessages, activeDocId, activeThreadId, saveChatHistory, saveThreadList]);
+
+  // Close thread dropdown on outside click
+  useEffect(() => {
+    if (!threadListOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (threadListRef.current && !threadListRef.current.contains(e.target as Node)) {
+        setThreadListOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [threadListOpen]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -257,10 +507,98 @@ export function AiPanel({ onClose }: AiPanelProps) {
     }
   };
 
+  const handleMcpToolCall = useCallback(async (toolName: string, input: Record<string, unknown>): Promise<unknown> => {
+    const parsed = parseClaudeToolName(toolName);
+    if (!parsed) throw new Error(`Unknown tool: ${toolName}`);
+    return await callTool(parsed.serverId, parsed.toolName, input);
+  }, []);
+
+  const handleImageGen = async () => {
+    if (!user || !input.trim()) return;
+    const prompt = input.trim();
+    setInput("");
+    setGeneratingImage(true);
+
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "user", content: `🎨 Generate image: ${prompt}` },
+    ]);
+
+    try {
+      // Build a detailed image prompt using Claude with document + conversation context
+      let imagePrompt = prompt;
+      {
+        setToolStatus("Building image prompt from context...");
+        const docContext = buildContextPrefix();
+        const contextMessages: ClaudeMessage[] = [
+          ...(docContext
+            ? [{ role: "user" as const, content: docContext }, { role: "assistant" as const, content: "I've read the document context." }]
+            : []),
+          ...apiMessages.slice(-10),
+          {
+            role: "user" as const,
+            content: `Based on the document and conversation above, create a detailed image generation prompt for an AI image generator. The user's request is: "${prompt}"\n\nRespond with ONLY the image generation prompt (no explanation, no markdown, no quotes). The prompt should be detailed, specific, and in the language that best describes the visual content. Include style, composition, colors, and content details.`,
+          },
+        ];
+        try {
+          const detailedPrompt = await sendToClaude(
+            "",
+            "You are a prompt engineer for AI image generation. Convert user requests into detailed, specific image generation prompts. Use the document context to inform your prompts with relevant details.",
+            contextMessages,
+          );
+          if (detailedPrompt.trim()) {
+            imagePrompt = detailedPrompt.trim();
+          }
+        } catch {
+          // Fall back to raw prompt if Claude fails
+        }
+      }
+
+      setToolStatus("Generating image...");
+      const result = await generateImage(imagePrompt, (status) => setToolStatus(status));
+      setToolStatus(null);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "Image generated:",
+          generatedImage: { url: result.url, markdown: result.markdown },
+        },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `Image generation failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      ]);
+    } finally {
+      setGeneratingImage(false);
+      setToolStatus(null);
+    }
+  };
+
   const handleAction = async (actionId: string) => {
     if (!user || !activeDoc) return;
     const action = AI_ACTIONS.find((a) => a.id === actionId);
     if (!action) return;
+
+    // Auto-create thread if none exists
+    if (!activeThreadId && activeDocId) {
+      const newThread: ChatThread = {
+        id: crypto.randomUUID().slice(0, 8),
+        title: action.label,
+        createdAt: Date.now(),
+      };
+      const newList = [...threads, newThread];
+      setThreads(newList);
+      setActiveThreadId(newThread.id);
+      saveThreadList(activeDocId, newList);
+    }
 
     const selected = getSelectedText();
     const targetText = selected || stripHtml(activeDoc.content);
@@ -310,6 +648,19 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   const handleChat = async () => {
     if (!user || (!input.trim() && attachedImages.length === 0)) return;
+
+    // Auto-create thread if none exists
+    if (!activeThreadId && activeDocId) {
+      const newThread: ChatThread = {
+        id: crypto.randomUUID().slice(0, 8),
+        title: input.trim().slice(0, 40) || "Chat",
+        createdAt: Date.now(),
+      };
+      const newList = [...threads, newThread];
+      setThreads(newList);
+      setActiveThreadId(newThread.id);
+      saveThreadList(activeDocId, newList);
+    }
 
     const userInput = input.trim();
     setInput("");
@@ -413,7 +764,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   if (!user) {
     return (
-      <div className="flex h-full w-full flex-col border-l border-border bg-background">
+      <div className={`flex h-full w-full flex-col bg-background ${isMobile ? "" : "border-l border-border"}`}>
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <div className="flex items-center gap-2">
             <Bot className="h-4 w-4" />
@@ -422,10 +773,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isIOS ? "h-9 w-9 cursor-pointer" : "h-6 w-6 cursor-pointer"}
+            className={isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"}
             onClick={onClose}
           >
-            <X className={isIOS ? "h-5 w-5" : "h-3.5 w-3.5"} />
+            <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
         <div className="flex flex-1 flex-col items-center justify-center p-4 space-y-3">
@@ -513,7 +864,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
   );
 
   return (
-    <div className="relative flex h-full w-full flex-col border-l border-border bg-background">
+    <div className={`relative flex h-full w-full flex-col bg-background ${isMobile ? "" : "border-l border-border"}`}>
       {/* Custom Rules Editor (overlay) */}
       <RulesEditor
         open={rulesOpen}
@@ -560,16 +911,22 @@ export function AiPanel({ onClose }: AiPanelProps) {
           >
             <Settings className="h-3.5 w-3.5" />
           </Button>
-          {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 cursor-pointer"
+            onClick={createNewThread}
+            title="New topic"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+          {activeThreadId && messages.length > 0 && (
             <Button
               variant="ghost"
               size="icon"
               className="h-6 w-6 cursor-pointer"
-              onClick={() => {
-                setMessages([]);
-                setApiMessages([]);
-              }}
-              title="Clear conversation"
+              onClick={() => { if (activeThreadId) deleteThread(activeThreadId); }}
+              title="Delete this topic"
             >
               <Trash2 className="h-3.5 w-3.5" />
             </Button>
@@ -577,13 +934,56 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isIOS ? "h-9 w-9 cursor-pointer" : "h-6 w-6 cursor-pointer"}
+            className={isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"}
             onClick={onClose}
           >
-            <X className={isIOS ? "h-5 w-5" : "h-3.5 w-3.5"} />
+            <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
       </div>
+
+      {/* Thread selector bar */}
+      {threads.length > 0 && (
+        <div className="relative border-b border-border" ref={threadListRef}>
+          <button
+            className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-left hover:bg-accent/50 transition-colors"
+            onClick={() => setThreadListOpen(!threadListOpen)}
+          >
+            <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span className="flex-1 truncate font-medium">
+              {threads.find((t) => t.id === activeThreadId)?.title || "Select topic"}
+            </span>
+            <span className="text-[9px] text-muted-foreground">{threads.length}</span>
+            <ChevronDown className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${threadListOpen ? "rotate-180" : ""}`} />
+          </button>
+          {threadListOpen && (
+            <div className="absolute inset-x-0 top-full z-30 bg-popover border border-border rounded-b-md shadow-lg max-h-48 overflow-y-auto">
+              {threads.map((t) => (
+                <div
+                  key={t.id}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] cursor-pointer group transition-colors ${
+                    t.id === activeThreadId ? "bg-accent" : "hover:bg-accent/50"
+                  }`}
+                  onClick={() => switchThread(t.id)}
+                >
+                  <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="flex-1 truncate">{t.title}</span>
+                  <span className="text-[9px] text-muted-foreground">
+                    {new Date(t.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                  </span>
+                  <button
+                    className="opacity-0 group-hover:opacity-60 hover:opacity-100! p-0.5 transition-opacity"
+                    onClick={(e) => { e.stopPropagation(); deleteThread(t.id); }}
+                    title="Delete topic"
+                  >
+                    <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Quick actions */}
       <div className="p-2 space-y-1">
@@ -661,7 +1061,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() =>
-                        navigator.clipboard.writeText(msg.content)
+                        navigator.clipboard.writeText(msg.generatedImage?.markdown || msg.content)
                       }
                       title="Copy raw text"
                     >
@@ -672,11 +1072,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
-                        if (!replaceSelection(msg.content)) {
+                        const text = msg.generatedImage?.markdown || msg.content;
+                        if (isIOS) {
+                          setPendingInsert({ text, mode: "replace" });
+                          onClose();
+                        } else if (!replaceSelection(text)) {
                           alert("エディタが利用できません。エディタ表示に切り替えてください。");
                         }
                       }}
-                      title="Replace selection / Insert at cursor"
+                      title={isIOS ? "Insert and return to editor" : "Replace selection / Insert at cursor"}
                     >
                       <Replace className="h-2.5 w-2.5" />
                     </Button>
@@ -685,11 +1089,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
-                        if (!appendToDoc(msg.content)) {
+                        const text = msg.generatedImage?.markdown || msg.content;
+                        if (isIOS) {
+                          setPendingInsert({ text, mode: "append" });
+                          onClose();
+                        } else if (!appendToDoc(text)) {
                           alert("エディタが利用できません。エディタ表示に切り替えてください。");
                         }
                       }}
-                      title="Append to document"
+                      title={isIOS ? "Append and return to editor" : "Append to document"}
                     >
                       <CornerDownLeft className="h-2.5 w-2.5" />
                     </Button>
@@ -718,11 +1126,62 @@ export function AiPanel({ onClose }: AiPanelProps) {
                 ) : (
                   <div className="prose ai-markdown select-text">
                     {renderMarkdown(msg.content)}
+                    {msg.generatedImage && (
+                      <div className="mt-2 space-y-2">
+                        <img
+                          src={msg.generatedImage.url}
+                          alt=""
+                          className="max-w-full max-h-48 rounded-md border border-border"
+                        />
+                        <div className="flex gap-1">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="text-[10px] h-6 gap-1 cursor-pointer"
+                            onClick={() => {
+                              if (isIOS) {
+                                setPendingInsert({ text: msg.generatedImage!.markdown, mode: "replace" });
+                                onClose();
+                              } else if (!insertAtCursor(msg.generatedImage!.markdown)) {
+                                appendToDoc(msg.generatedImage!.markdown);
+                              }
+                            }}
+                          >
+                            <CornerDownLeft className="h-2.5 w-2.5" />
+                            Insert at cursor
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-[10px] h-6 gap-1 cursor-pointer"
+                            onClick={() => navigator.clipboard.writeText(msg.generatedImage!.markdown)}
+                          >
+                            <Copy className="h-2.5 w-2.5" />
+                            Copy markdown
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             </div>
           ))}
+          {/* Thinking / loading indicator */}
+          {(streaming || generatingImage) && !streamingText && (
+            <div className="text-xs bg-muted rounded-md p-2">
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
+                </div>
+                <span className="text-[10px] text-muted-foreground">
+                  {toolStatus || (generatingImage ? "Generating image..." : "Thinking...")}
+                </span>
+              </div>
+            </div>
+          )}
           {streaming && streamingText && (
             <div className="text-xs bg-muted rounded-md p-2">
               <span className="text-[10px] text-muted-foreground">
@@ -772,17 +1231,27 @@ export function AiPanel({ onClose }: AiPanelProps) {
       />
 
       {/* Input — textarea, Cmd+Enter to send */}
-      <div className="border-t border-border p-2">
+      <div className={`border-t border-border ${isIOS ? "pt-2 pb-7 px-5" : "p-2"}`}>
         <div className="flex gap-1 items-end">
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7 shrink-0 cursor-pointer"
+            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
             onClick={handleImageAttach}
             disabled={streaming}
             title="Attach image"
           >
-            <Paperclip className="h-3.5 w-3.5" />
+            <Paperclip className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
+            onClick={handleImageGen}
+            disabled={streaming || generatingImage || !input.trim()}
+            title="Generate image from prompt"
+          >
+            <Wand2 className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>
           <textarea
             ref={textareaRef}
@@ -802,11 +1271,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
           />
           <Button
             size="icon"
-            className="h-7 w-7 shrink-0 cursor-pointer"
+            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
             onClick={handleChat}
             disabled={streaming || (!input.trim() && attachedImages.length === 0)}
           >
-            <Send className="h-3.5 w-3.5" />
+            <Send className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
       </div>

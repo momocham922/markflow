@@ -19,33 +19,42 @@ import {
   ListOrdered,
   Quote,
   Link,
+  Link2,
   Image,
   Pencil,
   Check,
-  History,
   Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ThemeCustomizer } from "@/components/ThemeCustomizer";
 import { useAppStore } from "@/stores/app-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { processImagePath } from "@/extensions/image-paste";
-import { isIOS } from "@/platform";
+import { isMobile } from "@/platform";
 import type { PreviewMode } from "./Editor";
 
 interface EditorToolbarProps {
   previewMode: PreviewMode;
   onPreviewModeChange: (mode: PreviewMode) => void;
   collabSlot?: ReactNode;
-  onHistoryOpen?: () => void;
+  voiceActive?: boolean;
+  voiceSupported?: boolean;
+  onVoiceToggle?: () => void;
+  scrollSyncEnabled?: boolean;
+  onScrollSyncToggle?: () => void;
 }
 
 export function EditorToolbar({
   previewMode,
   onPreviewModeChange,
   collabSlot,
-  onHistoryOpen,
+  voiceActive = false,
+  voiceSupported = false,
+  onVoiceToggle,
+  scrollSyncEnabled = false,
+  onScrollSyncToggle,
 }: EditorToolbarProps) {
   const [themeOpen, setThemeOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
@@ -56,9 +65,17 @@ export function EditorToolbar({
   const ime = useIMEGuard();
 
   const { activeDocId, documents, updateDocument } = useAppStore();
+  const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const tags = activeDoc?.tags ?? [];
   const { view } = useEditorStore();
+
+  // Ownership badge for shared/team docs
+  const isSharedOrTeam = activeDoc?.isShared || activeDoc?.teamId;
+  const isOwner = isSharedOrTeam && activeDoc?.ownerId === user?.uid;
+  const ownerLabel = isOwner
+    ? (user?.displayName || user?.email || "You")
+    : (activeDoc?.ownerName || null);
 
   const addTag = (value: string) => {
     const tag = value.trim().toLowerCase();
@@ -123,12 +140,12 @@ export function EditorToolbar({
     setRenaming(false);
   };
 
-  // ── iOS mobile layout ───────────────────────────────────
-  if (isIOS) {
+  // ── Mobile layout (2 rows: info + tools) ───────────
+  if (isMobile) {
     return (
-      <div className="flex items-center justify-between border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2">
-        {/* Left: document title */}
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1">
+      <div className="border-b border-border bg-background/80 backdrop-blur-sm">
+        {/* Row 1: document info */}
+        <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 text-xs text-muted-foreground min-w-0">
           {activeDoc && (
             renaming ? (
               <div className="flex items-center gap-1 shrink-0">
@@ -153,67 +170,52 @@ export function EditorToolbar({
               </div>
             ) : (
               <span
-                className="text-xs font-medium truncate max-w-[140px] cursor-pointer hover:text-foreground shrink-0 flex items-center gap-1"
+                className="text-xs font-medium truncate cursor-pointer hover:text-foreground flex items-center gap-1 min-w-0"
                 onClick={handleStartRename}
                 title="Click to rename"
               >
-                {activeDoc.title}
-                <Pencil className="h-2.5 w-2.5 opacity-50" />
+                <span className="truncate">{activeDoc.title}</span>
+                <Pencil className="h-2.5 w-2.5 opacity-50 shrink-0" />
               </span>
             )
+          )}
+          {isSharedOrTeam && (
+            <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${isOwner ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`} title={ownerLabel ? `Owner: ${ownerLabel}` : undefined}>
+              {activeDoc?.teamId ? "Team" : "Shared"}{ownerLabel ? ` · ${ownerLabel}` : ""}
+            </span>
           )}
           {collabSlot}
         </div>
 
-        {/* Right: essential controls */}
-        <div className="flex items-center gap-1 shrink-0">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={onHistoryOpen}
-            title="Version History"
-          >
-            <History className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setThemeOpen(true)}
-            title="Theme"
-          >
-            <Paintbrush className="h-3.5 w-3.5" />
-          </Button>
+        {/* Row 2: tool buttons */}
+        <div className="flex items-center justify-between px-3 pt-0.5 pb-1.5">
+          <div className="flex items-center gap-1.5">
+            {voiceSupported && onVoiceToggle && (
+              <Button
+                variant={voiceActive ? "secondary" : "ghost"}
+                size="icon"
+                className={`h-11 w-11 ${voiceActive ? "text-red-500" : ""}`}
+                onClick={onVoiceToggle}
+                title={voiceActive ? "Close voice panel" : "Voice input"}
+              >
+                {voiceActive ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+              </Button>
+            )}
+            <Button variant="ghost" size="icon" className="h-11 w-11" onClick={() => setThemeOpen(true)} title="Theme">
+              <Paintbrush className="h-5 w-5" />
+            </Button>
+          </div>
 
-          {/* Preview mode toggle (no split on mobile) */}
+          {/* Preview mode toggle */}
           <div className="flex items-center rounded-md border border-border p-0.5">
-            <Button
-              variant={previewMode === "edit" ? "secondary" : "ghost"}
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => onPreviewModeChange("edit")}
-              title="Edit only"
-            >
-              <PenLine className="h-3.5 w-3.5" />
+            <Button variant={previewMode === "edit" ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => onPreviewModeChange("edit")} title="Edit only">
+              <PenLine className="h-4.5 w-4.5" />
             </Button>
-            <Button
-              variant={previewMode === "preview" ? "secondary" : "ghost"}
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => onPreviewModeChange("preview")}
-              title="Preview only"
-            >
-              <Eye className="h-3.5 w-3.5" />
+            <Button variant={previewMode === "preview" ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => onPreviewModeChange("preview")} title="Preview only">
+              <Eye className="h-4.5 w-4.5" />
             </Button>
-            <Button
-              variant={previewMode === "mindmap" ? "secondary" : "ghost"}
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => onPreviewModeChange("mindmap")}
-              title="Mind Map"
-            >
-              <Network className="h-3.5 w-3.5" />
+            <Button variant={previewMode === "mindmap" ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => onPreviewModeChange("mindmap")} title="Mind Map">
+              <Network className="h-4.5 w-4.5" />
             </Button>
           </div>
         </div>
@@ -261,6 +263,11 @@ export function EditorToolbar({
               <Pencil className="h-2.5 w-2.5 opacity-50" />
             </span>
           )
+        )}
+        {isSharedOrTeam && (
+          <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${isOwner ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`} title={ownerLabel ? `Owner: ${ownerLabel}` : undefined}>
+            {activeDoc?.teamId ? "Team" : "Shared"}{ownerLabel ? ` · ${ownerLabel}` : ""}
+          </span>
         )}
 
         <Separator orientation="vertical" className="h-4 mx-1" />
@@ -402,17 +409,19 @@ export function EditorToolbar({
           </>
         )}
 
-        {/* History */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 gap-1 px-2 text-[11px] text-muted-foreground"
-          onClick={onHistoryOpen}
-          title="Version History"
-        >
-          <History className="h-3.5 w-3.5" />
-          History
-        </Button>
+        {/* Voice input */}
+        {voiceSupported && onVoiceToggle && (
+          <Button
+            variant={voiceActive ? "secondary" : "ghost"}
+            size="sm"
+            className={`h-6 gap-1 px-2 text-[11px] ${voiceActive ? "text-red-500" : "text-muted-foreground"}`}
+            onClick={onVoiceToggle}
+            title={voiceActive ? "Close voice panel" : "Voice input"}
+          >
+            {voiceActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+            {voiceActive ? "Stop" : "Voice"}
+          </Button>
+        )}
 
         {/* Theme customizer */}
         <Button
@@ -437,15 +446,17 @@ export function EditorToolbar({
           >
             <PenLine className="h-3.5 w-3.5" />
           </Button>
-          <Button
-            variant={previewMode === "split" ? "secondary" : "ghost"}
-            size="icon"
-            className="h-6 w-6"
-            onClick={() => onPreviewModeChange("split")}
-            title="Split view"
-          >
-            <Columns2 className="h-3.5 w-3.5" />
-          </Button>
+          {!isMobile && (
+            <Button
+              variant={previewMode === "split" ? "secondary" : "ghost"}
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => onPreviewModeChange("split")}
+              title="Split view"
+            >
+              <Columns2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
           <Button
             variant={previewMode === "preview" ? "secondary" : "ghost"}
             size="icon"
@@ -465,6 +476,17 @@ export function EditorToolbar({
             <Network className="h-3.5 w-3.5" />
           </Button>
         </div>
+        {previewMode === "split" && !isMobile && (
+          <Button
+            variant={scrollSyncEnabled ? "secondary" : "ghost"}
+            size="icon"
+            className="h-6 w-6"
+            onClick={onScrollSyncToggle}
+            title={scrollSyncEnabled ? "Disable scroll sync" : "Enable scroll sync"}
+          >
+            <Link2 className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
 
       <ThemeCustomizer open={themeOpen} onOpenChange={setThemeOpen} />

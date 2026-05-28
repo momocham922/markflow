@@ -7,7 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
-import { getPlatform, isIOS } from "@/platform";
+import { getPlatform, isIOS, isMobile } from "@/platform";
 import { isHtmlContent, extractYouTubeId, escapeHtml } from "@/lib/editor-utils";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
@@ -16,9 +16,10 @@ import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
+import { VoicePanel } from "./VoicePanel";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
-import { VersionHistory } from "./VersionHistory";
+import { useAuthStore, markCollabActive, markCollabInactive } from "@/stores/auth-store";
 import { MindMapView } from "./MindMapView";
 import { MindMapEditor, createInitialMindMapData } from "./MindMapEditor";
 import mermaid from "mermaid";
@@ -134,9 +135,11 @@ mermaid.initialize({ startOnLoad: false, theme: "default" });
 
 export function Editor() {
   const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
+  const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>(isIOS ? "edit" : "split");
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(isMobile ? "edit" : "split");
+  const [scrollSyncEnabled, setScrollSyncEnabled] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
   const setView = useEditorStore((s) => s.setView);
@@ -149,6 +152,10 @@ export function Editor() {
   const frozenContentRef = useRef<Record<string, string>>({});
   const prevActiveDocRef = useRef<string | null>(null);
   if (activeDocId && activeDoc?.isShared && activeDocId !== prevActiveDocRef.current) {
+    // Clean up old entry to prevent memory leak (only keep current doc)
+    if (prevActiveDocRef.current && prevActiveDocRef.current !== activeDocId) {
+      delete frozenContentRef.current[prevActiveDocRef.current];
+    }
     frozenContentRef.current[activeDocId] = activeDoc.content || "";
   }
   prevActiveDocRef.current = activeDocId ?? null;
@@ -157,16 +164,18 @@ export function Editor() {
   const handleCollabChange = useCallback(
     (content: string) => {
       if (!activeDocId) return;
-      if (!content.trim()) return;
+      // Allow intentional content clearing from collab
       const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
-      // Skip auto-title for pinned, shared, or team docs
-      if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
+      // Auto-derive title from first heading for owned docs (or personal docs).
+      // Skip for pinned titles and non-owned shared/team docs (their title comes from cloud).
+      const isOwned = !activeDoc?.ownerId || activeDoc.ownerId === user?.uid;
+      if (!activeDoc?.titlePinned && isOwned) {
         const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, activeDoc?.isShared, activeDoc?.teamId, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, activeDoc?.ownerId, user?.uid, updateDocument],
   );
 
   // Callback: sync Y.Text content → frozen value BEFORE yCollab activates.
@@ -179,14 +188,31 @@ export function Editor() {
   );
 
   // Real-time collaboration via Yjs — only for shared documents
-  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled, wsTimedOut } =
+  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled, wsTimedOut, replaceContent: collabReplaceContent } =
     useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
   const isCollabReady = Boolean(activeDocId && collabExtension && collabDocId === activeDocId);
+
+  // Keep frozenContentRef fresh while CodeMirror is unmounted (during collab reconnection).
+  // Without this, remounting after "Syncing document..." overlay shows stale/empty content.
+  if (activeDocId && activeDoc?.isShared && !isCollabReady) {
+    frozenContentRef.current[activeDocId] = activeDoc.content || "";
+  }
+
+  // Track active collab docs so syncFromCloud/syncToCloud skip them
+  useEffect(() => {
+    if (isCollabReady && activeDocId) {
+      markCollabActive(activeDocId);
+      return () => { markCollabInactive(activeDocId); };
+    }
+  }, [isCollabReady, activeDocId]);
+
   // Auto-save versions when content changes significantly
-  useAutoVersion({
+  // In collab mode, only save for local edits (not remote yCollab sync)
+  const { markLocalEdit } = useAutoVersion({
     docId: activeDocId,
     content: activeDoc?.content ?? "",
     title: activeDoc?.title ?? "",
+    collabActive: isCollabReady,
   });
 
   // Auto-convert legacy HTML content to Markdown on first load
@@ -252,18 +278,20 @@ export function Editor() {
     ];
   }, []);
 
-  // Memoize extensions — yCollab only included when isCollabReady so it's part of
-  // the initial EditorState (no reconfigure needed, ySync ViewPlugin stays stable).
+  // Include yCollab directly in extensions. CodeMirror reconciles same-instance
+  // extensions across reconfigures, so the ySync ViewPlugin survives as long as
+  // collabExtension reference is stable (which it is — only changes on doc switch
+  // or collab activation).
   const extensions = useMemo(
     () => [
-      markdown({ base: markdownLanguage, codeLanguages: languages }),
+      markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
       EditorView.lineWrapping,
       markdownShortcuts,
       imagePaste,
       ...iosGutterTheme,
       ...(isCollabReady && collabExtension ? [collabExtension] : []),
     ],
-    [collabExtension, isCollabReady, iosGutterTheme],
+    [iosGutterTheme, isCollabReady, collabExtension],
   );
 
   const editorTheme = useMemo(() => {
@@ -312,6 +340,8 @@ export function Editor() {
 
   // Render mermaid diagrams after preview HTML updates or theme change
   const previewRef = useRef<HTMLDivElement>(null);
+  const previewScrollRef = useRef<HTMLDivElement>(null);
+  const editorScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = previewRef.current;
     if (!container) return;
@@ -397,16 +427,18 @@ export function Editor() {
   const onChange = useCallback(
     (value: string) => {
       if (!activeDocId) return;
-      if (!value.trim()) return;
+      // Allow intentional content clearing — don't block empty content
       const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
-      // Skip auto-title for pinned, shared, or team docs
-      if (!activeDoc?.titlePinned && !activeDoc?.isShared && !activeDoc?.teamId) {
+      // Auto-derive title from first heading for owned docs (or personal docs).
+      // Skip for pinned titles and non-owned shared/team docs (their title comes from cloud).
+      const isOwned = !activeDoc?.ownerId || activeDoc.ownerId === user?.uid;
+      if (!activeDoc?.titlePinned && isOwned) {
         const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, activeDoc?.isShared, activeDoc?.teamId, updateDocument],
+    [activeDocId, activeDoc?.titlePinned, activeDoc?.ownerId, user?.uid, updateDocument],
   );
 
   const onCreateEditor = useCallback(
@@ -418,24 +450,76 @@ export function Editor() {
   );
 
   // Keep the store's view reference in sync on every editor update
+  // Also detect local edits (vs remote yCollab sync) for auto-version
+  const isCollabReadyRef = useRef(isCollabReady);
+  isCollabReadyRef.current = isCollabReady;
+  const markLocalEditRef = useRef(markLocalEdit);
+  markLocalEditRef.current = markLocalEdit;
+
   const onUpdate = useCallback(
     (update: ViewUpdate) => {
       if (update.view !== viewRef.current) {
         viewRef.current = update.view;
         setView(update.view);
       }
+      // In collab mode, detect local user edits for auto-version.
+      // Remote yCollab sync transactions lack userEvent annotations.
+      if (isCollabReadyRef.current && update.docChanged) {
+        const hasLocal = update.transactions.some(
+          (tr) =>
+            tr.docChanged &&
+            (tr.isUserEvent("input") ||
+              tr.isUserEvent("delete") ||
+              tr.isUserEvent("undo") ||
+              tr.isUserEvent("redo") ||
+              tr.isUserEvent("move")),
+        );
+        if (hasLocal) markLocalEditRef.current();
+      }
     },
     [setView],
   );
 
   // Restore a version's content into the document
+  // FIX: Also update Y.Doc for collab documents so the editor reflects the restored version
   const handleRestoreVersion = useCallback(
     (content: string) => {
       if (!activeDocId || !content.trim()) return;
       updateDocument(activeDocId, { content, updatedAt: Date.now() });
+      if (isCollabReady) {
+        collabReplaceContent(content);
+      }
     },
-    [activeDocId, updateDocument],
+    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
   );
+
+  // Watch for pending restore from VersionPanel (store-based bridge)
+  const pendingRestoreContent = useAppStore((s) => s.pendingRestoreContent);
+  const clearPendingRestore = useAppStore((s) => s.setPendingRestoreContent);
+  useEffect(() => {
+    if (pendingRestoreContent !== null) {
+      handleRestoreVersion(pendingRestoreContent);
+      clearPendingRestore(null);
+    }
+  }, [pendingRestoreContent, handleRestoreVersion, clearPendingRestore]);
+
+  // Apply pending insert from AI panel (iOS: panel closes first, then insert fires)
+  const pendingInsert = useEditorStore((s) => s.pendingInsert);
+  const clearPendingInsert = useEditorStore((s) => s.setPendingInsert);
+  useEffect(() => {
+    if (pendingInsert && viewRef.current) {
+      const view = viewRef.current;
+      if (pendingInsert.mode === "replace") {
+        const { from, to } = view.state.selection.main;
+        view.dispatch({ changes: { from, to, insert: pendingInsert.text } });
+      } else {
+        const len = view.state.doc.length;
+        view.dispatch({ changes: { from: len, insert: `\n\n${pendingInsert.text}` } });
+      }
+      view.focus();
+      clearPendingInsert(null);
+    }
+  }, [pendingInsert, clearPendingInsert]);
 
   // Cleanup on unmount only
   useEffect(() => {
@@ -445,6 +529,53 @@ export function Editor() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Scroll sync between editor and preview in split mode
+  useEffect(() => {
+    if (!scrollSyncEnabled || previewMode !== "split" || isMobile) return;
+    const editorScrollDOM = editorScrollRef.current;
+    const previewDOM = previewScrollRef.current;
+    if (!editorScrollDOM || !previewDOM) return;
+
+    let syncSource: "editor" | "preview" | null = null;
+    let rafId: number | null = null;
+
+    const getScrollPercent = (el: HTMLElement) => {
+      const max = el.scrollHeight - el.clientHeight;
+      return max > 0 ? el.scrollTop / max : 0;
+    };
+    const setScrollPercent = (el: HTMLElement, pct: number) => {
+      const max = el.scrollHeight - el.clientHeight;
+      el.scrollTop = max * pct;
+    };
+
+    const onEditorScroll = () => {
+      if (syncSource === "preview") return;
+      syncSource = "editor";
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        setScrollPercent(previewDOM, getScrollPercent(editorScrollDOM));
+        requestAnimationFrame(() => { syncSource = null; });
+      });
+    };
+    const onPreviewScroll = () => {
+      if (syncSource === "editor") return;
+      syncSource = "preview";
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        setScrollPercent(editorScrollDOM, getScrollPercent(previewDOM));
+        requestAnimationFrame(() => { syncSource = null; });
+      });
+    };
+
+    editorScrollDOM.addEventListener("scroll", onEditorScroll, { passive: true });
+    previewDOM.addEventListener("scroll", onPreviewScroll, { passive: true });
+    return () => {
+      editorScrollDOM.removeEventListener("scroll", onEditorScroll);
+      previewDOM.removeEventListener("scroll", onPreviewScroll);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [scrollSyncEnabled, previewMode, activeDocId]);
 
   // Handle Tauri native file drag-and-drop for images
   // WKWebView cannot receive browser-native drop events from Finder,
@@ -516,6 +647,39 @@ export function Editor() {
     [activeDocId, updateDocument],
   );
 
+  // Voice input — always show button; errors handled in useVoiceInput on start
+  const voiceSupported = true;
+
+  const handleInsertMarkdown = useCallback(
+    (markdown: string) => {
+      if (!activeDocId) return;
+      const current = activeDoc?.content ?? "";
+      const newContent = current.trimEnd() + markdown;
+      updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+      if (isCollabReady) {
+        collabReplaceContent(newContent);
+      }
+    },
+    [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
+  );
+
+  const handleReplaceMarkdown = useCallback(
+    (oldMarkdown: string, newMarkdown: string) => {
+      if (!activeDocId) return;
+      const current = activeDoc?.content ?? "";
+      const idx = current.indexOf(oldMarkdown);
+      if (idx >= 0) {
+        const newContent = current.slice(0, idx) + newMarkdown + current.slice(idx + oldMarkdown.length);
+        updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+        if (isCollabReady) {
+          collabReplaceContent(newContent);
+        }
+      }
+      // If old content not found (user edited it), skip — don't append to avoid duplication
+    },
+    [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
+  );
+
   if (!activeDoc) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -549,7 +713,11 @@ export function Editor() {
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
-        onHistoryOpen={() => setHistoryOpen(true)}
+        voiceActive={voiceOpen}
+        voiceSupported={voiceSupported}
+        onVoiceToggle={() => setVoiceOpen((v) => !v)}
+        scrollSyncEnabled={scrollSyncEnabled}
+        onScrollSyncToggle={() => setScrollSyncEnabled((v) => !v)}
         collabSlot={
           (collabConnected || collabExtension) ? (
             <div className="flex items-center gap-1.5 shrink-0 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5">
@@ -589,6 +757,7 @@ export function Editor() {
       <div className="flex flex-1 overflow-hidden">
         {/* Editor pane — always mounted, hidden in preview-only and mindmap modes */}
         <div
+          ref={editorScrollRef}
           className={`overflow-auto editor-scroll ${
             previewMode === "preview" || previewMode === "mindmap"
               ? "hidden"
@@ -605,7 +774,7 @@ export function Editor() {
             <CodeMirror
               key={activeDocId}
               value={isCollabReady ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
-              onChange={isCollabReady ? undefined : onChange}
+              onChange={onChange}
               extensions={extensions}
               theme={editorTheme}
               onCreateEditor={onCreateEditor}
@@ -617,13 +786,31 @@ export function Editor() {
         {/* Mind map view */}
         {previewMode === "mindmap" && (
           <div className="flex-1">
-            <MindMapView content={activeDoc.content || ""} title={activeDoc.title} />
+            <MindMapView
+              content={activeDoc.content || ""}
+              title={activeDoc.title}
+              onNodeClick={({ text }) => {
+                setPreviewMode("preview");
+                setTimeout(() => {
+                  const container = previewScrollRef.current;
+                  if (!container) return;
+                  const headings = container.querySelectorAll("h1, h2, h3, h4, h5, h6");
+                  for (const heading of headings) {
+                    if (heading.textContent?.trim() === text) {
+                      heading.scrollIntoView({ behavior: "smooth", block: "start" });
+                      return;
+                    }
+                  }
+                }, 150);
+              }}
+            />
           </div>
         )}
         {/* Preview pane — rendered markdown */}
         {previewMode !== "edit" && previewMode !== "mindmap" && (
           <div
-            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"} ${isIOS ? "overflow-x-hidden" : ""}`}
+            ref={previewScrollRef}
+            className={`overflow-auto preview-scroll ${previewMode === "split" ? "w-1/2" : "flex-1"} ${isMobile ? "overflow-x-hidden" : ""}`}
           >
             {previewThemeCss && <style>{previewThemeCss}</style>}
             {themeSettings.customPreviewCss && (
@@ -631,7 +818,7 @@ export function Editor() {
             )}
             <div
               ref={previewRef}
-              className={`prose max-w-none ${isIOS ? "ios-preview" : "px-12 py-8"}`}
+              className={`prose max-w-none ${isMobile ? "mobile-preview" : "px-12 py-8"}`}
               dangerouslySetInnerHTML={{ __html: previewHtml }}
               onClick={(e) => {
                 const target = (e.target as HTMLElement).closest(".wikilink");
@@ -644,7 +831,7 @@ export function Editor() {
             />
             {/* Backlinks */}
             {backlinks.length > 0 && (
-              <div className={isIOS ? "px-4 pb-4" : "px-12 pb-8"}>
+              <div className={isMobile ? "px-4 pb-4" : "px-12 pb-8"}>
                 <div className="border-t border-border pt-4 mt-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wider mb-2">
                     Backlinks ({backlinks.length})
@@ -666,13 +853,7 @@ export function Editor() {
           </div>
         )}
       </div>
-      <VersionHistory
-        open={historyOpen}
-        onOpenChange={setHistoryOpen}
-        docId={activeDocId}
-        currentTitle={activeDoc?.title ?? ""}
-        onRestore={handleRestoreVersion}
-      />
+      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} />}
     </div>
   );
 }

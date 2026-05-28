@@ -18,8 +18,9 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
 import { marked } from "marked";
-import { getPlatform, isIOS } from "@/platform";
+import { getPlatform, isIOS, isMobile, isMac } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
+import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -48,6 +49,9 @@ function App() {
     documents,
     addDocument,
     setActiveDocId,
+    setPendingRestoreContent,
+    themeSettings,
+    customPreviewThemes,
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
   const syncing = useAuthStore((s) => s.syncing);
@@ -70,6 +74,7 @@ function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
   const { viewportHeight, keyboardVisible } = useIOSKeyboard();
+  const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(sidebarOpen, toggleSidebar);
   const [shareToken, setShareToken] = useState<string | null>(() => {
     const match = window.location.hash.match(/^#\/share\/(.+)$/);
     return match ? match[1] : null;
@@ -124,15 +129,62 @@ function App() {
     [sidebarWidth, rightPanelWidth, rightPanel],
   );
 
+  /** Parse a share token from various URL formats */
+  const parseShareToken = useCallback((input: string): string | null => {
+    const trimmed = input.trim();
+    // markflow://share/{token}
+    const proto = trimmed.match(/^markflow:\/\/share\/(.+)$/);
+    if (proto) return proto[1];
+    // #/share/{token}
+    const hash = trimmed.match(/#\/share\/(.+)$/);
+    if (hash) return hash[1];
+    // raw token (32 alphanumeric chars)
+    if (/^[a-z0-9]{32}$/.test(trimmed)) return trimmed;
+    return null;
+  }, []);
+
+  /** Open a shared document by link/token */
+  const openShareLink = useCallback((input: string) => {
+    const token = parseShareToken(input);
+    if (token) {
+      setShareToken(token);
+    }
+  }, [parseShareToken]);
+
   // Listen for hash changes (share links)
   useEffect(() => {
     const handleHash = () => {
-      const match = window.location.hash.match(/^#\/share\/(.+)$/);
-      setShareToken(match ? match[1] : null);
+      const token = parseShareToken(window.location.hash);
+      setShareToken(token);
     };
     window.addEventListener("hashchange", handleHash);
     return () => window.removeEventListener("hashchange", handleHash);
-  }, []);
+  }, [parseShareToken]);
+
+  // Listen for deep link events (markflow://share/{token})
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/plugin-deep-link").then(async ({ onOpenUrl, getCurrent }) => {
+      // Handle initial launch URL (app was opened via deep link while not running)
+      try {
+        const initialUrls = await getCurrent();
+        if (initialUrls && initialUrls.length > 0) {
+          for (const url of initialUrls) {
+            const token = parseShareToken(url);
+            if (token) { setShareToken(token); break; }
+          }
+        }
+      } catch {}
+      // Listen for subsequent deep link events while app is running
+      unlisten = await onOpenUrl((urls) => {
+        for (const url of urls) {
+          const token = parseShareToken(url);
+          if (token) { setShareToken(token); break; }
+        }
+      });
+    }).catch(() => {});
+    return () => { unlisten?.(); };
+  }, [parseShareToken]);
 
   useEffect(() => {
     loadDocuments();
@@ -169,9 +221,80 @@ function App() {
     return () => { unlisten?.(); };
   }, []);
 
-  // Auto-update check on startup — only checks, never auto-installs
+  // ─── Debounced Slack edit notifications ───
+  // Fire on: 10min idle after last edit, document switch, or app close
+  const editedDocRef = useRef<{ id: string; title: string } | null>(null);
+  const editTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const EDIT_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
+
+  const flushEditNotification = useCallback(async () => {
+    if (editTimerRef.current) {
+      clearTimeout(editTimerRef.current);
+      editTimerRef.current = null;
+    }
+    const edited = editedDocRef.current;
+    if (!edited) return;
+    editedDocRef.current = null;
+    try {
+      const { notifySlack } = await import("@/services/slack-notify");
+      const user = useAuthStore.getState().user;
+      await notifySlack(edited.id, "edit", {
+        docTitle: edited.title,
+        authorName: user?.displayName || user?.email || undefined,
+      });
+    } catch { /* ignore */ }
+  }, []);
+
+  // Track edits — called from Editor onChange
+  const markDocEdited = useCallback((docId: string, title: string) => {
+    editedDocRef.current = { id: docId, title };
+    if (editTimerRef.current) clearTimeout(editTimerRef.current);
+    editTimerRef.current = setTimeout(flushEditNotification, EDIT_DEBOUNCE_MS);
+  }, [flushEditNotification]);
+
+  // Flush on document switch
+  useEffect(() => {
+    // When activeDocId changes, flush notification for the previously edited doc
+    return () => { flushEditNotification(); };
+  }, [activeDocId, flushEditNotification]);
+
+  // Detect edits via store subscription (updateDocument triggers updatedAt change)
+  const lastUpdatedAtRef = useRef<number>(0);
+  useEffect(() => {
+    const unsub = useAppStore.subscribe((state) => {
+      const doc = state.documents.find((d) => d.id === state.activeDocId);
+      if (doc && doc.updatedAt > lastUpdatedAtRef.current) {
+        lastUpdatedAtRef.current = doc.updatedAt;
+        markDocEdited(doc.id, doc.title);
+      }
+    });
+    return unsub;
+  }, [markDocEdited]);
+
+  // Flush on app close (augment existing onWindowClose)
+  useEffect(() => {
+    const handleBeforeUnload = () => { flushEditNotification(); };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [flushEditNotification]);
+
+  // Signal to Rust that frontend is alive (cancels failsafe auto-updater).
+  // Delayed 5s to ensure full React tree has rendered without crash.
   useEffect(() => {
     const timer = setTimeout(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("cancel_auto_update");
+      } catch {
+        // Not in Tauri or command not available — ignore
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Auto-update check — on startup and every 30 minutes while app is open
+  useEffect(() => {
+    const checkUpdate = async () => {
       try {
         const { getSetting } = await import("@/services/database");
         const channel = ((await getSetting("update_channel")) || "stable") as "stable" | "beta";
@@ -183,8 +306,10 @@ function App() {
       } catch {
         // Silently ignore update check failures (offline, dev mode, etc.)
       }
-    }, 3000);
-    return () => clearTimeout(timer);
+    };
+    const startupTimer = setTimeout(checkUpdate, 3000);
+    const interval = setInterval(checkUpdate, 30 * 60 * 1000);
+    return () => { clearTimeout(startupTimer); clearInterval(interval); };
   }, []);
 
   const handleInstallUpdate = useCallback(async () => {
@@ -309,6 +434,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
       reader.onload = () => {
         const content = reader.result as string;
         const title = file.name.replace(/\.md$/i, "").slice(0, 50) || "Imported";
+        const authUser = useAuthStore.getState().user;
         const doc: Document = {
           id: crypto.randomUUID(),
           title,
@@ -317,10 +443,25 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
           updatedAt: Date.now(),
           folder: "/",
           tags: [],
-          ownerId: null,
+          ownerId: authUser?.uid ?? null,
         };
         addDocument(doc);
         setActiveDocId(doc.id);
+        // Cloud-first: upload to Firestore immediately so reconciliation never deletes it
+        if (authUser) {
+          import("@/services/firebase").then(({ saveDocumentToFirestore }) => {
+            saveDocumentToFirestore({
+              id: doc.id,
+              title: doc.title,
+              content: doc.content,
+              ownerId: authUser.uid,
+              ownerName: authUser.displayName || authUser.email || undefined,
+              folder: doc.folder,
+              tags: doc.tags,
+              updatedAt: doc.updatedAt,
+            }).catch((err) => console.error("[import] Cloud upload failed:", err));
+          }).catch(() => {});
+        }
       };
       reader.readAsText(file);
       // Reset so the same file can be imported again
@@ -360,9 +501,123 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
     }
   }, [activeDocId, documents]);
 
+  // ─── Publish to Web ────────────────────────────────────────
+
+  const [publishUrl, setPublishUrl] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+
+  const handlePublish = useCallback(async () => {
+    const doc = documents.find((d) => d.id === activeDocId);
+    const user = useAuthStore.getState().user;
+    if (!doc || !user) {
+      setPublishError("ドキュメントを選択してログインしてください");
+      return;
+    }
+    setPublishing(true);
+    setPublishError(null);
+    try {
+      const { generatePublishHtml } = await import("@/lib/html-publish");
+      const html = generatePublishHtml({
+        title: doc.title,
+        content: doc.content,
+        themeId: themeSettings.previewTheme,
+        isDark: theme === "dark",
+        customPreviewThemes,
+        customPreviewCss: themeSettings.customPreviewCss,
+      });
+
+      // Step 1: Ensure doc exists in Firestore (setDoc+merge, no transaction)
+      const { getDoc: fsGetDoc, setDoc: fsSetDoc, doc: fsDoc, collection: fsColl, serverTimestamp: fsSt } =
+        await import("firebase/firestore");
+      const { firestore } = await import("@/services/firebase");
+      const docRef = fsDoc(fsColl(firestore, "documents"), doc.id);
+      const snap = await fsGetDoc(docRef);
+      if (snap.exists()) {
+        // Doc exists — just make sure ownerId is correct
+        const cd = snap.data();
+        if (cd.ownerId && cd.ownerId !== user.uid) {
+          throw new Error("このドキュメントのオーナーではありません");
+        }
+      } else {
+        // Doc doesn't exist — create with all required fields
+        await fsSetDoc(docRef, {
+          title: doc.title,
+          content: doc.content,
+          ownerId: user.uid,
+          ownerName: user.displayName || user.email || undefined,
+          folder: doc.folder ?? "/",
+          tags: doc.tags ?? [],
+          collaborators: {},
+          collaboratorUids: [],
+          titlePinned: doc.titlePinned ?? false,
+          ...(doc.teamId ? { teamId: doc.teamId } : {}),
+          createdAt: fsSt(),
+          updatedAt: fsSt(),
+        });
+      }
+
+      // Step 2: Upload HTML to Firebase Storage
+      const { invoke } = await import("@tauri-apps/api/core");
+      const token = await user.getIdToken();
+      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
+      if (!bucket) throw new Error("VITE_FIREBASE_STORAGE_BUCKET is not configured");
+      const url = await invoke<string>("upload_html_cloud", {
+        html,
+        docId: doc.id,
+        token,
+        bucket,
+      });
+
+      // Step 3: Set publish URL on the doc (merge — works for both existing and new)
+      await fsSetDoc(docRef, {
+        publishUrl: url,
+        publishedAt: fsSt(),
+      }, { merge: true });
+
+      setPublishUrl(url);
+      try { await navigator.clipboard.writeText(url); } catch {}
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Publish failed:", e);
+      setPublishError(msg);
+    } finally {
+      setPublishing(false);
+    }
+  }, [activeDocId, documents, theme, themeSettings, customPreviewThemes]);
+
+  const handleUnpublish = useCallback(async () => {
+    const doc = documents.find((d) => d.id === activeDocId);
+    const user = useAuthStore.getState().user;
+    if (!doc || !user) return;
+    setPublishing(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const token = await user.getIdToken();
+      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
+      await invoke<void>("delete_published_html", {
+        docId: doc.id,
+        token,
+        bucket,
+      });
+      const { setPublishUrl: saveUrl } = await import("@/services/firebase");
+      await saveUrl(doc.id, null);
+      setPublishUrl(null);
+    } catch (e) {
+      console.error("Unpublish failed:", e);
+    } finally {
+      setPublishing(false);
+    }
+  }, [activeDocId, documents]);
+
+  // Clear publish URL when switching documents
+  useEffect(() => {
+    setPublishUrl(null);
+  }, [activeDocId]);
+
   if (!initialized) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background">
+      <div className="flex h-screen w-screen items-center justify-center bg-background" data-tauri-drag-region>
         <div className="text-sm text-muted-foreground">Loading...</div>
       </div>
     );
@@ -375,16 +630,16 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <div
           className={cn(
             "flex flex-col overflow-hidden bg-background",
-            !isIOS && "h-screen w-screen",
-            isIOS && "safe-top",
+            !isMobile && "h-screen w-screen",
+            isMobile && "safe-top",
           )}
-          style={isIOS ? {
+          style={isMobile ? {
             position: "fixed",
             top: 0, left: 0, right: 0,
-            ...(keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
+            ...(isIOS && keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
           } : undefined}
         >
-          {!isIOS && (
+          {!isMobile && (
             <div
               className="h-7 w-full shrink-0"
               data-tauri-drag-region
@@ -409,17 +664,18 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       <div
         className={cn(
           "flex flex-col overflow-hidden bg-background",
-          !isIOS && "h-screen w-screen",
-          isIOS && "safe-top",
+          !isMobile && "h-screen w-screen",
+          isMobile && "safe-top",
         )}
-        style={isIOS ? {
+        style={isMobile ? {
           position: "fixed",
           top: 0, left: 0, right: 0,
-          ...(keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
+          ...(isIOS && keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
         } : undefined}
       >
         {/* Window drag region — desktop only (macOS title bar) */}
-        {!isIOS && (
+        {/* macOS overlay title bar drag region — Windows has its own title bar */}
+        {isMac && (
           <div
             className="h-7 w-full shrink-0"
             data-tauri-drag-region
@@ -452,85 +708,164 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             </div>
           </div>
         )}
+        {/* Publish banner */}
+        {(publishUrl || publishing || publishError) && (
+          <div className={cn(
+            "flex items-center justify-between gap-3 px-4 py-1.5 text-white text-xs shrink-0",
+            publishError ? "bg-red-600" : "bg-green-600",
+          )}>
+            {publishing ? (
+              <span>公開中...</span>
+            ) : publishError ? (
+              <>
+                <span className="truncate">公開エラー: {publishError}</span>
+                <button
+                  className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                  onClick={() => setPublishError(null)}
+                >
+                  ✕
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="truncate">
+                  公開URL: <a href={publishUrl!} target="_blank" rel="noopener noreferrer" className="underline">{publishUrl}</a>
+                  <span className="ml-2 opacity-70">(クリップボードにコピー済み)</span>
+                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors whitespace-nowrap"
+                    onClick={async () => { try { await navigator.clipboard.writeText(publishUrl!); } catch {} }}
+                  >
+                    コピー
+                  </button>
+                  <button
+                    className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors whitespace-nowrap"
+                    onClick={() => setPublishUrl(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <div className="flex flex-1 overflow-hidden">
-          {/* Sidebar — overlay on iOS, inline on desktop */}
-          {sidebarOpen && isIOS && (
+          {/* Sidebar — swipeable overlay on iOS, inline on desktop */}
+          {isMobile && (sidebarOpen || swiping) && (
             <div
-              className="fixed inset-0 z-40 bg-black/30"
+              className="fixed inset-0 z-40"
+              style={{ backgroundColor: `rgba(0,0,0,${0.3 * backdropOpacity})` }}
               onClick={toggleSidebar}
             />
           )}
-          {sidebarOpen && (
-            <>
+          {isMobile ? (
+            (sidebarOpen || swiping) && (
               <div
-                className={cn(
-                  "shrink-0 overflow-hidden",
-                  isIOS && "fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background"
-                )}
-                style={{ width: isIOS ? 280 : sidebarWidth }}
+                className="fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background overflow-hidden"
+                style={{
+                  width: "min(320px, 85vw)",
+                  transform: `translateX(${sidebarTranslateX}px)`,
+                  transition: swiping ? "none" : "transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+                  willChange: "transform",
+                }}
               >
                 <Sidebar />
               </div>
-              {/* Sidebar resize handle — desktop only */}
-              {!isIOS && (
+            )
+          ) : (
+            sidebarOpen && (
+              <>
+                <div
+                  className="shrink-0 overflow-hidden"
+                  style={{ width: sidebarWidth }}
+                >
+                  <Sidebar />
+                </div>
                 <div
                   className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
                   onPointerDown={(e) => handleResizeStart("sidebar", e)}
                 />
-              )}
-            </>
+              </>
+            )
           )}
 
           {/* Main content */}
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* Top bar — draggable on desktop, normal on iOS */}
             <div
-              className={cn("flex items-center justify-between border-b border-border px-3 pb-1.5", isIOS && "pt-1 safe-left safe-right")}
-              {...(!isIOS ? { "data-tauri-drag-region": true } : {})}
+              className={cn("flex items-center justify-between border-b border-border px-3 pb-1.5", isMobile && "pt-1 safe-left safe-right")}
+              {...(!isMobile ? { "data-tauri-drag-region": true } : {})}
             >
               <div className="flex items-center gap-1">
                 {!sidebarOpen && (
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-7 w-7"
+                    className={isMobile ? "h-11 w-11" : "h-7 w-7"}
                     onClick={toggleSidebar}
                   >
-                    <PanelLeft className="h-4 w-4" />
+                    <PanelLeft className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                   </Button>
                 )}
                 {/* View mode toggle */}
-                <div className="flex items-center rounded-md border border-border p-0.5">
+                {isMobile ? (
                   <Button
-                    variant={viewMode === "editor" ? "secondary" : "ghost"}
+                    variant="ghost"
                     size="icon"
-                    className="h-6 w-6"
-                    onClick={() => setViewMode("editor")}
-                    title="Editor"
+                    className="h-11 w-11"
+                    onClick={() => {
+                      const modes: ViewMode[] = ["editor", "canvas", "visualization"];
+                      setViewMode(modes[(modes.indexOf(viewMode) + 1) % modes.length]);
+                    }}
+                    title={viewMode === "editor" ? "Editor" : viewMode === "canvas" ? "Canvas" : "Visualization"}
                   >
-                    <PenLine className="h-3.5 w-3.5" />
+                    {viewMode === "editor" ? <PenLine className="h-5 w-5" /> : viewMode === "canvas" ? <LayoutGrid className="h-5 w-5" /> : <Network className="h-5 w-5" />}
                   </Button>
+                ) : (
+                  <div className="flex items-center rounded-md border border-border p-0.5">
+                    <Button
+                      variant={viewMode === "editor" ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setViewMode("editor")}
+                      title="Editor"
+                    >
+                      <PenLine className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant={viewMode === "canvas" ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setViewMode("canvas")}
+                      title="Canvas"
+                    >
+                      <LayoutGrid className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant={viewMode === "visualization" ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => setViewMode("visualization")}
+                      title="Visualization"
+                    >
+                      <Network className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
+                {/* Import markdown — desktop only */}
+                {!isMobile && (
                   <Button
-                    variant={viewMode === "canvas" ? "secondary" : "ghost"}
+                    variant="ghost"
                     size="icon"
-                    className="h-6 w-6"
-                    onClick={() => setViewMode("canvas")}
-                    title="Canvas"
+                    className="h-7 w-7"
+                    onClick={handleImportMarkdown}
+                    title="Import .md file"
                   >
-                    <LayoutGrid className="h-3.5 w-3.5" />
+                    <Upload className="h-3.5 w-3.5" />
                   </Button>
-                </div>
-                {/* Import markdown */}
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={handleImportMarkdown}
-                  title="Import .md file"
-                >
-                  <Upload className="h-3.5 w-3.5" />
-                </Button>
-                {!isIOS && (
+                )}
+                {!isMobile && (
                   <span className="ml-1 text-[10px] text-muted-foreground hidden sm:inline">
                     Cmd+K search · Cmd+Shift+/ shortcuts
                   </span>
@@ -540,31 +875,34 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
+                  className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", "disabled:opacity-40 disabled:pointer-events-none")}
                   onClick={() => setShareOpen(true)}
+                  disabled={!activeDocId}
                   title="Share"
                 >
-                  <Share2 className="h-4 w-4" />
+                  <Share2 className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                 </Button>
                 {viewMode === "editor" && (
                   <>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn("h-7 w-7", rightPanel === "ai" && "bg-accent")}
+                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "ai" && "bg-accent", "disabled:opacity-40 disabled:pointer-events-none")}
                       onClick={() => togglePanel("ai")}
+                      disabled={!activeDocId}
                       title="Claude AI"
                     >
-                      <Bot className="h-4 w-4" />
+                      <Bot className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                     </Button>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn("h-7 w-7", rightPanel === "versions" && "bg-accent")}
+                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "versions" && "bg-accent", "disabled:opacity-40 disabled:pointer-events-none")}
                       onClick={() => togglePanel("versions")}
+                      disabled={!activeDocId}
                       title="Version history"
                     >
-                      <History className="h-4 w-4" />
+                      <History className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                     </Button>
                   </>
                 )}
@@ -607,7 +945,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   </Suspense>
                 )}
               </div>
-              {viewMode === "editor" && rightPanel !== "none" && !isIOS && (
+              {viewMode === "editor" && rightPanel !== "none" && !isMobile && (
                 <>
                   {/* Right panel resize handle — desktop */}
                   <div
@@ -619,6 +957,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                       <VersionPanel
                         onClose={() => setRightPanel("none")}
                         onViewDiff={setDiffState}
+                        onRestore={setPendingRestoreContent}
                       />
                     )}
                     {rightPanel === "ai" && (
@@ -632,12 +971,21 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         </div>
 
         {/* Right panels — fullscreen overlay on iOS */}
-        {isIOS && viewMode === "editor" && rightPanel !== "none" && (
-          <div className="fixed inset-0 z-40 flex flex-col safe-top safe-bottom bg-background">
+        {isMobile && viewMode === "editor" && rightPanel !== "none" && (
+          <div
+            className="fixed z-40 flex flex-col safe-top bg-background"
+            style={{
+              top: 0, left: 0, right: 0,
+              ...(keyboardVisible
+                ? { bottom: "auto", height: viewportHeight }
+                : { bottom: 0 }),
+            }}
+          >
             {rightPanel === "versions" && (
               <VersionPanel
                 onClose={() => setRightPanel("none")}
                 onViewDiff={setDiffState}
+                onRestore={setPendingRestoreContent}
               />
             )}
             {rightPanel === "ai" && (
@@ -648,7 +996,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
         {/* Syncing overlay — initial sync or closing sync */}
         {(closingSyncVisible || (syncing && !initialSyncDoneRef.current)) && (
-          <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
+          <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]" data-tauri-drag-region>
             <div className="flex items-center gap-3 rounded-lg bg-card border border-border px-5 py-3 shadow-lg">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
               <span className="text-sm text-foreground">
@@ -657,7 +1005,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             </div>
           </div>
         )}
-        {!(isIOS && keyboardVisible) && <StatusBar />}
+        {!(isMobile && keyboardVisible) && <StatusBar />}
         <ShareDialog open={shareOpen} onOpenChange={setShareOpen} />
         <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
         <CommandPalette
@@ -670,6 +1018,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           onImportMarkdown={handleImportMarkdown}
           onPrint={handlePrint}
           onShowShortcuts={() => setShortcutsOpen(true)}
+          onOpenShareLink={openShareLink}
+          onPublish={handlePublish}
+          onUnpublish={handleUnpublish}
+          isPublished={!!publishUrl}
         />
         {/* Hidden file input for markdown import */}
         <input

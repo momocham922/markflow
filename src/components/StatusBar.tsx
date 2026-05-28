@@ -2,18 +2,22 @@ import { Moon, Sun, FlaskConical } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { isIOS } from "@/platform";
+import { isIOS, isMobile, isTauri } from "@/platform";
+import { cn } from "@/lib/utils";
 import * as db from "@/services/database";
 
 export function StatusBar() {
   const { theme, toggleTheme } = useAppStore();
   const { user, isOnline, syncing } = useAuthStore();
 
-  // iOS: ultra-compact bar + safe area spacer (separate divs to avoid height conflicts)
-  if (isIOS) {
+  // Mobile: ultra-compact bar + safe area spacer
+  if (isMobile) {
     return (
       <div
-        className="flex items-center justify-between border-t border-border bg-background px-3 pt-1 pb-7 text-[9px] text-muted-foreground shrink-0"
+        className={cn(
+          "flex items-center justify-between border-t border-border bg-background pt-2 text-[10px] text-muted-foreground shrink-0",
+          isIOS ? "pb-7 px-6" : "pb-2 px-4",
+        )}
       >
         <span className="flex items-center gap-1">
           <span
@@ -24,10 +28,10 @@ export function StatusBar() {
           {!user ? "Local" : syncing ? "Sync..." : isOnline ? "Online" : "Offline"}
         </span>
         <button
-          className="h-5 w-5 flex items-center justify-center text-muted-foreground"
+          className="flex items-center justify-center text-muted-foreground"
           onClick={toggleTheme}
         >
-          {theme === "light" ? <Moon className="h-3 w-3" /> : <Sun className="h-3 w-3" />}
+          {theme === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
         </button>
       </div>
     );
@@ -44,8 +48,33 @@ export function StatusBar() {
     }).catch(() => {});
   }, []);
 
+  const [downgrading, setDowngrading] = useState(false);
+
   const toggleBetaChannel = useCallback(async () => {
     const next = !betaChannel;
+
+    // Switching from beta → stable: offer to force-install stable if current version is beta
+    if (!next && isTauri && __APP_VERSION__.includes("beta")) {
+      const confirmed = window.confirm(
+        "Stableチャンネルに切り替えます。\n最新のStable版をインストールしてアプリを再起動しますか？",
+      );
+      if (!confirmed) return;
+
+      setBetaChannel(false);
+      await db.setSetting("update_channel", "stable");
+      setDowngrading(true);
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke<string>("force_install_stable");
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      } catch (err) {
+        setDowngrading(false);
+        window.alert(`Stable版のインストールに失敗しました: ${err}`);
+      }
+      return;
+    }
+
     setBetaChannel(next);
     await db.setSetting("update_channel", next ? "beta" : "stable");
   }, [betaChannel]);
@@ -79,7 +108,10 @@ export function StatusBar() {
         )}
       </div>
       <div className="flex items-center gap-3">
-        {betaChannel && (
+        {downgrading && (
+          <span className="text-amber-500 font-medium animate-pulse">Installing Stable...</span>
+        )}
+        {betaChannel && !downgrading && (
           <span className="text-amber-500 font-medium">Beta</span>
         )}
         {activeDoc && (

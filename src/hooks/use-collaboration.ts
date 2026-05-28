@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { IndexeddbPersistence } from "y-indexeddb";
@@ -20,6 +20,8 @@ export interface CollabState {
   docId: string | null;
   enabled: boolean;
   wsTimedOut: boolean;
+  /** Replace Y.Text content (e.g., for version restore). Noop if not active. */
+  replaceContent: (content: string) => void;
 }
 
 const WS_URL = import.meta.env.VITE_YJS_WEBSOCKET_URL || "";
@@ -110,51 +112,20 @@ export function useCollaboration(
       let wsSynced = false;
       let finalized = false;
 
-      /** Seed Y.Text from local content if Y.Doc is empty.
-       *  Uses clientID-based leader election to prevent content duplication
-       *  when multiple users open the same doc simultaneously.
-       *  Only the client with the lowest clientID seeds immediately;
-       *  others wait and only seed if the leader didn't.
-       */
-      const seedIfEmpty = () => {
-        const ydocContent = ytext.toString();
-        const localContent = initialContentRef.current;
-        if (!ydocContent.trim() && localContent.trim()) {
-          const allClientIds = Array.from(provider.awareness.getStates().keys());
-          if (allClientIds.length > 1) {
-            const minId = Math.min(...allClientIds);
-            if (ydoc.clientID !== minId) {
-              // Not the leader — wait for leader to seed, then fallback
-              setTimeout(() => {
-                if (cancelled) return;
-                if (!ytext.toString().trim() && localContent.trim()) {
-                  ydoc.transact(() => { ytext.insert(0, localContent); });
-                }
-              }, 2000);
-              return;
-            }
-          }
-          ydoc.transact(() => {
-            ytext.insert(0, localContent);
-          });
-        }
-      };
-
       const tryFinalize = () => {
         if (finalized || !idbSynced || !wsSynced || cancelled) return;
         finalized = true;
-
-        seedIfEmpty();
 
         // Sync Y.Text content → frozen value BEFORE activating yCollab.
         // This prevents @uiw/react-codemirror's value prop from conflicting
         // with yCollab's initial sync (which would cause content duplication).
         const finalContent = ytext.toString();
-        if (finalContent.trim() && docId) {
+        // Always sync Y.Text → frozenContentRef, even if empty (prevents stale frozen value)
+        if (docId) {
           onBeforeCollabRef.current?.(docId, finalContent);
         }
 
-        // Also push Y.Text content to store immediately for preview sync
+        // Push Y.Text content to store for preview sync (skip empty to avoid clearing store)
         if (finalContent.trim()) {
           onContentChangeRef.current(finalContent);
         }
@@ -165,43 +136,50 @@ export function useCollaboration(
         setCollabDocId(docId);
       };
 
+      // Connect WebSocket immediately so remote updates start flowing ASAP.
+      // Previously this was deferred until after IDB sync, which caused a race
+      // where finalization completed before WS connected, delaying remote edits.
+      provider.connect();
+
       // IDB synced → if Y.Text already has content from IDB, finalize immediately
       // (no risk of duplication — these are persisted operations from previous sessions).
-      // Otherwise, connect WS and wait for server state.
+      // Otherwise, wait for WS sync to deliver server state.
       idb.once("synced", () => {
         idbSynced = true;
         if (ytext.toString().trim()) {
           wsSynced = true;
           tryFinalize();
         }
-        provider.connect();
       });
 
-      // WS sync — handles both initial sync and reconnections
+      // WS sync — handles both initial sync and reconnections.
+      // Server-side seeding ensures Y.Text has content; client never seeds
+      // to prevent CRDT duplication from concurrent inserts.
       provider.on("sync", (isSynced: boolean) => {
         if (!isSynced) return;
 
         if (!finalized) {
-          // First sync: complete initialization
           wsSynced = true;
           tryFinalize();
-        } else {
-          // Reconnection sync: WS server may have restarted (Cloud Run scale-to-zero).
-          // If Y.Doc is now empty, re-seed from local content.
-          seedIfEmpty();
         }
       });
 
-      // Fallback: if WS never syncs (server down), allow non-collab editing.
-      // Do NOT seed Y.Text here — seeding creates new Yjs operations that can
-      // conflict with operations arriving later from the WS server, causing
-      // content duplication. Instead, Editor renders without yCollab.
+      // Fallback: if WS never syncs within timeout (Cloud Run cold start,
+      // server down), activate collab from IDB/local state anyway.
+      // Provider stays connected so WS can sync later if server comes up.
       const wsTimeout = setTimeout(() => {
-        if (!wsSynced && idbSynced && !cancelled && !finalized) {
-          console.warn("[collab] WS sync timeout — fallback to non-collab mode");
-          setWsTimedOut(true);
+        if (!wsSynced && !cancelled && !finalized) {
+          if (idbSynced) {
+            console.warn("[collab] WS sync timeout — activating with local state");
+            wsSynced = true;
+            tryFinalize();
+          } else {
+            // IDB also hasn't synced — give up and show editor without collab
+            console.warn("[collab] WS+IDB timeout — fallback to non-collab mode");
+            setWsTimedOut(true);
+          }
         }
-      }, 5000);
+      }, 15_000);
 
       // Connection status
       provider.on("status", ({ status }: { status: string }) => {
@@ -238,7 +216,10 @@ export function useCollaboration(
       const observer = () => {
         if (!finalized || cancelled) return;
         const text = ytext.toString();
-        if (!text.trim()) return;
+        // FIX: Removed `!text.trim()` guard. If a collaborator legitimately
+        // clears the document, we must propagate that change to the store.
+        // The empty content guard in updateDocument/saveDocumentToFirestore
+        // already prevents accidental data loss at the persistence layer.
 
         pendingText = text;
         if (!throttleTimer) {
@@ -306,5 +287,16 @@ export function useCollaboration(
     };
   }, [enabled, docId, user]);
 
-  return { extension, connected, peers, docId: collabDocId, enabled, wsTimedOut };
+  // Replace Y.Text content atomically (for version restore)
+  const replaceContent = useCallback((content: string) => {
+    const ydoc = ydocRef.current;
+    if (!ydoc) return;
+    const ytext = ydoc.getText("codemirror");
+    ydoc.transact(() => {
+      ytext.delete(0, ytext.length);
+      if (content) ytext.insert(0, content);
+    });
+  }, []);
+
+  return { extension, connected, peers, docId: collabDocId, enabled, wsTimedOut, replaceContent };
 }

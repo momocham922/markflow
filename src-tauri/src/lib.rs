@@ -1,7 +1,12 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tauri_plugin_updater::UpdaterExt;
+
+/// Flag set by frontend to indicate it's alive and handling updates itself.
+/// If this remains false after a timeout, Rust auto-installs any available update.
+static FRONTEND_ALIVE: AtomicBool = AtomicBool::new(false);
 
 /// Pending OAuth code from iOS in-webview flow
 static PENDING_OAUTH_CODE: Mutex<Option<String>> = Mutex::new(None);
@@ -206,6 +211,13 @@ fn open_safari_vc(_url: String) {}
 #[tauri::command]
 fn dismiss_safari_vc() {}
 
+/// Open a URL in the system browser (works on all platforms including Android)
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize, Default)]
 struct OgpData {
     title: String,
@@ -258,6 +270,28 @@ fn extract_title(html: &str) -> String {
         }
     }
     String::new()
+}
+
+#[tauri::command]
+async fn send_slack_webhook(webhook_url: String, body: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&webhook_url)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status >= 200 && status < 300 {
+        Ok(text)
+    } else {
+        Err(format!("Slack webhook failed ({}): {}", status, text))
+    }
 }
 
 #[tauri::command]
@@ -434,19 +468,26 @@ fn get_pending_oauth_code() -> Option<String> {
     PENDING_OAUTH_CODE.lock().unwrap().take()
 }
 
+/// Called by frontend to signal it's alive and will handle updates via UI.
+/// Prevents Rust failsafe from auto-installing.
+#[tauri::command]
+fn cancel_auto_update() {
+    FRONTEND_ALIVE.store(true, Ordering::Relaxed);
+}
+
 #[tauri::command]
 async fn print_html(html: String) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
     let path = temp_dir.join("markflow-print.html");
     std::fs::write(&path, &html).map_err(|e| e.to_string())?;
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(desktop)]
     {
         std::process::Command::new("/usr/bin/open")
             .arg(path.to_str().ok_or("Invalid path")?)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-    // iOS: print is handled in JS via window.print() or WKWebView
+    // Mobile: print is handled in JS via window.print() or WebView
     Ok(())
 }
 
@@ -638,6 +679,105 @@ async fn upload_image_from_path(
     upload_image_cloud(data, ext, uid, token, bucket).await
 }
 
+/// Upload HTML string to Firebase Storage for publishing.
+/// Stores at `published/{doc_id}.html` with public download URL.
+#[tauri::command]
+async fn upload_html_cloud(
+    html: String,
+    doc_id: String,
+    token: String,
+    bucket: String,
+) -> Result<String, String> {
+    let object_path = format!("published/{}.html", doc_id);
+    let upload_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
+        bucket,
+        urlencoding::encode(&object_path),
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .post(&upload_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .header("Content-Type", "text/html; charset=utf-8")
+        .header("X-Goog-Upload-Protocol", "raw")
+        .header("X-Goog-Upload-Command", "upload, finalize")
+        .body(html.into_bytes())
+        .send()
+        .await
+        .map_err(|e| format!("Upload request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    let encoded_path = urlencoding::encode(&object_path);
+
+    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
+                bucket, encoded_path, dl_token
+            )
+        } else {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+                bucket, encoded_path
+            )
+        }
+    } else {
+        format!(
+            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+            bucket, encoded_path
+        )
+    };
+
+    Ok(download_url)
+}
+
+/// Delete a published HTML from Firebase Storage.
+#[tauri::command]
+async fn delete_published_html(
+    doc_id: String,
+    token: String,
+    bucket: String,
+) -> Result<(), String> {
+    let object_path = format!("published/{}.html", doc_id);
+    let delete_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}",
+        bucket,
+        urlencoding::encode(&object_path),
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .delete(&delete_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("Delete request failed: {}", e))?;
+
+    // 404 = already deleted, treat as success
+    if !resp.status().is_success() && resp.status().as_u16() != 404 {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Delete failed (HTTP {}): {}", status, body));
+    }
+
+    Ok(())
+}
+
 /// Upload image from base64 string — avoids massive JSON number array over IPC.
 #[tauri::command]
 async fn upload_image_from_base64(
@@ -728,12 +868,406 @@ async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), St
     Ok(())
 }
 
+/// Force-install the latest stable version, even if it's a "downgrade" from beta.
+/// Bypasses semver comparison so beta users can switch back to stable.
+#[tauri::command]
+async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
+    let url: url::Url = STABLE_ENDPOINT
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|_current, _remote| true) // always treat as newer
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No stable release available".to_string())?;
+
+    let version = update.version.clone();
+
+    update
+        .download_and_install(
+            |_chunk_len: usize, _content_len: Option<u64>| {},
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(version)
+}
+
+// ── Voice recording — Rust-side audio capture (bypasses WKWebView getUserMedia restriction) ──
+
+static VOICE_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
+static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
+static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
+/// Overlap buffer: last 0.5s of previous chunk for boundary accuracy
+static VOICE_OVERLAP: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+
+// ── Silero VAD ──
+// Session + LSTM state + 64-sample context (prepended to each 512-sample window)
+struct VadState {
+    session: ort::session::Session,
+    state: Vec<f32>,    // [2, 1, 128] = 256 floats
+    context: Vec<f32>,  // last 64 samples from previous window
+}
+static VAD: Mutex<Option<VadState>> = Mutex::new(None);
+
+/// Run Silero VAD on 16kHz mono audio. Returns true if speech detected.
+fn silero_vad_has_speech(audio: &[f32]) -> bool {
+    use ndarray::{Array0, Array2, Array3};
+
+    let mut vad = VAD.lock().unwrap();
+    if vad.is_none() {
+        let model_bytes = include_bytes!("../resources/silero_vad.onnx");
+        match ort::session::Session::builder()
+            .and_then(|mut b| b.commit_from_memory(model_bytes))
+        {
+            Ok(session) => {
+                println!("[vad] Silero VAD loaded");
+                *vad = Some(VadState {
+                    session,
+                    state: vec![0.0f32; 2 * 1 * 128],
+                    context: vec![0.0f32; 64],
+                });
+            }
+            Err(e) => {
+                println!("[vad] Failed to load Silero: {}", e);
+                return true;
+            }
+        }
+    }
+    let vs = vad.as_mut().unwrap();
+    let window = 512usize;
+    let ctx_size = 64usize;
+
+    let mut speech_frames = 0u32;
+    let mut total_frames = 0u32;
+    let mut max_prob: f32 = 0.0;
+
+    for chunk in audio.chunks(window) {
+        if chunk.len() < window { break; }
+        total_frames += 1;
+
+        // Prepend 64-sample context (critical for Silero VAD accuracy)
+        let mut input_data = Vec::with_capacity(ctx_size + window);
+        input_data.extend_from_slice(&vs.context);
+        input_data.extend_from_slice(chunk);
+        // input_data is now 576 samples
+
+        let input = ort::value::Tensor::from_array(
+            Array2::from_shape_vec((1, ctx_size + window), input_data).unwrap()
+        ).unwrap();
+        let state = ort::value::Tensor::from_array(
+            Array3::from_shape_vec((2, 1, 128), vs.state.clone()).unwrap()
+        ).unwrap();
+        let sr = ort::value::Tensor::from_array(
+            Array0::from_elem((), 16000i64)
+        ).unwrap();
+
+        let outputs = match vs.session.run(ort::inputs![
+            "input" => input,
+            "state" => state,
+            "sr" => sr,
+        ]) {
+            Ok(o) => o,
+            Err(e) => {
+                println!("[vad] inference error: {}", e);
+                return true;
+            }
+        };
+
+        if let Ok((_, prob_data)) = outputs["output"].try_extract_tensor::<f32>() {
+            let prob: f32 = prob_data.first().copied().unwrap_or(0.0);
+            if prob > max_prob { max_prob = prob; }
+            if prob > 0.5 { speech_frames += 1; }
+        }
+        if let Ok((_, new_state)) = outputs["stateN"].try_extract_tensor::<f32>() {
+            vs.state = new_state.to_vec();
+        }
+
+        // Update context: last 64 samples of this chunk
+        vs.context = chunk[window - ctx_size..].to_vec();
+    }
+
+    println!("[vad] {}/{} speech ({:.0}%), max={:.3}",
+        speech_frames, total_frames,
+        if total_frames > 0 { speech_frames as f32 / total_frames as f32 * 100.0 } else { 0.0 },
+        max_prob);
+
+    speech_frames > 0
+}
+
+/// Voice chunk returned to frontend: raw PCM base64 + sample rate.
+#[derive(serde::Serialize)]
+struct VoiceChunkData {
+    audio: String,
+    sample_rate: u32,
+}
+
+/// Stop active recording and free the cpal Stream.
+fn stop_voice_recording_inner() {
+    VOICE_ACTIVE.store(false, Ordering::SeqCst);
+    let ptr = {
+        let mut guard = VOICE_STREAM_RAW.lock().unwrap();
+        let p = *guard;
+        *guard = 0;
+        p
+    };
+    if ptr != 0 {
+        // SAFETY: ptr was created by Box::into_raw in start_voice_recording.
+        // We clear the stored value above to prevent double-free.
+        unsafe {
+            drop(Box::from_raw(ptr as *mut cpal::Stream));
+        }
+    }
+}
+
+/// Request microphone permission via AVFoundation (triggers macOS system dialog).
+/// cpal uses CoreAudio directly and does NOT trigger the permission prompt on its own.
+#[cfg(target_os = "macos")]
+fn ensure_microphone_permission() -> Result<(), String> {
+    extern "C" {
+        fn request_microphone_permission() -> i32;
+    }
+    let result = unsafe { request_microphone_permission() };
+    match result {
+        1 => Ok(()),
+        0 => Err("マイクへのアクセスが拒否されています。\nSystem Settings > Privacy & Security > Microphone で MarkFlow を許可してください。".into()),
+        _ => Err("マイク権限リクエストがタイムアウトしました。".into()),
+    }
+}
+
+/// List available audio input devices.
+#[tauri::command]
+fn list_audio_devices() -> Result<Vec<String>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let devices = host.input_devices().map_err(|e| format!("デバイス一覧取得失敗: {}", e))?;
+    let mut names = Vec::new();
+    for d in devices {
+        if let Ok(name) = d.name() {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
+#[tauri::command]
+fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    // Request microphone permission first (macOS only).
+    // Without this, cpal silently receives no audio data.
+    #[cfg(target_os = "macos")]
+    ensure_microphone_permission()?;
+
+    stop_voice_recording_inner();
+
+    let host = cpal::default_host();
+    let device = if let Some(ref name) = device_name {
+        let mut found = None;
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().ok().as_deref() == Some(name.as_str()) {
+                    found = Some(d);
+                    break;
+                }
+            }
+        }
+        found.ok_or_else(|| format!("オーディオデバイス「{}」が見つかりません。", name))?
+    } else {
+        host.default_input_device()
+            .ok_or("マイクが見つかりません。System Settings > Privacy & Security > Microphone で MarkFlow を許可してください。")?
+    };
+
+    let supported = device
+        .default_input_config()
+        .map_err(|e| format!("マイク設定エラー: {}。マイク権限を確認してください。", e))?;
+
+    println!("[voice] Device: {:?}, format: {:?}, rate: {}, ch: {}",
+        device.name().unwrap_or_default(),
+        supported.sample_format(),
+        supported.sample_rate().0,
+        supported.channels());
+
+    let sample_format = supported.sample_format();
+    let sample_rate = supported.sample_rate().0;
+    let channels = supported.channels() as u32;
+
+    VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
+    VOICE_CHANNELS.store(channels, Ordering::Relaxed);
+    VOICE_BUFFER.lock().unwrap().clear();
+    VOICE_OVERLAP.lock().unwrap().clear();
+    // Reset Silero VAD state for new recording session
+    if let Some(ref mut vs) = *VAD.lock().unwrap() {
+        vs.state.fill(0.0);
+        vs.context.fill(0.0);
+    }
+    VOICE_ACTIVE.store(true, Ordering::SeqCst);
+
+    let config: cpal::StreamConfig = supported.into();
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device
+            .build_input_stream(
+                &config,
+                |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if !VOICE_ACTIVE.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                        buf.extend_from_slice(data);
+                    }
+                },
+                |err| eprintln!("[voice] Stream error: {}", err),
+                None,
+            )
+            .map_err(|e| format!("録音開始失敗: {}。マイク権限を確認してください。", e))?,
+        cpal::SampleFormat::I16 => device
+            .build_input_stream(
+                &config,
+                |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    if !VOICE_ACTIVE.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                        for &s in data {
+                            buf.push(s as f32 / 32768.0);
+                        }
+                    }
+                },
+                |err| eprintln!("[voice] Stream error: {}", err),
+                None,
+            )
+            .map_err(|e| format!("録音開始失敗: {}。マイク権限を確認してください。", e))?,
+        fmt => return Err(format!("未対応のオーディオ形式: {:?}", fmt)),
+    };
+
+    stream
+        .play()
+        .map_err(|e| format!("Failed to play stream: {}", e))?;
+
+    // Keep stream alive by leaking — freed in stop_voice_recording_inner
+    let ptr = Box::into_raw(Box::new(stream)) as usize;
+    *VOICE_STREAM_RAW.lock().unwrap() = ptr;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_voice_recording() {
+    stop_voice_recording_inner();
+}
+
+/// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
+/// Audio is resampled to 16 kHz mono for optimal STT quality.
+#[tauri::command]
+fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
+    use base64::Engine;
+
+    let samples: Vec<f32> = {
+        let mut buf = VOICE_BUFFER.lock().unwrap();
+        std::mem::take(&mut *buf)
+    };
+
+    if samples.is_empty() {
+        return Ok(None);
+    }
+
+    let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
+    let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
+
+    // Mix to mono if multi-channel
+    let mono: Vec<f32> = if channels > 1 {
+        samples
+            .chunks(channels as usize)
+            .map(|ch| ch.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        samples
+    };
+
+    // Prepend overlap from previous chunk (0.5s) for boundary accuracy
+    let overlap_samples = (sample_rate as usize) / 2; // 0.5 seconds
+    let with_overlap = {
+        let overlap = VOICE_OVERLAP.lock().unwrap();
+        let mut v = Vec::with_capacity(overlap.len() + mono.len());
+        v.extend_from_slice(&overlap);
+        v.extend_from_slice(&mono);
+        v
+    };
+    // Save last 0.5s as overlap for next chunk
+    {
+        let mut overlap = VOICE_OVERLAP.lock().unwrap();
+        let start = if mono.len() > overlap_samples { mono.len() - overlap_samples } else { 0 };
+        *overlap = mono[start..].to_vec();
+    }
+    let mono = with_overlap;
+
+    // Resample to 16 kHz for optimal STT quality
+    const TARGET_RATE: u32 = 16000;
+    let resampled = if sample_rate > TARGET_RATE {
+        let ratio = sample_rate as f64 / TARGET_RATE as f64;
+        let new_len = (mono.len() as f64 / ratio) as usize;
+        let mut out = Vec::with_capacity(new_len);
+        for i in 0..new_len {
+            let src = i as f64 * ratio;
+            let idx = src as usize;
+            let frac = src - idx as f64;
+            // Linear interpolation for better quality
+            let s0 = mono[idx.min(mono.len() - 1)];
+            let s1 = mono[(idx + 1).min(mono.len() - 1)];
+            out.push(s0 + (s1 - s0) * frac as f32);
+        }
+        out
+    } else {
+        mono
+    };
+    let output_rate = if sample_rate > TARGET_RATE { TARGET_RATE } else { sample_rate };
+
+    // Skip chunks shorter than 0.3 seconds (too short for useful STT)
+    let min_samples = (output_rate as usize) * 3 / 10;
+    if resampled.len() < min_samples {
+        return Ok(None);
+    }
+
+    // Silero VAD: neural network voice activity detection
+    if !silero_vad_has_speech(&resampled) {
+        return Ok(None);
+    }
+
+    // f32 → i16 (LINEAR16 PCM)
+    let mut pcm_bytes = Vec::with_capacity(resampled.len() * 2);
+    for &s in &resampled {
+        let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    Ok(Some(VoiceChunkData {
+        audio: base64::engine::general_purpose::STANDARD.encode(&pcm_bytes),
+        sample_rate: output_rate,
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(
@@ -791,7 +1325,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(target_os = "ios")]
             {
                 std::thread::spawn(|| {
@@ -805,9 +1339,83 @@ pub fn run() {
                     }
                 });
             }
+
+            // Failsafe auto-updater: runs independently of frontend.
+            // If the frontend crashes (e.g. React hooks violation → black screen),
+            // it can't check for updates. This Rust-side task ensures the app
+            // still self-heals by auto-installing any available update.
+            #[cfg(desktop)]
+            {
+                let update_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Wait for frontend to boot. If healthy, it calls cancel_auto_update
+                    // within ~5 seconds of mounting.
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                    if FRONTEND_ALIVE.load(Ordering::Relaxed) {
+                        return; // Frontend is alive — it handles updates via UI
+                    }
+
+                    // Frontend didn't respond. It's likely crashed.
+                    // Determine update channel from current version.
+                    let version = update_handle
+                        .config()
+                        .version
+                        .as_deref()
+                        .unwrap_or("");
+                    let endpoint = if version.contains("beta") {
+                        BETA_ENDPOINT
+                    } else {
+                        STABLE_ENDPOINT
+                    };
+
+                    let url: url::Url = match endpoint.parse() {
+                        Ok(u) => u,
+                        Err(_) => return,
+                    };
+
+                    let updater = match update_handle
+                        .updater_builder()
+                        .endpoints(vec![url])
+                    {
+                        Ok(b) => match b.build() {
+                            Ok(u) => u,
+                            Err(_) => return,
+                        },
+                        Err(_) => return,
+                    };
+
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            // Give frontend one more chance (total ~15s from startup)
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            if FRONTEND_ALIVE.load(Ordering::Relaxed) {
+                                return;
+                            }
+
+                            eprintln!(
+                                "[failsafe] Frontend unresponsive. Auto-installing update v{}",
+                                update.version
+                            );
+                            if let Err(e) =
+                                update.download_and_install(|_, _| {}, || {}).await
+                            {
+                                eprintln!("[failsafe] Install failed: {}", e);
+                                return;
+                            }
+                            // Restart app with updated binary
+                            update_handle.restart();
+                        }
+                        _ => {
+                            // No update available or check failed — nothing to do
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, get_voice_chunk])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

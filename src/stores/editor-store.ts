@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import type { EditorView } from "@codemirror/view";
 
+interface PendingInsert {
+  text: string;
+  mode: "replace" | "append";
+}
+
 interface EditorState {
   view: EditorView | null;
   setView: (view: EditorView | null) => void;
@@ -12,6 +17,9 @@ interface EditorState {
   insertAtCursor: (text: string) => boolean;
   replaceSelection: (text: string) => boolean;
   appendToDoc: (text: string) => boolean;
+  /** Queued insert for iOS — applied by Editor after AI panel closes */
+  pendingInsert: PendingInsert | null;
+  setPendingInsert: (insert: PendingInsert | null) => void;
 }
 
 /** Check that the view is alive and its DOM is still attached */
@@ -90,4 +98,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     view.focus();
     return true;
   },
+
+  pendingInsert: null,
+  setPendingInsert: (insert) => set({ pendingInsert: insert }),
 }));

@@ -17,8 +17,32 @@ function detectIOS(): boolean {
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
+/** Detect Android */
+function detectAndroid(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android/.test(navigator.userAgent);
+}
+
+/** Detect macOS (non-iOS) */
+function detectMac(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return navigator.platform === "MacIntel" && navigator.maxTouchPoints <= 1;
+}
+
 /** True when running on iOS (Tauri iOS or Safari) — cached after first call */
 export const isIOS = detectIOS();
+
+/** True when running on Android */
+export const isAndroid = detectAndroid();
+
+/** True when running on any mobile platform (iOS or Android, with fallback for custom UAs) */
+export const isMobile = isIOS || isAndroid ||
+  (typeof window !== "undefined" && typeof navigator !== "undefined" &&
+    window.innerWidth <= 1024 && navigator.maxTouchPoints > 0) ||
+  (typeof navigator !== "undefined" && /Mobile|wv|WebView/i.test(navigator.userAgent));
+
+/** True when running on macOS desktop */
+export const isMac = detectMac();
 
 /** True when running inside Tauri (desktop or iOS) */
 export const isTauri = detectTauri();

@@ -18,6 +18,7 @@ interface HeadingNode {
   id: string;
   label: string;
   level: number;
+  lineNumber: number;
   children: HeadingNode[];
 }
 
@@ -26,13 +27,14 @@ interface HeadingNode {
  * Returns a root node whose children are the top-level headings.
  */
 function parseHeadings(content: string, docTitle: string): HeadingNode {
-  const root: HeadingNode = { id: "root", label: docTitle || "Document", level: 0, children: [] };
+  const root: HeadingNode = { id: "root", label: docTitle || "Document", level: 0, lineNumber: 0, children: [] };
   const lines = content.split("\n");
 
   const stack: HeadingNode[] = [root];
 
   let headingIdx = 0;
-  for (const line of lines) {
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx];
     const match = line.match(/^(#{1,6})\s+(.+)/);
     if (!match) continue;
 
@@ -42,6 +44,7 @@ function parseHeadings(content: string, docTitle: string): HeadingNode {
       id: `h-${headingIdx++}`,
       label,
       level,
+      lineNumber: lineIdx,
       children: [],
     };
 
@@ -124,7 +127,7 @@ function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { 
       id: node.id,
       type: "mindmap",
       position: { x, y: yCenter - nodeH / 2 },
-      data: { label: node.label, level: node.level, themeId } satisfies MindMapNodeData,
+      data: { label: node.label, level: node.level, themeId, lineNumber: node.lineNumber } satisfies MindMapNodeData,
     });
 
     if (node.children.length === 0) return;
@@ -165,9 +168,10 @@ function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { 
 interface MindMapViewProps {
   content: string;
   title: string;
+  onNodeClick?: (info: { lineNumber: number; text: string }) => void;
 }
 
-export function MindMapView({ content, title }: MindMapViewProps) {
+export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
   const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) || "lavender") as MindMapThemeId;
   const { nodes, edges } = useMemo(() => {
     const tree = parseHeadings(content, title);
@@ -197,7 +201,11 @@ export function MindMapView({ content, title }: MindMapViewProps) {
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}
-        elementsSelectable={false}
+        elementsSelectable={!!onNodeClick}
+        onNodeClick={onNodeClick ? (_event, node) => {
+          const data = node.data as unknown as MindMapNodeData;
+          if (data.lineNumber != null) onNodeClick({ lineNumber: data.lineNumber, text: data.label });
+        } : undefined}
         panOnDrag
         zoomOnScroll
         className="bg-background"
