@@ -16,6 +16,17 @@ val tauriProperties = Properties().apply {
 android {
     compileSdk = 36
     namespace = "com.markflow.editor"
+    signingConfigs {
+        create("release") {
+            val ks = file(System.getProperty("user.home") + "/.android/markflow-release.keystore")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASS") ?: "markflow2026"
+                keyAlias = "markflow"
+                keyPassword = System.getenv("ANDROID_KEY_PASS") ?: System.getenv("ANDROID_KEYSTORE_PASS") ?: "markflow2026"
+            }
+        }
+    }
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.markflow.editor"
@@ -37,6 +48,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
