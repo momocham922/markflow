@@ -27,3 +27,4 @@ test-results/
 # Debug
 npm-debug.log*
 pnpm-debug.log*
+.android-version-code

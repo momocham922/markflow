@@ -61,6 +61,20 @@ if [ -z "$KEYSTORE_PASS" ]; then
   exit 1
 fi
 
+# ─── Version code ───
+# Tauri generates versionCode from semver (e.g., 0.5.0 → 5000).
+# Play Store requires strictly increasing versionCode, so we add a build counter.
+VCODE_FILE="$ROOT/.android-version-code"
+if [ -f "$VCODE_FILE" ]; then
+  LAST_VCODE=$(cat "$VCODE_FILE")
+else
+  LAST_VCODE=5000
+fi
+NEXT_VCODE=$((LAST_VCODE + 1))
+echo "$NEXT_VCODE" > "$VCODE_FILE"
+export ANDROID_VERSION_CODE="$NEXT_VCODE"
+echo "=== versionCode: $NEXT_VCODE ==="
+
 # ─── Build ───
 echo "=== Building Android AAB (aarch64) ==="
 cd "$ROOT"
