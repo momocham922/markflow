@@ -152,17 +152,39 @@ git add -A && git commit && git push
 - ExportOptions.plist: `app-store-connect` + `automatic` signing
 - `ITSAppUsesNonExemptEncryption: false` が Info.plist に必須
 
-#### 全プラットフォームリリース手順
+#### 全プラットフォームリリース手順（4プラットフォーム）
 1. `./scripts/bump-version.sh X.Y.Z-beta.N`
 2. `git add -A && git commit && git push`
-3. **macOS**: ローカルで署名ビルド → `./scripts/release-beta.sh`
+3. **macOS**: ローカルで署名ビルド → `./scripts/release-beta.sh`（または `release-stable.sh`）
 4. **Windows**: GitHub Actionsが `package.json` 変更を検知して自動ビルド → 既存リリースにWindows版を追加
 5. **iOS**: ローカルで `./scripts/release-testflight.sh`
+6. **Android**: `ANDROID_KEYSTORE_PASS=markflow2026 ./scripts/release-android-internal.sh`
+
+```bash
+# Beta リリース一括実行例（macOS + iOS + Android をローカルで実行、Windowsは自動）
+./scripts/bump-version.sh X.Y.Z-beta.N
+git add -A && git commit && git push
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+  APPLE_API_KEY="AQ996V29F4" \
+  APPLE_API_ISSUER="fab7704b-d2a9-4ce6-9e58-c6a73c958c22" \
+  APPLE_API_KEY_PATH="/Users/3937/.tauri/AuthKey_AQ996V29F4.p8" \
+  pnpm tauri build
+./scripts/release-beta.sh
+./scripts/release-testflight.sh
+ANDROID_KEYSTORE_PASS=markflow2026 ./scripts/release-android-internal.sh
+```
 
 - Beta CI: `release/beta` pushで `.github/workflows/release-beta.yml` 発火（Windowsのみ）
 - Stable CI: `main` pushで `.github/workflows/release-stable.yml` 発火（Windowsのみ）
 - macOSはApple署名証明書がCI未登録のため、ローカルビルド
 - 手動実行（workflow_dispatch）も可能
+
+### Android 注意事項
+- リリース署名: `~/.android/markflow-release.keystore`（alias: `markflow`）
+- Play Console自動アップロード: `~/.android/play-api-key.json`（サービスアカウント: `play-upload@markflow-app-2026.iam.gserviceaccount.com`）
+- Internal Testingトラックに自動公開
+- `build.gradle.kts` にリリース署名設定済み（`ANDROID_KEYSTORE_PASS` 環境変数）
 
 ### Windows 注意事項
 - MSIバンドラーはプレリリース版 (beta.X) に非対応 → `--bundles nsis` 必須
