@@ -13,7 +13,7 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { PanelLeft, History, PenLine, LayoutGrid, Bot, Share2, ArrowLeft, Upload } from "lucide-react";
+import { PanelLeft, History, PenLine, LayoutGrid, Bot, Share2, ArrowLeft, Upload, Network } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
@@ -28,6 +28,12 @@ const CanvasView = lazy(() =>
   })),
 );
 
+const VisualizationView = lazy(() =>
+  import("@/components/visualization/VisualizationView").then((m) => ({
+    default: m.VisualizationView,
+  })),
+);
+
 // HTML → Markdown for legacy content export
 const turndown = new TurndownService({
   headingStyle: "atx",
@@ -35,7 +41,7 @@ const turndown = new TurndownService({
   bulletListMarker: "-",
 });
 
-type ViewMode = "editor" | "canvas";
+type ViewMode = "editor" | "canvas" | "visualization";
 type RightPanel = "none" | "versions" | "ai";
 
 function App() {
@@ -933,6 +939,16 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   </div>
                 ) : viewMode === "editor" ? (
                   <Editor />
+                ) : viewMode === "visualization" ? (
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                        Loading visualization...
+                      </div>
+                    }
+                  >
+                    <VisualizationView />
+                  </Suspense>
                 ) : (
                   <Suspense
                     fallback={

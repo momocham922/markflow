@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { User } from "firebase/auth";
 import {
   signInWithGoogle,
+  signInWithGitHub,
   signOut,
   onAuthChange,
   fetchUserDocuments,
@@ -111,7 +112,7 @@ interface AuthState {
   syncing: boolean;
   loginError: string | null;
   init: () => () => void;
-  login: () => Promise<void>;
+  login: (provider?: "google" | "github") => Promise<void>;
   logout: () => Promise<void>;
   syncToCloud: () => Promise<boolean>;
   syncFromCloud: () => Promise<void>;
@@ -216,10 +217,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     };
   },
 
-  login: async () => {
+  login: async (provider = "google") => {
     set({ loginError: null });
     try {
-      await signInWithGoogle();
+      if (provider === "github") {
+        await signInWithGitHub();
+      } else {
+        await signInWithGoogle();
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("Login failed:", error);

@@ -15,11 +15,18 @@ export interface ClaudeMessage {
   content: string | ContentBlock[];
 }
 
+export interface CustomTool {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
 export interface SendOptions {
   systemPrompt: string;
   messages: ClaudeMessage[];
   onChunk?: (text: string) => void;
   tools?: boolean;
+  customTools?: CustomTool[];
 }
 
 async function getFirebaseIdToken(): Promise<string> {
@@ -36,32 +43,14 @@ export function abortClaude() {
   activeAbortController = null;
 }
 
-export async function sendToClaude(
-  _unused: string,
-  systemPrompt: string,
-  messages: ClaudeMessage[],
+// Raw API call — returns full response JSON (non-streaming) or text (streaming)
+async function callClaudeApi(
+  idToken: string,
+  body: Record<string, unknown>,
   onChunk?: (text: string) => void,
-  tools?: boolean,
-): Promise<string> {
-  const idToken = await getFirebaseIdToken();
-
-  abortClaude(); // Cancel any in-flight request
-  const controller = new AbortController();
-  activeAbortController = controller;
-
-  const body: Record<string, unknown> = {
-    system: systemPrompt,
-    messages,
-    max_tokens: 4096,
-    stream: !!onChunk,
-  };
-
-  if (tools) {
-    body.tools = [
-      { type: "web_search_20250305", name: "web_search", max_uses: 3 },
-    ];
-  }
-
+  signal?: AbortSignal,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any> {
   const response = await fetch(`${AI_PROXY_URL}/v1/chat`, {
     method: "POST",
     headers: {
@@ -69,7 +58,7 @@ export async function sendToClaude(
       Authorization: `Bearer ${idToken}`,
     },
     body: JSON.stringify(body),
-    signal: controller.signal,
+    signal,
   });
 
   if (!response.ok) {
@@ -92,7 +81,6 @@ export async function sendToClaude(
 
         lineBuf += decoder.decode(value, { stream: true });
         const lines = lineBuf.split("\n");
-        // Keep the last (possibly incomplete) line in the buffer
         lineBuf = lines.pop() || "";
 
         for (const line of lines) {
@@ -113,21 +101,156 @@ export async function sendToClaude(
       }
     } finally {
       reader.releaseLock();
-      activeAbortController = null;
     }
     return fullText;
   }
 
-  activeAbortController = null;
-  const data = await response.json();
-  // Handle both single text and multi-block responses (tool use)
-  if (Array.isArray(data.content)) {
-    return data.content
-      .filter((b: { type: string }) => b.type === "text")
-      .map((b: { text: string }) => b.text)
-      .join("");
+  return await response.json();
+}
+
+function buildToolsList(tools?: boolean, customTools?: CustomTool[]): unknown[] | undefined {
+  if (!tools && (!customTools || customTools.length === 0)) return undefined;
+  const allTools: unknown[] = [];
+  if (tools) {
+    allTools.push({ type: "web_search_20250305", name: "web_search", max_uses: 3 });
   }
-  return data.content?.[0]?.text || "";
+  if (customTools) {
+    for (const t of customTools) {
+      allTools.push({ name: t.name, description: t.description, input_schema: t.input_schema });
+    }
+  }
+  return allTools;
+}
+
+export async function sendToClaude(
+  _unused: string,
+  systemPrompt: string,
+  messages: ClaudeMessage[],
+  onChunk?: (text: string) => void,
+  tools?: boolean,
+  customTools?: CustomTool[],
+): Promise<string> {
+  const idToken = await getFirebaseIdToken();
+
+  abortClaude();
+  const controller = new AbortController();
+  activeAbortController = controller;
+
+  const toolsList = buildToolsList(tools, customTools);
+  const body: Record<string, unknown> = {
+    system: systemPrompt,
+    messages,
+    max_tokens: 4096,
+    stream: !!onChunk,
+  };
+  if (toolsList) body.tools = toolsList;
+
+  try {
+    const result = await callClaudeApi(idToken, body, onChunk, controller.signal);
+
+    if (onChunk) return result as string;
+
+    // Extract text from response
+    if (Array.isArray(result.content)) {
+      return result.content
+        .filter((b: { type: string }) => b.type === "text")
+        .map((b: { text: string }) => b.text)
+        .join("");
+    }
+    return result.content?.[0]?.text || "";
+  } finally {
+    activeAbortController = null;
+  }
+}
+
+/**
+ * Send to Claude with MCP tool execution loop.
+ * When Claude returns tool_use blocks, calls the tool and sends results back.
+ * onChunk is only used for the final response (after all tool calls are resolved).
+ */
+export async function sendWithToolLoop(
+  systemPrompt: string,
+  messages: ClaudeMessage[],
+  onToolCall: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  onChunk?: (text: string) => void,
+  tools?: boolean,
+  customTools?: CustomTool[],
+  onToolStatus?: (status: string) => void,
+): Promise<string> {
+  const idToken = await getFirebaseIdToken();
+
+  abortClaude();
+  const controller = new AbortController();
+  activeAbortController = controller;
+
+  const toolsList = buildToolsList(tools, customTools);
+  const conversationMessages = [...messages];
+  const maxIterations = 10;
+
+  try {
+    for (let i = 0; i < maxIterations; i++) {
+      const isLastChance = i === maxIterations - 1;
+      const body: Record<string, unknown> = {
+        system: systemPrompt,
+        messages: conversationMessages,
+        max_tokens: 4096,
+        stream: false,
+      };
+      if (toolsList && !isLastChance) body.tools = toolsList;
+
+      const data = await callClaudeApi(idToken, body, undefined, controller.signal);
+
+      if (!Array.isArray(data.content)) {
+        return data.content?.[0]?.text || "";
+      }
+
+      // Check for tool_use blocks
+      const toolUseBlocks = data.content.filter(
+        (b: { type: string }) => b.type === "tool_use",
+      );
+
+      if (toolUseBlocks.length === 0 || isLastChance) {
+        // No tool use — extract text. If there's an onChunk, send the final text through it.
+        const text = data.content
+          .filter((b: { type: string }) => b.type === "text")
+          .map((b: { text: string }) => b.text)
+          .join("");
+        if (onChunk) onChunk(text);
+        return text;
+      }
+
+      // Add assistant response to conversation
+      conversationMessages.push({ role: "assistant", content: data.content });
+
+      // Execute all tool calls and add results
+      const toolResults: ContentBlock[] = [];
+      for (const block of toolUseBlocks) {
+        const { id, name, input } = block as { id: string; name: string; input: Record<string, unknown> };
+        onToolStatus?.(`Calling tool: ${name}`);
+        try {
+          const result = await onToolCall(name, input);
+          toolResults.push({
+            type: "tool_result" as unknown as "text",
+            tool_use_id: id,
+            content: typeof result === "string" ? result : JSON.stringify(result),
+          } as unknown as ContentBlock);
+        } catch (err) {
+          toolResults.push({
+            type: "tool_result" as unknown as "text",
+            tool_use_id: id,
+            content: `Error: ${err instanceof Error ? err.message : String(err)}`,
+            is_error: true,
+          } as unknown as ContentBlock);
+        }
+      }
+
+      conversationMessages.push({ role: "user", content: toolResults });
+    }
+
+    return "Tool execution limit reached.";
+  } finally {
+    activeAbortController = null;
+  }
 }
 
 export const AI_ACTIONS = [

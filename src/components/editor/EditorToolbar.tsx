@@ -24,6 +24,8 @@ import {
   Pencil,
   Check,
   Network,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -227,7 +229,7 @@ export function EditorToolbar({
 
   // ── Desktop layout ──────────────────────────────────────
   return (
-    <div className="flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 justify-between">
+    <div className="relative flex items-center border-b border-border px-3 py-1.5 bg-background/80 backdrop-blur-sm gap-2 justify-between">
       {/* Left: document title (rename) + tags */}
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 flex-1 overflow-hidden">
         {/* Document title / rename */}

@@ -4,6 +4,7 @@ import {
   getAuth,
   indexedDBLocalPersistence,
   GoogleAuthProvider,
+  GithubAuthProvider,
   signInWithCredential,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -47,6 +48,10 @@ const GOOGLE_CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET =
   import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
+const GITHUB_CLIENT_ID =
+  import.meta.env.VITE_GITHUB_CLIENT_ID || "";
+const GITHUB_CLIENT_SECRET =
+  import.meta.env.VITE_GITHUB_CLIENT_SECRET || "";
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
