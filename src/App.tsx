@@ -170,16 +170,24 @@ function App() {
   // Listen for deep link events (markflow://share/{token})
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    import("@tauri-apps/plugin-deep-link").then(({ onOpenUrl }) => {
-      onOpenUrl((urls) => {
-        for (const url of urls) {
-          const token = parseShareToken(url);
-          if (token) {
-            setShareToken(token);
-            break;
+    import("@tauri-apps/plugin-deep-link").then(async ({ onOpenUrl, getCurrent }) => {
+      // Handle initial launch URL (app was opened via deep link while not running)
+      try {
+        const initialUrls = await getCurrent();
+        if (initialUrls && initialUrls.length > 0) {
+          for (const url of initialUrls) {
+            const token = parseShareToken(url);
+            if (token) { setShareToken(token); break; }
           }
         }
-      }).then((fn) => { unlisten = fn; });
+      } catch {}
+      // Listen for subsequent deep link events while app is running
+      unlisten = await onOpenUrl((urls) => {
+        for (const url of urls) {
+          const token = parseShareToken(url);
+          if (token) { setShareToken(token); break; }
+        }
+      });
     }).catch(() => {});
     return () => { unlisten?.(); };
   }, [parseShareToken]);

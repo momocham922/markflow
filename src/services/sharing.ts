@@ -102,6 +102,16 @@ export interface Collaborator {
   addedAt: number;
 }
 
+/** Check if a user with the given email has ever signed in to the app */
+export async function checkUserExists(email: string): Promise<boolean> {
+  const usersQ = query(
+    collection(firestore, "users"),
+    where("email", "==", email),
+  );
+  const snap = await getDocs(usersQ);
+  return !snap.empty;
+}
+
 /** Add a collaborator to a document by email (atomic transaction) */
 export async function addCollaborator(
   docId: string,

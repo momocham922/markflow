@@ -33,6 +33,7 @@ import {
   addCollaborator,
   removeCollaborator,
   getCollaborators,
+  checkUserExists,
   type ShareLink,
   type Collaborator,
 } from "@/services/sharing";
@@ -188,6 +189,18 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     setInviting(true);
     setError("");
     try {
+      const exists = await checkUserExists(inviteEmail.trim());
+      if (!exists) {
+        const proceed = window.confirm(
+          `「${inviteEmail.trim()}」はまだMarkFlowに登録されていません。\n\n` +
+          "招待を続行すると、相手がアプリをインストール・ログインした時点で共有が有効になります。\n" +
+          "招待を続行しますか？",
+        );
+        if (!proceed) {
+          setInviting(false);
+          return;
+        }
+      }
       // Save current content to Firestore before sharing — ensures
       // the collaborator gets the latest content, not a stale version.
       if (activeDoc) {

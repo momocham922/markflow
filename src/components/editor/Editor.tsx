@@ -554,7 +554,7 @@ export function Editor() {
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         setScrollPercent(previewDOM, getScrollPercent(editorScrollDOM));
-        syncSource = null;
+        requestAnimationFrame(() => { syncSource = null; });
       });
     };
     const onPreviewScroll = () => {
@@ -563,7 +563,7 @@ export function Editor() {
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         setScrollPercent(editorScrollDOM, getScrollPercent(previewDOM));
-        syncSource = null;
+        requestAnimationFrame(() => { syncSource = null; });
       });
     };
 
