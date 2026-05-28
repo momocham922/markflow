@@ -555,7 +555,7 @@ export function Sidebar() {
         setRenameValue(doc.title);
       }}
       className={cn(
-        "group flex w-full items-center gap-1.5 rounded-md pl-3 pr-2 text-left text-xs transition-colors cursor-pointer",
+        "group flex w-full items-center gap-1.5 rounded-md pl-2.5 pr-2 text-left text-xs transition-colors cursor-pointer",
         isMobile ? "py-px" : "py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
@@ -797,7 +797,7 @@ export function Sidebar() {
             setRenameValue(title);
           }}
           className={cn(
-            "group flex w-full items-center gap-1.5 rounded-md pl-3 pr-2 text-left text-xs transition-colors cursor-pointer",
+            "group flex w-full items-center gap-1.5 rounded-md pl-2.5 pr-2 text-left text-xs transition-colors cursor-pointer",
             isMobile ? "py-px" : "py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
@@ -1267,7 +1267,7 @@ export function Sidebar() {
                           key={sd.id}
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
-                            "group flex w-full items-center gap-1.5 rounded-md pl-3 pr-2 text-left text-xs transition-colors",
+                            "group flex w-full items-center gap-1.5 rounded-md pl-2.5 pr-2 text-left text-xs transition-colors",
                             isMobile ? "py-px" : "py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
