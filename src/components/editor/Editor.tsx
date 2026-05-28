@@ -341,6 +341,7 @@ export function Editor() {
   // Render mermaid diagrams after preview HTML updates or theme change
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
+  const editorScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = previewRef.current;
     if (!container) return;
@@ -532,7 +533,7 @@ export function Editor() {
   // Scroll sync between editor and preview in split mode
   useEffect(() => {
     if (!scrollSyncEnabled || previewMode !== "split" || isMobile) return;
-    const editorScrollDOM = viewRef.current?.scrollDOM;
+    const editorScrollDOM = editorScrollRef.current;
     const previewDOM = previewScrollRef.current;
     if (!editorScrollDOM || !previewDOM) return;
 
@@ -756,6 +757,7 @@ export function Editor() {
       <div className="flex flex-1 overflow-hidden">
         {/* Editor pane — always mounted, hidden in preview-only and mindmap modes */}
         <div
+          ref={editorScrollRef}
           className={`overflow-auto editor-scroll ${
             previewMode === "preview" || previewMode === "mindmap"
               ? "hidden"

@@ -555,8 +555,8 @@ export function Sidebar() {
         setRenameValue(doc.title);
       }}
       className={cn(
-        "group flex w-full items-center gap-1.5 rounded-md pl-2.5 pr-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "py-px" : "py-1.5",
+        "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
+        isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -797,8 +797,8 @@ export function Sidebar() {
             setRenameValue(title);
           }}
           className={cn(
-            "group flex w-full items-center gap-1.5 rounded-md pl-2.5 pr-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "py-px" : "py-1.5",
+            "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
+            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -1267,8 +1267,8 @@ export function Sidebar() {
                           key={sd.id}
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
-                            "group flex w-full items-center gap-1.5 rounded-md pl-2.5 pr-2 text-left text-xs transition-colors",
-                            isMobile ? "py-px" : "py-1.5",
+                            "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors",
+                            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",

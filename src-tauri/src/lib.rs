@@ -1047,9 +1047,24 @@ fn ensure_microphone_permission() -> Result<(), String> {
     }
 }
 
-/// Start capturing audio from the default input device via CoreAudio (cpal).
+/// List available audio input devices.
 #[tauri::command]
-fn start_voice_recording() -> Result<(), String> {
+fn list_audio_devices() -> Result<Vec<String>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let devices = host.input_devices().map_err(|e| format!("デバイス一覧取得失敗: {}", e))?;
+    let mut names = Vec::new();
+    for d in devices {
+        if let Ok(name) = d.name() {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
+#[tauri::command]
+fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     // Request microphone permission first (macOS only).
@@ -1060,9 +1075,21 @@ fn start_voice_recording() -> Result<(), String> {
     stop_voice_recording_inner();
 
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or("マイクが見つかりません。System Settings > Privacy & Security > Microphone で MarkFlow を許可してください。")?;
+    let device = if let Some(ref name) = device_name {
+        let mut found = None;
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().ok().as_deref() == Some(name.as_str()) {
+                    found = Some(d);
+                    break;
+                }
+            }
+        }
+        found.ok_or_else(|| format!("オーディオデバイス「{}」が見つかりません。", name))?
+    } else {
+        host.default_input_device()
+            .ok_or("マイクが見つかりません。System Settings > Privacy & Security > Microphone で MarkFlow を許可してください。")?
+    };
 
     let supported = device
         .default_input_config()
@@ -1388,7 +1415,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, start_voice_recording, stop_voice_recording, get_voice_chunk])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, get_voice_chunk])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

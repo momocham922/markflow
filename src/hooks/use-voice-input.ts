@@ -10,6 +10,7 @@ const isTauri =
 
 export interface UseVoiceInputOptions {
   language?: string;
+  deviceName?: string;
   onTranscript?: (text: string) => void;
   onError?: (error: string) => void;
   onMaxDuration?: () => void;
@@ -41,6 +42,7 @@ function blobToBase64(blob: Blob): Promise<string> {
 
 export function useVoiceInput({
   language = "ja-JP",
+  deviceName,
   onTranscript,
   onError,
   onMaxDuration,
@@ -206,7 +208,7 @@ export function useVoiceInput({
       if (isTauri) {
         // Rust audio capture — bypasses WKWebView getUserMedia restriction
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("start_voice_recording");
+        await invoke("start_voice_recording", { deviceName: deviceName || null });
 
         // Poll Rust buffer every CHUNK_MS and send to transcription API.
         // Use a queue to avoid losing audio chunks during API calls.

@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Mic, MicOff, Sparkles, Trash2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { isMobile } from "@/platform";
+import { isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { auth } from "@/services/firebase";
@@ -30,6 +30,18 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   const lastStructuredOutputRef = useRef("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  const [audioDevices, setAudioDevices] = useState<string[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<string>("");
+
+  useEffect(() => {
+    if (!isTauri) return;
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      invoke<string[]>("list_audio_devices").then((devices) => {
+        setAudioDevices(devices);
+      }).catch(() => {});
+    });
+  }, []);
+
   // Refs to avoid stale closures in setInterval callbacks
   const fullTranscriptRef = useRef("");
   const structuringRef = useRef(false);
@@ -46,6 +58,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
     clearTranscript,
   } = useVoiceInput({
     language: "ja-JP",
+    deviceName: selectedDevice || undefined,
     onError: (msg) => setVoiceError(msg),
     onMaxDuration: () => setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
@@ -237,6 +250,20 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         )}
 
         <div className="flex-1" />
+
+        {isTauri && audioDevices.length > 1 && !isRecording && (
+          <select
+            className="h-7 max-w-[120px] rounded-md border border-input bg-background px-1.5 text-[11px] outline-none truncate"
+            value={selectedDevice}
+            onChange={(e) => setSelectedDevice(e.target.value)}
+            title={selectedDevice || "Default microphone"}
+          >
+            <option value="">Default mic</option>
+            {audioDevices.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        )}
 
         <select
           className="h-7 rounded-md border border-input bg-background px-2 text-[11px] outline-none"
