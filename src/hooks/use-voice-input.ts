@@ -340,7 +340,7 @@ export function useVoiceInput({
       onErrorRef.current?.(msg);
       stopRecording();
     }
-  }, [isSupported, stopRecording, sendChunk]);
+  }, [isSupported, stopRecording, sendChunk, deviceName, systemAudio]);
 
   const toggle = useCallback(() => {
     if (isRecording) stopRecording();
