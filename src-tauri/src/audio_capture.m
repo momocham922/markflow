@@ -59,9 +59,7 @@ int start_av_audio_capture(void) {
         _sampleRate = fmt.sampleRate;
         _channels = (int)fmt.channelCount;
 
-        AVAudioFormat *tapFmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:_sampleRate channels:1];
-
-        [input installTapOnBus:0 bufferSize:4096 format:tapFmt
+        [input installTapOnBus:0 bufferSize:4096 format:nil
             block:^(AVAudioPCMBuffer *buffer, __unused AVAudioTime *when) {
                 if (!buffer.floatChannelData) return;
                 float *ch0 = buffer.floatChannelData[0];
