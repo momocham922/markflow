@@ -249,8 +249,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
                 const { invoke } = await import("@tauri-apps/api/core");
                 await invoke("start_system_audio_capture");
               } catch (e) {
-                setVoiceError(e instanceof Error ? e.message : String(e));
-                return;
+                setVoiceError(`システム音声: ${e instanceof Error ? e.message : String(e)}（マイクのみで録音します）`);
               }
             }
             toggle();
@@ -306,7 +305,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           </Button>
         )}
 
-        {isTauri && audioDevices.length > 1 && !isRecording && (
+        {isTauri && audioDevices.length > 0 && !isRecording && (
           <select
             className="h-7 max-w-[120px] rounded-md border border-input bg-background px-1.5 text-[11px] outline-none truncate"
             value={selectedDevice}
