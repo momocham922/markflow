@@ -1155,10 +1155,27 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
 
     stop_voice_recording_inner();
 
+    // CoreAudio may need time after permission grant to become available.
+    // Retry up to 3 times with increasing delays.
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
+        }
+        match start_voice_recording_inner(&device_name) {
+            Ok(()) => return Ok(()),
+            Err(e) => { last_err = e; }
+        }
+    }
+    Err(last_err)
+}
+
+fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
     let host = cpal::default_host();
     let device = if let Some(ref name) = device_name {
         let mut found = None;
-        // On Windows, "[Output] X" prefix means search output devices for loopback
         #[cfg(target_os = "windows")]
         if name.starts_with("[Output] ") {
             let real_name = &name["[Output] ".len()..];

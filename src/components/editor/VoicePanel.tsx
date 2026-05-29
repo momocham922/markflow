@@ -297,13 +297,12 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         {isTauri && isMac && !isRecording && (
           <Button
             variant={systemAudio ? "secondary" : "ghost"}
-            size="sm"
-            className="gap-1 text-[11px] h-7"
+            size="icon"
+            className="h-7 w-7"
             onClick={() => setSystemAudio((v) => !v)}
-            title={systemAudio ? "System audio ON (click to disable)" : "Include system audio (meetings, etc.)"}
+            title={systemAudio ? "システム音声 ON（クリックで無効化）" : "システム音声も録音（会議等）"}
           >
-            <Monitor className="h-3 w-3" />
-            {systemAudio ? "System" : "Sys"}
+            <Monitor className={`h-3.5 w-3.5 ${systemAudio ? "text-amber-500" : ""}`} />
           </Button>
         )}
 
