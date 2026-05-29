@@ -63,6 +63,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   } = useVoiceInput({
     language: "ja-JP",
     deviceName: selectedDevice || undefined,
+    systemAudio,
     onError: (msg) => setVoiceError(msg),
     onMaxDuration: () => setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
@@ -245,23 +246,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           variant={isRecording ? "destructive" : "default"}
           size="sm"
           className="gap-1.5"
-          onClick={async () => {
-            setVoiceError(null);
-            if (!isRecording && systemAudio && isTauri) {
-              try {
-                const { invoke } = await import("@tauri-apps/api/core");
-                await invoke("start_system_audio_capture");
-                console.log("[voice] system audio capture started");
-              } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e);
-                console.error("[voice] system audio failed:", msg);
-                setVoiceError(`システム音声: ${msg}（マイクのみで録音します）`);
-              }
-            } else {
-              console.log(`[voice] skip system audio: isRecording=${isRecording} systemAudio=${systemAudio} isTauri=${isTauri}`);
-            }
-            toggle();
-          }}
+          onClick={() => { setVoiceError(null); toggle(); }}
         >
           {isRecording ? (
             <>

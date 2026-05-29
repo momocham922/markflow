@@ -1182,7 +1182,7 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 
 /// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
 #[tauri::command]
-fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
+fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     #[cfg(target_os = "macos")]
@@ -1211,7 +1211,17 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
         }
         match start_voice_recording_inner(&device_name) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                // Start system audio capture if requested
+                #[cfg(target_os = "macos")]
+                if system_audio.unwrap_or(false) {
+                    match start_system_audio_capture_inner() {
+                        Ok(()) => println!("[voice] System audio capture also started"),
+                        Err(e) => println!("[voice] System audio failed (mic-only): {}", e),
+                    }
+                }
+                return Ok(());
+            }
             Err(e) => { last_err = e; }
         }
     }
@@ -1380,6 +1390,11 @@ static SC_STREAM_RAW: Mutex<Option<screencapturekit::prelude::SCStream>> = Mutex
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn start_system_audio_capture() -> Result<(), String> {
+    start_system_audio_capture_inner()
+}
+
+#[cfg(target_os = "macos")]
+fn start_system_audio_capture_inner() -> Result<(), String> {
     use screencapturekit::prelude::*;
     if !screencapturekit_available() {
         return Err("システム音声キャプチャにはmacOS 13以降が必要です".to_string());
