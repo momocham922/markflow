@@ -976,10 +976,12 @@ async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
 // ── Voice recording — Rust-side audio capture (bypasses WKWebView getUserMedia restriction) ──
 
 static VOICE_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+static SYSTEM_AUDIO_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
+static SYSTEM_AUDIO_RATE: AtomicU32 = AtomicU32::new(48000);
 /// Overlap buffer: last 0.5s of previous chunk for boundary accuracy
 static VOICE_OVERLAP: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 
@@ -1387,8 +1389,8 @@ fn start_system_audio_capture() -> Result<(), String> {
                     let floats: &[f32] = unsafe {
                         std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)
                     };
-                    if let Ok(mut voice_buf) = VOICE_BUFFER.try_lock() {
-                        voice_buf.extend_from_slice(floats);
+                    if let Ok(mut sys_buf) = SYSTEM_AUDIO_BUFFER.try_lock() {
+                        sys_buf.extend_from_slice(floats);
                     }
                 }
             }
@@ -1413,14 +1415,20 @@ fn start_system_audio_capture() -> Result<(), String> {
 /// Return current audio input level (0.0–1.0 RMS) without draining the buffer.
 #[tauri::command]
 fn get_voice_level() -> f32 {
-    let buf = match VOICE_BUFFER.try_lock() {
-        Ok(b) => b,
-        Err(_) => return 0.0,
-    };
-    if buf.is_empty() { return 0.0; }
-    let tail = if buf.len() > 1600 { &buf[buf.len() - 1600..] } else { &buf[..] };
-    let rms = (tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32).sqrt();
-    (rms * 5.0).min(1.0)
+    let mut total_rms = 0.0f32;
+    if let Ok(buf) = VOICE_BUFFER.try_lock() {
+        if !buf.is_empty() {
+            let tail = if buf.len() > 1600 { &buf[buf.len() - 1600..] } else { &buf[..] };
+            total_rms += tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32;
+        }
+    }
+    if let Ok(buf) = SYSTEM_AUDIO_BUFFER.try_lock() {
+        if !buf.is_empty() {
+            let tail = if buf.len() > 1600 { &buf[buf.len() - 1600..] } else { &buf[..] };
+            total_rms += tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32;
+        }
+    }
+    (total_rms.sqrt() * 5.0).min(1.0)
 }
 
 /// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
@@ -1429,26 +1437,66 @@ fn get_voice_level() -> f32 {
 fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     use base64::Engine;
 
-    let samples: Vec<f32> = {
+    let mic_samples: Vec<f32> = {
         let mut buf = VOICE_BUFFER.lock().unwrap();
         std::mem::take(&mut *buf)
     };
+    let sys_samples: Vec<f32> = {
+        let mut buf = SYSTEM_AUDIO_BUFFER.lock().unwrap();
+        std::mem::take(&mut *buf)
+    };
 
-    if samples.is_empty() {
+    if mic_samples.is_empty() && sys_samples.is_empty() {
         return Ok(None);
     }
 
-    let sample_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
+    let mic_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
+    let sys_rate = SYSTEM_AUDIO_RATE.load(Ordering::Relaxed);
     let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
+    // Use the higher rate as the common sample_rate for downstream processing
+    let sample_rate = mic_rate.max(sys_rate).max(16000);
 
-    // Mix to mono if multi-channel
-    let mono: Vec<f32> = if channels > 1 {
-        samples
-            .chunks(channels as usize)
-            .map(|ch| ch.iter().sum::<f32>() / channels as f32)
-            .collect()
+    // Mix mic to mono if multi-channel
+    let mic_mono: Vec<f32> = if channels > 1 && !mic_samples.is_empty() {
+        mic_samples.chunks(channels as usize)
+            .map(|ch| ch.iter().sum::<f32>() / channels as f32).collect()
     } else {
-        samples
+        mic_samples
+    };
+
+    // Resample system audio to match mic rate, then mix
+    let mono: Vec<f32> = if sys_samples.is_empty() {
+        mic_mono
+    } else if mic_mono.is_empty() {
+        // System audio only — resample to sample_rate if needed
+        if sys_rate != sample_rate {
+            let ratio = sys_rate as f64 / sample_rate as f64;
+            let new_len = (sys_samples.len() as f64 / ratio) as usize;
+            (0..new_len).map(|i| {
+                let idx = (i as f64 * ratio) as usize;
+                sys_samples[idx.min(sys_samples.len() - 1)]
+            }).collect()
+        } else {
+            sys_samples
+        }
+    } else {
+        // Both sources: resample system audio to mic rate, then sum
+        let sys_resampled: Vec<f32> = if sys_rate != sample_rate {
+            let ratio = sys_rate as f64 / sample_rate as f64;
+            let new_len = (sys_samples.len() as f64 / ratio) as usize;
+            (0..new_len).map(|i| {
+                let idx = (i as f64 * ratio) as usize;
+                sys_samples[idx.min(sys_samples.len() - 1)]
+            }).collect()
+        } else {
+            sys_samples
+        };
+        let len = mic_mono.len().max(sys_resampled.len());
+        (0..len).map(|i| {
+            let m = if i < mic_mono.len() { mic_mono[i] } else { 0.0 };
+            let s = if i < sys_resampled.len() { sys_resampled[i] } else { 0.0 };
+            (m + s).clamp(-1.0, 1.0)
+        }).collect()
     };
 
     // Prepend overlap from previous chunk (0.5s) for boundary accuracy
