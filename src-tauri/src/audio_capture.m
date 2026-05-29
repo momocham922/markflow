@@ -71,7 +71,9 @@ int start_av_audio_capture(void) {
 
         NSError *err = nil;
         if (![_engine startAndReturnError:&err]) {
-            NSLog(@"[audio] AVAudioEngine start failed: %@", err);
+            NSString *msg = [NSString stringWithFormat:@"%@ (code=%ld)", err.localizedDescription, (long)err.code];
+            NSLog(@"[audio] AVAudioEngine start failed: %@", msg);
+            strlcpy(_lastError, [msg UTF8String], sizeof(_lastError));
             [[_engine inputNode] removeTapOnBus:0];
             _engine = nil;
             return -2;

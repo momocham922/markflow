@@ -1198,7 +1198,7 @@ fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), Stri
         let msg = match ok {
             0 => format!("マイクへのアクセスが許可されていません。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。"),
             -1 => format!("マイクのオーディオフォーマット取得に失敗しました。"),
-            -2 => format!("AVAudioEngineの起動に失敗しました。"),
+            -2 => format!("AVAudioEngine起動失敗: {}", if detail.is_empty() { "不明なエラー" } else { &detail }),
             -3 => format!("マイク初期化エラー: {}", detail),
             _ => format!("マイクの起動に失敗しました。"),
         };
