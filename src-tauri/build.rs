@@ -6,6 +6,7 @@ fn main() {
             .flag("-fobjc-arc")
             .compile("audio_capture");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
         // Weak-link ScreenCaptureKit so it's optional at runtime (macOS 13+).
         println!("cargo:rustc-link-arg=-weak_framework");
         println!("cargo:rustc-link-arg=ScreenCaptureKit");

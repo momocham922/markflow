@@ -21,75 +21,141 @@ int check_microphone_status(void) {
     return (int)[AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
 }
 
-// ── AVAudioEngine-based audio capture ──
+// ── AVCaptureSession-based audio capture ──
 
-static AVAudioEngine *_engine = nil;
 static NSMutableData *_audioBuf = nil;
 static NSLock *_audioLock = nil;
 static double _sampleRate = 0;
-static int _channels = 0;
 static char _lastError[512] = {0};
 
 const char* get_last_audio_error(void) { return _lastError; }
 
-// Returns: 1=OK, 0=permission denied, -1=bad format, -2=engine start fail, -3=exception
+@interface AudioDelegate : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
+@end
+
+@implementation AudioDelegate
+- (void)captureOutput:(AVCaptureOutput *)output
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection {
+    CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+    if (!blockBuffer) return;
+
+    size_t totalBytes = CMBlockBufferGetDataLength(blockBuffer);
+    if (totalBytes == 0) return;
+
+    // Get audio format info
+    CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sampleBuffer);
+    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt);
+    if (!asbd) return;
+
+    char *dataPtr = NULL;
+    CMBlockBufferGetDataPointer(blockBuffer, 0, NULL, NULL, &dataPtr);
+    if (!dataPtr) return;
+
+    int sampleCount;
+    float tempBuf[8192];
+
+    if (asbd->mFormatFlags & kAudioFormatFlagIsFloat) {
+        // Float32
+        sampleCount = (int)(totalBytes / sizeof(float));
+        float *src = (float *)dataPtr;
+        int channels = asbd->mChannelsPerFrame;
+        if (channels > 1) {
+            // Mix to mono
+            int frames = sampleCount / channels;
+            sampleCount = frames < 8192 ? frames : 8192;
+            for (int i = 0; i < sampleCount; i++) {
+                float sum = 0;
+                for (int c = 0; c < channels; c++) sum += src[i * channels + c];
+                tempBuf[i] = sum / channels;
+            }
+        } else {
+            sampleCount = sampleCount < 8192 ? sampleCount : 8192;
+            memcpy(tempBuf, src, sampleCount * sizeof(float));
+        }
+    } else if (asbd->mBitsPerChannel == 16) {
+        // Int16
+        int totalSamples = (int)(totalBytes / sizeof(int16_t));
+        int16_t *src = (int16_t *)dataPtr;
+        int channels = asbd->mChannelsPerFrame;
+        int frames = totalSamples / channels;
+        sampleCount = frames < 8192 ? frames : 8192;
+        for (int i = 0; i < sampleCount; i++) {
+            float sum = 0;
+            for (int c = 0; c < channels; c++) sum += src[i * channels + c] / 32768.0f;
+            tempBuf[i] = sum / channels;
+        }
+    } else {
+        return; // unsupported format
+    }
+
+    [_audioLock lock];
+    [_audioBuf appendBytes:tempBuf length:sampleCount * sizeof(float)];
+    [_audioLock unlock];
+}
+@end
+
+static AVCaptureSession *_session = nil;
+static AudioDelegate *_delegate = nil;
+
+// Returns: 1=OK, 0=permission, -1=no device, -2=session error, -3=exception
 int start_av_audio_capture(void) {
-    if (_engine) return 1;
+    if (_session && _session.isRunning) return 1;
 
     AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
-    NSLog(@"[audio] Mic permission status: %d", (int)status);
     if (status != AVAuthorizationStatusAuthorized) {
-        NSLog(@"[audio] Microphone not authorized (status=%d)", (int)status);
+        snprintf(_lastError, sizeof(_lastError), "Permission status: %d", (int)status);
         return 0;
     }
 
     @try {
-        _engine = [[AVAudioEngine alloc] init];
         _audioBuf = [NSMutableData new];
         _audioLock = [NSLock new];
 
-        // Force engine to build its internal graph (input → mixer → output)
-        AVAudioMixerNode *mixer = [_engine mainMixerNode];
-        mixer.outputVolume = 0;
-
-        AVAudioInputNode *input = [_engine inputNode];
-        AVAudioFormat *fmt = [input outputFormatForBus:0];
-        NSLog(@"[audio] Format: %@", fmt);
-        if (!fmt || fmt.sampleRate == 0) {
-            strlcpy(_lastError, "No valid audio format", sizeof(_lastError));
-            _engine = nil;
+        AVCaptureDevice *mic = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+        if (!mic) {
+            strlcpy(_lastError, "No audio capture device found", sizeof(_lastError));
             return -1;
         }
-        _sampleRate = fmt.sampleRate;
-        _channels = 1;
+        NSLog(@"[audio] Device: %@", mic.localizedName);
 
-        [input installTapOnBus:0 bufferSize:4096 format:nil
-            block:^(AVAudioPCMBuffer *buffer, __unused AVAudioTime *when) {
-                if (!buffer.floatChannelData) return;
-                float *ch0 = buffer.floatChannelData[0];
-                NSUInteger frames = buffer.frameLength;
-                [_audioLock lock];
-                [_audioBuf appendBytes:ch0 length:frames * sizeof(float)];
-                [_audioLock unlock];
-            }];
-
-        [_engine prepare];
         NSError *err = nil;
-        if (![_engine startAndReturnError:&err]) {
-            NSString *msg = [NSString stringWithFormat:@"%@ (code=%ld)", err.localizedDescription, (long)err.code];
-            NSLog(@"[audio] AVAudioEngine start failed: %@", msg);
-            strlcpy(_lastError, [msg UTF8String], sizeof(_lastError));
-            [[_engine inputNode] removeTapOnBus:0];
-            _engine = nil;
+        AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:mic error:&err];
+        if (!input) {
+            snprintf(_lastError, sizeof(_lastError), "Input error: %s", [[err localizedDescription] UTF8String]);
             return -2;
         }
-        NSLog(@"[audio] AVAudioEngine started: %.0f Hz, %d ch", _sampleRate, _channels);
+
+        AVCaptureAudioDataOutput *output = [[AVCaptureAudioDataOutput alloc] init];
+        _delegate = [[AudioDelegate alloc] init];
+        dispatch_queue_t queue = dispatch_queue_create("com.markflow.audio", DISPATCH_QUEUE_SERIAL);
+        [output setSampleBufferDelegate:_delegate queue:queue];
+
+        _session = [[AVCaptureSession alloc] init];
+        if ([_session canAddInput:input]) [_session addInput:input];
+        else {
+            strlcpy(_lastError, "Cannot add audio input to session", sizeof(_lastError));
+            return -2;
+        }
+        if ([_session canAddOutput:output]) [_session addOutput:output];
+        else {
+            strlcpy(_lastError, "Cannot add audio output to session", sizeof(_lastError));
+            return -2;
+        }
+
+        // Get sample rate from device format
+        CMFormatDescriptionRef fmtDesc = (CMFormatDescriptionRef)CFBridgingRetain(mic.activeFormat.formatDescription);
+        // Note: we retain then immediately use, no need to release since ARC manages the source
+        const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc);
+        _sampleRate = asbd ? asbd->mSampleRate : 44100;
+
+        [_session startRunning];
+        NSLog(@"[audio] AVCaptureSession started: %.0f Hz, device=%@", _sampleRate, mic.localizedName);
         return 1;
     } @catch (NSException *e) {
         NSString *msg = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
-        NSLog(@"[audio] AVAudioEngine exception: %@", msg);
         strlcpy(_lastError, [msg UTF8String], sizeof(_lastError));
-        _engine = nil;
+        _session = nil;
         return -3;
     }
 }
@@ -108,15 +174,16 @@ int drain_av_audio_buffer(float *dest, int maxSamples) {
 }
 
 double get_av_sample_rate(void) { return _sampleRate; }
-int get_av_channels(void) { return _channels; }
+int get_av_channels(void) { return 1; } // always mono output
 
 void stop_av_audio_capture(void) {
-    if (!_engine) return;
-    [[_engine inputNode] removeTapOnBus:0];
-    [_engine stop];
-    _engine = nil;
+    if (_session) {
+        [_session stopRunning];
+        _session = nil;
+        _delegate = nil;
+        NSLog(@"[audio] AVCaptureSession stopped");
+    }
     [_audioLock lock];
     [_audioBuf setLength:0];
     [_audioLock unlock];
-    NSLog(@"[audio] AVAudioEngine stopped");
 }
