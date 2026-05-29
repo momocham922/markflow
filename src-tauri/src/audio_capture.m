@@ -49,17 +49,20 @@ int start_av_audio_capture(void) {
         _audioLock = [NSLock new];
 
         AVAudioInputNode *input = [_engine inputNode];
-        AVAudioFormat *fmt = [input outputFormatForBus:0];
-        NSLog(@"[audio] Input format: %@", fmt);
+        AVAudioFormat *hwFmt = [input inputFormatForBus:0];
+        NSLog(@"[audio] HW input format: %@", hwFmt);
+        AVAudioFormat *outFmt = [input outputFormatForBus:0];
+        NSLog(@"[audio] Node output format: %@", outFmt);
+        AVAudioFormat *fmt = outFmt ?: hwFmt;
         if (!fmt || fmt.sampleRate == 0) {
-            NSLog(@"[audio] Invalid audio format from input node");
+            strlcpy(_lastError, "No valid audio format", sizeof(_lastError));
             _engine = nil;
             return -1;
         }
         _sampleRate = fmt.sampleRate;
         _channels = (int)fmt.channelCount;
 
-        [input installTapOnBus:0 bufferSize:4096 format:nil
+        [input installTapOnBus:0 bufferSize:4096 format:fmt
             block:^(AVAudioPCMBuffer *buffer, __unused AVAudioTime *when) {
                 if (!buffer.floatChannelData) return;
                 float *ch0 = buffer.floatChannelData[0];
@@ -69,6 +72,7 @@ int start_av_audio_capture(void) {
                 [_audioLock unlock];
             }];
 
+        [_engine prepare];
         NSError *err = nil;
         if (![_engine startAndReturnError:&err]) {
             NSString *msg = [NSString stringWithFormat:@"%@ (code=%ld)", err.localizedDescription, (long)err.code];
