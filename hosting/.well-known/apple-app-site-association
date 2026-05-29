@@ -1,0 +1,11 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "HHVN9NX6B8.com.markflow.app",
+        "paths": ["/share/*"]
+      }
+    ]
+  }
+}

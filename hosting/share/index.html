@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MarkFlow - 共有ドキュメント</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0a0a0a; color: #fafafa; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { max-width: 400px; padding: 2.5rem; text-align: center; }
+    .logo { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
+    .btn { display: inline-block; padding: 0.75rem 2rem; border-radius: 0.5rem; font-size: 1rem; font-weight: 500; text-decoration: none; margin: 0.5rem; transition: opacity 0.2s; }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #6366f1; color: #fff; }
+    .btn-secondary { background: #27272a; color: #fafafa; border: 1px solid #3f3f46; }
+    .info { color: #888; font-size: 0.8rem; margin-top: 2rem; line-height: 1.6; }
+    .platforms { display: flex; justify-content: center; gap: 1.5rem; margin-top: 1.5rem; flex-wrap: wrap; }
+    .platform { color: #888; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">MarkFlow</div>
+    <p class="subtitle">Markdown Editor</p>
+    <p style="margin-bottom: 1.5rem; color: #ccc;">共有ドキュメントを開こうとしています</p>
+    <a class="btn btn-primary" id="openApp" href="#">アプリで開く</a>
+    <div class="platforms">
+      <a class="platform" href="https://github.com/momocham922/markflow/releases/latest" target="_blank">macOS / Windows</a>
+      <span class="platform">iOS (TestFlight)</span>
+      <span class="platform">Android (Internal Testing)</span>
+    </div>
+    <p class="info">
+      MarkFlowがインストールされている場合、自動的にアプリが開きます。<br>
+      インストールされていない場合は、上のリンクからダウンロードしてください。
+    </p>
+  </div>
+  <script>
+    const path = window.location.pathname;
+    const token = path.replace(/^\/share\//, "");
+    if (token && token !== path) {
+      const appUrl = "markflow://share/" + token;
+      document.getElementById("openApp").href = appUrl;
+      // Try to open in app automatically
+      setTimeout(() => { window.location.href = appUrl; }, 500);
+    }
+  </script>
+</body>
+</html>

@@ -108,7 +108,7 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
   const getShareUrl = useCallback(
     (token: string) => {
-      return `markflow://share/${token}`;
+      return `https://markflow.jp/share/${token}`;
     },
     [],
   );

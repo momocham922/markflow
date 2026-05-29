@@ -5,5 +5,22 @@
   },
   "storage": {
     "rules": "firebase/storage.rules"
+  },
+  "hosting": {
+    "public": "hosting",
+    "headers": [
+      {
+        "source": "/.well-known/**",
+        "headers": [
+          { "key": "Content-Type", "value": "application/json" }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/share/**",
+        "destination": "/share/index.html"
+      }
+    ]
   }
 }

@@ -384,6 +384,17 @@ export async function signInWithGitHub(): Promise<User | null> {
   return result.user;
 }
 
+export async function reportCrash(data: Record<string, unknown>): Promise<void> {
+  try {
+    const userId = auth.currentUser?.uid || null;
+    await addDoc(collection(firestore, "crash_reports"), {
+      ...data,
+      userId,
+      reportedAt: serverTimestamp(),
+    });
+  } catch {}
+}
+
 export async function signOut(): Promise<void> {
   await firebaseSignOut(auth);
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-cli/schema.json",
   "productName": "MarkFlow",
-  "version": "0.5.0-beta.5",
+  "version": "0.5.0-beta.6",
   "identifier": "com.markflow.editor",
   "build": {
     "frontendDist": "../dist",
@@ -42,6 +42,7 @@
       "icons/icon.ico"
     ],
     "createUpdaterArtifacts": true,
+    "resources": ["resources/markflow-recovery.sh"],
     "macOS": {
       "signingIdentity": "Developer ID Application: Ryohei Mita (HHVN9NX6B8)",
       "minimumSystemVersion": "10.13",
@@ -51,7 +52,10 @@
   },
   "plugins": {
     "deep-link": {
-      "mobile": [{ "scheme": ["markflow"] }],
+      "mobile": [
+        { "scheme": ["markflow"] },
+        { "host": "markflow.jp", "pathPrefix": ["/share"] }
+      ],
       "desktop": {
         "schemes": ["markflow"]
       }

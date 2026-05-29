@@ -138,6 +138,9 @@ function App() {
   /** Parse a share token from various URL formats */
   const parseShareToken = useCallback((input: string): string | null => {
     const trimmed = input.trim();
+    // https://markflow.jp/share/{token}
+    const https = trimmed.match(/^https:\/\/markflow\.jp\/share\/(.+)$/);
+    if (https) return https[1];
     // markflow://share/{token}
     const proto = trimmed.match(/^markflow:\/\/share\/(.+)$/);
     if (proto) return proto[1];
@@ -285,17 +288,57 @@ function App() {
   }, [flushEditNotification]);
 
   // Signal to Rust that frontend is alive (cancels failsafe auto-updater).
-  // Delayed 5s to ensure full React tree has rendered without crash.
+  // Also send any pending crash reports from previous sessions.
   useEffect(() => {
     const timer = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("cancel_auto_update");
-      } catch {
-        // Not in Tauri or command not available — ignore
-      }
+        // Send pending crash reports to Firestore
+        const reports = await invoke<string[]>("get_crash_reports").catch(() => [] as string[]);
+        if (reports.length > 0) {
+          const { reportCrash } = await import("@/services/firebase");
+          for (const raw of reports) {
+            try { await reportCrash(JSON.parse(raw)); } catch {}
+          }
+          await invoke("clear_crash_reports").catch(() => {});
+          console.log(`[crash-report] Sent ${reports.length} pending crash report(s)`);
+        }
+      } catch {}
     }, 5000);
     return () => clearTimeout(timer);
+  }, []);
+
+  // Global JS error handler → Firestore crash report
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      import("@/services/firebase").then(({ reportCrash }) => {
+        reportCrash({
+          type: "js_error",
+          message: event.message,
+          stack: event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`,
+          appVersion: __APP_VERSION__,
+          platform: navigator.platform,
+        }).catch(() => {});
+      });
+    };
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      import("@/services/firebase").then(({ reportCrash }) => {
+        reportCrash({
+          type: "unhandled_rejection",
+          message: String(event.reason),
+          stack: event.reason?.stack || "",
+          appVersion: __APP_VERSION__,
+          platform: navigator.platform,
+        }).catch(() => {});
+      });
+    };
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleRejection);
+    return () => {
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleRejection);
+    };
   }, []);
 
   // Auto-update check — on startup and every 30 minutes while app is open

@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.markflow.editor",
+      "sha256_cert_fingerprints": [
+        "E1:A0:8D:F5:CF:27:1F:B6:07:4B:28:61:1A:A0:B9:F4:BF:80:9B:3B:54:D6:2A:E1:42:4E:EB:C8:16:8F:CA:46"
+      ]
+    }
+  }
+]

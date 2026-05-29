@@ -4,6 +4,76 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tauri_plugin_updater::UpdaterExt;
 
+// ── Crash reporting ─────────────────────────────────────────
+static CRASH_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = CRASH_DIR.lock().ok().and_then(|g| g.clone()) {
+            let _ = std::fs::create_dir_all(&dir);
+            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            let loc = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
+            let report = serde_json::json!({
+                "timestamp": chrono_now(),
+                "type": "rust_panic",
+                "message": msg,
+                "location": loc,
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "platform": std::env::consts::OS,
+            });
+            let filename = format!("crash_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+            let _ = std::fs::write(dir.join(&filename), report.to_string());
+        }
+        default_hook(info);
+    }));
+}
+
+fn chrono_now() -> String {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs();
+    let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+    format!("{}-{:02}-{:02}T{:02}:{:02}:{:02}Z", 1970 + secs / 31536000, 1, 1, h, m, s)
+}
+
+#[tauri::command]
+fn get_crash_reports() -> Vec<String> {
+    let dir = match CRASH_DIR.lock().ok().and_then(|g| g.clone()) {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let mut reports = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    reports.push(content);
+                }
+            }
+        }
+    }
+    reports
+}
+
+#[tauri::command]
+fn clear_crash_reports() {
+    let dir = match CRASH_DIR.lock().ok().and_then(|g| g.clone()) {
+        Some(d) => d,
+        None => return,
+    };
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Flag set by frontend to indicate it's alive and handling updates itself.
 /// If this remains false after a timeout, Rust auto-installs any available update.
 static FRONTEND_ALIVE: AtomicBool = AtomicBool::new(false);
@@ -1047,16 +1117,27 @@ fn ensure_microphone_permission() -> Result<(), String> {
     }
 }
 
-/// List available audio input devices.
+/// List available audio devices (input + output for loopback selection on Windows).
 #[tauri::command]
 fn list_audio_devices() -> Result<Vec<String>, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    let devices = host.input_devices().map_err(|e| format!("デバイス一覧取得失敗: {}", e))?;
     let mut names = Vec::new();
-    for d in devices {
-        if let Ok(name) = d.name() {
-            names.push(name);
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if let Ok(name) = d.name() {
+                if seen.insert(name.clone()) { names.push(name); }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(devices) = host.output_devices() {
+        for d in devices {
+            if let Ok(name) = d.name() {
+                let label = format!("[Output] {}", name);
+                if seen.insert(label.clone()) { names.push(label); }
+            }
         }
     }
     Ok(names)
@@ -1077,11 +1158,26 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
     let host = cpal::default_host();
     let device = if let Some(ref name) = device_name {
         let mut found = None;
-        if let Ok(devices) = host.input_devices() {
-            for d in devices {
-                if d.name().ok().as_deref() == Some(name.as_str()) {
-                    found = Some(d);
-                    break;
+        // On Windows, "[Output] X" prefix means search output devices for loopback
+        #[cfg(target_os = "windows")]
+        if name.starts_with("[Output] ") {
+            let real_name = &name["[Output] ".len()..];
+            if let Ok(devices) = host.output_devices() {
+                for d in devices {
+                    if d.name().ok().as_deref() == Some(real_name) {
+                        found = Some(d);
+                        break;
+                    }
+                }
+            }
+        }
+        if found.is_none() {
+            if let Ok(devices) = host.input_devices() {
+                for d in devices {
+                    if d.name().ok().as_deref() == Some(name.as_str()) {
+                        found = Some(d);
+                        break;
+                    }
                 }
             }
         }
@@ -1396,6 +1492,52 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Initialize crash reporting
+            use tauri::Manager;
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                let crash_dir = data_dir.join("crash_reports");
+                *CRASH_DIR.lock().unwrap() = Some(crash_dir);
+                install_panic_hook();
+            }
+
+            // Install LaunchAgent for auto-recovery (macOS, first launch only)
+            #[cfg(target_os = "macos")]
+            {
+                if let Ok(home) = std::env::var("HOME") {
+                    let plist_path = format!("{}/Library/LaunchAgents/com.markflow.updater.plist", home);
+                    if !std::path::Path::new(&plist_path).exists() {
+                        let recovery_script = app.path().resource_dir().ok()
+                            .map(|r| r.join("markflow-recovery.sh"));
+                        if let Some(script) = recovery_script {
+                            if script.exists() {
+                                let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.markflow.updater</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/markflow-updater.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/markflow-updater.log</string>
+</dict>
+</plist>"#, script.display());
+                                let _ = std::fs::write(&plist_path, plist);
+                                let _ = std::process::Command::new("launchctl").args(["load", &plist_path]).output();
+                                println!("[recovery] Installed LaunchAgent: {}", plist_path);
+                            }
+                        }
+                    }
+                }
+            }
+
             #[cfg(target_os = "ios")]
             {
                 std::thread::spawn(|| {
@@ -1485,7 +1627,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
