@@ -1429,7 +1429,18 @@ fn start_system_audio_capture() -> Result<(), String> {
     Err("システム音声キャプチャはmacOSでのみ利用可能です".to_string())
 }
 
-/// Return current audio input level (0.0–1.0 RMS) without draining the buffer.
+#[tauri::command]
+fn get_audio_debug() -> String {
+    let mic_len = VOICE_BUFFER.try_lock().map(|b| b.len()).unwrap_or(0);
+    let sys_len = SYSTEM_AUDIO_BUFFER.try_lock().map(|b| b.len()).unwrap_or(0);
+    #[cfg(target_os = "macos")]
+    let sc_active = SC_STREAM_ACTIVE.load(Ordering::Relaxed);
+    #[cfg(not(target_os = "macos"))]
+    let sc_active = false;
+    let voice_active = VOICE_ACTIVE.load(Ordering::Relaxed);
+    format!("mic={} sys={} va={} sc={}", mic_len, sys_len, voice_active, sc_active)
+}
+
 #[tauri::command]
 fn get_voice_level() -> f32 {
     let mut total_rms = 0.0f32;
@@ -1779,7 +1790,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

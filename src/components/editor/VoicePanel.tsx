@@ -34,6 +34,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   const [selectedDevice, setSelectedDevice] = useState<string>("");
   const [systemAudio, setSystemAudio] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [audioDebug, setAudioDebug] = useState("");
   const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
 
   useEffect(() => {
@@ -73,6 +74,8 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         const { invoke } = await import("@tauri-apps/api/core");
         const level = await invoke<number>("get_voice_level");
         setAudioLevel(level);
+        const dbg = await invoke<string>("get_audio_debug");
+        setAudioDebug(dbg);
       } catch { setAudioLevel(0); }
     }, 100);
     return () => { clearInterval(id); setAudioLevel(0); };
@@ -248,9 +251,14 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
               try {
                 const { invoke } = await import("@tauri-apps/api/core");
                 await invoke("start_system_audio_capture");
+                console.log("[voice] system audio capture started");
               } catch (e) {
-                setVoiceError(`システム音声: ${e instanceof Error ? e.message : String(e)}（マイクのみで録音します）`);
+                const msg = e instanceof Error ? e.message : String(e);
+                console.error("[voice] system audio failed:", msg);
+                setVoiceError(`システム音声: ${msg}（マイクのみで録音します）`);
               }
+            } else {
+              console.log(`[voice] skip system audio: isRecording=${isRecording} systemAudio=${systemAudio} isTauri=${isTauri}`);
             }
             toggle();
           }}
@@ -272,6 +280,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           <span className="text-xs text-muted-foreground font-mono tabular-nums">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse mr-1.5" />
             {formatDuration(duration)}
+            {audioDebug && <span className="ml-2 text-[9px] text-muted-foreground/50">sa={String(systemAudio)} {audioDebug}</span>}
           </span>
         )}
 
