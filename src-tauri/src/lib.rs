@@ -1113,7 +1113,7 @@ fn stop_voice_recording_inner() {
         unsafe { stop_av_audio_capture(); }
         stop_system_audio_inner();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         let ptr = {
             let mut guard = VOICE_STREAM_RAW.lock().unwrap();
@@ -1154,7 +1154,7 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
         };
         serde_json::from_str::<Vec<String>>(&json).map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         use cpal::traits::{DeviceTrait, HostTrait};
         let host = cpal::default_host();
@@ -1178,13 +1178,15 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
         }
         Ok(names)
     }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Ok(vec![])
+    }
 }
 
 /// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
 #[tauri::command]
 fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<(), String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
     #[cfg(target_os = "macos")]
     {
         ensure_microphone_permission()?;
@@ -1200,7 +1202,7 @@ fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>
     // Stop only mic, preserve system audio capture if active
     #[cfg(target_os = "macos")]
     stop_mic_only();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     stop_voice_recording_inner();
 
     // CoreAudio may need time after permission grant to become available.
@@ -1293,7 +1295,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
 }
 
 /// Non-macOS: use cpal
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -1360,6 +1362,11 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     stream.play().map_err(|e| format!("Failed to play: {}", e))?;
     *VOICE_STREAM_RAW.lock().unwrap() = Box::into_raw(Box::new(stream)) as usize;
     Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), String> {
+    Err("このプラットフォームではRust音声キャプチャは利用できません。ブラウザAPIを使用してください。".into())
 }
 
 #[tauri::command]
