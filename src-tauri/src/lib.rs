@@ -1189,8 +1189,15 @@ fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), Stri
         fn get_av_channels() -> i32;
     }
     let ok = unsafe { start_av_audio_capture() };
-    if ok == 0 {
-        return Err("マイクの起動に失敗しました。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。".into());
+    if ok != 1 {
+        let msg = match ok {
+            0 => "マイクへのアクセスが許可されていません。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。",
+            -1 => "マイクのオーディオフォーマット取得に失敗しました。別のオーディオデバイスを試してください。",
+            -2 => "AVAudioEngineの起動に失敗しました。アプリを再起動してください。",
+            -3 => "マイク初期化中に例外が発生しました。マイク設定を確認してください。",
+            _ => "マイクの起動に失敗しました。",
+        };
+        return Err(msg.into());
     }
     let sample_rate = unsafe { get_av_sample_rate() } as u32;
     let channels = unsafe { get_av_channels() } as u32;

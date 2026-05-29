@@ -29,11 +29,12 @@ static NSLock *_audioLock = nil;
 static double _sampleRate = 0;
 static int _channels = 0;
 
+// Returns: 1=OK, 0=permission denied, -1=bad format, -2=engine start fail, -3=exception
 int start_av_audio_capture(void) {
     if (_engine) return 1;
 
-    // Verify permission before touching AVAudioEngine
     AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    NSLog(@"[audio] Mic permission status: %d", (int)status);
     if (status != AVAuthorizationStatusAuthorized) {
         NSLog(@"[audio] Microphone not authorized (status=%d)", (int)status);
         return 0;
@@ -46,15 +47,15 @@ int start_av_audio_capture(void) {
 
         AVAudioInputNode *input = [_engine inputNode];
         AVAudioFormat *fmt = [input outputFormatForBus:0];
+        NSLog(@"[audio] Input format: %@", fmt);
         if (!fmt || fmt.sampleRate == 0) {
             NSLog(@"[audio] Invalid audio format from input node");
             _engine = nil;
-            return 0;
+            return -1;
         }
         _sampleRate = fmt.sampleRate;
         _channels = (int)fmt.channelCount;
 
-        // Use a standard format for the tap (mono float32 at device rate)
         AVAudioFormat *tapFmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:_sampleRate channels:1];
 
         [input installTapOnBus:0 bufferSize:4096 format:tapFmt
@@ -72,14 +73,14 @@ int start_av_audio_capture(void) {
             NSLog(@"[audio] AVAudioEngine start failed: %@", err);
             [[_engine inputNode] removeTapOnBus:0];
             _engine = nil;
-            return 0;
+            return -2;
         }
         NSLog(@"[audio] AVAudioEngine started: %.0f Hz, %d ch", _sampleRate, _channels);
         return 1;
     } @catch (NSException *e) {
         NSLog(@"[audio] AVAudioEngine exception: %@ — %@", e.name, e.reason);
         _engine = nil;
-        return 0;
+        return -3;
     }
 }
 
