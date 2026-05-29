@@ -1084,20 +1084,23 @@ struct VoiceChunkData {
     sample_rate: u32,
 }
 
-/// Stop active recording and free the cpal Stream.
 fn stop_voice_recording_inner() {
     VOICE_ACTIVE.store(false, Ordering::SeqCst);
-    let ptr = {
-        let mut guard = VOICE_STREAM_RAW.lock().unwrap();
-        let p = *guard;
-        *guard = 0;
-        p
-    };
-    if ptr != 0 {
-        // SAFETY: ptr was created by Box::into_raw in start_voice_recording.
-        // We clear the stored value above to prevent double-free.
-        unsafe {
-            drop(Box::from_raw(ptr as *mut cpal::Stream));
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" { fn stop_av_audio_capture(); }
+        unsafe { stop_av_audio_capture(); }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let ptr = {
+            let mut guard = VOICE_STREAM_RAW.lock().unwrap();
+            let p = *guard;
+            *guard = 0;
+            p
+        };
+        if ptr != 0 {
+            unsafe { drop(Box::from_raw(ptr as *mut cpal::Stream)); }
         }
     }
 }
@@ -1177,6 +1180,51 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
     Err(last_err)
 }
 
+/// macOS: use AVAudioEngine (bypasses broken cpal/CoreAudio on macOS 26)
+#[cfg(target_os = "macos")]
+fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), String> {
+    extern "C" {
+        fn start_av_audio_capture() -> i32;
+        fn get_av_sample_rate() -> f64;
+        fn get_av_channels() -> i32;
+    }
+    let ok = unsafe { start_av_audio_capture() };
+    if ok == 0 {
+        return Err("マイクの起動に失敗しました。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。".into());
+    }
+    let sample_rate = unsafe { get_av_sample_rate() } as u32;
+    let channels = unsafe { get_av_channels() } as u32;
+    println!("[voice] AVAudioEngine started: {}Hz, {}ch", sample_rate, channels);
+
+    VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
+    VOICE_CHANNELS.store(channels, Ordering::Relaxed);
+    VOICE_BUFFER.lock().unwrap().clear();
+    VOICE_OVERLAP.lock().unwrap().clear();
+    if let Some(ref mut vs) = *VAD.lock().unwrap() {
+        vs.state.fill(0.0);
+        vs.context.fill(0.0);
+    }
+    VOICE_ACTIVE.store(true, Ordering::SeqCst);
+
+    // Poll AVAudioEngine buffer → VOICE_BUFFER
+    std::thread::spawn(|| {
+        let mut temp = vec![0.0f32; 16384];
+        while VOICE_ACTIVE.load(Ordering::Relaxed) {
+            extern "C" { fn drain_av_audio_buffer(dest: *mut f32, max: i32) -> i32; }
+            let count = unsafe { drain_av_audio_buffer(temp.as_mut_ptr(), temp.len() as i32) };
+            if count > 0 {
+                if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                    buf.extend_from_slice(&temp[..count as usize]);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    Ok(())
+}
+
+/// Non-macOS: use cpal
+#[cfg(not(target_os = "macos"))]
 fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -1208,23 +1256,11 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
         found.ok_or_else(|| format!("オーディオデバイス「{}」が見つかりません。", name))?
     } else {
         host.default_input_device()
-            .ok_or("マイクが見つかりません。System Settings > Privacy & Security > Microphone で MarkFlow を許可してください。")?
+            .ok_or("マイクが見つかりません。")?
     };
 
-    let supported = device.default_input_config().or_else(|_| {
-        device.supported_input_configs()
-            .map_err(|e| format!("マイク設定エラー: {}。マイク権限を確認してください。", e))?
-            .next()
-            .ok_or_else(|| "マイクがサポートする設定が見つかりません。".to_string())
-            .map(|r| r.with_max_sample_rate())
-    })?;
-
-    println!("[voice] Device: {:?}, format: {:?}, rate: {}, ch: {}",
-        device.description().map(|d| d.name().to_string()).unwrap_or_default(),
-        supported.sample_format(),
-        supported.sample_rate(),
-        supported.channels());
-
+    let supported = device.default_input_config()
+        .map_err(|e| format!("マイク設定エラー: {}。", e))?;
     let sample_format = supported.sample_format();
     let sample_rate = supported.sample_rate();
     let channels = supported.channels() as u32;
@@ -1233,59 +1269,27 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
     VOICE_BUFFER.lock().unwrap().clear();
     VOICE_OVERLAP.lock().unwrap().clear();
-    // Reset Silero VAD state for new recording session
-    if let Some(ref mut vs) = *VAD.lock().unwrap() {
-        vs.state.fill(0.0);
-        vs.context.fill(0.0);
-    }
+    if let Some(ref mut vs) = *VAD.lock().unwrap() { vs.state.fill(0.0); vs.context.fill(0.0); }
     VOICE_ACTIVE.store(true, Ordering::SeqCst);
 
     let config: cpal::StreamConfig = supported.into();
-
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => device
-            .build_input_stream(
-                &config,
-                |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if !VOICE_ACTIVE.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
-                        buf.extend_from_slice(data);
-                    }
-                },
-                |err| eprintln!("[voice] Stream error: {}", err),
-                None,
-            )
-            .map_err(|e| format!("録音開始失敗: {}。マイク権限を確認してください。", e))?,
-        cpal::SampleFormat::I16 => device
-            .build_input_stream(
-                &config,
-                |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    if !VOICE_ACTIVE.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
-                        for &s in data {
-                            buf.push(s as f32 / 32768.0);
-                        }
-                    }
-                },
-                |err| eprintln!("[voice] Stream error: {}", err),
-                None,
-            )
-            .map_err(|e| format!("録音開始失敗: {}。マイク権限を確認してください。", e))?,
+        cpal::SampleFormat::F32 => device.build_input_stream(&config,
+            |data: &[f32], _: &cpal::InputCallbackInfo| {
+                if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
+                if let Ok(mut buf) = VOICE_BUFFER.try_lock() { buf.extend_from_slice(data); }
+            }, |e| eprintln!("[voice] {}", e), None,
+        ).map_err(|e| format!("録音開始失敗: {}", e))?,
+        cpal::SampleFormat::I16 => device.build_input_stream(&config,
+            |data: &[i16], _: &cpal::InputCallbackInfo| {
+                if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
+                if let Ok(mut buf) = VOICE_BUFFER.try_lock() { for &s in data { buf.push(s as f32 / 32768.0); } }
+            }, |e| eprintln!("[voice] {}", e), None,
+        ).map_err(|e| format!("録音開始失敗: {}", e))?,
         fmt => return Err(format!("未対応のオーディオ形式: {:?}", fmt)),
     };
-
-    stream
-        .play()
-        .map_err(|e| format!("Failed to play stream: {}", e))?;
-
-    // Keep stream alive by leaking — freed in stop_voice_recording_inner
-    let ptr = Box::into_raw(Box::new(stream)) as usize;
-    *VOICE_STREAM_RAW.lock().unwrap() = ptr;
-
+    stream.play().map_err(|e| format!("Failed to play: {}", e))?;
+    *VOICE_STREAM_RAW.lock().unwrap() = Box::into_raw(Box::new(stream)) as usize;
     Ok(())
 }
 

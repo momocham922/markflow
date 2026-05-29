@@ -1,0 +1,89 @@
+#import <AVFoundation/AVFoundation.h>
+
+// ── Microphone permission ──
+
+int request_microphone_permission(void) {
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (status == AVAuthorizationStatusAuthorized) return 1;
+    if (status == AVAuthorizationStatusDenied || status == AVAuthorizationStatusRestricted) return 0;
+
+    __block int result = -1;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+        result = granted ? 1 : 0;
+        dispatch_semaphore_signal(sem);
+    }];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 60LL * NSEC_PER_SEC));
+    return result;
+}
+
+int check_microphone_status(void) {
+    return (int)[AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+}
+
+// ── AVAudioEngine-based audio capture ──
+
+static AVAudioEngine *_engine = nil;
+static NSMutableData *_audioBuf = nil;
+static NSLock *_audioLock = nil;
+static double _sampleRate = 0;
+static int _channels = 0;
+
+int start_av_audio_capture(void) {
+    if (_engine) return 1;
+
+    _engine = [[AVAudioEngine alloc] init];
+    _audioBuf = [NSMutableData new];
+    _audioLock = [NSLock new];
+
+    AVAudioInputNode *input = [_engine inputNode];
+    AVAudioFormat *fmt = [input outputFormatForBus:0];
+    _sampleRate = fmt.sampleRate;
+    _channels = (int)fmt.channelCount;
+
+    [input installTapOnBus:0 bufferSize:4096 format:fmt
+        block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+            if (!buffer.floatChannelData) return;
+            float *ch0 = buffer.floatChannelData[0];
+            NSUInteger frames = buffer.frameLength;
+            [_audioLock lock];
+            [_audioBuf appendBytes:ch0 length:frames * sizeof(float)];
+            [_audioLock unlock];
+        }];
+
+    NSError *err = nil;
+    if (![_engine startAndReturnError:&err]) {
+        NSLog(@"[audio] AVAudioEngine start failed: %@", err);
+        _engine = nil;
+        return 0;
+    }
+    NSLog(@"[audio] AVAudioEngine started: %.0f Hz, %d ch", _sampleRate, _channels);
+    return 1;
+}
+
+int drain_av_audio_buffer(float *dest, int maxSamples) {
+    if (!_audioBuf || !_audioLock) return 0;
+    [_audioLock lock];
+    int available = (int)(_audioBuf.length / sizeof(float));
+    int toCopy = available < maxSamples ? available : maxSamples;
+    if (toCopy > 0) {
+        memcpy(dest, _audioBuf.bytes, toCopy * sizeof(float));
+        [_audioBuf replaceBytesInRange:NSMakeRange(0, toCopy * sizeof(float)) withBytes:NULL length:0];
+    }
+    [_audioLock unlock];
+    return toCopy;
+}
+
+double get_av_sample_rate(void) { return _sampleRate; }
+int get_av_channels(void) { return _channels; }
+
+void stop_av_audio_capture(void) {
+    if (!_engine) return;
+    [[_engine inputNode] removeTapOnBus:0];
+    [_engine stop];
+    _engine = nil;
+    [_audioLock lock];
+    [_audioBuf setLength:0];
+    [_audioLock unlock];
+    NSLog(@"[audio] AVAudioEngine stopped");
+}
