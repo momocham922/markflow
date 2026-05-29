@@ -1086,19 +1086,32 @@ struct VoiceChunkData {
     sample_rate: u32,
 }
 
+#[cfg(target_os = "macos")]
+fn stop_system_audio_inner() {
+    if SC_STREAM_ACTIVE.swap(false, Ordering::SeqCst) {
+        let stream = SC_STREAM_RAW.lock().unwrap().take();
+        if let Some(mut s) = stream {
+            let _ = s.stop_capture();
+            println!("[voice] ScreenCaptureKit stopped");
+        }
+    }
+}
+
+/// Stop mic only (not system audio). Used when restarting mic recording.
+#[cfg(target_os = "macos")]
+fn stop_mic_only() {
+    VOICE_ACTIVE.store(false, Ordering::SeqCst);
+    extern "C" { fn stop_av_audio_capture(); }
+    unsafe { stop_av_audio_capture(); }
+}
+
 fn stop_voice_recording_inner() {
     VOICE_ACTIVE.store(false, Ordering::SeqCst);
     #[cfg(target_os = "macos")]
     {
         extern "C" { fn stop_av_audio_capture(); }
         unsafe { stop_av_audio_capture(); }
-        // Stop system audio capture too
-        SC_STREAM_ACTIVE.store(false, Ordering::SeqCst);
-        let ptr = SC_STREAM_RAW.lock().unwrap().take();
-        if let Some(mut stream) = ptr {
-            let _ = stream.stop_capture();
-            println!("[voice] ScreenCaptureKit stopped");
-        }
+        stop_system_audio_inner();
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1184,6 +1197,10 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
         }
     }
 
+    // Stop only mic, preserve system audio capture if active
+    #[cfg(target_os = "macos")]
+    stop_mic_only();
+    #[cfg(not(target_os = "macos"))]
     stop_voice_recording_inner();
 
     // CoreAudio may need time after permission grant to become available.
