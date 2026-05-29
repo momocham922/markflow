@@ -1187,9 +1187,13 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
             .ok_or("マイクが見つかりません。System Settings > Privacy & Security > Microphone で MarkFlow を許可してください。")?
     };
 
-    let supported = device
-        .default_input_config()
-        .map_err(|e| format!("マイク設定エラー: {}。マイク権限を確認してください。", e))?;
+    let supported = device.default_input_config().or_else(|_| {
+        device.supported_input_configs()
+            .map_err(|e| format!("マイク設定エラー: {}。マイク権限を確認してください。", e))?
+            .next()
+            .ok_or_else(|| "マイクがサポートする設定が見つかりません。".to_string())
+            .map(|r| r.with_max_sample_rate())
+    })?;
 
     println!("[voice] Device: {:?}, format: {:?}, rate: {}, ch: {}",
         device.name().unwrap_or_default(),

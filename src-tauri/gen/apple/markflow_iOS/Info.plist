@@ -17,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.5.0.6</string>
+	<string>0.5.0.7</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -47,10 +47,12 @@
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
-			<key>CFBundleURLSchemes</key>
-			<array/>
 			<key>CFBundleURLName</key>
-			<string>https</string>
+			<string>com.markflow.editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>markflow</string>
+			</array>
 		</dict>
 	</array>
 </dict>
