@@ -1385,6 +1385,7 @@ fn screencapturekit_available() -> bool {
 
 #[cfg(target_os = "macos")]
 static SC_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static SC_STREAM_RAW: Mutex<Option<screencapturekit::prelude::SCStream>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]

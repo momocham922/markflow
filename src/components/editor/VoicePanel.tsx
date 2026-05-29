@@ -34,7 +34,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   const [selectedDevice, setSelectedDevice] = useState<string>("");
   const [systemAudio, setSystemAudio] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [audioDebug, setAudioDebug] = useState("");
   const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
 
   useEffect(() => {
@@ -75,8 +74,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         const { invoke } = await import("@tauri-apps/api/core");
         const level = await invoke<number>("get_voice_level");
         setAudioLevel(level);
-        const dbg = await invoke<string>("get_audio_debug");
-        setAudioDebug(dbg);
       } catch { setAudioLevel(0); }
     }, 100);
     return () => { clearInterval(id); setAudioLevel(0); };
@@ -265,7 +262,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           <span className="text-xs text-muted-foreground font-mono tabular-nums">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse mr-1.5" />
             {formatDuration(duration)}
-            {audioDebug && <span className="ml-2 text-[9px] text-muted-foreground/50">sa={String(systemAudio)} {audioDebug}</span>}
           </span>
         )}
 
@@ -287,7 +283,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
 
         <div className="flex-1" />
 
-        {isTauri && isMac && !isRecording && (
+        {isTauri && isMac && !isMobile && !isRecording && (
           <Button
             variant={systemAudio ? "secondary" : "ghost"}
             size="icon"
