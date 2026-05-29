@@ -23,12 +23,33 @@ int check_microphone_status(void) {
 
 // ── AVCaptureSession-based audio capture ──
 
+static NSString *_requestedDeviceName = nil;
 static NSMutableData *_audioBuf = nil;
 static NSLock *_audioLock = nil;
 static double _sampleRate = 0;
 static char _lastError[512] = {0};
 
 const char* get_last_audio_error(void) { return _lastError; }
+
+void set_audio_device_name(const char *name) {
+    _requestedDeviceName = name ? [NSString stringWithUTF8String:name] : nil;
+}
+
+// Returns JSON array of device names: ["Device1","Device2"]
+const char* list_av_audio_devices(void) {
+    static char buf[2048];
+    AVCaptureDeviceDiscoverySession *disc = [AVCaptureDeviceDiscoverySession
+        discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+        mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
+    NSMutableArray *names = [NSMutableArray new];
+    for (AVCaptureDevice *d in disc.devices) {
+        [names addObject:d.localizedName];
+    }
+    NSData *json = [NSJSONSerialization dataWithJSONObject:names options:0 error:nil];
+    NSString *str = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"[]";
+    strlcpy(buf, [str UTF8String], sizeof(buf));
+    return buf;
+}
 
 @interface AudioDelegate : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
 @end
@@ -112,9 +133,28 @@ int start_av_audio_capture(void) {
         _audioBuf = [NSMutableData new];
         _audioLock = [NSLock new];
 
-        AVCaptureDevice *mic = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+        AVCaptureDevice *mic = nil;
+        NSString *requestedDevice = _requestedDeviceName;
+        if (requestedDevice.length > 0) {
+            // Find specific device by name
+            AVCaptureDeviceDiscoverySession *disc = [AVCaptureDeviceDiscoverySession
+                discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+                mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
+            for (AVCaptureDevice *d in disc.devices) {
+                if ([d.localizedName isEqualToString:requestedDevice]) { mic = d; break; }
+            }
+        }
         if (!mic) {
-            strlcpy(_lastError, "No audio capture device found", sizeof(_lastError));
+            mic = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+        }
+        if (!mic) {
+            AVCaptureDeviceDiscoverySession *disc = [AVCaptureDeviceDiscoverySession
+                discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+                mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
+            mic = disc.devices.firstObject;
+        }
+        if (!mic) {
+            strlcpy(_lastError, "マイクが見つかりません。外部マイクを接続するか、iPhoneを近づけてContinuity Microphoneを有効にしてください。", sizeof(_lastError));
             return -1;
         }
         NSLog(@"[audio] Device: %@", mic.localizedName);

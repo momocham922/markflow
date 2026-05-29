@@ -1120,30 +1120,42 @@ fn ensure_microphone_permission() -> Result<(), String> {
     }
 }
 
-/// List available audio devices (input + output for loopback selection on Windows).
+/// List available audio devices.
 #[tauri::command]
 fn list_audio_devices() -> Result<Vec<String>, String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
-    let mut names = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    if let Ok(devices) = host.input_devices() {
-        for d in devices {
-            if let Ok(desc) = d.description() { let name = desc.name().to_string();
-                if seen.insert(name.clone()) { names.push(name); }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" { fn list_av_audio_devices() -> *const std::ffi::c_char; }
+        let json = unsafe {
+            let p = list_av_audio_devices();
+            std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
+        };
+        serde_json::from_str::<Vec<String>>(&json).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        let mut names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if let Ok(desc) = d.description() { let name = desc.name().to_string();
+                    if seen.insert(name.clone()) { names.push(name); }
+                }
             }
         }
-    }
-    #[cfg(target_os = "windows")]
-    if let Ok(devices) = host.output_devices() {
-        for d in devices {
-            if let Ok(desc) = d.description() { let name = desc.name().to_string();
-                let label = format!("[Output] {}", name);
-                if seen.insert(label.clone()) { names.push(label); }
+        #[cfg(target_os = "windows")]
+        if let Ok(devices) = host.output_devices() {
+            for d in devices {
+                if let Ok(desc) = d.description() { let name = desc.name().to_string();
+                    let label = format!("[Output] {}", name);
+                    if seen.insert(label.clone()) { names.push(label); }
+                }
             }
         }
+        Ok(names)
     }
-    Ok(names)
 }
 
 /// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
@@ -1180,13 +1192,21 @@ fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
     Err(last_err)
 }
 
-/// macOS: use AVAudioEngine (bypasses broken cpal/CoreAudio on macOS 26)
 #[cfg(target_os = "macos")]
-fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), String> {
+fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), String> {
     extern "C" {
+        fn set_audio_device_name(name: *const std::ffi::c_char);
         fn start_av_audio_capture() -> i32;
         fn get_av_sample_rate() -> f64;
         fn get_av_channels() -> i32;
+    }
+    unsafe {
+        if let Some(name) = device_name {
+            let cname = std::ffi::CString::new(name.as_str()).unwrap_or_default();
+            set_audio_device_name(cname.as_ptr());
+        } else {
+            set_audio_device_name(std::ptr::null());
+        }
     }
     let ok = unsafe { start_av_audio_capture() };
     if ok != 1 {
@@ -1195,12 +1215,13 @@ fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), Stri
             let p = get_last_audio_error();
             if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().to_string() }
         };
+        let d = if detail.is_empty() { "不明" } else { &detail };
         let msg = match ok {
-            0 => format!("マイクへのアクセスが許可されていません。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。"),
-            -1 => format!("マイクのオーディオフォーマット取得に失敗しました。"),
-            -2 => format!("AVAudioEngine起動失敗: {}", if detail.is_empty() { "不明なエラー" } else { &detail }),
-            -3 => format!("マイク初期化エラー: {}", detail),
-            _ => format!("マイクの起動に失敗しました。"),
+            0 => format!("マイク権限なし: {}\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON に", d),
+            -1 => format!("マイクデバイスが見つかりません: {}", d),
+            -2 => format!("キャプチャセッション起動失敗: {}", d),
+            -3 => format!("マイク初期化例外: {}", d),
+            _ => format!("マイク起動失敗 (code={}): {}", ok, d),
         };
         return Err(msg);
     }
