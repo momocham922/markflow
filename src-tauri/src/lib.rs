@@ -1090,6 +1090,13 @@ fn stop_voice_recording_inner() {
     {
         extern "C" { fn stop_av_audio_capture(); }
         unsafe { stop_av_audio_capture(); }
+        // Stop system audio capture too
+        SC_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        let ptr = SC_STREAM_RAW.lock().unwrap().take();
+        if let Some(mut stream) = ptr {
+            let _ = stream.stop_capture();
+            println!("[voice] ScreenCaptureKit stopped");
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1349,6 +1356,7 @@ fn screencapturekit_available() -> bool {
 
 #[cfg(target_os = "macos")]
 static SC_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SC_STREAM_RAW: Mutex<Option<screencapturekit::prelude::SCStream>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
@@ -1366,7 +1374,7 @@ fn start_system_audio_capture() -> Result<(), String> {
     let filter = SCContentFilter::create().with_display(&display).with_excluding_windows(&[]).build();
     let config = SCStreamConfiguration::new()
         .with_width(2).with_height(2)
-        .with_captures_audio(true).with_sample_rate(16000).with_channel_count(1);
+        .with_captures_audio(true).with_sample_rate(48000).with_channel_count(1);
 
     struct AudioHandler;
     impl SCStreamOutputTrait for AudioHandler {
@@ -1391,9 +1399,7 @@ fn start_system_audio_capture() -> Result<(), String> {
     stream.add_output_handler(AudioHandler, SCStreamOutputType::Audio);
     stream.start_capture().map_err(|e| format!("システム音声キャプチャ開始失敗: {:?}", e))?;
     SC_STREAM_ACTIVE.store(true, Ordering::SeqCst);
-    // Leak the stream to keep it alive — it captures on a background thread.
-    // The stream is never explicitly freed; it stops when the process exits.
-    Box::leak(Box::new(stream));
+    *SC_STREAM_RAW.lock().unwrap() = Some(stream);
     println!("[voice] System audio capture started via ScreenCaptureKit");
     Ok(())
 }
