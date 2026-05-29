@@ -32,33 +32,55 @@ static int _channels = 0;
 int start_av_audio_capture(void) {
     if (_engine) return 1;
 
-    _engine = [[AVAudioEngine alloc] init];
-    _audioBuf = [NSMutableData new];
-    _audioLock = [NSLock new];
+    // Verify permission before touching AVAudioEngine
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (status != AVAuthorizationStatusAuthorized) {
+        NSLog(@"[audio] Microphone not authorized (status=%d)", (int)status);
+        return 0;
+    }
 
-    AVAudioInputNode *input = [_engine inputNode];
-    AVAudioFormat *fmt = [input outputFormatForBus:0];
-    _sampleRate = fmt.sampleRate;
-    _channels = (int)fmt.channelCount;
+    @try {
+        _engine = [[AVAudioEngine alloc] init];
+        _audioBuf = [NSMutableData new];
+        _audioLock = [NSLock new];
 
-    [input installTapOnBus:0 bufferSize:4096 format:fmt
-        block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
-            if (!buffer.floatChannelData) return;
-            float *ch0 = buffer.floatChannelData[0];
-            NSUInteger frames = buffer.frameLength;
-            [_audioLock lock];
-            [_audioBuf appendBytes:ch0 length:frames * sizeof(float)];
-            [_audioLock unlock];
-        }];
+        AVAudioInputNode *input = [_engine inputNode];
+        AVAudioFormat *fmt = [input outputFormatForBus:0];
+        if (!fmt || fmt.sampleRate == 0) {
+            NSLog(@"[audio] Invalid audio format from input node");
+            _engine = nil;
+            return 0;
+        }
+        _sampleRate = fmt.sampleRate;
+        _channels = (int)fmt.channelCount;
 
-    NSError *err = nil;
-    if (![_engine startAndReturnError:&err]) {
-        NSLog(@"[audio] AVAudioEngine start failed: %@", err);
+        // Use a standard format for the tap (mono float32 at device rate)
+        AVAudioFormat *tapFmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:_sampleRate channels:1];
+
+        [input installTapOnBus:0 bufferSize:4096 format:tapFmt
+            block:^(AVAudioPCMBuffer *buffer, __unused AVAudioTime *when) {
+                if (!buffer.floatChannelData) return;
+                float *ch0 = buffer.floatChannelData[0];
+                NSUInteger frames = buffer.frameLength;
+                [_audioLock lock];
+                [_audioBuf appendBytes:ch0 length:frames * sizeof(float)];
+                [_audioLock unlock];
+            }];
+
+        NSError *err = nil;
+        if (![_engine startAndReturnError:&err]) {
+            NSLog(@"[audio] AVAudioEngine start failed: %@", err);
+            [[_engine inputNode] removeTapOnBus:0];
+            _engine = nil;
+            return 0;
+        }
+        NSLog(@"[audio] AVAudioEngine started: %.0f Hz, %d ch", _sampleRate, _channels);
+        return 1;
+    } @catch (NSException *e) {
+        NSLog(@"[audio] AVAudioEngine exception: %@ — %@", e.name, e.reason);
         _engine = nil;
         return 0;
     }
-    NSLog(@"[audio] AVAudioEngine started: %.0f Hz, %d ch", _sampleRate, _channels);
-    return 1;
 }
 
 int drain_av_audio_buffer(float *dest, int maxSamples) {
