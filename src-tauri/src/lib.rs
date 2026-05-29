@@ -1126,7 +1126,7 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::new();
     if let Ok(devices) = host.input_devices() {
         for d in devices {
-            if let Ok(name) = d.name() {
+            if let Ok(desc) = d.description() { let name = desc.name().to_string();
                 if seen.insert(name.clone()) { names.push(name); }
             }
         }
@@ -1134,7 +1134,7 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
     #[cfg(target_os = "windows")]
     if let Ok(devices) = host.output_devices() {
         for d in devices {
-            if let Ok(name) = d.name() {
+            if let Ok(desc) = d.description() { let name = desc.name().to_string();
                 let label = format!("[Output] {}", name);
                 if seen.insert(label.clone()) { names.push(label); }
             }
@@ -1148,10 +1148,17 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 fn start_voice_recording(device_name: Option<String>) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-    // Request microphone permission first (macOS only).
-    // Without this, cpal silently receives no audio data.
     #[cfg(target_os = "macos")]
-    ensure_microphone_permission()?;
+    {
+        ensure_microphone_permission()?;
+        // Re-check: macOS may report "authorized" via AVFoundation even
+        // when the toggle is OFF in System Settings after a re-sign.
+        extern "C" { fn check_microphone_status() -> i32; }
+        let status = unsafe { check_microphone_status() };
+        if status != 3 {
+            return Err("マイクへのアクセスが無効になっています。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。".into());
+        }
+    }
 
     stop_voice_recording_inner();
 
@@ -1181,7 +1188,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
             let real_name = &name["[Output] ".len()..];
             if let Ok(devices) = host.output_devices() {
                 for d in devices {
-                    if d.name().ok().as_deref() == Some(real_name) {
+                    if d.description().ok().map(|desc| desc.name().to_string()).as_deref() == Some(real_name) {
                         found = Some(d);
                         break;
                     }
@@ -1191,7 +1198,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
         if found.is_none() {
             if let Ok(devices) = host.input_devices() {
                 for d in devices {
-                    if d.name().ok().as_deref() == Some(name.as_str()) {
+                    if d.description().ok().map(|desc| desc.name().to_string()).as_deref() == Some(name.as_str()) {
                         found = Some(d);
                         break;
                     }
@@ -1213,13 +1220,13 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     })?;
 
     println!("[voice] Device: {:?}, format: {:?}, rate: {}, ch: {}",
-        device.name().unwrap_or_default(),
+        device.description().map(|d| d.name().to_string()).unwrap_or_default(),
         supported.sample_format(),
-        supported.sample_rate().0,
+        supported.sample_rate(),
         supported.channels());
 
     let sample_format = supported.sample_format();
-    let sample_rate = supported.sample_rate().0;
+    let sample_rate = supported.sample_rate();
     let channels = supported.channels() as u32;
 
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
