@@ -33,6 +33,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
   const [systemAudio, setSystemAudio] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
   const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
 
   useEffect(() => {
@@ -64,6 +65,18 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
     onError: (msg) => setVoiceError(msg),
     onMaxDuration: () => setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
+
+  useEffect(() => {
+    if (!isRecording || !isTauri) { setAudioLevel(0); return; }
+    const id = setInterval(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const level = await invoke<number>("get_voice_level");
+        setAudioLevel(level);
+      } catch { setAudioLevel(0); }
+    }, 100);
+    return () => { clearInterval(id); setAudioLevel(0); };
+  }, [isRecording]);
 
   // Keep refs in sync
   useEffect(() => { fullTranscriptRef.current = fullTranscript; }, [fullTranscript]);
@@ -261,6 +274,22 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse mr-1.5" />
             {formatDuration(duration)}
           </span>
+        )}
+
+        {isRecording && (
+          <div className="flex items-end gap-px h-4" title={`Level: ${Math.round(audioLevel * 100)}%`}>
+            {[0.15, 0.3, 0.45, 0.6, 0.75].map((threshold, i) => (
+              <div
+                key={i}
+                className={`w-[3px] rounded-sm transition-all duration-75 ${
+                  audioLevel >= threshold
+                    ? threshold >= 0.75 ? "bg-red-500" : threshold >= 0.45 ? "bg-amber-400" : "bg-emerald-500"
+                    : "bg-muted"
+                }`}
+                style={{ height: `${4 + i * 3}px` }}
+              />
+            ))}
+          </div>
         )}
 
         <div className="flex-1" />

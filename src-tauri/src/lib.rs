@@ -1336,6 +1336,19 @@ fn start_system_audio_capture() -> Result<(), String> {
     Err("システム音声キャプチャはmacOSでのみ利用可能です".to_string())
 }
 
+/// Return current audio input level (0.0–1.0 RMS) without draining the buffer.
+#[tauri::command]
+fn get_voice_level() -> f32 {
+    let buf = match VOICE_BUFFER.try_lock() {
+        Ok(b) => b,
+        Err(_) => return 0.0,
+    };
+    if buf.is_empty() { return 0.0; }
+    let tail = if buf.len() > 1600 { &buf[buf.len() - 1600..] } else { &buf[..] };
+    let rms = (tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32).sqrt();
+    (rms * 5.0).min(1.0)
+}
+
 /// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
 /// Audio is resampled to 16 kHz mono for optimal STT quality.
 #[tauri::command]
@@ -1627,7 +1640,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
