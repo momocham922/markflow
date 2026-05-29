@@ -1391,6 +1391,9 @@ fn start_system_audio_capture() -> Result<(), String> {
     stream.add_output_handler(AudioHandler, SCStreamOutputType::Audio);
     stream.start_capture().map_err(|e| format!("システム音声キャプチャ開始失敗: {:?}", e))?;
     SC_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+    // Leak the stream to keep it alive — it captures on a background thread.
+    // The stream is never explicitly freed; it stops when the process exits.
+    Box::leak(Box::new(stream));
     println!("[voice] System audio capture started via ScreenCaptureKit");
     Ok(())
 }
