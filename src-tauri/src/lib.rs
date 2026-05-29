@@ -1190,14 +1190,19 @@ fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), Stri
     }
     let ok = unsafe { start_av_audio_capture() };
     if ok != 1 {
-        let msg = match ok {
-            0 => "マイクへのアクセスが許可されていません。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。",
-            -1 => "マイクのオーディオフォーマット取得に失敗しました。別のオーディオデバイスを試してください。",
-            -2 => "AVAudioEngineの起動に失敗しました。アプリを再起動してください。",
-            -3 => "マイク初期化中に例外が発生しました。マイク設定を確認してください。",
-            _ => "マイクの起動に失敗しました。",
+        extern "C" { fn get_last_audio_error() -> *const std::ffi::c_char; }
+        let detail = unsafe {
+            let p = get_last_audio_error();
+            if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().to_string() }
         };
-        return Err(msg.into());
+        let msg = match ok {
+            0 => format!("マイクへのアクセスが許可されていません。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。"),
+            -1 => format!("マイクのオーディオフォーマット取得に失敗しました。"),
+            -2 => format!("AVAudioEngineの起動に失敗しました。"),
+            -3 => format!("マイク初期化エラー: {}", detail),
+            _ => format!("マイクの起動に失敗しました。"),
+        };
+        return Err(msg);
     }
     let sample_rate = unsafe { get_av_sample_rate() } as u32;
     let channels = unsafe { get_av_channels() } as u32;

@@ -28,6 +28,9 @@ static NSMutableData *_audioBuf = nil;
 static NSLock *_audioLock = nil;
 static double _sampleRate = 0;
 static int _channels = 0;
+static char _lastError[512] = {0};
+
+const char* get_last_audio_error(void) { return _lastError; }
 
 // Returns: 1=OK, 0=permission denied, -1=bad format, -2=engine start fail, -3=exception
 int start_av_audio_capture(void) {
@@ -78,7 +81,9 @@ int start_av_audio_capture(void) {
         NSLog(@"[audio] AVAudioEngine started: %.0f Hz, %d ch", _sampleRate, _channels);
         return 1;
     } @catch (NSException *e) {
-        NSLog(@"[audio] AVAudioEngine exception: %@ — %@", e.name, e.reason);
+        NSString *msg = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
+        NSLog(@"[audio] AVAudioEngine exception: %@", msg);
+        strlcpy(_lastError, [msg UTF8String], sizeof(_lastError));
         _engine = nil;
         return -3;
     }
