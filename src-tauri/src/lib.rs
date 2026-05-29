@@ -1495,13 +1495,8 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Silero VAD: skip silence. Bypass when system audio is active
-    // (VAD is trained on speech and rejects music/video audio).
-    #[cfg(target_os = "macos")]
-    let skip_vad = SC_STREAM_ACTIVE.load(Ordering::Relaxed);
-    #[cfg(not(target_os = "macos"))]
-    let skip_vad = false;
-    if !skip_vad && !silero_vad_has_speech(&resampled) {
+    // Silero VAD: skip silence chunks
+    if !silero_vad_has_speech(&resampled) {
         return Ok(None);
     }
 
