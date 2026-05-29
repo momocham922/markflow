@@ -48,21 +48,22 @@ int start_av_audio_capture(void) {
         _audioBuf = [NSMutableData new];
         _audioLock = [NSLock new];
 
+        // Force engine to build its internal graph (input → mixer → output)
+        AVAudioMixerNode *mixer = [_engine mainMixerNode];
+        mixer.outputVolume = 0;
+
         AVAudioInputNode *input = [_engine inputNode];
-        AVAudioFormat *hwFmt = [input inputFormatForBus:0];
-        NSLog(@"[audio] HW input format: %@", hwFmt);
-        AVAudioFormat *outFmt = [input outputFormatForBus:0];
-        NSLog(@"[audio] Node output format: %@", outFmt);
-        AVAudioFormat *fmt = outFmt ?: hwFmt;
+        AVAudioFormat *fmt = [input outputFormatForBus:0];
+        NSLog(@"[audio] Format: %@", fmt);
         if (!fmt || fmt.sampleRate == 0) {
             strlcpy(_lastError, "No valid audio format", sizeof(_lastError));
             _engine = nil;
             return -1;
         }
         _sampleRate = fmt.sampleRate;
-        _channels = (int)fmt.channelCount;
+        _channels = 1;
 
-        [input installTapOnBus:0 bufferSize:4096 format:fmt
+        [input installTapOnBus:0 bufferSize:4096 format:nil
             block:^(AVAudioPCMBuffer *buffer, __unused AVAudioTime *when) {
                 if (!buffer.floatChannelData) return;
                 float *ch0 = buffer.floatChannelData[0];
