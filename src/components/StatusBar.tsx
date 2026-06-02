@@ -15,10 +15,10 @@ export function StatusBar() {
     return (
       <div
         className={cn(
-          "flex items-center justify-between border-t border-border bg-background pt-2 text-[10px] text-muted-foreground shrink-0",
-          isIOS ? "pb-7 px-6" : "px-4",
+          "flex items-center justify-between border-t border-border bg-background text-[10px] text-muted-foreground shrink-0",
+          isIOS ? "pb-7 px-6 pt-2" : "px-4",
         )}
-        style={!isIOS ? { paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
+        style={!isIOS ? { paddingTop: "0.5rem", paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
       >
         <span className="flex items-center gap-1">
           <span

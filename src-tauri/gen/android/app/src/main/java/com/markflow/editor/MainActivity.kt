@@ -28,9 +28,16 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+
+    // Request mic permission at startup so WebView getUserMedia works
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        != PackageManager.PERMISSION_GRANTED) {
+      requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
   }
 
   override fun onWebViewCreate(webView: WebView) {
+    webView.settings.mediaPlaybackRequiresUserGesture = false
     webView.webChromeClient = object : WebChromeClient() {
       override fun onPermissionRequest(request: PermissionRequest) {
         val resources = request.resources

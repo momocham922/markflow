@@ -1318,8 +1318,8 @@ export function Sidebar() {
       {/* Footer */}
       <Separator />
       <div
-        className={cn("flex items-center justify-between pt-2 text-[10px] text-muted-foreground", isIOS ? "pb-7 px-6" : "px-4")}
-        style={!isIOS ? { paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
+        className={cn("flex items-center justify-between text-[10px] text-muted-foreground", isIOS ? "pb-7 px-6 pt-2" : "px-4")}
+        style={!isIOS ? { paddingTop: "0.5rem", paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
       >
         <span>
           {personalDocs.length} doc{personalDocs.length !== 1 ? "s" : ""}

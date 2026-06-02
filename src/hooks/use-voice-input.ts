@@ -265,17 +265,26 @@ export function useVoiceInput({
         // Browser fallback: getUserMedia + MediaRecorder
         if (!navigator.mediaDevices?.getUserMedia) {
           throw new Error(
-            "Microphone API not available. Grant microphone permission in System Settings.",
+            "マイクAPIが利用できません。設定でマイク権限を許可してください。",
           );
         }
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            sampleRate: { ideal: 16000 },
-            channelCount: { ideal: 1 },
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
-        });
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              sampleRate: { ideal: 16000 },
+              channelCount: { ideal: 1 },
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("Permission") || msg.includes("NotAllowed")) {
+            throw new Error("マイクへのアクセスが拒否されました。設定でマイク権限を許可してください。");
+          }
+          throw new Error(`マイクの起動に失敗しました: ${msg}`);
+        }
         streamRef.current = stream;
 
         const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
