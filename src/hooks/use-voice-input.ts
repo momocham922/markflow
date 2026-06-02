@@ -215,11 +215,14 @@ export function useVoiceInput({
 
     try {
       const androidAudio = getAndroidAudio();
-      if (androidAudio) {
+      if (isAndroid) {
         // Android: native AudioRecord via JS bridge
+        if (!androidAudio) {
+          throw new Error("音声キャプチャの初期化中です。数秒後にもう一度お試しください。");
+        }
         const bridge = androidAudio;
         if (!bridge.hasPermission()) {
-          throw new Error("マイクへのアクセスが拒否されました。設定でマイク権限を許可してください。");
+          throw new Error("マイクへのアクセスが拒否されました。設定 → アプリ → MarkFlow → 権限 でマイクを許可してください。");
         }
         const ok = bridge.start();
         if (!ok) throw new Error("マイクの起動に失敗しました。");
