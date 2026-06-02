@@ -1143,12 +1143,11 @@ export function Sidebar() {
               </div>
               {myDocsExpanded && (
                 <div className="space-y-0.5 pl-3">
-                  {personalDocs.length === 0 && (
+                  {user && !teamsLoaded ? null : personalDocs.length === 0 ? (
                     <p className="px-2 py-2 text-[10px] text-muted-foreground italic">
                       No documents yet
                     </p>
-                  )}
-                  {renderFolder(tree)}
+                  ) : renderFolder(tree)}
                 </div>
               )}
             </div>
@@ -1319,7 +1318,7 @@ export function Sidebar() {
       {/* Footer */}
       <Separator />
       <div
-        className={cn("flex items-center justify-between pt-2 text-[10px] text-muted-foreground", isIOS ? "pb-7 px-5" : "px-3")}
+        className={cn("flex items-center justify-between pt-2 text-[10px] text-muted-foreground", isIOS ? "pb-7 px-6" : "px-4")}
         style={!isIOS ? { paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
       >
         <span>
