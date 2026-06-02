@@ -10,8 +10,8 @@ import { isAndroid } from "@/platform";
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-// Android Tauri uses browser getUserMedia (Rust cpal not available on Android)
 const useTauriAudio = isTauri && !isAndroid;
+const getAndroidAudio = () => isAndroid ? (window as unknown as Record<string, any>).AndroidAudio : null;
 
 export interface UseVoiceInputOptions {
   language?: string;
@@ -180,8 +180,10 @@ export function useVoiceInput({
   );
 
   const stopRecording = useCallback(() => {
-    // Stop Rust audio capture if in Tauri
-    if (useTauriAudio) {
+    const androidBridge = getAndroidAudio();
+    if (androidBridge) {
+      try { androidBridge.stop(); } catch {}
+    } else if (useTauriAudio) {
       import("@tauri-apps/api/core").then(({ invoke }) => {
         invoke("stop_voice_recording").catch(() => {});
       });
@@ -212,8 +214,25 @@ export function useVoiceInput({
     stopRecording();
 
     try {
-      if (useTauriAudio) {
-        // Rust audio capture — bypasses WKWebView getUserMedia restriction
+      const androidAudio = getAndroidAudio();
+      if (androidAudio) {
+        // Android: native AudioRecord via JS bridge
+        const bridge = androidAudio;
+        if (!bridge.hasPermission()) {
+          throw new Error("マイクへのアクセスが拒否されました。設定でマイク権限を許可してください。");
+        }
+        const ok = bridge.start();
+        if (!ok) throw new Error("マイクの起動に失敗しました。");
+        chunkIntervalRef.current = setInterval(async () => {
+          try {
+            const chunk = bridge.getChunk();
+            if (chunk) {
+              await sendChunk(chunk, { encoding: "LINEAR16", sampleRate: 16000 });
+            }
+          } catch (e) { console.error("[voice] Android chunk error:", e); }
+        }, CHUNK_MS);
+      } else if (useTauriAudio) {
+        // Rust audio capture (macOS/Windows)
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("start_voice_recording", { deviceName: deviceName || null, systemAudio: systemAudio || false });
 

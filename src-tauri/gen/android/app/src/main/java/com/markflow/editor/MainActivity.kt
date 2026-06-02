@@ -4,65 +4,33 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.ViewGroup
-import android.webkit.PermissionRequest
-import android.webkit.WebChromeClient
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 
 class MainActivity : TauriActivity() {
-  private var pendingPermissionRequest: PermissionRequest? = null
+  lateinit var audioCapture: AudioCapture
 
   private val requestPermissionLauncher = registerForActivityResult(
     ActivityResultContracts.RequestPermission()
-  ) { isGranted ->
-    val req = pendingPermissionRequest
-    pendingPermissionRequest = null
-    if (isGranted && req != null) {
-      req.grant(req.resources)
-    } else {
-      req?.deny()
-    }
-  }
+  ) { _ -> }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    audioCapture = AudioCapture(this)
 
-    // Request mic permission early
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
         != PackageManager.PERMISSION_GRANTED) {
       requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    // Find WebView and configure audio permissions after layout is ready
+    // Add JS bridge to WebView
     window.decorView.post {
       findWebView(window.decorView as? ViewGroup)?.let { webView ->
-        webView.settings.mediaPlaybackRequiresUserGesture = false
-        val existingClient = webView.webChromeClient
-        webView.webChromeClient = object : WebChromeClient() {
-          override fun onPermissionRequest(request: PermissionRequest) {
-            runOnUiThread {
-              val resources = request.resources
-              if (resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
-                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO)
-                    == PackageManager.PERMISSION_GRANTED) {
-                  request.grant(resources)
-                } else {
-                  pendingPermissionRequest = request
-                  requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
-              } else {
-                request.grant(resources)
-              }
-            }
-          }
-
-          override fun onProgressChanged(view: WebView?, newProgress: Int) {
-            existingClient?.onProgressChanged(view, newProgress)
-          }
-        }
+        webView.addJavascriptInterface(AudioBridge(this), "AndroidAudio")
       }
     }
   }
@@ -78,4 +46,24 @@ class MainActivity : TauriActivity() {
     }
     return null
   }
+}
+
+class AudioBridge(private val activity: MainActivity) {
+  @JavascriptInterface
+  fun start(): Boolean = activity.audioCapture.start()
+
+  @JavascriptInterface
+  fun stop() = activity.audioCapture.stop()
+
+  @JavascriptInterface
+  fun hasPermission(): Boolean = activity.audioCapture.hasPermission()
+
+  @JavascriptInterface
+  fun getSampleRate(): Int = activity.audioCapture.getSampleRate()
+
+  @JavascriptInterface
+  fun getLevel(): Float = activity.audioCapture.getLevel()
+
+  @JavascriptInterface
+  fun getChunk(): String? = activity.audioCapture.getChunk()
 }
