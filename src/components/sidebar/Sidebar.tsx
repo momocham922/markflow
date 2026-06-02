@@ -125,6 +125,7 @@ export function Sidebar() {
   const user = useAuthStore((s) => s.user);
   const [sharedDocs, setSharedDocs] = useState<{ id: string; title: string; role: "editor" | "viewer" }[]>([]);
   const [sharedExpanded, setSharedExpanded] = useState(true);
+  const [teamsLoaded, setTeamsLoaded] = useState(!user);
 
   // My Documents collapsible
   const [myDocsExpanded, setMyDocsExpanded] = useState(true);
@@ -181,10 +182,14 @@ export function Sidebar() {
     if (!user?.uid) {
       setSharedDocs([]);
       setTeams([]);
+      setTeamsLoaded(true);
       return;
     }
-    fetchSharedWithMe(user.uid).then(setSharedDocs).catch(() => {});
-    refreshTeams(user.uid);
+    setTeamsLoaded(false);
+    Promise.all([
+      fetchSharedWithMe(user.uid).then(setSharedDocs).catch(() => {}),
+      refreshTeams(user.uid),
+    ]).then(() => setTeamsLoaded(true));
 
     // Poll every 15s to pick up changes from other members
     teamsRefreshTimer.current = setInterval(() => {
@@ -215,10 +220,15 @@ export function Sidebar() {
     [sharedDocs],
   );
 
-  // Personal docs: exclude team docs and docs shared with me (that I don't own)
+  // Personal docs: exclude team docs and docs shared with me (that I don't own).
+  // While teams are loading, also exclude docs with teamId to prevent flash.
   const personalDocs = useMemo(
-    () => documents.filter((d) => !teamDocIds.has(d.id) && !sharedDocIds.has(d.id)),
-    [documents, teamDocIds, sharedDocIds],
+    () => documents.filter((d) => {
+      if (teamDocIds.has(d.id) || sharedDocIds.has(d.id)) return false;
+      if (!teamsLoaded && d.teamId) return false;
+      return true;
+    }),
+    [documents, teamDocIds, sharedDocIds, teamsLoaded],
   );
 
   // Search: filter by title AND content (across ALL docs)
@@ -1308,7 +1318,10 @@ export function Sidebar() {
 
       {/* Footer */}
       <Separator />
-      <div className={cn("flex items-center justify-between pt-2 text-[10px] text-muted-foreground", isIOS ? "pb-7 px-5" : "pb-2 px-3")}>
+      <div
+        className={cn("flex items-center justify-between pt-2 text-[10px] text-muted-foreground", isIOS ? "pb-7 px-5" : "px-3")}
+        style={!isIOS ? { paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
+      >
         <span>
           {personalDocs.length} doc{personalDocs.length !== 1 ? "s" : ""}
           {teams.length > 0 && ` / ${teams.length} team${teams.length !== 1 ? "s" : ""}`}

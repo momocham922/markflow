@@ -5,8 +5,13 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 8000; // 8 second chunks: fewer boundaries = better accuracy
 const MAX_DURATION_SECONDS = 60 * 60; // 60 minutes hard limit
 
+import { isAndroid } from "@/platform";
+
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+// Android Tauri uses browser getUserMedia (Rust cpal not available on Android)
+const useTauriAudio = isTauri && !isAndroid;
 
 export interface UseVoiceInputOptions {
   language?: string;
@@ -176,7 +181,7 @@ export function useVoiceInput({
 
   const stopRecording = useCallback(() => {
     // Stop Rust audio capture if in Tauri
-    if (isTauri) {
+    if (useTauriAudio) {
       import("@tauri-apps/api/core").then(({ invoke }) => {
         invoke("stop_voice_recording").catch(() => {});
       });
@@ -207,7 +212,7 @@ export function useVoiceInput({
     stopRecording();
 
     try {
-      if (isTauri) {
+      if (useTauriAudio) {
         // Rust audio capture — bypasses WKWebView getUserMedia restriction
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("start_voice_recording", { deviceName: deviceName || null, systemAudio: systemAudio || false });
@@ -356,7 +361,7 @@ export function useVoiceInput({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (isTauri) {
+      if (useTauriAudio) {
         import("@tauri-apps/api/core").then(({ invoke }) => {
           invoke("stop_voice_recording").catch(() => {});
         });
