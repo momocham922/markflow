@@ -811,7 +811,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           {isMobile ? (
             (sidebarOpen || swiping) && (
               <div
-                className="fixed inset-y-0 left-0 z-50 safe-top safe-bottom shadow-xl bg-background overflow-hidden"
+                className="fixed inset-y-0 left-0 z-50 safe-top shadow-xl bg-background overflow-hidden"
                 style={{
                   width: "min(320px, 85vw)",
                   transform: `translateX(${sidebarTranslateX}px)`,
