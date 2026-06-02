@@ -16,8 +16,9 @@ export function StatusBar() {
       <div
         className={cn(
           "flex items-center justify-between border-t border-border bg-background pt-2 text-[10px] text-muted-foreground shrink-0",
-          isIOS ? "pb-7 px-6" : "pb-2 px-4",
+          isIOS ? "pb-7 px-6" : "px-4",
         )}
+        style={!isIOS ? { paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)" } : undefined}
       >
         <span className="flex items-center gap-1">
           <span
