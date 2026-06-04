@@ -128,25 +128,6 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
   return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
 };
 
-// Track checkbox index for interactive preview toggles
-let checkboxIndex = 0;
-
-marked.use({
-  extensions: [{
-    name: "listitem",
-    renderer(token: any) {
-      if (token.task) {
-        const idx = checkboxIndex++;
-        const checkedAttr = token.checked ? " checked" : "";
-        let text = this.parser.parseInline(token.tokens);
-        text = text.replace(/<input.*?type="checkbox".*?>/i, "");
-        return `<li class="task-list-item"><input type="checkbox" class="task-checkbox" data-checkbox-index="${idx}"${checkedAttr}> ${text}</li>\n`;
-      }
-      return false; // fall back to default
-    },
-  }],
-});
-
 marked.use({ renderer });
 
 // Initialize mermaid — render on demand, not on load
@@ -326,7 +307,6 @@ export function Editor() {
   const previewHtml = useMemo(() => {
     if (!deferredContent) return "";
     pendingOgpUrls = [];
-    checkboxIndex = 0;
     try {
       let html = marked.parse(deferredContent) as string;
       // Protect code/pre blocks from wiki-link replacement
@@ -347,6 +327,12 @@ export function Editor() {
       });
       // Restore code/pre blocks
       html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
+      // Make task checkboxes interactive (remove disabled, add index + class)
+      let cbIdx = 0;
+      html = html.replace(/<input (checked="")?disabled="" type="checkbox">/g, (_match, checked) => {
+        const idx = cbIdx++;
+        return `<input type="checkbox" class="task-checkbox" data-checkbox-index="${idx}"${checked ? " checked" : ""}>`;
+      });
       // Capture pending URLs to ref (survives concurrent renders)
       // eslint-disable-next-line react-compiler/react-compiler
       pendingOgpUrlsRef.current = [...pendingOgpUrls];
