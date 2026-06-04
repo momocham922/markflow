@@ -594,6 +594,16 @@ input::selection {
 }
 
 
+/* ---- CodeMirror mobile compact ---- */
+@media (max-width: 768px) {
+  .cm-editor .cm-content {
+    padding: 1rem 1rem !important;
+  }
+  .cm-editor .cm-gutters {
+    padding-right: 2px !important;
+  }
+}
+
 /* ---- CodeMirror gutter selection fix ---- */
 /* Prevent selection highlight from sticking on gutters after deselection */
 .cm-editor .cm-gutters {
