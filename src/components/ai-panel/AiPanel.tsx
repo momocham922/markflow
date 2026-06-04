@@ -50,7 +50,7 @@ import {
 } from "@/services/mcp";
 import { McpSettings, loadMcpConfigs } from "./McpSettings";
 import { generateImage } from "@/services/image-gen";
-import { useAppStore } from "@/stores/app-store";
+import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEditorStore } from "@/stores/editor-store";
 import {
@@ -60,6 +60,7 @@ import {
   deleteAiChatFromCloud,
   saveAiThreadsToCloud,
   fetchAiThreadsFromCloud,
+  auth,
 } from "@/services/firebase";
 import { isIOS, isMobile } from "@/platform";
 import * as db from "@/services/database";
@@ -467,24 +468,91 @@ export function AiPanel({ onClose }: AiPanelProps) {
     return parsed.body.textContent || "";
   };
 
-  const buildContextPrefix = (): string => {
+  // Cache for document summaries (avoids re-summarizing unchanged docs)
+  const docSummaryCache = useRef<Map<string, { hash: number; summary: string }>>(new Map());
+
+  const hashContent = (s: string): number => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return h;
+  };
+
+  const buildDocMeta = (doc: Document): string => {
+    const flags: string[] = [];
+    if (doc.teamId) flags.push("team");
+    else if (doc.isShared) flags.push("shared");
+    else flags.push("personal");
+    if (doc.docType === "mindmap") flags.push("mindmap");
+    const date = new Date(doc.updatedAt).toISOString().slice(0, 16).replace("T", " ");
+    return `[${flags.join(",")}] folder="${doc.folder || "/"}" tags=[${(doc.tags || []).join(",")}] updated=${date}`;
+  };
+
+  const summarizeDoc = async (text: string): Promise<string> => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) return text.slice(0, 500) + "...";
+      const result = await sendToClaude(
+        token,
+        "Summarize this document in 2-3 sentences. Keep the same language. Output ONLY the summary.",
+        [{ role: "user", content: text.slice(0, 6000) }],
+      );
+      return result.trim() || text.slice(0, 500) + "...";
+    } catch {
+      return text.slice(0, 500) + "...";
+    }
+  };
+
+  const buildContextPrefix = async (): Promise<string> => {
     const parts: string[] = [];
+    const TOKEN_BUDGET = 12000; // ~chars, conservative estimate for context window
+    let usedChars = 0;
 
     if (allDocsContext && documents.length > 1) {
       parts.push("=== All Documents in Workspace ===");
-      for (const doc of documents) {
-        const text = stripHtml(doc.content);
-        const preview =
-          text.length > 800 ? text.slice(0, 800) + "..." : text;
-        parts.push(
-          `\n--- ${doc.title} ${doc.id === activeDocId ? "(CURRENT)" : ""} ---\n${preview}`,
-        );
+
+      // Current doc: always full content + full meta
+      if (activeDoc) {
+        const text = stripHtml(activeDoc.content);
+        parts.push(`\n--- ${activeDoc.title} (CURRENT) ---\n${buildDocMeta(activeDoc)}\n\n${text}`);
+        usedChars += text.length;
       }
+
+      // Other docs: sort by updatedAt desc (most recent first)
+      const otherDocs = documents
+        .filter((d) => d.id !== activeDocId)
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+
+      for (const doc of otherDocs) {
+        const text = stripHtml(doc.content);
+        const meta = buildDocMeta(doc);
+        const contentHash = hashContent(text);
+
+        if (text.length <= 2000 && usedChars + text.length < TOKEN_BUDGET) {
+          // Short doc: full content
+          parts.push(`\n--- ${doc.title} ---\n${meta}\n\n${text}`);
+          usedChars += text.length;
+        } else if (usedChars < TOKEN_BUDGET) {
+          // Long doc or budget tight: use cached summary or generate one
+          const cached = docSummaryCache.current.get(doc.id);
+          let summary: string;
+          if (cached && cached.hash === contentHash) {
+            summary = cached.summary;
+          } else {
+            summary = await summarizeDoc(text);
+            docSummaryCache.current.set(doc.id, { hash: contentHash, summary });
+          }
+          parts.push(`\n--- ${doc.title} ---\n${meta}\n\n[Summary] ${summary}`);
+          usedChars += summary.length;
+        } else {
+          // Over budget: metadata only
+          parts.push(`\n--- ${doc.title} ---\n${meta}\n\n[Content omitted — over context budget]`);
+        }
+      }
+
       parts.push("\n=== End of Documents ===\n");
     } else if (activeDoc) {
-      parts.push(
-        `Current document "${activeDoc.title}":\n${stripHtml(activeDoc.content)}`,
-      );
+      const text = stripHtml(activeDoc.content);
+      parts.push(`Current document "${activeDoc.title}":\n${buildDocMeta(activeDoc)}\n\n${text}`);
     }
 
     const selected = getSelectedText();
@@ -568,7 +636,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
       let imagePrompt = prompt;
       {
         setToolStatus("Building image prompt from context...");
-        const docContext = buildContextPrefix();
+        const docContext = await buildContextPrefix();
         const contextMessages: ClaudeMessage[] = [
           ...(docContext
             ? [{ role: "user" as const, content: docContext }, { role: "assistant" as const, content: "I've read the document context." }]
@@ -738,7 +806,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
     try {
       const isFirstMessage = apiMessages.length === 0;
-      const context = buildContextPrefix();
+      const context = await buildContextPrefix();
 
       // Build content blocks for multimodal
       const contentBlocks: ContentBlock[] = [];
