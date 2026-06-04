@@ -128,6 +128,25 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
   return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
 };
 
+// Track checkbox index for interactive preview toggles
+let checkboxIndex = 0;
+
+marked.use({
+  extensions: [{
+    name: "listitem",
+    renderer(token: any) {
+      if (token.task) {
+        const idx = checkboxIndex++;
+        const checkedAttr = token.checked ? " checked" : "";
+        let text = this.parser.parseInline(token.tokens);
+        text = text.replace(/<input.*?type="checkbox".*?>/i, "");
+        return `<li class="task-list-item"><input type="checkbox" class="task-checkbox" data-checkbox-index="${idx}"${checkedAttr}> ${text}</li>\n`;
+      }
+      return false; // fall back to default
+    },
+  }],
+});
+
 marked.use({ renderer });
 
 // Initialize mermaid — render on demand, not on load
@@ -306,8 +325,8 @@ export function Editor() {
   // ogpVersion dependency: re-render when OGP data arrives so cards render inline
   const previewHtml = useMemo(() => {
     if (!deferredContent) return "";
-    // Reset pending OGP URLs for this render pass
     pendingOgpUrls = [];
+    checkboxIndex = 0;
     try {
       let html = marked.parse(deferredContent) as string;
       // Protect code/pre blocks from wiki-link replacement
@@ -813,6 +832,30 @@ export function Editor() {
               className={`prose max-w-none ${isMobile ? "mobile-preview" : "px-12 py-8"}`}
               dangerouslySetInnerHTML={{ __html: previewHtml }}
               onClick={(e) => {
+                // Checkbox toggle in preview
+                const checkbox = e.target as HTMLInputElement;
+                if (checkbox.classList?.contains("task-checkbox") && activeDocId) {
+                  const idx = parseInt(checkbox.getAttribute("data-checkbox-index") || "-1", 10);
+                  if (idx >= 0) {
+                    const content = activeDoc?.content || "";
+                    const lines = content.split("\n");
+                    let cbCount = 0;
+                    for (let i = 0; i < lines.length; i++) {
+                      const match = lines[i].match(/^(\s*[-*+]\s*)\[([ xX])\]/);
+                      if (match) {
+                        if (cbCount === idx) {
+                          const isChecked = match[2] !== " ";
+                          lines[i] = lines[i].replace(/\[([ xX])\]/, isChecked ? "[ ]" : "[x]");
+                          updateDocument(activeDocId, { content: lines.join("\n"), updatedAt: Date.now() });
+                          break;
+                        }
+                        cbCount++;
+                      }
+                    }
+                  }
+                  return;
+                }
+                // Wiki-link click
                 const target = (e.target as HTMLElement).closest(".wikilink");
                 if (target) {
                   e.preventDefault();

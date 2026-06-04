@@ -594,6 +594,20 @@ input::selection {
 }
 
 
+/* ---- Task checkbox in preview ---- */
+.prose .task-list-item {
+  list-style: none;
+  margin-left: -1.5rem;
+}
+.prose .task-checkbox {
+  cursor: pointer;
+  width: 1rem;
+  height: 1rem;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+  accent-color: oklch(0.55 0.2 270);
+}
+
 /* ---- CodeMirror mobile compact ---- */
 @media (max-width: 768px) {
   .cm-editor .cm-content {
