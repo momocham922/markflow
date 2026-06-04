@@ -329,7 +329,7 @@ export function Editor() {
       html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
       // Make task checkboxes interactive (remove disabled, add index + class)
       let cbIdx = 0;
-      html = html.replace(/<input (checked="")?disabled="" type="checkbox">/g, (_match, checked) => {
+      html = html.replace(/<input (checked="" )?disabled="" type="checkbox">/g, (_match, checked) => {
         const idx = cbIdx++;
         return `<input type="checkbox" class="task-checkbox" data-checkbox-index="${idx}"${checked ? " checked" : ""}>`;
       });
