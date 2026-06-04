@@ -11,6 +11,7 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
   onReplaceMarkdown: (oldMarkdown: string, newMarkdown: string) => void;
+  documentContent: string;
 }
 
 function formatDuration(seconds: number): string {
@@ -19,7 +20,7 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelProps) {
+export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentContent }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0);
@@ -50,6 +51,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   const structuringRef = useRef(false);
   const onInsertRef = useRef(onInsertMarkdown);
   const onReplaceRef = useRef(onReplaceMarkdown);
+  const docContentRef = useRef(documentContent);
 
   const {
     isRecording,
@@ -84,6 +86,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   useEffect(() => { structuringRef.current = structuring; }, [structuring]);
   useEffect(() => { onInsertRef.current = onInsertMarkdown; }, [onInsertMarkdown]);
   useEffect(() => { onReplaceRef.current = onReplaceMarkdown; }, [onReplaceMarkdown]);
+  useEffect(() => { docContentRef.current = documentContent; }, [documentContent]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -94,7 +97,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
   const doStructure = useCallback(async () => {
     const transcript = fullTranscriptRef.current;
     if (!transcript.trim() || structuringRef.current) return;
-    if (transcript === lastStructuredRef.current) return;
 
     setStructuring(true);
     structuringRef.current = true;
@@ -104,6 +106,26 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error("No token");
 
+      const existingDoc = docContentRef.current.trim();
+      const hasExisting = existingDoc.length > 0;
+
+      const systemPrompt = hasExisting
+        ? "You are a document assistant. You will receive an EXISTING document and a NEW voice transcript. " +
+          "Merge them into a single, well-structured Markdown document. " +
+          "Preserve the existing document's structure and content, and integrate the new transcript naturally. " +
+          "Update, expand, or reorganize sections as needed to incorporate the new information. " +
+          "Keep the same language. Do NOT add generic titles. Output ONLY the final Markdown."
+        : "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
+          "Integrate all content coherently — do not produce fragments or partial updates. " +
+          "Use appropriate headings, bullet points, and formatting. " +
+          "Keep the same language as the transcript. " +
+          "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
+          "Output ONLY the structured Markdown content, no explanations or meta-commentary.";
+
+      const userContent = hasExisting
+        ? `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${transcript}\n\nMerge these into one cohesive Markdown document.`
+        : `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`;
+
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
         headers: {
@@ -111,19 +133,8 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          system:
-            "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
-            "Integrate all content coherently — do not produce fragments or partial updates. " +
-            "Use appropriate headings, bullet points, and formatting. " +
-            "Keep the same language as the transcript. " +
-            "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
-            "Output ONLY the structured Markdown content, no explanations or meta-commentary.",
-          messages: [
-            {
-              role: "user",
-              content: `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`,
-            },
-          ],
+          system: systemPrompt,
+          messages: [{ role: "user", content: userContent }],
           max_tokens: 4096,
           stream: false,
         }),
@@ -138,11 +149,14 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown }: VoicePanelPr
         "";
 
       if (markdown.trim()) {
-        const newOutput = `\n\n${markdown.trim()}\n`;
-        if (lastStructuredOutputRef.current) {
-          onReplaceRef.current(lastStructuredOutputRef.current, newOutput);
+        const newOutput = markdown.trim();
+        if (hasExisting) {
+          // Replace entire document content with merged result
+          onReplaceRef.current(docContentRef.current, newOutput);
+        } else if (lastStructuredOutputRef.current) {
+          onReplaceRef.current(lastStructuredOutputRef.current, `\n\n${newOutput}\n`);
         } else {
-          onInsertRef.current(newOutput);
+          onInsertRef.current(`\n\n${newOutput}\n`);
         }
         lastStructuredOutputRef.current = newOutput;
         lastStructuredRef.current = transcript;

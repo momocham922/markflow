@@ -845,7 +845,7 @@ export function Editor() {
           </div>
         )}
       </div>
-      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} />}
+      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} documentContent={activeDoc?.content || ""} />}
     </div>
   );
 }
