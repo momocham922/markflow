@@ -17,6 +17,7 @@ class AudioCapture(private val activity: MainActivity) {
     private val buffer = mutableListOf<Float>()
     private val lock = Object()
     private var sampleRate = 16000
+    private var useFloat = true
 
     fun hasPermission(): Boolean {
         return ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
@@ -29,42 +30,65 @@ class AudioCapture(private val activity: MainActivity) {
 
         val rates = intArrayOf(16000, 44100, 48000)
         var record: AudioRecord? = null
-        for (rate in rates) {
-            val bufSize = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-            if (bufSize == AudioRecord.ERROR_BAD_VALUE || bufSize == AudioRecord.ERROR) continue
-            try {
-                val r = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    rate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_FLOAT,
-                    bufSize * 2
-                )
-                if (r.state == AudioRecord.STATE_INITIALIZED) {
-                    record = r
-                    sampleRate = rate
-                    break
+
+        // Try Float32 first, then fall back to Int16
+        for (encoding in intArrayOf(AudioFormat.ENCODING_PCM_FLOAT, AudioFormat.ENCODING_PCM_16BIT)) {
+            for (rate in rates) {
+                val bufSize = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, encoding)
+                if (bufSize == AudioRecord.ERROR_BAD_VALUE || bufSize == AudioRecord.ERROR) continue
+                try {
+                    val r = AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        rate,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        encoding,
+                        bufSize * 2
+                    )
+                    if (r.state == AudioRecord.STATE_INITIALIZED) {
+                        record = r
+                        sampleRate = rate
+                        useFloat = encoding == AudioFormat.ENCODING_PCM_FLOAT
+                        break
+                    }
+                    r.release()
+                } catch (e: Exception) {
+                    android.util.Log.w("MarkFlow", "AudioRecord init failed: rate=$rate enc=$encoding: ${e.message}")
+                    continue
                 }
-                r.release()
-            } catch (e: Exception) {
-                continue
             }
+            if (record != null) break
         }
 
-        if (record == null) return false
-        audioRecord = record
+        if (record == null) {
+            android.util.Log.e("MarkFlow", "No working AudioRecord configuration found")
+            return false
+        }
 
+        audioRecord = record
         synchronized(lock) { buffer.clear() }
         isRecording = true
         record.startRecording()
+        android.util.Log.i("MarkFlow", "AudioRecord started: ${sampleRate}Hz, float=$useFloat")
 
         thread(isDaemon = true) {
-            val readBuf = FloatArray(1024)
-            while (isRecording) {
-                val read = record.read(readBuf, 0, readBuf.size, AudioRecord.READ_BLOCKING)
-                if (read > 0) {
-                    synchronized(lock) {
-                        for (i in 0 until read) buffer.add(readBuf[i])
+            if (useFloat) {
+                val readBuf = FloatArray(1024)
+                while (isRecording) {
+                    val read = record.read(readBuf, 0, readBuf.size, AudioRecord.READ_BLOCKING)
+                    if (read > 0) {
+                        synchronized(lock) {
+                            for (i in 0 until read) buffer.add(readBuf[i])
+                        }
+                    }
+                }
+            } else {
+                val readBuf = ShortArray(1024)
+                while (isRecording) {
+                    val read = record.read(readBuf, 0, readBuf.size)
+                    if (read > 0) {
+                        synchronized(lock) {
+                            for (i in 0 until read) buffer.add(readBuf[i].toFloat() / 32768f)
+                        }
                     }
                 }
             }
@@ -99,12 +123,10 @@ class AudioCapture(private val activity: MainActivity) {
         }
     }
 
-    // Return base64-encoded LINEAR16 PCM chunk for STT
     fun getChunk(): String? {
         val samples = drainBuffer()
         if (samples.isEmpty()) return null
 
-        // Resample to 16kHz if needed
         val resampled = if (sampleRate != 16000) {
             val ratio = sampleRate.toDouble() / 16000.0
             val newLen = (samples.size / ratio).toInt()
@@ -114,7 +136,6 @@ class AudioCapture(private val activity: MainActivity) {
             }
         } else samples
 
-        // Float32 -> Int16 PCM
         val byteBuffer = ByteBuffer.allocate(resampled.size * 2).order(ByteOrder.LITTLE_ENDIAN)
         for (s in resampled) {
             val clamped = s.coerceIn(-1f, 1f)

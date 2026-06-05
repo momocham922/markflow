@@ -1,4 +1,11 @@
 #import <AVFoundation/AVFoundation.h>
+#import <TargetConditionals.h>
+
+#if TARGET_OS_OSX
+#define DEVICE_TYPES @[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+#else
+#define DEVICE_TYPES @[AVCaptureDeviceTypeBuiltInMicrophone]
+#endif
 
 // ── Microphone permission ──
 
@@ -39,7 +46,7 @@ void set_audio_device_name(const char *name) {
 const char* list_av_audio_devices(void) {
     static char buf[2048];
     AVCaptureDeviceDiscoverySession *disc = [AVCaptureDeviceDiscoverySession
-        discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+        discoverySessionWithDeviceTypes:DEVICE_TYPES
         mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
     NSMutableArray *names = [NSMutableArray new];
     for (AVCaptureDevice *d in disc.devices) {
@@ -138,7 +145,7 @@ int start_av_audio_capture(void) {
         if (requestedDevice.length > 0) {
             // Find specific device by name
             AVCaptureDeviceDiscoverySession *disc = [AVCaptureDeviceDiscoverySession
-                discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+                discoverySessionWithDeviceTypes:DEVICE_TYPES
                 mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
             for (AVCaptureDevice *d in disc.devices) {
                 if ([d.localizedName isEqualToString:requestedDevice]) { mic = d; break; }
@@ -149,7 +156,7 @@ int start_av_audio_capture(void) {
         }
         if (!mic) {
             AVCaptureDeviceDiscoverySession *disc = [AVCaptureDeviceDiscoverySession
-                discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInMicrophone, AVCaptureDeviceTypeExternalUnknown]
+                discoverySessionWithDeviceTypes:DEVICE_TYPES
                 mediaType:AVMediaTypeAudio position:AVCaptureDevicePositionUnspecified];
             mic = disc.devices.firstObject;
         }

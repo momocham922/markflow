@@ -1098,7 +1098,7 @@ fn stop_system_audio_inner() {
 }
 
 /// Stop mic only (not system audio). Used when restarting mic recording.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn stop_mic_only() {
     VOICE_ACTIVE.store(false, Ordering::SeqCst);
     extern "C" { fn stop_av_audio_capture(); }
@@ -1107,10 +1107,11 @@ fn stop_mic_only() {
 
 fn stop_voice_recording_inner() {
     VOICE_ACTIVE.store(false, Ordering::SeqCst);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         extern "C" { fn stop_av_audio_capture(); }
         unsafe { stop_av_audio_capture(); }
+        #[cfg(target_os = "macos")]
         stop_system_audio_inner();
     }
     #[cfg(target_os = "windows")]
@@ -1129,7 +1130,7 @@ fn stop_voice_recording_inner() {
 
 /// Request microphone permission via AVFoundation (triggers macOS system dialog).
 /// cpal uses CoreAudio directly and does NOT trigger the permission prompt on its own.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn ensure_microphone_permission() -> Result<(), String> {
     extern "C" {
         fn request_microphone_permission() -> i32;
@@ -1145,7 +1146,7 @@ fn ensure_microphone_permission() -> Result<(), String> {
 /// List available audio devices.
 #[tauri::command]
 fn list_audio_devices() -> Result<Vec<String>, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         extern "C" { fn list_av_audio_devices() -> *const std::ffi::c_char; }
         let json = unsafe {
@@ -1178,7 +1179,7 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
         }
         Ok(names)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     {
         Ok(vec![])
     }
@@ -1187,20 +1188,17 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 /// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
 #[tauri::command]
 fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         ensure_microphone_permission()?;
-        // Re-check: macOS may report "authorized" via AVFoundation even
-        // when the toggle is OFF in System Settings after a re-sign.
         extern "C" { fn check_microphone_status() -> i32; }
         let status = unsafe { check_microphone_status() };
         if status != 3 {
-            return Err("マイクへのアクセスが無効になっています。\nSystem Settings → Privacy & Security → Microphone で MarkFlow を ON にしてください。".into());
+            return Err("マイクへのアクセスが無効になっています。設定でマイク権限を許可してください。".into());
         }
     }
 
-    // Stop only mic, preserve system audio capture if active
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     stop_mic_only();
     #[cfg(target_os = "windows")]
     stop_voice_recording_inner();
@@ -1230,7 +1228,7 @@ fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>
     Err(last_err)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), String> {
     extern "C" {
         fn set_audio_device_name(name: *const std::ffi::c_char);
@@ -1364,7 +1362,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
 fn start_voice_recording_inner(_device_name: &Option<String>) -> Result<(), String> {
     Err("このプラットフォームではRust音声キャプチャは利用できません。ブラウザAPIを使用してください。".into())
 }
