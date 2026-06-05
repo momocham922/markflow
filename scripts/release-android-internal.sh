@@ -164,15 +164,14 @@ upload = service.edits().bundles().upload(
 version_code = upload["versionCode"]
 print(f"Uploaded AAB: versionCode={version_code}")
 
-# Assign to internal track
-service.edits().tracks().update(
-    packageName=package, editId=edit_id, track="internal",
-    body={"track": "internal", "releases": [{"versionCodes": [str(version_code)], "status": "completed", "releaseNotes": [{"language": "en-US", "text": f"v{version}"}]}]}
-).execute()
-
-# Commit
-service.edits().commit(packageName=package, editId=edit_id).execute()
-print(f"Published to Internal Testing: v{version} (versionCode={version_code})")
+# Assign to internal + alpha (closed testing) tracks
+release_body = {"versionCodes": [str(version_code)], "status": "completed", "name": version, "releaseNotes": [{"language": "en-US", "text": f"v{version}"}]}
+for track_name in ["internal", "alpha"]:
+    service.edits().tracks().update(
+        packageName=package, editId=edit_id, track=track_name,
+        body={"track": track_name, "releases": [release_body]}
+    ).execute()
+    print(f"Published to {track_name}: v{version} (versionCode={version_code})")
 PYEOF
 
 echo ""
