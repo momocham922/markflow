@@ -4,6 +4,8 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>MarkFlow uses the microphone for voice-to-text input.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>MarkFlow accesses your photo library to insert images into documents.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
