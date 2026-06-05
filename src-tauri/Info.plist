@@ -6,6 +6,8 @@
 	<string>MarkFlow uses the microphone for voice-to-text input.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>MarkFlow accesses your photo library to insert images into documents.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>MarkFlow uses the audio capture framework for voice-to-text input. Camera access is not used.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

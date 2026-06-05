@@ -17,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.5.0.46</string>
+	<string>0.5.0.47</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -44,6 +44,8 @@
 	<string>MarkFlow uses the microphone for voice-to-text input.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>MarkFlow accesses your photo library to insert images into documents.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>MarkFlow uses the audio capture framework for voice-to-text input. Camera access is not used.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>CFBundleURLTypes</key>
