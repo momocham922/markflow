@@ -39,24 +39,33 @@ for f in "$DMG" "$TAR" "$SIG"; do
   fi
 done
 
-# Download existing beta.json to preserve Windows entry
-EXISTING_JSON="{}"
-if gh release download beta --pattern "beta.json" --dir /tmp --clobber 2>/dev/null; then
-  EXISTING_JSON=$(cat /tmp/beta.json)
-  echo "Downloaded existing beta.json (preserving Windows entry if present)"
+# Try to get Windows signature from release assets (CI may have built it already)
+WIN_SIG=""
+WIN_EXE_NAME="MarkFlow_${VERSION}_x64-setup.exe"
+if gh release download beta --pattern "${WIN_EXE_NAME}.sig" --dir /tmp --clobber 2>/dev/null; then
+  WIN_SIG=$(cat "/tmp/${WIN_EXE_NAME}.sig")
+  echo "Found Windows signature for v${VERSION} in release assets"
+else
+  # Fallback: check existing beta.json for Windows entry with matching version
+  if gh release download beta --pattern "beta.json" --dir /tmp --clobber 2>/dev/null; then
+    WIN_SIG=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('/tmp/beta.json'))
+    if d.get('version') == '${VERSION}' and 'windows-x86_64' in d.get('platforms', {}):
+        print(d['platforms']['windows-x86_64']['signature'])
+except: pass
+" 2>/dev/null)
+    if [ -n "$WIN_SIG" ]; then
+      echo "Preserved Windows entry from existing beta.json"
+    fi
+  fi
 fi
 
-# Generate beta.json — merge macOS into existing (preserves windows-x86_64)
+# Generate beta.json
 SIG_CONTENT=$(cat "$SIG")
 python3 -c "
 import json, datetime, sys
-
-try:
-    existing = json.loads('''${EXISTING_JSON}''')
-except:
-    existing = {}
-
-existing_platforms = existing.get('platforms', {})
 
 data = {
     'version': '${VERSION}',
@@ -65,13 +74,16 @@ data = {
     'platforms': {}
 }
 
-# Preserve Windows entry if it exists and version matches
-if 'windows-x86_64' in existing_platforms and existing.get('version') == '${VERSION}':
-    data['platforms']['windows-x86_64'] = existing_platforms['windows-x86_64']
+win_sig = '''${WIN_SIG}'''
+if win_sig.strip():
+    data['platforms']['windows-x86_64'] = {
+        'signature': win_sig.strip(),
+        'url': 'https://github.com/momocham922/markflow/releases/download/beta/${WIN_EXE_NAME}'
+    }
+    print('Including windows-x86_64', file=sys.stderr)
 
-# Add/update macOS entry
 data['platforms']['darwin-aarch64'] = {
-    'signature': '${SIG_CONTENT}',
+    'signature': '''${SIG_CONTENT}''',
     'url': 'https://github.com/momocham922/markflow/releases/download/beta/MarkFlow.app.tar.gz'
 }
 
