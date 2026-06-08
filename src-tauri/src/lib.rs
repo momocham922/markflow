@@ -1125,6 +1125,7 @@ fn stop_voice_recording_inner() {
         if ptr != 0 {
             unsafe { drop(Box::from_raw(ptr as *mut cpal::Stream)); }
         }
+        stop_system_audio_windows();
     }
 }
 
@@ -1217,6 +1218,13 @@ fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>
                 if system_audio.unwrap_or(false) {
                     match start_system_audio_capture_inner() {
                         Ok(()) => println!("[voice] System audio capture also started"),
+                        Err(e) => println!("[voice] System audio failed (mic-only): {}", e),
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                if system_audio.unwrap_or(false) {
+                    match start_system_audio_capture() {
+                        Ok(()) => println!("[voice] System audio capture also started (WASAPI)"),
                         Err(e) => println!("[voice] System audio failed (mic-only): {}", e),
                     }
                 }
@@ -1444,10 +1452,93 @@ fn start_system_audio_capture_inner() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+static SYSTEM_AUDIO_STREAM_RAW: Mutex<usize> = Mutex::new(0);
+#[cfg(target_os = "windows")]
+static SYSTEM_AUDIO_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn start_system_audio_capture() -> Result<(), String> {
-    Err("システム音声キャプチャはmacOSでのみ利用可能です".to_string())
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    if SYSTEM_AUDIO_ACTIVE.load(Ordering::Relaxed) { return Ok(()); }
+
+    let host = cpal::default_host();
+    let device = host.default_output_device()
+        .ok_or("出力デバイスが見つかりません。")?;
+    let desc = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+
+    let supported = device.default_output_config()
+        .map_err(|e| format!("出力デバイス設定エラー: {}", e))?;
+    let sample_format = supported.sample_format();
+    let sample_rate = supported.sample_rate();
+    let channels = supported.channels() as u32;
+
+    SYSTEM_AUDIO_RATE.store(sample_rate, Ordering::Relaxed);
+
+    let config: cpal::StreamConfig = supported.into();
+    let ch = channels;
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_input_stream(&config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                if !SYSTEM_AUDIO_ACTIVE.load(Ordering::Relaxed) { return; }
+                if let Ok(mut buf) = SYSTEM_AUDIO_BUFFER.try_lock() {
+                    if ch > 1 {
+                        for chunk in data.chunks(ch as usize) {
+                            buf.push(chunk.iter().sum::<f32>() / ch as f32);
+                        }
+                    } else {
+                        buf.extend_from_slice(data);
+                    }
+                }
+            }, |e| eprintln!("[voice] system audio error: {}", e), None,
+        ).map_err(|e| format!("システム音声キャプチャ開始失敗: {}。\nWASAPI loopback非対応の可能性があります。", e))?,
+        cpal::SampleFormat::I16 => device.build_input_stream(&config,
+            move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                if !SYSTEM_AUDIO_ACTIVE.load(Ordering::Relaxed) { return; }
+                if let Ok(mut buf) = SYSTEM_AUDIO_BUFFER.try_lock() {
+                    if ch > 1 {
+                        for chunk in data.chunks(ch as usize) {
+                            let sum: f32 = chunk.iter().map(|&s| s as f32 / 32768.0).sum();
+                            buf.push(sum / ch as f32);
+                        }
+                    } else {
+                        for &s in data { buf.push(s as f32 / 32768.0); }
+                    }
+                }
+            }, |e| eprintln!("[voice] system audio error: {}", e), None,
+        ).map_err(|e| format!("システム音声キャプチャ開始失敗: {}", e))?,
+        fmt => return Err(format!("未対応のオーディオ形式: {:?}", fmt)),
+    };
+    stream.play().map_err(|e| format!("システム音声再生失敗: {}", e))?;
+    SYSTEM_AUDIO_ACTIVE.store(true, Ordering::SeqCst);
+    *SYSTEM_AUDIO_STREAM_RAW.lock().unwrap() = Box::into_raw(Box::new(stream)) as usize;
+    SYSTEM_AUDIO_BUFFER.lock().unwrap().clear();
+    println!("[voice] System audio capture started via WASAPI loopback: {} ({}Hz, {}ch)", desc, sample_rate, channels);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn stop_system_audio_windows() {
+    if SYSTEM_AUDIO_ACTIVE.swap(false, Ordering::SeqCst) {
+        let ptr = {
+            let mut guard = SYSTEM_AUDIO_STREAM_RAW.lock().unwrap();
+            let p = *guard;
+            *guard = 0;
+            p
+        };
+        if ptr != 0 {
+            unsafe { drop(Box::from_raw(ptr as *mut cpal::Stream)); }
+        }
+        println!("[voice] WASAPI loopback stopped");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn start_system_audio_capture() -> Result<(), String> {
+    Err("システム音声キャプチャはこのプラットフォームでは利用できません".to_string())
 }
 
 #[tauri::command]
@@ -1456,7 +1547,9 @@ fn get_audio_debug() -> String {
     let sys_len = SYSTEM_AUDIO_BUFFER.try_lock().map(|b| b.len()).unwrap_or(0);
     #[cfg(target_os = "macos")]
     let sc_active = SC_STREAM_ACTIVE.load(Ordering::Relaxed);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    let sc_active = SYSTEM_AUDIO_ACTIVE.load(Ordering::Relaxed);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let sc_active = false;
     let voice_active = VOICE_ACTIVE.load(Ordering::Relaxed);
     format!("mic={} sys={} va={} sc={}", mic_len, sys_len, voice_active, sc_active)

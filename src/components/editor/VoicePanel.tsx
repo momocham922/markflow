@@ -11,6 +11,7 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
   onReplaceMarkdown: (oldMarkdown: string, newMarkdown: string) => void;
+  onSetContent: (content: string) => void;
   documentContent: string;
 }
 
@@ -20,7 +21,7 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentContent }: VoicePanelProps) {
+export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, documentContent }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0);
@@ -35,7 +36,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
   const [selectedDevice, setSelectedDevice] = useState<string>("");
   const [systemAudio, setSystemAudio] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
-  const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
+  const isDesktop = typeof navigator !== "undefined" && !isMobile;
 
   useEffect(() => {
     if (!isTauri) return;
@@ -51,6 +52,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
   const structuringRef = useRef(false);
   const onInsertRef = useRef(onInsertMarkdown);
   const onReplaceRef = useRef(onReplaceMarkdown);
+  const onSetContentRef = useRef(onSetContent);
   const docContentRef = useRef(documentContent);
 
   const {
@@ -86,6 +88,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
   useEffect(() => { structuringRef.current = structuring; }, [structuring]);
   useEffect(() => { onInsertRef.current = onInsertMarkdown; }, [onInsertMarkdown]);
   useEffect(() => { onReplaceRef.current = onReplaceMarkdown; }, [onReplaceMarkdown]);
+  useEffect(() => { onSetContentRef.current = onSetContent; }, [onSetContent]);
   useEffect(() => { docContentRef.current = documentContent; }, [documentContent]);
 
   useEffect(() => {
@@ -94,9 +97,14 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
     }
   }, [fullTranscript, interimText]);
 
-  const doStructure = useCallback(async () => {
+  const doStructure = useCallback(async (manual = false) => {
     const transcript = fullTranscriptRef.current;
     if (!transcript.trim() || structuringRef.current) return;
+
+    const newPart = lastStructuredRef.current
+      ? transcript.slice(lastStructuredRef.current.length).trim()
+      : transcript.trim();
+    if (!manual && newPart.length < 80) return;
 
     setStructuring(true);
     structuringRef.current = true;
@@ -151,8 +159,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
       if (markdown.trim()) {
         const newOutput = markdown.trim();
         if (hasExisting) {
-          // Replace entire document content with merged result
-          onReplaceRef.current(docContentRef.current, newOutput);
+          onSetContentRef.current(newOutput);
         } else if (lastStructuredOutputRef.current) {
           onReplaceRef.current(lastStructuredOutputRef.current, `\n\n${newOutput}\n`);
         } else {
@@ -297,7 +304,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
 
         <div className="flex-1" />
 
-        {isTauri && isMac && !isMobile && !isRecording && (
+        {isTauri && isDesktop && !isRecording && (
           <Button
             variant={systemAudio ? "secondary" : "ghost"}
             size="icon"
@@ -342,7 +349,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, documentConten
           variant="outline"
           size="sm"
           className="gap-1.5 text-xs"
-          onClick={() => doStructure()}
+          onClick={() => doStructure(true)}
           disabled={!fullTranscript.trim() || structuring}
         >
           {structuring ? (

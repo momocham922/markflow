@@ -677,6 +677,17 @@ export function Editor() {
     [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
   );
 
+  const handleSetContent = useCallback(
+    (newContent: string) => {
+      if (!activeDocId) return;
+      updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+      if (isCollabReady) {
+        collabReplaceContent(newContent);
+      }
+    },
+    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
+  );
+
   if (!activeDoc) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -874,7 +885,7 @@ export function Editor() {
           </div>
         )}
       </div>
-      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} documentContent={activeDoc?.content || ""} />}
+      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} onSetContent={handleSetContent} documentContent={activeDoc?.content || ""} />}
     </div>
   );
 }
