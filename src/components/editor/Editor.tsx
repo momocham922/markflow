@@ -660,23 +660,6 @@ export function Editor() {
     [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
   );
 
-  const handleReplaceMarkdown = useCallback(
-    (oldMarkdown: string, newMarkdown: string) => {
-      if (!activeDocId) return;
-      const current = activeDoc?.content ?? "";
-      const idx = current.indexOf(oldMarkdown);
-      if (idx >= 0) {
-        const newContent = current.slice(0, idx) + newMarkdown + current.slice(idx + oldMarkdown.length);
-        updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
-        if (isCollabReady) {
-          collabReplaceContent(newContent);
-        }
-      }
-      // If old content not found (user edited it), skip — don't append to avoid duplication
-    },
-    [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
-  );
-
   const handleSetContent = useCallback(
     (newContent: string) => {
       if (!activeDocId) return;
@@ -885,7 +868,7 @@ export function Editor() {
           </div>
         )}
       </div>
-      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onReplaceMarkdown={handleReplaceMarkdown} onSetContent={handleSetContent} documentContent={activeDoc?.content || ""} />}
+      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onSetContent={handleSetContent} documentContent={activeDoc?.content || ""} />}
     </div>
   );
 }

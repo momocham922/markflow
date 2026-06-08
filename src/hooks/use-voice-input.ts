@@ -237,7 +237,10 @@ export function useVoiceInput({
       } else if (useTauriAudio) {
         // Rust audio capture (macOS/Windows)
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("start_voice_recording", { deviceName: deviceName || null, systemAudio: systemAudio || false });
+        const result = await invoke<string>("start_voice_recording", { deviceName: deviceName || null, systemAudio: systemAudio || false });
+        if (result && result.startsWith("sys_audio_failed:")) {
+          onErrorRef.current?.(`システム音声の録音に失敗しました（マイクのみで録音中）: ${result.slice("sys_audio_failed:".length)}`);
+        }
 
         // Poll Rust buffer every CHUNK_MS and send to transcription API.
         // Use a queue to avoid losing audio chunks during API calls.

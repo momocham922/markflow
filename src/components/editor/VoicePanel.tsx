@@ -10,7 +10,6 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
 interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
-  onReplaceMarkdown: (oldMarkdown: string, newMarkdown: string) => void;
   onSetContent: (content: string) => void;
   documentContent: string;
 }
@@ -21,7 +20,7 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, documentContent }: VoicePanelProps) {
+export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0);
@@ -29,7 +28,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, 
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
-  const lastStructuredOutputRef = useRef("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
@@ -51,7 +49,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, 
   const fullTranscriptRef = useRef("");
   const structuringRef = useRef(false);
   const onInsertRef = useRef(onInsertMarkdown);
-  const onReplaceRef = useRef(onReplaceMarkdown);
   const onSetContentRef = useRef(onSetContent);
   const docContentRef = useRef(documentContent);
 
@@ -87,7 +84,6 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, 
   useEffect(() => { fullTranscriptRef.current = fullTranscript; }, [fullTranscript]);
   useEffect(() => { structuringRef.current = structuring; }, [structuring]);
   useEffect(() => { onInsertRef.current = onInsertMarkdown; }, [onInsertMarkdown]);
-  useEffect(() => { onReplaceRef.current = onReplaceMarkdown; }, [onReplaceMarkdown]);
   useEffect(() => { onSetContentRef.current = onSetContent; }, [onSetContent]);
   useEffect(() => { docContentRef.current = documentContent; }, [documentContent]);
 
@@ -160,12 +156,9 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, 
         const newOutput = markdown.trim();
         if (hasExisting) {
           onSetContentRef.current(newOutput);
-        } else if (lastStructuredOutputRef.current) {
-          onReplaceRef.current(lastStructuredOutputRef.current, `\n\n${newOutput}\n`);
         } else {
           onInsertRef.current(`\n\n${newOutput}\n`);
         }
-        lastStructuredOutputRef.current = newOutput;
         lastStructuredRef.current = transcript;
       }
     } catch (err) {
@@ -364,7 +357,7 @@ export function VoicePanel({ onInsertMarkdown, onReplaceMarkdown, onSetContent, 
           variant="ghost"
           size="icon"
           className={isMobile ? "h-11 w-11" : "h-7 w-7"}
-          onClick={() => { clearTranscript(); lastStructuredRef.current = ""; lastStructuredOutputRef.current = ""; }}
+          onClick={() => { clearTranscript(); lastStructuredRef.current = ""; }}
           disabled={!fullTranscript}
           title="Clear transcript"
         >

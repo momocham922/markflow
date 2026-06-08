@@ -1188,7 +1188,7 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 
 /// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
 #[tauri::command]
-fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<(), String> {
+fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<String, String> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         ensure_microphone_permission()?;
@@ -1213,22 +1213,29 @@ fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>
         }
         match start_voice_recording_inner(&device_name) {
             Ok(()) => {
-                // Start system audio capture if requested
-                #[cfg(target_os = "macos")]
+                let mut sys_warning: Option<String> = None;
                 if system_audio.unwrap_or(false) {
+                    #[cfg(target_os = "macos")]
                     match start_system_audio_capture_inner() {
                         Ok(()) => println!("[voice] System audio capture also started"),
-                        Err(e) => println!("[voice] System audio failed (mic-only): {}", e),
+                        Err(e) => {
+                            println!("[voice] System audio failed (mic-only): {}", e);
+                            sys_warning = Some(e);
+                        }
                     }
-                }
-                #[cfg(target_os = "windows")]
-                if system_audio.unwrap_or(false) {
+                    #[cfg(target_os = "windows")]
                     match start_system_audio_capture() {
                         Ok(()) => println!("[voice] System audio capture also started (WASAPI)"),
-                        Err(e) => println!("[voice] System audio failed (mic-only): {}", e),
+                        Err(e) => {
+                            println!("[voice] System audio failed (mic-only): {}", e);
+                            sys_warning = Some(e);
+                        }
                     }
                 }
-                return Ok(());
+                if let Some(w) = sys_warning {
+                    return Ok(format!("sys_audio_failed:{}", w));
+                }
+                return Ok(String::new());
             }
             Err(e) => { last_err = e; }
         }
