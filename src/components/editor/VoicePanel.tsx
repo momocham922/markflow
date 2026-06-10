@@ -232,7 +232,7 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
       {(fullTranscript || isRecording) && (
         <div
           ref={scrollRef}
-          className="max-h-32 overflow-y-auto px-4 py-2 text-sm leading-relaxed wrap-break-word"
+          className="max-h-32 overflow-y-auto px-4 py-2 text-sm leading-relaxed wrap-break-word select-text cursor-text"
         >
           {fullTranscript && (
             <span className="text-foreground">{fullTranscript}</span>
