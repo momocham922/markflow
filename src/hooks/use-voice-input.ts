@@ -56,7 +56,10 @@ export function useVoiceInput({
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [interimText, setInterimText] = useState("");
-  const [fullTranscript, setFullTranscript] = useState("");
+  const savedTranscript = (() => {
+    try { return localStorage.getItem("voice_transcript") || ""; } catch { return ""; }
+  })();
+  const [fullTranscript, setFullTranscript] = useState(savedTranscript);
   const [duration, setDuration] = useState(0);
 
   const isSupported = typeof navigator !== "undefined";
@@ -68,7 +71,7 @@ export function useVoiceInput({
     null,
   );
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const transcriptRef = useRef("");
+  const transcriptRef = useRef(savedTranscript);
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
   const onMaxDurationRef = useRef(onMaxDuration);
@@ -385,6 +388,13 @@ export function useVoiceInput({
     if (isRecording) stopRecording();
     else startRecording();
   }, [isRecording, startRecording, stopRecording]);
+
+  useEffect(() => {
+    try {
+      if (fullTranscript) localStorage.setItem("voice_transcript", fullTranscript);
+      else localStorage.removeItem("voice_transcript");
+    } catch {}
+  }, [fullTranscript]);
 
   const clearTranscript = useCallback(() => {
     transcriptRef.current = "";
