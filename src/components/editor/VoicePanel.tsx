@@ -112,23 +112,39 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
 
       const existingDoc = docContentRef.current.trim();
       const hasExisting = existingDoc.length > 0;
+      const hasNewPart = newPart.length > 0;
 
-      const systemPrompt = hasExisting
-        ? "You are a document assistant. You will receive an EXISTING document and a NEW voice transcript. " +
+      let systemPrompt: string;
+      let userContent: string;
+
+      if (hasExisting && hasNewPart) {
+        systemPrompt =
+          "You are a document assistant. You will receive an EXISTING document and NEW additional voice transcript. " +
+          "Integrate the new transcript into the existing document. " +
+          "Add new sections, expand existing sections, or reorganize as needed. " +
+          "Keep the same language. Output the COMPLETE updated Markdown document — do not truncate.";
+        userContent =
+          `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${newPart}\n\nIntegrate this new content into the existing document. Output the complete updated document.`;
+      } else if (hasExisting) {
+        systemPrompt =
+          "You are a document assistant. You will receive an EXISTING document and a voice transcript. " +
           "Merge them into a single, well-structured Markdown document. " +
-          "Preserve the existing document's structure and content, and integrate the new transcript naturally. " +
-          "Update, expand, or reorganize sections as needed to incorporate the new information. " +
-          "Keep the same language. Do NOT add generic titles. Output ONLY the final Markdown."
-        : "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
+          "Preserve the existing document's structure and content, and integrate the transcript naturally. " +
+          "Update, expand, or reorganize sections as needed. " +
+          "Keep the same language. Do NOT add generic titles. Output the COMPLETE Markdown — do not truncate.";
+        userContent =
+          `## Existing Document\n\n${existingDoc}\n\n## Voice Transcript\n\n${transcript}\n\nMerge these into one cohesive Markdown document. Output the complete document without truncation.`;
+      } else {
+        systemPrompt =
+          "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
           "Integrate all content coherently — do not produce fragments or partial updates. " +
           "Use appropriate headings, bullet points, and formatting. " +
           "Keep the same language as the transcript. " +
           "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
-          "Output ONLY the structured Markdown content, no explanations or meta-commentary.";
-
-      const userContent = hasExisting
-        ? `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${transcript}\n\nMerge these into one cohesive Markdown document.`
-        : `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`;
+          "Output ONLY the structured Markdown content, no explanations or meta-commentary. Do not truncate.";
+        userContent =
+          `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`;
+      }
 
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
@@ -139,7 +155,7 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
         body: JSON.stringify({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
-          max_tokens: 4096,
+          max_tokens: 16384,
           stream: false,
         }),
       });
