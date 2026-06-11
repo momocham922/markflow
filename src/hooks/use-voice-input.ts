@@ -241,7 +241,9 @@ export function useVoiceInput({
         // Rust audio capture (macOS/Windows)
         const { invoke } = await import("@tauri-apps/api/core");
         const result = await invoke<string>("start_voice_recording", { deviceName: deviceName || null, systemAudio: systemAudio || false });
-        if (result && result.startsWith("sys_audio_failed:")) {
+        if (result && result.startsWith("mic_unavailable:")) {
+          onErrorRef.current?.("マイクが見つかりません（システム音声のみで録音中）");
+        } else if (result && result.startsWith("sys_audio_failed:")) {
           onErrorRef.current?.(`システム音声の録音に失敗しました（マイクのみで録音中）: ${result.slice("sys_audio_failed:".length)}`);
         }
 

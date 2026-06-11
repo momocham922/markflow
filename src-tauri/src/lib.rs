@@ -1187,60 +1187,106 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 }
 
 /// Start capturing audio from the default (or specified) input device via CoreAudio (cpal).
+/// When system_audio=true and mic is unavailable, falls back to system-audio-only mode.
 #[tauri::command]
 fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<String, String> {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        ensure_microphone_permission()?;
-        extern "C" { fn check_microphone_status() -> i32; }
-        let status = unsafe { check_microphone_status() };
-        if status != 3 {
-            return Err("マイクへのアクセスが無効になっています。設定でマイク権限を許可してください。".into());
-        }
-    }
+    let want_sys = system_audio.unwrap_or(false);
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    stop_mic_only();
-    #[cfg(target_os = "windows")]
-    stop_voice_recording_inner();
-
-    // CoreAudio may need time after permission grant to become available.
-    // Retry up to 3 times with increasing delays.
-    let mut last_err = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
-        }
-        match start_voice_recording_inner(&device_name) {
-            Ok(()) => {
-                let mut sys_warning: Option<String> = None;
-                if system_audio.unwrap_or(false) {
-                    #[cfg(target_os = "macos")]
-                    match start_system_audio_capture_inner() {
-                        Ok(()) => println!("[voice] System audio capture also started"),
-                        Err(e) => {
-                            println!("[voice] System audio failed (mic-only): {}", e);
-                            sys_warning = Some(e);
-                        }
-                    }
-                    #[cfg(target_os = "windows")]
-                    match start_system_audio_capture() {
-                        Ok(()) => println!("[voice] System audio capture also started (WASAPI)"),
-                        Err(e) => {
-                            println!("[voice] System audio failed (mic-only): {}", e);
-                            sys_warning = Some(e);
-                        }
-                    }
-                }
-                if let Some(w) = sys_warning {
-                    return Ok(format!("sys_audio_failed:{}", w));
-                }
-                return Ok(String::new());
+    // --- Try microphone ---
+    let mic_ok = 'mic: {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            if let Err(e) = ensure_microphone_permission() {
+                if !want_sys { return Err(e); }
+                break 'mic Err(e);
             }
-            Err(e) => { last_err = e; }
+            extern "C" { fn check_microphone_status() -> i32; }
+            let status = unsafe { check_microphone_status() };
+            if status != 3 {
+                let e = "マイクへのアクセスが無効になっています。設定でマイク権限を許可してください。".to_string();
+                if !want_sys { return Err(e); }
+                break 'mic Err(e);
+            }
         }
+
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        stop_mic_only();
+        #[cfg(target_os = "windows")]
+        stop_voice_recording_inner();
+
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
+            }
+            match start_voice_recording_inner(&device_name) {
+                Ok(()) => break 'mic Ok(()),
+                Err(e) => { last_err = e; }
+            }
+        }
+        Err(last_err)
+    };
+
+    match mic_ok {
+        Ok(()) => {
+            // Mic started — optionally start system audio too
+            let mut sys_warning: Option<String> = None;
+            if want_sys {
+                #[cfg(target_os = "macos")]
+                match start_system_audio_capture_inner() {
+                    Ok(()) => println!("[voice] System audio capture also started"),
+                    Err(e) => {
+                        println!("[voice] System audio failed (mic-only): {}", e);
+                        sys_warning = Some(e);
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                match start_system_audio_capture() {
+                    Ok(()) => println!("[voice] System audio capture also started (WASAPI)"),
+                    Err(e) => {
+                        println!("[voice] System audio failed (mic-only): {}", e);
+                        sys_warning = Some(e);
+                    }
+                }
+            }
+            if let Some(w) = sys_warning {
+                return Ok(format!("sys_audio_failed:{}", w));
+            }
+            Ok(String::new())
+        }
+        Err(mic_err) if want_sys => {
+            // Mic failed but system audio requested — try system-audio-only mode
+            println!("[voice] Mic unavailable ({}), attempting system-audio-only mode", mic_err);
+            VOICE_BUFFER.lock().unwrap().clear();
+            VOICE_OVERLAP.lock().unwrap().clear();
+            if let Some(ref mut vs) = *VAD.lock().unwrap() {
+                vs.state.fill(0.0);
+                vs.context.fill(0.0);
+            }
+            VOICE_ACTIVE.store(true, Ordering::SeqCst);
+
+            let sys_result = {
+                #[cfg(target_os = "macos")]
+                { start_system_audio_capture_inner() }
+                #[cfg(target_os = "windows")]
+                { start_system_audio_capture() }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                { Err::<(), String>("システム音声キャプチャはこのプラットフォームでは利用できません".into()) }
+            };
+
+            match sys_result {
+                Ok(()) => {
+                    println!("[voice] System-audio-only mode started");
+                    Ok(format!("mic_unavailable:{}", mic_err))
+                }
+                Err(sys_err) => {
+                    VOICE_ACTIVE.store(false, Ordering::SeqCst);
+                    Err(format!("マイクもシステム音声も利用できません。\nマイク: {}\nシステム音声: {}", mic_err, sys_err))
+                }
+            }
+        }
+        Err(mic_err) => Err(mic_err),
     }
-    Err(last_err)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
