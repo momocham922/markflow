@@ -52,7 +52,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.5.0
-        CFBundleVersion: "112"
+        CFBundleVersion: "113"
     entitlements:
       path: markflow_iOS/markflow_iOS.entitlements
     scheme:

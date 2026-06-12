@@ -1,7 +1,7 @@
 use tauri::Emitter;
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tauri_plugin_updater::UpdaterExt;
 
 // ── Crash reporting ─────────────────────────────────────────
@@ -977,7 +977,21 @@ async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
 
 static VOICE_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static SYSTEM_AUDIO_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+static SYSTEM_AUDIO_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
 static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Safety backstop for system-audio buffers: drop oldest beyond this many samples
+/// if the frontend stops draining (normal drain is every CHUNK_MS = 8s).
+/// MUST be comfortably larger than one drain interval, or every chunk loses its head.
+const SYS_AUDIO_MAX_SAMPLES: usize = 48000 * 30; // ~30s
+
+/// Wall-clock milliseconds since the UNIX epoch (monotonic enough for stall detection).
+#[allow(dead_code)] // used by the macOS SCStream watchdog only
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 static VOICE_STREAM_RAW: Mutex<usize> = Mutex::new(0);
 static VOICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(16000);
 static VOICE_CHANNELS: AtomicU32 = AtomicU32::new(1);
@@ -1453,6 +1467,10 @@ fn screencapturekit_available() -> bool {
 static SC_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static SC_STREAM_RAW: Mutex<Option<screencapturekit::prelude::SCStream>> = Mutex::new(None);
+/// Timestamp (ms) of the last audio sample buffer delivered by ScreenCaptureKit.
+/// The watchdog uses this to detect a silently-dead stream and restart it.
+#[cfg(target_os = "macos")]
+static SC_LAST_SAMPLE_MS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
@@ -1461,13 +1479,44 @@ fn start_system_audio_capture() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn start_system_audio_capture_inner() -> Result<(), String> {
-    use screencapturekit::prelude::*;
-    if !screencapturekit_available() {
-        return Err("システム音声キャプチャにはmacOS 13以降が必要です".to_string());
+struct AudioHandler;
+#[cfg(target_os = "macos")]
+impl screencapturekit::prelude::SCStreamOutputTrait for AudioHandler {
+    fn did_output_sample_buffer(
+        &self,
+        sample: screencapturekit::prelude::CMSampleBuffer,
+        of_type: screencapturekit::prelude::SCStreamOutputType,
+    ) {
+        use screencapturekit::prelude::*;
+        if of_type != SCStreamOutputType::Audio { return; }
+        if !VOICE_ACTIVE.load(Ordering::Relaxed) && !SC_STREAM_ACTIVE.load(Ordering::Relaxed) { return; }
+        // Mark liveness even if the buffer lock is contended — proves the stream is alive.
+        SC_LAST_SAMPLE_MS.store(now_ms(), Ordering::Relaxed);
+        if let Some(abl) = sample.audio_buffer_list() {
+            for buf in abl.iter() {
+                let bytes = buf.data();
+                let floats: &[f32] = unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)
+                };
+                if let Ok(mut sys_buf) = SYSTEM_AUDIO_BUFFER.try_lock() {
+                    sys_buf.extend_from_slice(floats);
+                    if sys_buf.len() > SYS_AUDIO_MAX_SAMPLES {
+                        let drain = sys_buf.len() - SYS_AUDIO_MAX_SAMPLES;
+                        sys_buf.drain(..drain);
+                    }
+                } else {
+                    SYSTEM_AUDIO_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
-    if SC_STREAM_ACTIVE.load(Ordering::Relaxed) { return Ok(()); }
+}
 
+/// Build a fresh SCStream and start capturing. Stores it in SC_STREAM_RAW.
+/// Does NOT touch SC_STREAM_ACTIVE (caller owns that flag) so it can be reused by the watchdog.
+#[cfg(target_os = "macos")]
+fn build_and_start_sc_stream() -> Result<(), String> {
+    use screencapturekit::prelude::*;
     let content = SCShareableContent::get()
         .map_err(|e| format!("ScreenCaptureKit初期化失敗: {:?}。\nSystem Settings → Privacy & Security → Screen & System Audio Recordingで許可してください。", e))?;
     let display = content.displays().into_iter().next()
@@ -1477,30 +1526,61 @@ fn start_system_audio_capture_inner() -> Result<(), String> {
         .with_width(2).with_height(2)
         .with_captures_audio(true).with_sample_rate(48000).with_channel_count(1);
 
-    struct AudioHandler;
-    impl SCStreamOutputTrait for AudioHandler {
-        fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-            if of_type != SCStreamOutputType::Audio { return; }
-            if !VOICE_ACTIVE.load(Ordering::Relaxed) && !SC_STREAM_ACTIVE.load(Ordering::Relaxed) { return; }
-            if let Some(abl) = sample.audio_buffer_list() {
-                for buf in abl.iter() {
-                    let bytes = buf.data();
-                    let floats: &[f32] = unsafe {
-                        std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)
-                    };
-                    if let Ok(mut sys_buf) = SYSTEM_AUDIO_BUFFER.try_lock() {
-                        sys_buf.extend_from_slice(floats);
-                    }
-                }
-            }
-        }
-    }
-
     let mut stream = SCStream::new(&filter, &config);
     stream.add_output_handler(AudioHandler, SCStreamOutputType::Audio);
     stream.start_capture().map_err(|e| format!("システム音声キャプチャ開始失敗: {:?}", e))?;
-    SC_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+    SC_LAST_SAMPLE_MS.store(now_ms(), Ordering::Relaxed);
     *SC_STREAM_RAW.lock().unwrap() = Some(stream);
+    Ok(())
+}
+
+/// Watchdog: ScreenCaptureKit can silently stop delivering audio (display sleep,
+/// screensaver, OS error) with no callback. SCStream registers no error delegate,
+/// so without this the stream dies after a few minutes and recording goes silent.
+/// We detect "no sample buffers for a while" and rebuild the stream.
+#[cfg(target_os = "macos")]
+fn sc_watchdog() {
+    const STALL_MS: u64 = 6000; // SCK delivers buffers even during silence; >6s gap = dead
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if !SC_STREAM_ACTIVE.load(Ordering::Relaxed) { break; }
+        let last = SC_LAST_SAMPLE_MS.load(Ordering::Relaxed);
+        if last == 0 { continue; }
+        let gap = now_ms().saturating_sub(last);
+        if gap > STALL_MS {
+            println!("[voice] SCStream stalled ({}ms since last sample) — restarting", gap);
+            if let Some(s) = SC_STREAM_RAW.lock().unwrap().take() {
+                let _ = s.stop_capture();
+            }
+            // Give the new stream a grace window before the next stall check.
+            SC_LAST_SAMPLE_MS.store(now_ms(), Ordering::Relaxed);
+            match build_and_start_sc_stream() {
+                Ok(()) => {
+                    // If the user stopped recording while we were rebuilding, undo it.
+                    if !SC_STREAM_ACTIVE.load(Ordering::Relaxed) {
+                        if let Some(s) = SC_STREAM_RAW.lock().unwrap().take() {
+                            let _ = s.stop_capture();
+                        }
+                        break;
+                    }
+                    println!("[voice] SCStream restarted");
+                }
+                Err(e) => println!("[voice] SCStream restart failed (will retry): {}", e),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_system_audio_capture_inner() -> Result<(), String> {
+    if !screencapturekit_available() {
+        return Err("システム音声キャプチャにはmacOS 13以降が必要です".to_string());
+    }
+    if SC_STREAM_ACTIVE.load(Ordering::Relaxed) { return Ok(()); }
+
+    build_and_start_sc_stream()?;
+    SC_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+    std::thread::spawn(sc_watchdog);
     println!("[voice] System audio capture started via ScreenCaptureKit");
     Ok(())
 }
@@ -1544,6 +1624,12 @@ fn start_system_audio_capture() -> Result<(), String> {
                     } else {
                         buf.extend_from_slice(data);
                     }
+                    if buf.len() > SYS_AUDIO_MAX_SAMPLES {
+                        let drain = buf.len() - SYS_AUDIO_MAX_SAMPLES;
+                        buf.drain(..drain);
+                    }
+                } else {
+                    SYSTEM_AUDIO_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
                 }
             }, |e| eprintln!("[voice] system audio error: {}", e), None,
         ).map_err(|e| format!("システム音声キャプチャ開始失敗: {}。\nWASAPI loopback非対応の可能性があります。", e))?,
@@ -1559,6 +1645,12 @@ fn start_system_audio_capture() -> Result<(), String> {
                     } else {
                         for &s in data { buf.push(s as f32 / 32768.0); }
                     }
+                    if buf.len() > SYS_AUDIO_MAX_SAMPLES {
+                        let drain = buf.len() - SYS_AUDIO_MAX_SAMPLES;
+                        buf.drain(..drain);
+                    }
+                } else {
+                    SYSTEM_AUDIO_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
                 }
             }, |e| eprintln!("[voice] system audio error: {}", e), None,
         ).map_err(|e| format!("システム音声キャプチャ開始失敗: {}", e))?,
@@ -1640,6 +1732,12 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         let mut buf = SYSTEM_AUDIO_BUFFER.lock().unwrap();
         std::mem::take(&mut *buf)
     };
+    let has_sys_audio = !sys_samples.is_empty();
+
+    let drops = SYSTEM_AUDIO_DROP_COUNT.swap(0, Ordering::Relaxed);
+    if drops > 0 {
+        println!("[voice] System audio: {} callback(s) dropped due to lock contention", drops);
+    }
 
     if mic_samples.is_empty() && sys_samples.is_empty() {
         return Ok(None);
@@ -1738,8 +1836,32 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    // Silero VAD: skip silence chunks
-    if !silero_vad_has_speech(&resampled) {
+    // Silence gating.
+    //  - Mic only: Silero VAD (speech-tuned) — accurate at rejecting non-speech silence.
+    //  - System audio present: VAD alone would wrongly drop non-speech audio (music,
+    //    compressed meeting audio), so use an RMS energy floor as the primary gate with
+    //    VAD as a rescue for sub-floor chunks. A chunk is dropped only when it is BOTH
+    //    near-silent AND speechless (= true silence). Because dropping requires *both*
+    //    conditions, this never drops anything the original speech-VAD path would have
+    //    kept — so it cannot regress accuracy — while still blocking the silence that
+    //    makes STT hallucinate. (`||` short-circuits, so VAD only runs on near-silent
+    //    chunks, keeping its LSTM state away from the mic+system mix in the common case.)
+    let keep = if has_sys_audio {
+        let rms = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
+        const SILENCE_FLOOR: f32 = 0.003;
+        let keep = rms >= SILENCE_FLOOR || silero_vad_has_speech(&resampled);
+        if !keep {
+            println!("[gate] System audio true silence (rms={:.5}) — skipping chunk", rms);
+        }
+        keep
+    } else {
+        let keep = silero_vad_has_speech(&resampled);
+        if !keep {
+            println!("[vad] No speech detected — skipping chunk");
+        }
+        keep
+    };
+    if !keep {
         return Ok(None);
     }
 
