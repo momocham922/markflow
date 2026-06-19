@@ -159,11 +159,139 @@ function initMermaid(dark: boolean) {
     theme: dark ? "dark" : "default",
     themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
     flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
-    sequence: { useMaxWidth: true },
+    sequence: { useMaxWidth: true, wrap: true, wrapPadding: 15 },
   });
 }
 
 initMermaid(false);
+
+/**
+ * Post-process mermaid SVG to fix CJK text overflow in notes
+ * and normalize background section rect widths.
+ * Must be called AFTER the SVG is inserted into the DOM (getBBox requires it).
+ */
+function fixMermaidSvg(el: HTMLElement) {
+  const svg = el.querySelector("svg") as SVGSVGElement | null;
+  if (!svg) return;
+
+  // --- Expand note rects to fit CJK text ---
+  for (const noteRect of Array.from(svg.querySelectorAll("rect.note"))) {
+    const g = noteRect.parentElement;
+    if (!g) continue;
+    const textEls = g.querySelectorAll("text");
+    if (textEls.length === 0) continue;
+
+    const rx = parseFloat(noteRect.getAttribute("x") || "0");
+    const rw = parseFloat(noteRect.getAttribute("width") || "0");
+
+    let minTx = Infinity;
+    let maxTr = -Infinity;
+    for (const t of Array.from(textEls)) {
+      try {
+        const bb = (t as SVGTextElement).getBBox();
+        if (bb.width > 0) {
+          minTx = Math.min(minTx, bb.x);
+          maxTr = Math.max(maxTr, bb.x + bb.width);
+        }
+      } catch {
+        /* getBBox may fail if not in DOM */
+      }
+    }
+    if (maxTr === -Infinity) continue;
+
+    const pad = 18;
+    const newX = Math.min(rx, minTx - pad);
+    const newRight = Math.max(rx + rw, maxTr + pad);
+    if (newRight - newX > rw + 1) {
+      noteRect.setAttribute("x", String(newX));
+      noteRect.setAttribute("width", String(newRight - newX));
+    }
+  }
+
+  // --- Normalize background section rect widths ---
+  // Background section rects (from `rect rgb(...)`) and main bg both have class "rect".
+  // The main bg covers the full viewBox — exclude it by area.
+  const rectEls = Array.from(svg.querySelectorAll("rect.rect"));
+  if (rectEls.length < 2) return;
+
+  // Identify the main background rect (largest by area, covers ~full viewBox)
+  let mainBgIdx = 0;
+  let maxArea = 0;
+  rectEls.forEach((r, i) => {
+    const w = parseFloat(r.getAttribute("width") || "0");
+    const h = parseFloat(r.getAttribute("height") || "0");
+    if (w * h > maxArea) {
+      maxArea = w * h;
+      mainBgIdx = i;
+    }
+  });
+
+  const sectionRects = rectEls.filter((_, i) => i !== mainBgIdx);
+  if (sectionRects.length < 2) return;
+
+  // Find the widest span across all section rects
+  let minX = Infinity;
+  let maxR = 0;
+  for (const r of sectionRects) {
+    const x = parseFloat(r.getAttribute("x") || "0");
+    const w = parseFloat(r.getAttribute("width") || "0");
+    minX = Math.min(minX, x);
+    maxR = Math.max(maxR, x + w);
+  }
+  // Normalize all section rects to the same x and width
+  for (const r of sectionRects) {
+    r.setAttribute("x", String(minX));
+    r.setAttribute("width", String(maxR - minX));
+  }
+
+  // Also normalize loopLine x1/x2 (alt/loop box borders) to match section width
+  const loopLines = Array.from(svg.querySelectorAll("line.loopLine"));
+  if (loopLines.length > 0) {
+    let loopMinX1 = Infinity;
+    let loopMaxX2 = 0;
+    for (const line of loopLines) {
+      const x1 = parseFloat(line.getAttribute("x1") || "0");
+      const x2 = parseFloat(line.getAttribute("x2") || "0");
+      loopMinX1 = Math.min(loopMinX1, x1, x2);
+      loopMaxX2 = Math.max(loopMaxX2, x1, x2);
+    }
+    // Normalize horizontal lines (same y1/y2) to span full width
+    for (const line of loopLines) {
+      const y1 = parseFloat(line.getAttribute("y1") || "0");
+      const y2 = parseFloat(line.getAttribute("y2") || "0");
+      if (Math.abs(y1 - y2) < 1) {
+        // Horizontal line — stretch to widest span
+        line.setAttribute("x1", String(loopMinX1));
+        line.setAttribute("x2", String(loopMaxX2));
+      } else {
+        // Vertical line — normalize x to the boundary
+        const x = parseFloat(line.getAttribute("x1") || "0");
+        if (Math.abs(x - loopMinX1) < Math.abs(x - loopMaxX2)) {
+          line.setAttribute("x1", String(loopMinX1));
+          line.setAttribute("x2", String(loopMinX1));
+        } else {
+          line.setAttribute("x1", String(loopMaxX2));
+          line.setAttribute("x2", String(loopMaxX2));
+        }
+      }
+    }
+  }
+
+  // --- Recalculate viewBox to fit expanded elements ---
+  try {
+    const bbox = svg.getBBox();
+    const pad = 8;
+    const newW = bbox.width + pad * 2;
+    const newH = bbox.height + pad * 2;
+    svg.setAttribute(
+      "viewBox",
+      `${bbox.x - pad} ${bbox.y - pad} ${newW} ${newH}`,
+    );
+    svg.style.maxWidth = `${newW}px`;
+  } catch {
+    /* getBBox may fail */
+  }
+}
 
 export function Editor() {
   const {
@@ -504,9 +632,10 @@ export function Editor() {
             source,
           );
           if (!el.isConnected) continue;
-          mermaidSvgCache.current.set(prefix + source, svg);
           el.innerHTML = svg;
           bindFunctions?.(el);
+          fixMermaidSvg(el);
+          mermaidSvgCache.current.set(prefix + source, el.innerHTML);
         } catch (e) {
           console.error(
             "[mermaid] render failed:",
