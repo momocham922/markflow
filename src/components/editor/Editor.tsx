@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useCallback,
   useState,
   useMemo,
@@ -157,6 +158,14 @@ function initMermaid(dark: boolean) {
     startOnLoad: false,
     theme: dark ? "dark" : "default",
     themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
+    flowchart: {
+      htmlLabels: true,
+      padding: 15,
+      nodeSpacing: 50,
+      rankSpacing: 50,
+      useMaxWidth: true,
+    },
+    sequence: { useMaxWidth: true },
   });
 }
 
@@ -393,7 +402,7 @@ export function Editor() {
       // Protect code/pre/mermaid blocks from wiki-link replacement
       const codeBlocks: string[] = [];
       html = html.replace(
-        /<(pre|code)[^>]*>[\s\S]*?<\/\1>|<div class="mermaid">[\s\S]*?<\/div>/gi,
+        /<(pre|code)[^>]*>[\s\S]*?<\/\1>|<div class="mermaid"[^>]*>[\s\S]*?<\/div>/gi,
         (match) => {
           codeBlocks.push(match);
           return `\x00CB${codeBlocks.length - 1}\x00`;
@@ -430,17 +439,19 @@ export function Editor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deferredContent, documents, ogpVersion]);
 
-  // Render mermaid diagrams after preview HTML updates or theme change
+  // Mermaid diagram rendering — split into two phases:
+  // 1. useLayoutEffect: synchronous cache restore (runs BEFORE browser paint — no plaintext flash)
+  // 2. useEffect: async mermaid.render() for uncached diagrams
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const mermaidSvgCache = useRef(new Map<string, string>());
   const prevThemeRef = useRef(theme);
-  useEffect(() => {
+
+  useLayoutEffect(() => {
     const isDark = theme === "dark";
     const themeChanged = prevThemeRef.current !== theme;
     prevThemeRef.current = theme;
-    initMermaid(isDark);
     const container = previewRef.current;
     if (!container) return;
 
@@ -449,13 +460,12 @@ export function Editor() {
       container
         .querySelectorAll<HTMLElement>(".mermaid[data-mermaid-processed]")
         .forEach((el) => el.removeAttribute("data-mermaid-processed"));
+      return;
     }
 
     const mermaidDivs = container.querySelectorAll<HTMLElement>(
       ".mermaid:not([data-mermaid-processed])",
     );
-    if (mermaidDivs.length === 0) return;
-
     for (const el of Array.from(mermaidDivs)) {
       const source =
         el.getAttribute("data-mermaid-source") || el.textContent?.trim() || "";
@@ -466,9 +476,20 @@ export function Editor() {
       if (cached) {
         el.setAttribute("data-mermaid-processed", "true");
         el.innerHTML = cached;
-        continue;
       }
     }
+  }, [previewHtml, theme]);
+
+  useEffect(() => {
+    const isDark = theme === "dark";
+    initMermaid(isDark);
+    const container = previewRef.current;
+    if (!container) return;
+
+    const mermaidDivs = container.querySelectorAll<HTMLElement>(
+      ".mermaid:not([data-mermaid-processed])",
+    );
+    if (mermaidDivs.length === 0) return;
 
     (async () => {
       for (const el of Array.from(mermaidDivs)) {
@@ -477,8 +498,12 @@ export function Editor() {
           el.getAttribute("data-mermaid-processed") === "true"
         )
           continue;
-        const source = el.getAttribute("data-mermaid-source") || "";
+        const source =
+          el.getAttribute("data-mermaid-source") ||
+          el.textContent?.trim() ||
+          "";
         if (!source) continue;
+        el.setAttribute("data-mermaid-source", source);
         el.setAttribute("data-mermaid-processed", "true");
         const cacheKey = `${isDark ? "d" : "l"}:${source}`;
         try {
