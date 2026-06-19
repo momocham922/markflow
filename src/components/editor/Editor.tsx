@@ -67,7 +67,8 @@ marked.setOptions({
 const renderer = new marked.Renderer();
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   if (lang === "mermaid") {
-    return `<div class="mermaid">${escapeHtml(text)}</div>`;
+    const escaped = escapeHtml(text);
+    return `<div class="mermaid" data-mermaid-source="${escaped}">${escaped}</div>`;
   }
   const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
   const highlighted = hljs.highlight(text, { language }).value;
@@ -151,85 +152,11 @@ marked.use({ renderer });
 const MERMAID_FONT =
   'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
 
-const MERMAID_LIGHT = {
-  fontFamily: MERMAID_FONT,
-  fontSize: "14px",
-  primaryColor: "#e8edf3",
-  primaryTextColor: "#1a1a2e",
-  primaryBorderColor: "#b0bec5",
-  lineColor: "#78909c",
-  secondaryColor: "#f0f4f8",
-  tertiaryColor: "#fafbfc",
-  background: "#ffffff",
-  mainBkg: "#e8edf3",
-  nodeBorder: "#b0bec5",
-  nodeTextColor: "#1a1a2e",
-  clusterBkg: "#f5f7fa",
-  clusterBorder: "#cfd8dc",
-  titleColor: "#1a1a2e",
-  edgeLabelBackground: "#ffffff",
-  noteBkgColor: "#fff9c4",
-  noteBorderColor: "#f9a825",
-  noteTextColor: "#333333",
-  actorBkg: "#e8edf3",
-  actorBorder: "#90a4ae",
-  actorTextColor: "#1a1a2e",
-  actorLineColor: "#b0bec5",
-  signalColor: "#546e7a",
-  signalTextColor: "#1a1a2e",
-  labelBoxBkgColor: "#f5f7fa",
-  labelBoxBorderColor: "#cfd8dc",
-  labelTextColor: "#37474f",
-  loopTextColor: "#37474f",
-  activationBorderColor: "#90a4ae",
-  activationBkgColor: "#e3f2fd",
-  sequenceNumberColor: "#ffffff",
-  sectionBkgColor: "#e3f2fd",
-  altSectionBkgColor: "#f5f7fa",
-};
-
-const MERMAID_DARK = {
-  fontFamily: MERMAID_FONT,
-  fontSize: "14px",
-  primaryColor: "#2d3748",
-  primaryTextColor: "#e2e8f0",
-  primaryBorderColor: "#4a5568",
-  lineColor: "#718096",
-  secondaryColor: "#1e2533",
-  tertiaryColor: "#1a202c",
-  background: "#1a202c",
-  mainBkg: "#2d3748",
-  nodeBorder: "#4a5568",
-  nodeTextColor: "#e2e8f0",
-  clusterBkg: "#1e2533",
-  clusterBorder: "#4a5568",
-  titleColor: "#e2e8f0",
-  edgeLabelBackground: "#2d3748",
-  noteBkgColor: "#44401a",
-  noteBorderColor: "#d69e2e",
-  noteTextColor: "#e2e8f0",
-  actorBkg: "#2d3748",
-  actorBorder: "#4a5568",
-  actorTextColor: "#e2e8f0",
-  actorLineColor: "#4a5568",
-  signalColor: "#a0aec0",
-  signalTextColor: "#e2e8f0",
-  labelBoxBkgColor: "#1e2533",
-  labelBoxBorderColor: "#4a5568",
-  labelTextColor: "#cbd5e0",
-  loopTextColor: "#cbd5e0",
-  activationBorderColor: "#4a5568",
-  activationBkgColor: "#2a4365",
-  sequenceNumberColor: "#e2e8f0",
-  sectionBkgColor: "#2a4365",
-  altSectionBkgColor: "#1e2533",
-};
-
 function initMermaid(dark: boolean) {
   mermaid.initialize({
     startOnLoad: false,
-    theme: "base",
-    themeVariables: dark ? MERMAID_DARK : MERMAID_LIGHT,
+    theme: dark ? "dark" : "default",
+    themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
   });
 }
 
@@ -507,26 +434,60 @@ export function Editor() {
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
+  const mermaidSvgCache = useRef(new Map<string, string>());
+  const prevThemeRef = useRef(theme);
   useEffect(() => {
-    initMermaid(theme === "dark");
+    const isDark = theme === "dark";
+    const themeChanged = prevThemeRef.current !== theme;
+    prevThemeRef.current = theme;
+    initMermaid(isDark);
     const container = previewRef.current;
     if (!container) return;
+
+    if (themeChanged) {
+      mermaidSvgCache.current.clear();
+      container
+        .querySelectorAll<HTMLElement>(".mermaid[data-mermaid-processed]")
+        .forEach((el) => el.removeAttribute("data-mermaid-processed"));
+    }
+
     const mermaidDivs = container.querySelectorAll<HTMLElement>(
       ".mermaid:not([data-mermaid-processed])",
     );
     if (mermaidDivs.length === 0) return;
+
+    for (const el of Array.from(mermaidDivs)) {
+      const source =
+        el.getAttribute("data-mermaid-source") || el.textContent?.trim() || "";
+      if (!source) continue;
+      el.setAttribute("data-mermaid-source", source);
+      const cacheKey = `${isDark ? "d" : "l"}:${source}`;
+      const cached = mermaidSvgCache.current.get(cacheKey);
+      if (cached) {
+        el.setAttribute("data-mermaid-processed", "true");
+        el.innerHTML = cached;
+        continue;
+      }
+    }
+
     (async () => {
       for (const el of Array.from(mermaidDivs)) {
-        if (!el.isConnected) continue;
+        if (
+          !el.isConnected ||
+          el.getAttribute("data-mermaid-processed") === "true"
+        )
+          continue;
+        const source = el.getAttribute("data-mermaid-source") || "";
+        if (!source) continue;
         el.setAttribute("data-mermaid-processed", "true");
-        const text = el.textContent?.trim() || "";
-        if (!text) continue;
+        const cacheKey = `${isDark ? "d" : "l"}:${source}`;
         try {
           const { svg, bindFunctions } = await mermaid.render(
             `mermaid-${crypto.randomUUID()}`,
-            text,
+            source,
           );
           if (!el.isConnected) continue;
+          mermaidSvgCache.current.set(cacheKey, svg);
           el.innerHTML = svg;
           bindFunctions?.(el);
         } catch (e) {
@@ -534,7 +495,7 @@ export function Editor() {
             "[mermaid] render failed:",
             e,
             "\n--- diagram text ---\n",
-            text,
+            source,
           );
         }
       }
