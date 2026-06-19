@@ -148,8 +148,92 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
 
 marked.use({ renderer });
 
-// Initialize mermaid — render on demand, not on load
-mermaid.initialize({ startOnLoad: false, theme: "default" });
+const MERMAID_FONT =
+  'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
+
+const MERMAID_LIGHT = {
+  fontFamily: MERMAID_FONT,
+  fontSize: "14px",
+  primaryColor: "#e8edf3",
+  primaryTextColor: "#1a1a2e",
+  primaryBorderColor: "#b0bec5",
+  lineColor: "#78909c",
+  secondaryColor: "#f0f4f8",
+  tertiaryColor: "#fafbfc",
+  background: "#ffffff",
+  mainBkg: "#e8edf3",
+  nodeBorder: "#b0bec5",
+  nodeTextColor: "#1a1a2e",
+  clusterBkg: "#f5f7fa",
+  clusterBorder: "#cfd8dc",
+  titleColor: "#1a1a2e",
+  edgeLabelBackground: "#ffffff",
+  noteBkgColor: "#fff9c4",
+  noteBorderColor: "#f9a825",
+  noteTextColor: "#333333",
+  actorBkg: "#e8edf3",
+  actorBorder: "#90a4ae",
+  actorTextColor: "#1a1a2e",
+  actorLineColor: "#b0bec5",
+  signalColor: "#546e7a",
+  signalTextColor: "#1a1a2e",
+  labelBoxBkgColor: "#f5f7fa",
+  labelBoxBorderColor: "#cfd8dc",
+  labelTextColor: "#37474f",
+  loopTextColor: "#37474f",
+  activationBorderColor: "#90a4ae",
+  activationBkgColor: "#e3f2fd",
+  sequenceNumberColor: "#ffffff",
+  sectionBkgColor: "#e3f2fd",
+  altSectionBkgColor: "#f5f7fa",
+};
+
+const MERMAID_DARK = {
+  fontFamily: MERMAID_FONT,
+  fontSize: "14px",
+  primaryColor: "#2d3748",
+  primaryTextColor: "#e2e8f0",
+  primaryBorderColor: "#4a5568",
+  lineColor: "#718096",
+  secondaryColor: "#1e2533",
+  tertiaryColor: "#1a202c",
+  background: "#1a202c",
+  mainBkg: "#2d3748",
+  nodeBorder: "#4a5568",
+  nodeTextColor: "#e2e8f0",
+  clusterBkg: "#1e2533",
+  clusterBorder: "#4a5568",
+  titleColor: "#e2e8f0",
+  edgeLabelBackground: "#2d3748",
+  noteBkgColor: "#44401a",
+  noteBorderColor: "#d69e2e",
+  noteTextColor: "#e2e8f0",
+  actorBkg: "#2d3748",
+  actorBorder: "#4a5568",
+  actorTextColor: "#e2e8f0",
+  actorLineColor: "#4a5568",
+  signalColor: "#a0aec0",
+  signalTextColor: "#e2e8f0",
+  labelBoxBkgColor: "#1e2533",
+  labelBoxBorderColor: "#4a5568",
+  labelTextColor: "#cbd5e0",
+  loopTextColor: "#cbd5e0",
+  activationBorderColor: "#4a5568",
+  activationBkgColor: "#2a4365",
+  sequenceNumberColor: "#e2e8f0",
+  sectionBkgColor: "#2a4365",
+  altSectionBkgColor: "#1e2533",
+};
+
+function initMermaid(dark: boolean) {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "base",
+    themeVariables: dark ? MERMAID_DARK : MERMAID_LIGHT,
+  });
+}
+
+initMermaid(false);
 
 export function Editor() {
   const {
@@ -424,16 +508,16 @@ export function Editor() {
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    initMermaid(theme === "dark");
     const container = previewRef.current;
     if (!container) return;
     const mermaidDivs = container.querySelectorAll<HTMLElement>(
       ".mermaid:not([data-mermaid-processed])",
     );
     if (mermaidDivs.length === 0) return;
-    let cancelled = false;
     (async () => {
       for (const el of Array.from(mermaidDivs)) {
-        if (cancelled) return;
+        if (!el.isConnected) continue;
         el.setAttribute("data-mermaid-processed", "true");
         const text = el.textContent?.trim() || "";
         if (!text) continue;
@@ -442,7 +526,7 @@ export function Editor() {
             `mermaid-${crypto.randomUUID()}`,
             text,
           );
-          if (cancelled) return;
+          if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
         } catch (e) {
@@ -455,9 +539,6 @@ export function Editor() {
         }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, [previewHtml, theme]);
 
   // Fetch OGP data for pending URLs collected during marked render
@@ -496,14 +577,6 @@ export function Editor() {
       }
     };
   }, [previewHtml]);
-
-  // Sync mermaid theme with app theme
-  useEffect(() => {
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: theme === "dark" ? "dark" : "default",
-    });
-  }, [theme]);
 
   // Backlinks: documents that link to this one
   const backlinks = useMemo(() => {
