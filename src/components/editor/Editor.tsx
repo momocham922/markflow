@@ -1,4 +1,11 @@
-import { useEffect, useCallback, useState, useMemo, useRef, useDeferredValue } from "react";
+import {
+  useEffect,
+  useCallback,
+  useState,
+  useMemo,
+  useRef,
+  useDeferredValue,
+} from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import type { ViewUpdate } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
@@ -8,7 +15,11 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
 import { getPlatform, isIOS, isMobile } from "@/platform";
-import { isHtmlContent, extractYouTubeId, escapeHtml } from "@/lib/editor-utils";
+import {
+  isHtmlContent,
+  extractYouTubeId,
+  escapeHtml,
+} from "@/lib/editor-utils";
 import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
@@ -19,7 +30,11 @@ import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel } from "./VoicePanel";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
-import { useAuthStore, markCollabActive, markCollabInactive } from "@/stores/auth-store";
+import {
+  useAuthStore,
+  markCollabActive,
+  markCollabInactive,
+} from "@/stores/auth-store";
 import { MindMapView } from "./MindMapView";
 import { MindMapEditor, createInitialMindMapData } from "./MindMapEditor";
 import mermaid from "mermaid";
@@ -83,7 +98,10 @@ function buildLinkCardHtml(data: OgpData, url: string): string {
   const safeUrl = escapeHtml(url);
   const safeImage = data.image ? escapeHtml(data.image) : "";
   const safeTitle = escapeHtml(data.title || domain);
-  const desc = data.description ? data.description.slice(0, 120) + (data.description.length > 120 ? "…" : "") : "";
+  const desc = data.description
+    ? data.description.slice(0, 120) +
+      (data.description.length > 120 ? "…" : "")
+    : "";
   const safeSite = escapeHtml(data.site_name || domain);
   return `<div class="link-card"><a href="${safeUrl}" class="link-card-inner" target="_blank" rel="noopener noreferrer">
     ${safeImage ? `<img class="link-card-image" src="${safeImage}" alt="" loading="lazy" />` : ""}
@@ -134,10 +152,20 @@ marked.use({ renderer });
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
 export function Editor() {
-  const { activeDocId, documents, updateDocument, setActiveDocId, theme, themeSettings, customPreviewThemes } = useAppStore();
+  const {
+    activeDocId,
+    documents,
+    updateDocument,
+    setActiveDocId,
+    theme,
+    themeSettings,
+    customPreviewThemes,
+  } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>(isMobile ? "edit" : "split");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(
+    isMobile ? "edit" : "split",
+  );
   const [scrollSyncEnabled, setScrollSyncEnabled] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [ogpVersion, setOgpVersion] = useState(0);
@@ -151,7 +179,11 @@ export function Editor() {
   // Update frozen content when switching docs (activeDocId changes → CodeMirror remounts).
   const frozenContentRef = useRef<Record<string, string>>({});
   const prevActiveDocRef = useRef<string | null>(null);
-  if (activeDocId && activeDoc?.isShared && activeDocId !== prevActiveDocRef.current) {
+  if (
+    activeDocId &&
+    activeDoc?.isShared &&
+    activeDocId !== prevActiveDocRef.current
+  ) {
     // Clean up old entry to prevent memory leak (only keep current doc)
     if (prevActiveDocRef.current && prevActiveDocRef.current !== activeDocId) {
       delete frozenContentRef.current[prevActiveDocRef.current];
@@ -165,17 +197,29 @@ export function Editor() {
     (content: string) => {
       if (!activeDocId) return;
       // Allow intentional content clearing from collab
-      const updates: { content: string; updatedAt: number; title?: string } = { content, updatedAt: Date.now() };
+      const updates: { content: string; updatedAt: number; title?: string } = {
+        content,
+        updatedAt: Date.now(),
+      };
       // Auto-derive title from first heading for owned docs (or personal docs).
       // Skip for pinned titles and non-owned shared/team docs (their title comes from cloud).
       const isOwned = !activeDoc?.ownerId || activeDoc.ownerId === user?.uid;
       if (!activeDoc?.titlePinned && isOwned) {
-        const firstLine = content.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+        const firstLine = content
+          .split("\n")[0]
+          ?.replace(/^#+\s*/, "")
+          .trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, activeDoc?.ownerId, user?.uid, updateDocument],
+    [
+      activeDocId,
+      activeDoc?.titlePinned,
+      activeDoc?.ownerId,
+      user?.uid,
+      updateDocument,
+    ],
   );
 
   // Callback: sync Y.Text content → frozen value BEFORE yCollab activates.
@@ -188,9 +232,24 @@ export function Editor() {
   );
 
   // Real-time collaboration via Yjs — only for shared documents
-  const { extension: collabExtension, connected: collabConnected, peers, docId: collabDocId, enabled: collabEnabled, wsTimedOut, replaceContent: collabReplaceContent } =
-    useCollaboration(activeDocId, activeDoc?.content ?? "", handleCollabChange, activeDoc?.isShared ?? false, handleBeforeCollab);
-  const isCollabReady = Boolean(activeDocId && collabExtension && collabDocId === activeDocId);
+  const {
+    extension: collabExtension,
+    connected: collabConnected,
+    peers,
+    docId: collabDocId,
+    enabled: collabEnabled,
+    wsTimedOut,
+    replaceContent: collabReplaceContent,
+  } = useCollaboration(
+    activeDocId,
+    activeDoc?.content ?? "",
+    handleCollabChange,
+    activeDoc?.isShared ?? false,
+    handleBeforeCollab,
+  );
+  const isCollabReady = Boolean(
+    activeDocId && collabExtension && collabDocId === activeDocId,
+  );
 
   // Keep frozenContentRef fresh while CodeMirror is unmounted (during collab reconnection).
   // Without this, remounting after "Syncing document..." overlay shows stale/empty content.
@@ -202,7 +261,9 @@ export function Editor() {
   useEffect(() => {
     if (isCollabReady && activeDocId) {
       markCollabActive(activeDocId);
-      return () => { markCollabInactive(activeDocId); };
+      return () => {
+        markCollabInactive(activeDocId);
+      };
     }
   }, [isCollabReady, activeDocId]);
 
@@ -234,15 +295,18 @@ export function Editor() {
 
   // Stable reference prevents @uiw/react-codemirror from reconfiguring on every render
   // (inline object literal → new ref each render → StateEffect.reconfigure on every render)
-  const basicSetupConfig = useMemo(() => ({
-    lineNumbers: true,
-    highlightActiveLineGutter: !isIOS,
-    highlightActiveLine: true,
-    foldGutter: !isIOS,
-    bracketMatching: true,
-    closeBrackets: true,
-    indentOnInput: true,
-  }), []);
+  const basicSetupConfig = useMemo(
+    () => ({
+      lineNumbers: true,
+      highlightActiveLineGutter: !isIOS,
+      highlightActiveLine: true,
+      foldGutter: !isIOS,
+      bracketMatching: true,
+      closeBrackets: true,
+      indentOnInput: true,
+    }),
+    [],
+  );
 
   // iOS: compact gutter via CodeMirror theme (CSS can't override CM's inline width calc)
   const iosGutterTheme = useMemo(() => {
@@ -264,10 +328,11 @@ export function Editor() {
           minWidth: "0 !important",
           width: "auto !important",
         },
-        "&light .cm-lineNumbers .cm-gutterElement, &dark .cm-lineNumbers .cm-gutterElement": {
-          minWidth: "0 !important",
-          padding: "0 1px 0 2px !important",
-        },
+        "&light .cm-lineNumbers .cm-gutterElement, &dark .cm-lineNumbers .cm-gutterElement":
+          {
+            minWidth: "0 !important",
+            padding: "0 1px 0 2px !important",
+          },
         "&light .cm-gutters, &dark .cm-gutters": {
           paddingRight: "0 !important",
         },
@@ -284,7 +349,11 @@ export function Editor() {
   // or collab activation).
   const extensions = useMemo(
     () => [
-      markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
+      markdown({
+        base: markdownLanguage,
+        codeLanguages: languages,
+        addKeymap: false,
+      }),
       EditorView.lineWrapping,
       markdownShortcuts,
       imagePaste,
@@ -295,7 +364,8 @@ export function Editor() {
   );
 
   const editorTheme = useMemo(() => {
-    const preset = editorThemes[themeSettings.editorTheme] ?? editorThemes.default;
+    const preset =
+      editorThemes[themeSettings.editorTheme] ?? editorThemes.default;
     return theme === "dark" ? preset.dark : preset.light;
   }, [theme, themeSettings.editorTheme]);
 
@@ -309,12 +379,15 @@ export function Editor() {
     pendingOgpUrls = [];
     try {
       let html = marked.parse(deferredContent) as string;
-      // Protect code/pre blocks from wiki-link replacement
+      // Protect code/pre/mermaid blocks from wiki-link replacement
       const codeBlocks: string[] = [];
-      html = html.replace(/<(pre|code)[^>]*>[\s\S]*?<\/\1>/gi, (match) => {
-        codeBlocks.push(match);
-        return `\x00CB${codeBlocks.length - 1}\x00`;
-      });
+      html = html.replace(
+        /<(pre|code)[^>]*>[\s\S]*?<\/\1>|<div class="mermaid">[\s\S]*?<\/div>/gi,
+        (match) => {
+          codeBlocks.push(match);
+          return `\x00CB${codeBlocks.length - 1}\x00`;
+        },
+      );
       // Replace [[doc title]] with clickable links
       html = html.replace(/\[\[([^\]]+)\]\]/g, (_match, title: string) => {
         const target = documents.find(
@@ -329,10 +402,13 @@ export function Editor() {
       html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
       // Make task checkboxes interactive (remove disabled, add index + class)
       let cbIdx = 0;
-      html = html.replace(/<input (checked="" )?disabled="" type="checkbox">/g, (_match, checked) => {
-        const idx = cbIdx++;
-        return `<input type="checkbox" class="task-checkbox" data-checkbox-index="${idx}"${checked ? " checked" : ""}>`;
-      });
+      html = html.replace(
+        /<input (checked="" )?disabled="" type="checkbox">/g,
+        (_match, checked) => {
+          const idx = cbIdx++;
+          return `<input type="checkbox" class="task-checkbox" data-checkbox-index="${idx}"${checked ? " checked" : ""}>`;
+        },
+      );
       // Capture pending URLs to ref (survives concurrent renders)
       // eslint-disable-next-line react-compiler/react-compiler
       pendingOgpUrlsRef.current = [...pendingOgpUrls];
@@ -350,11 +426,38 @@ export function Editor() {
   useEffect(() => {
     const container = previewRef.current;
     if (!container) return;
-    const mermaidDivs = container.querySelectorAll<HTMLElement>(".mermaid");
+    const mermaidDivs = container.querySelectorAll<HTMLElement>(
+      ".mermaid:not([data-mermaid-processed])",
+    );
     if (mermaidDivs.length === 0) return;
-    // Reset processed state so mermaid re-renders on content/theme change
-    mermaidDivs.forEach((el) => el.removeAttribute("data-processed"));
-    mermaid.run({ nodes: Array.from(mermaidDivs) }).catch(() => {});
+    let cancelled = false;
+    (async () => {
+      for (const el of Array.from(mermaidDivs)) {
+        if (cancelled) return;
+        el.setAttribute("data-mermaid-processed", "true");
+        const text = el.textContent?.trim() || "";
+        if (!text) continue;
+        try {
+          const { svg, bindFunctions } = await mermaid.render(
+            `mermaid-${crypto.randomUUID()}`,
+            text,
+          );
+          if (cancelled) return;
+          el.innerHTML = svg;
+          bindFunctions?.(el);
+        } catch (e) {
+          console.error(
+            "[mermaid] render failed:",
+            e,
+            "\n--- diagram text ---\n",
+            text,
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [previewHtml, theme]);
 
   // Fetch OGP data for pending URLs collected during marked render
@@ -409,15 +512,21 @@ export function Editor() {
     return documents.filter(
       (d) =>
         d.id !== activeDoc.id &&
-        d.content.match(new RegExp(`\\[\\[${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\]`, "i")),
+        d.content.match(
+          new RegExp(
+            `\\[\\[${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\]`,
+            "i",
+          ),
+        ),
     );
   }, [activeDoc, documents]);
 
   // Build preview theme CSS variables as a <style> tag override
   const previewThemeCss = useMemo(() => {
     // Check built-in themes first, then custom themes
-    const preset = previewThemes[themeSettings.previewTheme]
-      ?? customPreviewThemes.find((t) => t.id === themeSettings.previewTheme);
+    const preset =
+      previewThemes[themeSettings.previewTheme] ??
+      customPreviewThemes.find((t) => t.id === themeSettings.previewTheme);
     if (!preset) return "";
     const vars = { ...preset.variables };
     if (theme === "dark" && preset.dark) {
@@ -433,17 +542,29 @@ export function Editor() {
     (value: string) => {
       if (!activeDocId) return;
       // Allow intentional content clearing — don't block empty content
-      const updates: { content: string; updatedAt: number; title?: string } = { content: value, updatedAt: Date.now() };
+      const updates: { content: string; updatedAt: number; title?: string } = {
+        content: value,
+        updatedAt: Date.now(),
+      };
       // Auto-derive title from first heading for owned docs (or personal docs).
       // Skip for pinned titles and non-owned shared/team docs (their title comes from cloud).
       const isOwned = !activeDoc?.ownerId || activeDoc.ownerId === user?.uid;
       if (!activeDoc?.titlePinned && isOwned) {
-        const firstLine = value.split("\n")[0]?.replace(/^#+\s*/, "").trim();
+        const firstLine = value
+          .split("\n")[0]
+          ?.replace(/^#+\s*/, "")
+          .trim();
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
     },
-    [activeDocId, activeDoc?.titlePinned, activeDoc?.ownerId, user?.uid, updateDocument],
+    [
+      activeDocId,
+      activeDoc?.titlePinned,
+      activeDoc?.ownerId,
+      user?.uid,
+      updateDocument,
+    ],
   );
 
   const onCreateEditor = useCallback(
@@ -519,7 +640,9 @@ export function Editor() {
         view.dispatch({ changes: { from, to, insert: pendingInsert.text } });
       } else {
         const len = view.state.doc.length;
-        view.dispatch({ changes: { from: len, insert: `\n\n${pendingInsert.text}` } });
+        view.dispatch({
+          changes: { from: len, insert: `\n\n${pendingInsert.text}` },
+        });
       }
       view.focus();
       clearPendingInsert(null);
@@ -547,7 +670,11 @@ export function Editor() {
     let rafId: number | null = null;
     const LOCK_MS = 120;
 
-    const syncTo = (target: HTMLElement, source: HTMLElement, origin: "editor" | "preview") => {
+    const syncTo = (
+      target: HTMLElement,
+      source: HTMLElement,
+      origin: "editor" | "preview",
+    ) => {
       const now = performance.now();
       if (lockedBy && lockedBy !== origin && now < lockUntil) return;
       lockedBy = origin;
@@ -579,52 +706,82 @@ export function Editor() {
   // so we must use Tauri's event API with dragDropEnabled: true.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    const imageExts = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+    const imageExts = new Set([
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "webp",
+      "svg",
+      "bmp",
+    ]);
 
     (async () => {
       try {
         const platform = await getPlatform();
-        unlisten = await platform.onDragDrop(async (paths, position) => {
-          const view = viewRef.current;
-          if (!view) return;
-          if (!paths?.length) return;
+        unlisten =
+          (await platform.onDragDrop(async (paths, position) => {
+            const view = viewRef.current;
+            if (!view) return;
+            if (!paths?.length) return;
 
-          const imagePaths = paths.filter((p) => {
-            const ext = p.split(".").pop()?.toLowerCase() ?? "";
-            return imageExts.has(ext);
-          });
-          if (!imagePaths.length) return;
+            const imagePaths = paths.filter((p) => {
+              const ext = p.split(".").pop()?.toLowerCase() ?? "";
+              return imageExts.has(ext);
+            });
+            if (!imagePaths.length) return;
 
-          const pos = view.posAtCoords({ x: position.x, y: position.y })
-            ?? view.state.selection.main.head;
-          const placeholder = "![Uploading image...]()";
-          view.dispatch({ changes: { from: pos, insert: placeholder + "\n" } });
+            const pos =
+              view.posAtCoords({ x: position.x, y: position.y }) ??
+              view.state.selection.main.head;
+            const placeholder = "![Uploading image...]()";
+            view.dispatch({
+              changes: { from: pos, insert: placeholder + "\n" },
+            });
 
-          try {
-            const markdowns = await Promise.all(imagePaths.map((p) => processImagePath(p)));
-            const v = viewRef.current;
-            if (v) {
-              const doc = v.state.doc.toString();
-              const idx = doc.indexOf(placeholder);
-              if (idx >= 0) {
-                v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: markdowns.join("\n") } });
+            try {
+              const markdowns = await Promise.all(
+                imagePaths.map((p) => processImagePath(p)),
+              );
+              const v = viewRef.current;
+              if (v) {
+                const doc = v.state.doc.toString();
+                const idx = doc.indexOf(placeholder);
+                if (idx >= 0) {
+                  v.dispatch({
+                    changes: {
+                      from: idx,
+                      to: idx + placeholder.length,
+                      insert: markdowns.join("\n"),
+                    },
+                  });
+                }
+              }
+            } catch (err: unknown) {
+              const v = viewRef.current;
+              if (v) {
+                const doc = v.state.doc.toString();
+                const idx = doc.indexOf(placeholder);
+                if (idx >= 0) {
+                  const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
+                  v.dispatch({
+                    changes: {
+                      from: idx,
+                      to: idx + placeholder.length,
+                      insert: errMsg,
+                    },
+                  });
+                }
               }
             }
-          } catch (err: unknown) {
-            const v = viewRef.current;
-            if (v) {
-              const doc = v.state.doc.toString();
-              const idx = doc.indexOf(placeholder);
-              if (idx >= 0) {
-                const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-                v.dispatch({ changes: { from: idx, to: idx + placeholder.length, insert: errMsg } });
-              }
-            }
-          }
-        }) ?? undefined;
-      } catch { /* not in Tauri */ }
+          })) ?? undefined;
+      } catch {
+        /* not in Tauri */
+      }
     })();
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -652,18 +809,30 @@ export function Editor() {
       if (!activeDocId) return;
       const current = activeDoc?.content ?? "";
       const newContent = current.trimEnd() + markdown;
-      updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+      updateDocument(activeDocId, {
+        content: newContent,
+        updatedAt: Date.now(),
+      });
       if (isCollabReady) {
         collabReplaceContent(newContent);
       }
     },
-    [activeDocId, activeDoc?.content, updateDocument, isCollabReady, collabReplaceContent],
+    [
+      activeDocId,
+      activeDoc?.content,
+      updateDocument,
+      isCollabReady,
+      collabReplaceContent,
+    ],
   );
 
   const handleSetContent = useCallback(
     (newContent: string) => {
       if (!activeDocId) return;
-      updateDocument(activeDocId, { content: newContent, updatedAt: Date.now() });
+      updateDocument(activeDocId, {
+        content: newContent,
+        updatedAt: Date.now(),
+      });
       if (isCollabReady) {
         collabReplaceContent(newContent);
       }
@@ -690,7 +859,10 @@ export function Editor() {
       <div className="flex h-full flex-col relative">
         <MindMapEditor
           key={activeDocId}
-          content={activeDoc.content || JSON.stringify(createInitialMindMapData(activeDoc.title))}
+          content={
+            activeDoc.content ||
+            JSON.stringify(createInitialMindMapData(activeDoc.title))
+          }
           title={activeDoc.title}
           onChange={handleMindMapChange}
           onTitleChange={handleMindMapTitleChange}
@@ -710,9 +882,12 @@ export function Editor() {
         scrollSyncEnabled={scrollSyncEnabled}
         onScrollSyncToggle={() => setScrollSyncEnabled((v) => !v)}
         collabSlot={
-          (collabConnected || collabExtension) ? (
+          collabConnected || collabExtension ? (
             <div className="flex items-center gap-1.5 shrink-0 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5">
-              <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" title="Live collaboration active" />
+              <div
+                className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
+                title="Live collaboration active"
+              />
               {peers.length > 0 ? (
                 <>
                   <div className="flex -space-x-1.5">
@@ -764,7 +939,11 @@ export function Editor() {
           ) : (
             <CodeMirror
               key={activeDocId}
-              value={isCollabReady ? frozenContentRef.current[activeDocId!] : (activeDoc.content || "")}
+              value={
+                isCollabReady
+                  ? frozenContentRef.current[activeDocId!]
+                  : activeDoc.content || ""
+              }
               onChange={onChange}
               extensions={extensions}
               theme={editorTheme}
@@ -785,10 +964,15 @@ export function Editor() {
                 setTimeout(() => {
                   const container = previewScrollRef.current;
                   if (!container) return;
-                  const headings = container.querySelectorAll("h1, h2, h3, h4, h5, h6");
+                  const headings = container.querySelectorAll(
+                    "h1, h2, h3, h4, h5, h6",
+                  );
                   for (const heading of headings) {
                     if (heading.textContent?.trim() === text) {
-                      heading.scrollIntoView({ behavior: "smooth", block: "start" });
+                      heading.scrollIntoView({
+                        behavior: "smooth",
+                        block: "start",
+                      });
                       return;
                     }
                   }
@@ -814,8 +998,14 @@ export function Editor() {
               onClick={(e) => {
                 // Checkbox toggle in preview
                 const checkbox = e.target as HTMLInputElement;
-                if (checkbox.classList?.contains("task-checkbox") && activeDocId) {
-                  const idx = parseInt(checkbox.getAttribute("data-checkbox-index") || "-1", 10);
+                if (
+                  checkbox.classList?.contains("task-checkbox") &&
+                  activeDocId
+                ) {
+                  const idx = parseInt(
+                    checkbox.getAttribute("data-checkbox-index") || "-1",
+                    10,
+                  );
                   if (idx >= 0) {
                     const content = activeDoc?.content || "";
                     const lines = content.split("\n");
@@ -825,8 +1015,14 @@ export function Editor() {
                       if (match) {
                         if (cbCount === idx) {
                           const isChecked = match[2] !== " ";
-                          lines[i] = lines[i].replace(/\[([ xX])\]/, isChecked ? "[ ]" : "[x]");
-                          updateDocument(activeDocId, { content: lines.join("\n"), updatedAt: Date.now() });
+                          lines[i] = lines[i].replace(
+                            /\[([ xX])\]/,
+                            isChecked ? "[ ]" : "[x]",
+                          );
+                          updateDocument(activeDocId, {
+                            content: lines.join("\n"),
+                            updatedAt: Date.now(),
+                          });
                           break;
                         }
                         cbCount++;
@@ -868,7 +1064,13 @@ export function Editor() {
           </div>
         )}
       </div>
-      {voiceOpen && <VoicePanel onInsertMarkdown={handleInsertMarkdown} onSetContent={handleSetContent} documentContent={activeDoc?.content || ""} />}
+      {voiceOpen && (
+        <VoicePanel
+          onInsertMarkdown={handleInsertMarkdown}
+          onSetContent={handleSetContent}
+          documentContent={activeDoc?.content || ""}
+        />
+      )}
     </div>
   );
 }

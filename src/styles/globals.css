@@ -153,8 +153,8 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP",
-      sans-serif;
+    font-family:
+      -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
     margin: 0;
     padding: 0;
     overflow: hidden;
@@ -179,7 +179,8 @@
   }
 
   /* Prevent iOS WKWebView from scrolling the page when keyboard opens. */
-  html, body {
+  html,
+  body {
     overscroll-behavior: none;
     -webkit-overflow-scrolling: auto;
     touch-action: manipulation;
@@ -240,7 +241,14 @@ input::selection {
   color: var(--prose-body) !important;
   line-height: var(--prose-line-height, 1.75) !important;
   font-size: var(--prose-font-size, 1rem) !important;
-  font-family: var(--prose-font, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif) !important;
+  font-family: var(
+    --prose-font,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "Noto Sans JP",
+    sans-serif
+  ) !important;
   letter-spacing: var(--prose-letter-spacing, 0) !important;
 }
 
@@ -315,7 +323,8 @@ input::selection {
 /* ---- Blockquotes ---- */
 .tiptap blockquote,
 .prose blockquote {
-  border-left: var(--prose-bq-border-width, 4px) solid var(--prose-blockquote-border) !important;
+  border-left: var(--prose-bq-border-width, 4px) solid
+    var(--prose-blockquote-border) !important;
   padding-left: var(--prose-bq-pl, 1.2em) !important;
   margin-left: 0 !important;
   margin-top: 0.75em !important;
@@ -338,7 +347,14 @@ input::selection {
   border-radius: var(--prose-code-radius, 0.3em) !important;
   padding: var(--prose-code-padding, 0.15em 0.4em) !important;
   font-size: 0.85em !important;
-  font-family: var(--prose-code-font, "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace) !important;
+  font-family: var(
+    --prose-code-font,
+    "SF Mono",
+    "Fira Code",
+    "Cascadia Code",
+    "JetBrains Mono",
+    monospace
+  ) !important;
   color: var(--prose-code-fg) !important;
   font-weight: var(--prose-code-weight, 400);
 }
@@ -438,9 +454,14 @@ input::selection {
   color: var(--prose-links) !important;
   text-decoration: var(--prose-link-decoration, underline) !important;
   text-underline-offset: 0.2em !important;
-  text-decoration-color: var(--prose-link-decoration-color, color-mix(in oklch, var(--prose-links) 40%, transparent)) !important;
+  text-decoration-color: var(
+    --prose-link-decoration-color,
+    color-mix(in oklch, var(--prose-links) 40%, transparent)
+  ) !important;
   font-weight: var(--prose-link-weight, inherit);
-  transition: color 0.15s, text-decoration-color 0.15s;
+  transition:
+    color 0.15s,
+    text-decoration-color 0.15s;
 }
 
 .tiptap a:hover,
@@ -589,10 +610,9 @@ input::selection {
 }
 
 /* AI panel scrollbar — slightly narrower */
-.ai-panel-scroll [data-slot='scroll-area-viewport']::-webkit-scrollbar {
+.ai-panel-scroll [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
   width: 4px;
 }
-
 
 /* ---- Task checkbox in preview ---- */
 .prose .task-list-item {
@@ -648,10 +668,20 @@ input::selection {
   background: transparent;
 }
 
-.ai-markdown.prose h1 { font-size: 1.3em !important; border-bottom: none; padding-bottom: 0; }
-.ai-markdown.prose h2 { font-size: 1.15em !important; }
-.ai-markdown.prose h3 { font-size: 1.05em !important; }
-.ai-markdown.prose p { margin-bottom: 0.5em !important; }
+.ai-markdown.prose h1 {
+  font-size: 1.3em !important;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.ai-markdown.prose h2 {
+  font-size: 1.15em !important;
+}
+.ai-markdown.prose h3 {
+  font-size: 1.05em !important;
+}
+.ai-markdown.prose p {
+  margin-bottom: 0.5em !important;
+}
 .ai-markdown.prose pre {
   font-size: 0.8em !important;
   padding: 0.75em !important;
@@ -705,7 +735,9 @@ input::selection {
   border: 1px solid var(--border) !important;
   border-radius: 0.75em;
   overflow: hidden;
-  transition: box-shadow 0.2s, border-color 0.2s;
+  transition:
+    box-shadow 0.2s,
+    border-color 0.2s;
   background: var(--card);
 }
 .prose .link-card .link-card-inner:hover {
@@ -771,6 +803,23 @@ input::selection {
   color: var(--muted-foreground) !important;
   border-bottom: 1px dashed var(--destructive) !important;
   padding-bottom: 1px;
+}
+
+/* Mermaid diagrams — fallback for unrendered content */
+.prose .mermaid {
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 0.85em;
+  overflow-x: auto;
+}
+.prose .mermaid[data-mermaid-processed] {
+  white-space: normal;
+  font-family: inherit;
+  font-size: inherit;
+}
+.prose .mermaid svg {
+  max-width: 100%;
+  height: auto;
 }
 
 /* Collaboration cursor styles (y-codemirror.next) */
