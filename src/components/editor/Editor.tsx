@@ -595,7 +595,10 @@ export function Editor() {
     [theme],
   );
 
+  const previewVisible = previewMode !== "edit" && previewMode !== "mindmap";
+
   useLayoutEffect(() => {
+    if (!previewVisible) return;
     const container = previewRef.current;
     if (!container) return;
     const themeChanged = prevThemeRef.current !== theme;
@@ -610,9 +613,10 @@ export function Editor() {
       return;
     }
     restoreMermaidFromCache(container);
-  }, [previewHtml, theme, restoreMermaidFromCache]);
+  }, [previewHtml, theme, previewVisible, restoreMermaidFromCache]);
 
   useEffect(() => {
+    if (!previewVisible) return;
     const isDark = theme === "dark";
     initMermaid();
     const container = previewRef.current;
@@ -622,8 +626,10 @@ export function Editor() {
       ".mermaid:not([data-mermaid-processed])",
     );
     if (mermaidDivs.length === 0) return;
+    let cancelled = false;
     (async () => {
       for (const el of Array.from(mermaidDivs)) {
+        if (cancelled) break;
         if (
           !el.isConnected ||
           el.getAttribute("data-mermaid-processed") === "true"
@@ -632,15 +638,19 @@ export function Editor() {
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
         el.setAttribute("data-mermaid-processed", "true");
+        const cached = mermaidSvgCache.get(prefix + source);
+        if (cached) {
+          el.innerHTML = cached;
+          continue;
+        }
         try {
           const { svg, bindFunctions } = await mermaid.render(
             `mermaid-${crypto.randomUUID()}`,
             source,
           );
-          if (!el.isConnected) continue;
+          if (cancelled || !el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
-          // Cache original SVG first (guaranteed valid), then try post-processing
           mermaidSvgCache.set(prefix + source, svg);
           try {
             fixMermaidSvg(el, isDark);
@@ -649,18 +659,18 @@ export function Editor() {
             /* fixMermaidSvg failed — cache still has original SVG */
           }
         } catch (e) {
-          console.error(
-            "[mermaid] render failed:",
-            e,
-            "\n--- diagram text ---\n",
-            source,
-          );
+          console.error("[mermaid] render failed:", e);
+          el.textContent = String(e);
         }
       }
     })();
-  }, [previewHtml, theme]);
+    return () => {
+      cancelled = true;
+    };
+  }, [previewHtml, theme, previewVisible]);
 
   useEffect(() => {
+    if (!previewVisible) return;
     const container = previewRef.current;
     if (!container) return;
     const observer = new MutationObserver(() => {
@@ -668,7 +678,7 @@ export function Editor() {
     });
     observer.observe(container, { childList: true });
     return () => observer.disconnect();
-  }, [restoreMermaidFromCache]);
+  }, [previewVisible, restoreMermaidFromCache]);
 
   // Fetch OGP data for pending URLs collected during marked render
   useEffect(() => {
