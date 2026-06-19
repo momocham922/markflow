@@ -153,26 +153,65 @@ marked.use({ renderer });
 const MERMAID_FONT =
   'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
 
+const DARK_THEME_VARS = {
+  fontFamily: MERMAID_FONT,
+  fontSize: "14px",
+  background: "transparent",
+  primaryColor: "#374151",
+  primaryTextColor: "#f3f4f6",
+  primaryBorderColor: "#6b7280",
+  secondaryColor: "#1f2937",
+  secondaryTextColor: "#e5e7eb",
+  secondaryBorderColor: "#4b5563",
+  tertiaryColor: "#111827",
+  tertiaryTextColor: "#d1d5db",
+  tertiaryBorderColor: "#4b5563",
+  lineColor: "#9ca3af",
+  textColor: "#e5e7eb",
+  mainBkg: "#1f2937",
+  nodeBkg: "#374151",
+  nodeTextColor: "#f3f4f6",
+  nodeBorder: "#6b7280",
+  edgeLabelBackground: "#1f2937",
+  clusterBkg: "#1f2937",
+  clusterBorder: "#4b5563",
+  noteBkgColor: "#713f12",
+  noteTextColor: "#fef9c3",
+  noteBorderColor: "#a16207",
+  actorBkg: "#374151",
+  actorBorder: "#6b7280",
+  actorTextColor: "#f9fafb",
+  actorLineColor: "#4b5563",
+  signalColor: "#9ca3af",
+  signalTextColor: "#e5e7eb",
+  labelBoxBkgColor: "#374151",
+  labelBoxBorderColor: "#6b7280",
+  labelTextColor: "#f3f4f6",
+  loopTextColor: "#d1d5db",
+  activationBorderColor: "#6b7280",
+  activationBkgColor: "#4b5563",
+  sequenceNumberColor: "#f9fafb",
+};
+
 function initMermaid(dark: boolean) {
   mermaid.initialize({
     startOnLoad: false,
-    theme: dark ? "dark" : "default",
-    themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
+    theme: dark ? "base" : "default",
+    themeVariables: dark
+      ? DARK_THEME_VARS
+      : { fontFamily: MERMAID_FONT, fontSize: "14px" },
     flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
-    sequence: { useMaxWidth: true, wrap: true, wrapPadding: 15 },
+    sequence: { useMaxWidth: true },
   });
 }
 
 initMermaid(false);
 
-/**
- * Post-process mermaid SVG to fix CJK text overflow in notes
- * and normalize background section rect widths.
- * Must be called AFTER the SVG is inserted into the DOM (getBBox requires it).
- */
-function fixMermaidSvg(el: HTMLElement) {
+function fixMermaidSvg(el: HTMLElement, dark: boolean) {
   const svg = el.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
+
+  let modified = false;
 
   // --- Expand note rects to fit CJK text ---
   for (const noteRect of Array.from(svg.querySelectorAll("rect.note"))) {
@@ -194,7 +233,7 @@ function fixMermaidSvg(el: HTMLElement) {
           maxTr = Math.max(maxTr, bb.x + bb.width);
         }
       } catch {
-        /* getBBox may fail if not in DOM */
+        /* getBBox may fail if not visible */
       }
     }
     if (maxTr === -Infinity) continue;
@@ -205,91 +244,92 @@ function fixMermaidSvg(el: HTMLElement) {
     if (newRight - newX > rw + 1) {
       noteRect.setAttribute("x", String(newX));
       noteRect.setAttribute("width", String(newRight - newX));
+      modified = true;
     }
   }
 
   // --- Normalize background section rect widths ---
-  // Background section rects (from `rect rgb(...)`) and main bg both have class "rect".
-  // The main bg covers the full viewBox — exclude it by area.
-  const rectEls = Array.from(svg.querySelectorAll("rect.rect"));
-  if (rectEls.length < 2) return;
-
-  // Identify the main background rect (largest by area, covers ~full viewBox)
-  let mainBgIdx = 0;
-  let maxArea = 0;
-  rectEls.forEach((r, i) => {
+  // Identify section rects by exclusion: large rects that aren't actors/notes/activations.
+  const SKIP = new Set([
+    "actor",
+    "note",
+    "activation0",
+    "activation1",
+    "activation2",
+  ]);
+  const allRects = Array.from(svg.querySelectorAll("rect"));
+  const largeRects = allRects.filter((r) => {
+    for (const c of r.classList) if (SKIP.has(c)) return false;
     const w = parseFloat(r.getAttribute("width") || "0");
     const h = parseFloat(r.getAttribute("height") || "0");
-    if (w * h > maxArea) {
-      maxArea = w * h;
-      mainBgIdx = i;
-    }
+    return w > 150 && h > 30;
   });
 
-  const sectionRects = rectEls.filter((_, i) => i !== mainBgIdx);
-  if (sectionRects.length < 2) return;
+  if (largeRects.length >= 2) {
+    // The largest rect is the main background — exclude it
+    let maxArea = 0;
+    let mainIdx = 0;
+    largeRects.forEach((r, i) => {
+      const a =
+        parseFloat(r.getAttribute("width") || "0") *
+        parseFloat(r.getAttribute("height") || "0");
+      if (a > maxArea) {
+        maxArea = a;
+        mainIdx = i;
+      }
+    });
 
-  // Find the widest span across all section rects
-  let minX = Infinity;
-  let maxR = 0;
-  for (const r of sectionRects) {
-    const x = parseFloat(r.getAttribute("x") || "0");
-    const w = parseFloat(r.getAttribute("width") || "0");
-    minX = Math.min(minX, x);
-    maxR = Math.max(maxR, x + w);
-  }
-  // Normalize all section rects to the same x and width
-  for (const r of sectionRects) {
-    r.setAttribute("x", String(minX));
-    r.setAttribute("width", String(maxR - minX));
-  }
-
-  // Also normalize loopLine x1/x2 (alt/loop box borders) to match section width
-  const loopLines = Array.from(svg.querySelectorAll("line.loopLine"));
-  if (loopLines.length > 0) {
-    let loopMinX1 = Infinity;
-    let loopMaxX2 = 0;
-    for (const line of loopLines) {
-      const x1 = parseFloat(line.getAttribute("x1") || "0");
-      const x2 = parseFloat(line.getAttribute("x2") || "0");
-      loopMinX1 = Math.min(loopMinX1, x1, x2);
-      loopMaxX2 = Math.max(loopMaxX2, x1, x2);
+    const sectionRects = largeRects.filter((_, i) => i !== mainIdx);
+    if (sectionRects.length >= 2) {
+      let minX = Infinity;
+      let maxR = 0;
+      for (const r of sectionRects) {
+        const x = parseFloat(r.getAttribute("x") || "0");
+        const w = parseFloat(r.getAttribute("width") || "0");
+        minX = Math.min(minX, x);
+        maxR = Math.max(maxR, x + w);
+      }
+      for (const r of sectionRects) {
+        r.setAttribute("x", String(minX));
+        r.setAttribute("width", String(maxR - minX));
+      }
+      modified = true;
     }
-    // Normalize horizontal lines (same y1/y2) to span full width
-    for (const line of loopLines) {
-      const y1 = parseFloat(line.getAttribute("y1") || "0");
-      const y2 = parseFloat(line.getAttribute("y2") || "0");
-      if (Math.abs(y1 - y2) < 1) {
-        // Horizontal line — stretch to widest span
-        line.setAttribute("x1", String(loopMinX1));
-        line.setAttribute("x2", String(loopMaxX2));
-      } else {
-        // Vertical line — normalize x to the boundary
-        const x = parseFloat(line.getAttribute("x1") || "0");
-        if (Math.abs(x - loopMinX1) < Math.abs(x - loopMaxX2)) {
-          line.setAttribute("x1", String(loopMinX1));
-          line.setAttribute("x2", String(loopMinX1));
-        } else {
-          line.setAttribute("x1", String(loopMaxX2));
-          line.setAttribute("x2", String(loopMaxX2));
+
+    // In dark mode, darken user-specified section background colors
+    if (dark) {
+      const targets =
+        sectionRects.length >= 2 ? sectionRects : largeRects.slice(1);
+      for (const r of targets) {
+        const fill = r.getAttribute("fill") || "";
+        const m = fill.match(
+          /rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)/,
+        );
+        if (m) {
+          const dr = Math.round(Number(m[1]) * 0.3);
+          const dg = Math.round(Number(m[2]) * 0.3);
+          const db = Math.round(Number(m[3]) * 0.3);
+          r.setAttribute("fill", `rgb(${dr}, ${dg}, ${db})`);
         }
       }
     }
   }
 
-  // --- Recalculate viewBox to fit expanded elements ---
-  try {
-    const bbox = svg.getBBox();
-    const pad = 8;
-    const newW = bbox.width + pad * 2;
-    const newH = bbox.height + pad * 2;
-    svg.setAttribute(
-      "viewBox",
-      `${bbox.x - pad} ${bbox.y - pad} ${newW} ${newH}`,
-    );
-    svg.style.maxWidth = `${newW}px`;
-  } catch {
-    /* getBBox may fail */
+  // --- Update viewBox only if elements were expanded AND getBBox is valid ---
+  if (modified) {
+    try {
+      const bbox = svg.getBBox();
+      if (bbox.width > 10 && bbox.height > 10) {
+        const pad = 8;
+        svg.setAttribute(
+          "viewBox",
+          `${bbox.x - pad} ${bbox.y - pad} ${bbox.width + pad * 2} ${bbox.height + pad * 2}`,
+        );
+        svg.style.maxWidth = `${bbox.width + pad * 2}px`;
+      }
+    } catch {
+      /* getBBox may fail if SVG not yet laid out */
+    }
   }
 }
 
@@ -634,7 +674,7 @@ export function Editor() {
           if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
-          fixMermaidSvg(el);
+          fixMermaidSvg(el, isDark);
           mermaidSvgCache.current.set(prefix + source, el.innerHTML);
         } catch (e) {
           console.error(
