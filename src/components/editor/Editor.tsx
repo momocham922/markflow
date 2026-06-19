@@ -261,14 +261,13 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
       modified = true;
     }
 
-    // Darken section background colors (30% brightness)
     for (const r of sectionRects) {
       const fill = r.getAttribute("fill") || "";
       const m = fill.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
       if (m) {
         r.setAttribute(
           "fill",
-          `rgb(${Math.round(Number(m[1]) * 0.3)}, ${Math.round(Number(m[2]) * 0.3)}, ${Math.round(Number(m[3]) * 0.3)})`,
+          `rgba(${Math.round(Number(m[1]) * 0.25)}, ${Math.round(Number(m[2]) * 0.25)}, ${Math.round(Number(m[3]) * 0.25)}, 0.6)`,
         );
       }
       const stroke = r.getAttribute("stroke") || "";
@@ -276,7 +275,7 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
       if (sm) {
         r.setAttribute(
           "stroke",
-          `rgb(${Math.round(Number(sm[1]) * 0.4)}, ${Math.round(Number(sm[2]) * 0.4)}, ${Math.round(Number(sm[3]) * 0.4)})`,
+          `rgba(${Math.round(Number(sm[1]) * 0.35)}, ${Math.round(Number(sm[2]) * 0.35)}, ${Math.round(Number(sm[3]) * 0.35)}, 0.5)`,
         );
       }
     }
@@ -615,21 +614,18 @@ export function Editor() {
     restoreMermaidFromCache(container);
   }, [previewHtml, theme, previewVisible, restoreMermaidFromCache]);
 
-  useEffect(() => {
-    if (!previewVisible) return;
-    const isDark = theme === "dark";
-    initMermaid();
+  const renderMermaidRef = useRef<(() => void) | null>(null);
+  renderMermaidRef.current = () => {
     const container = previewRef.current;
     if (!container) return;
+    const isDark = theme === "dark";
     const prefix = isDark ? "d:" : "l:";
-    const mermaidDivs = container.querySelectorAll<HTMLElement>(
+    const divs = container.querySelectorAll<HTMLElement>(
       ".mermaid:not([data-mermaid-processed])",
     );
-    if (mermaidDivs.length === 0) return;
-    let cancelled = false;
+    if (divs.length === 0) return;
     (async () => {
-      for (const el of Array.from(mermaidDivs)) {
-        if (cancelled) break;
+      for (const el of Array.from(divs)) {
         if (
           !el.isConnected ||
           el.getAttribute("data-mermaid-processed") === "true"
@@ -645,10 +641,10 @@ export function Editor() {
         }
         try {
           const { svg, bindFunctions } = await mermaid.render(
-            `mermaid-${crypto.randomUUID()}`,
+            `mermaid-${Math.random().toString(36).slice(2)}`,
             source,
           );
-          if (cancelled || !el.isConnected) continue;
+          if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
           mermaidSvgCache.set(prefix + source, svg);
@@ -664,9 +660,11 @@ export function Editor() {
         }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+  };
+
+  useEffect(() => {
+    if (!previewVisible) return;
+    renderMermaidRef.current?.();
   }, [previewHtml, theme, previewVisible]);
 
   useEffect(() => {
@@ -675,6 +673,7 @@ export function Editor() {
     if (!container) return;
     const observer = new MutationObserver(() => {
       restoreMermaidFromCache(container);
+      requestAnimationFrame(() => renderMermaidRef.current?.());
     });
     observer.observe(container, { childList: true });
     return () => observer.disconnect();

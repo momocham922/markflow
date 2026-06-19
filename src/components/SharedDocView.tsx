@@ -1,11 +1,19 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { FileText, AlertCircle, ArrowLeft, Copy, Check, Pencil } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import {
+  FileText,
+  AlertCircle,
+  ArrowLeft,
+  Copy,
+  Check,
+  Pencil,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { fetchDocumentByToken } from "@/services/sharing";
 import { marked } from "marked";
 import hljs from "highlight.js";
+import mermaid from "mermaid";
+import { useAppStore } from "@/stores/app-store";
 
-/** Escape HTML special characters to prevent XSS */
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -15,19 +23,46 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-// Configure marked for preview — with XSS protections for external content
 const sharedRenderer = new marked.Renderer();
-sharedRenderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+sharedRenderer.code = function ({
+  text,
+  lang,
+}: {
+  text: string;
+  lang?: string;
+}) {
+  if (lang === "mermaid") {
+    const escaped = escapeHtml(text);
+    return `<div class="mermaid" data-mermaid-source="${escaped}"></div>`;
+  }
   const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
   const highlighted = hljs.highlight(text, { language }).value;
   return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
 };
-sharedRenderer.link = function ({ href, text }: { href: string; text: string }) {
+sharedRenderer.link = function ({
+  href,
+  text,
+}: {
+  href: string;
+  text: string;
+}) {
   if (/^(javascript|data|vbscript):/i.test(href.trim())) {
     return escapeHtml(text);
   }
   return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
 };
+
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "default",
+  themeVariables: {
+    fontFamily:
+      'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif',
+    fontSize: "14px",
+  },
+  flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
+  sequence: { useMaxWidth: true },
+});
 
 interface SharedDocViewProps {
   token: string;
@@ -35,6 +70,7 @@ interface SharedDocViewProps {
 }
 
 export function SharedDocView({ token, onBack }: SharedDocViewProps) {
+  const theme = useAppStore((s) => s.theme);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [doc, setDoc] = useState<{
@@ -47,6 +83,8 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const editPreviewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -70,11 +108,47 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     if (!doc) return "";
     const content = editing ? editContent : doc.content;
     try {
-      return marked.parse(content, { renderer: sharedRenderer, gfm: true, breaks: true }) as string;
+      return marked.parse(content, {
+        renderer: sharedRenderer,
+        gfm: true,
+        breaks: true,
+      }) as string;
     } catch {
       return content;
     }
   }, [doc, editing, editContent]);
+
+  useEffect(() => {
+    const container = contentRef.current || editPreviewRef.current;
+    if (!container) return;
+    const divs = container.querySelectorAll<HTMLElement>(
+      ".mermaid:not([data-mermaid-processed])",
+    );
+    if (divs.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const el of Array.from(divs)) {
+        if (cancelled || !el.isConnected) continue;
+        const source = el.getAttribute("data-mermaid-source") || "";
+        if (!source) continue;
+        el.setAttribute("data-mermaid-processed", "true");
+        try {
+          const { svg, bindFunctions } = await mermaid.render(
+            `mermaid-${Math.random().toString(36).slice(2)}`,
+            source,
+          );
+          if (cancelled || !el.isConnected) continue;
+          el.innerHTML = svg;
+          bindFunctions?.(el);
+        } catch (e) {
+          el.textContent = String(e);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [previewHtml, theme]);
 
   const handleCopy = async () => {
     if (!doc) return;
@@ -87,13 +161,19 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     if (!doc) return;
     setSaveError(null);
     try {
-      const { updateDoc, doc: firestoreDoc } = await import("firebase/firestore");
+      const { updateDoc, doc: firestoreDoc } =
+        await import("firebase/firestore");
       const { firestore } = await import("@/services/firebase");
       await updateDoc(firestoreDoc(firestore, "documents", doc.id), {
         content: editContent,
-        title: editContent.split("\n")[0]?.replace(/^#+\s*/, "").trim().slice(0, 50) || doc.title,
+        title:
+          editContent
+            .split("\n")[0]
+            ?.replace(/^#+\s*/, "")
+            .trim()
+            .slice(0, 50) || doc.title,
       });
-      setDoc((prev) => prev ? { ...prev, content: editContent } : null);
+      setDoc((prev) => (prev ? { ...prev, content: editContent } : null));
       setEditing(false);
     } catch {
       setSaveError("保存に失敗しました。編集権限がない可能性があります。");
@@ -103,7 +183,9 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-sm text-muted-foreground">Loading shared document...</div>
+        <div className="text-sm text-muted-foreground">
+          Loading shared document...
+        </div>
       </div>
     );
   }
@@ -113,7 +195,9 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
       <div className="flex h-full flex-col items-center justify-center gap-4">
         <AlertCircle className="h-10 w-10 text-muted-foreground" />
         <div className="text-center">
-          <h2 className="text-lg font-medium">{error || "Document not found"}</h2>
+          <h2 className="text-lg font-medium">
+            {error || "Document not found"}
+          </h2>
           <p className="mt-1 text-sm text-muted-foreground">
             The share link may be invalid, disabled, or expired.
           </p>
@@ -148,8 +232,8 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
           </span>
         </div>
         <div className="flex items-center gap-1.5">
-          {doc.permission === "edit" && (
-            editing ? (
+          {doc.permission === "edit" &&
+            (editing ? (
               <Button
                 variant="default"
                 size="sm"
@@ -169,15 +253,18 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
                 <Pencil className="h-3 w-3" />
                 Edit
               </Button>
-            )
-          )}
+            ))}
           <Button
             variant="outline"
             size="sm"
             className="h-7 gap-1.5 text-xs"
             onClick={handleCopy}
           >
-            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            {copied ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Copy className="h-3 w-3" />
+            )}
             Copy
           </Button>
         </div>
@@ -200,12 +287,14 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
               onChange={(e) => setEditContent(e.target.value)}
             />
             <div
+              ref={editPreviewRef}
               className="flex-1 overflow-auto prose prose-sm dark:prose-invert mx-auto max-w-3xl px-6 py-8"
               dangerouslySetInnerHTML={{ __html: previewHtml }}
             />
           </div>
         ) : (
           <div
+            ref={contentRef}
             className="prose prose-sm dark:prose-invert mx-auto max-w-3xl px-6 py-8"
             dangerouslySetInnerHTML={{ __html: previewHtml }}
           />
