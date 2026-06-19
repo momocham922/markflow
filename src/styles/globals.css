@@ -805,7 +805,7 @@ input::selection {
   padding-bottom: 1px;
 }
 
-/* Mermaid diagrams — container */
+/* Mermaid diagrams */
 .prose .mermaid {
   overflow-x: auto;
   margin: 1.5em 0;
@@ -816,10 +816,13 @@ input::selection {
   background: var(--tw-prose-pre-bg, rgba(0, 0, 0, 0.03));
   border-radius: 0.375rem;
 }
+.prose .mermaid[data-mermaid-processed] {
+  text-align: center;
+}
 .prose .mermaid svg {
+  max-width: 100%;
   height: auto;
 }
-/* Sequence diagram styling */
 .prose .mermaid .actor {
   stroke-width: 1.5px;
 }
@@ -839,40 +842,9 @@ input::selection {
   rx: 3px;
   ry: 3px;
 }
-/* Dark mode: force opaque fills + proper colors on all SVG shapes */
-.dark .prose .mermaid rect,
-.dark .prose .mermaid polygon,
-.dark .prose .mermaid circle,
-.dark .prose .mermaid .cluster rect {
-  fill-opacity: 1 !important;
-}
-.dark .prose .mermaid .labelBox,
-.dark .prose .mermaid .loopLine {
-  fill-opacity: 1 !important;
-}
-.dark .prose .mermaid text,
-.dark .prose .mermaid .nodeLabel,
-.dark .prose .mermaid .edgeLabel,
-.dark .prose .mermaid .label,
-.dark .prose .mermaid .messageText,
-.dark .prose .mermaid .loopText,
-.dark .prose .mermaid .labelText,
-.dark .prose .mermaid .actorMan tspan {
-  fill: #e2e8f0 !important;
-  color: #e2e8f0 !important;
-}
-.dark .prose .mermaid .edgePath .path,
-.dark .prose .mermaid .messageLine0,
-.dark .prose .mermaid .messageLine1,
-.dark .prose .mermaid line {
-  stroke: #94a3b8 !important;
-}
-.dark .prose .mermaid marker path {
-  fill: #94a3b8 !important;
-}
-.dark .prose .mermaid .edgeLabel rect {
-  fill: #1e293b !important;
-  opacity: 1 !important;
+/* Dark mode: invert the light-theme SVG */
+.dark .prose .mermaid[data-mermaid-processed] svg {
+  filter: invert(0.88) hue-rotate(180deg);
 }
 
 /* Collaboration cursor styles (y-codemirror.next) */

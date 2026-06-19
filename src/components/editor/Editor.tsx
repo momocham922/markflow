@@ -153,17 +153,17 @@ marked.use({ renderer });
 const MERMAID_FONT =
   'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
 
-function initMermaid(dark: boolean) {
+function initMermaid() {
   mermaid.initialize({
     startOnLoad: false,
-    theme: dark ? "dark" : "default",
+    theme: "default",
     themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
-    flowchart: { htmlLabels: true, padding: 15, useMaxWidth: false },
-    sequence: { useMaxWidth: false },
+    flowchart: { htmlLabels: true, padding: 25, useMaxWidth: true },
+    sequence: { useMaxWidth: true },
   });
 }
 
-initMermaid(false);
+initMermaid();
 
 export function Editor() {
   const {
@@ -440,48 +440,28 @@ export function Editor() {
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const mermaidSvgCache = useRef(new Map<string, string>());
-  const prevThemeRef = useRef(theme);
-
-  const restoreMermaidFromCache = useCallback(
-    (container: HTMLElement) => {
-      const isDark = theme === "dark";
-      const divs = container.querySelectorAll<HTMLElement>(
-        ".mermaid:not([data-mermaid-processed])",
-      );
-      for (const el of Array.from(divs)) {
-        const source = el.getAttribute("data-mermaid-source") || "";
-        if (!source) continue;
-        const cacheKey = `${isDark ? "d" : "l"}:${source}`;
-        const cached = mermaidSvgCache.current.get(cacheKey);
-        if (cached) {
-          el.setAttribute("data-mermaid-processed", "true");
-          el.innerHTML = cached;
-        }
+  const restoreMermaidFromCache = useCallback((container: HTMLElement) => {
+    const divs = container.querySelectorAll<HTMLElement>(
+      ".mermaid:not([data-mermaid-processed])",
+    );
+    for (const el of Array.from(divs)) {
+      const source = el.getAttribute("data-mermaid-source") || "";
+      if (!source) continue;
+      const cached = mermaidSvgCache.current.get(source);
+      if (cached) {
+        el.setAttribute("data-mermaid-processed", "true");
+        el.innerHTML = cached;
       }
-    },
-    [theme],
-  );
+    }
+  }, []);
 
   useLayoutEffect(() => {
-    const themeChanged = prevThemeRef.current !== theme;
-    prevThemeRef.current = theme;
     const container = previewRef.current;
     if (!container) return;
-
-    if (themeChanged) {
-      mermaidSvgCache.current.clear();
-      container
-        .querySelectorAll<HTMLElement>(".mermaid[data-mermaid-processed]")
-        .forEach((el) => el.removeAttribute("data-mermaid-processed"));
-      return;
-    }
-
     restoreMermaidFromCache(container);
-  }, [previewHtml, theme, restoreMermaidFromCache]);
+  }, [previewHtml, restoreMermaidFromCache]);
 
   useEffect(() => {
-    const isDark = theme === "dark";
-    initMermaid(isDark);
     const container = previewRef.current;
     if (!container) return;
 
@@ -500,14 +480,13 @@ export function Editor() {
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
         el.setAttribute("data-mermaid-processed", "true");
-        const cacheKey = `${isDark ? "d" : "l"}:${source}`;
         try {
           const { svg, bindFunctions } = await mermaid.render(
             `mermaid-${crypto.randomUUID()}`,
             source,
           );
           if (!el.isConnected) continue;
-          mermaidSvgCache.current.set(cacheKey, svg);
+          mermaidSvgCache.current.set(source, svg);
           el.innerHTML = svg;
           bindFunctions?.(el);
         } catch (e) {
@@ -520,7 +499,7 @@ export function Editor() {
         }
       }
     })();
-  }, [previewHtml, theme]);
+  }, [previewHtml]);
 
   useEffect(() => {
     const container = previewRef.current;
