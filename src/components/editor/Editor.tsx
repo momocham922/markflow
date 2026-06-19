@@ -69,7 +69,7 @@ const renderer = new marked.Renderer();
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   if (lang === "mermaid") {
     const escaped = escapeHtml(text);
-    return `<div class="mermaid" data-mermaid-source="${escaped}">${escaped}</div>`;
+    return `<div class="mermaid" data-mermaid-source="${escaped}"></div>`;
   }
   const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
   const highlighted = hljs.highlight(text, { language }).value;
@@ -158,14 +158,8 @@ function initMermaid(dark: boolean) {
     startOnLoad: false,
     theme: dark ? "dark" : "default",
     themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
-    flowchart: {
-      htmlLabels: true,
-      padding: 15,
-      nodeSpacing: 50,
-      rankSpacing: 50,
-      useMaxWidth: true,
-    },
-    sequence: { useMaxWidth: true },
+    flowchart: { htmlLabels: true, padding: 15, useMaxWidth: false },
+    sequence: { useMaxWidth: false },
   });
 }
 
@@ -448,8 +442,27 @@ export function Editor() {
   const mermaidSvgCache = useRef(new Map<string, string>());
   const prevThemeRef = useRef(theme);
 
+  const restoreMermaidFromCache = useCallback(
+    (container: HTMLElement) => {
+      const isDark = theme === "dark";
+      const divs = container.querySelectorAll<HTMLElement>(
+        ".mermaid:not([data-mermaid-processed])",
+      );
+      for (const el of Array.from(divs)) {
+        const source = el.getAttribute("data-mermaid-source") || "";
+        if (!source) continue;
+        const cacheKey = `${isDark ? "d" : "l"}:${source}`;
+        const cached = mermaidSvgCache.current.get(cacheKey);
+        if (cached) {
+          el.setAttribute("data-mermaid-processed", "true");
+          el.innerHTML = cached;
+        }
+      }
+    },
+    [theme],
+  );
+
   useLayoutEffect(() => {
-    const isDark = theme === "dark";
     const themeChanged = prevThemeRef.current !== theme;
     prevThemeRef.current = theme;
     const container = previewRef.current;
@@ -463,22 +476,8 @@ export function Editor() {
       return;
     }
 
-    const mermaidDivs = container.querySelectorAll<HTMLElement>(
-      ".mermaid:not([data-mermaid-processed])",
-    );
-    for (const el of Array.from(mermaidDivs)) {
-      const source =
-        el.getAttribute("data-mermaid-source") || el.textContent?.trim() || "";
-      if (!source) continue;
-      el.setAttribute("data-mermaid-source", source);
-      const cacheKey = `${isDark ? "d" : "l"}:${source}`;
-      const cached = mermaidSvgCache.current.get(cacheKey);
-      if (cached) {
-        el.setAttribute("data-mermaid-processed", "true");
-        el.innerHTML = cached;
-      }
-    }
-  }, [previewHtml, theme]);
+    restoreMermaidFromCache(container);
+  }, [previewHtml, theme, restoreMermaidFromCache]);
 
   useEffect(() => {
     const isDark = theme === "dark";
@@ -498,12 +497,8 @@ export function Editor() {
           el.getAttribute("data-mermaid-processed") === "true"
         )
           continue;
-        const source =
-          el.getAttribute("data-mermaid-source") ||
-          el.textContent?.trim() ||
-          "";
+        const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
-        el.setAttribute("data-mermaid-source", source);
         el.setAttribute("data-mermaid-processed", "true");
         const cacheKey = `${isDark ? "d" : "l"}:${source}`;
         try {
@@ -526,6 +521,16 @@ export function Editor() {
       }
     })();
   }, [previewHtml, theme]);
+
+  useEffect(() => {
+    const container = previewRef.current;
+    if (!container) return;
+    const observer = new MutationObserver(() => {
+      restoreMermaidFromCache(container);
+    });
+    observer.observe(container, { childList: true });
+    return () => observer.disconnect();
+  }, [restoreMermaidFromCache]);
 
   // Fetch OGP data for pending URLs collected during marked render
   useEffect(() => {
