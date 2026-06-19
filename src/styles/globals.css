@@ -814,7 +814,7 @@ input::selection {
   padding: 1em 0;
 }
 .dark .prose .mermaid {
-  background: rgba(255, 255, 255, 0.04);
+  background: #1e293b;
 }
 .prose .mermaid:not([data-mermaid-processed]) {
   min-height: 60px;
@@ -843,6 +843,74 @@ input::selection {
 .prose .mermaid .activation2 {
   rx: 3px;
   ry: 3px;
+}
+
+/* Mermaid dark mode — CSS overrides on default-theme SVG */
+.dark .prose .mermaid svg text,
+.dark .prose .mermaid svg tspan {
+  fill: #d1d5db !important;
+}
+.dark .prose .mermaid svg .actor {
+  fill: #334155 !important;
+  stroke: #64748b !important;
+}
+.dark .prose .mermaid svg text.actor > tspan {
+  fill: #f1f5f9 !important;
+}
+.dark .prose .mermaid svg rect.note {
+  fill: #422006 !important;
+  stroke: #92400e !important;
+}
+.dark .prose .mermaid svg .noteText,
+.dark .prose .mermaid svg .noteText > tspan {
+  fill: #fde68a !important;
+}
+.dark .prose .mermaid svg .actor-line {
+  stroke: #475569 !important;
+}
+.dark .prose .mermaid svg .messageLine0,
+.dark .prose .mermaid svg .messageLine1 {
+  stroke: #94a3b8 !important;
+}
+.dark .prose .mermaid svg .messageText {
+  fill: #e2e8f0 !important;
+}
+.dark .prose .mermaid svg .loopLine {
+  stroke: #64748b !important;
+}
+.dark .prose .mermaid svg .labelBox {
+  fill: #334155 !important;
+  stroke: #64748b !important;
+}
+.dark .prose .mermaid svg .labelText,
+.dark .prose .mermaid svg .labelText > tspan {
+  fill: #f1f5f9 !important;
+}
+.dark .prose .mermaid svg .loopText,
+.dark .prose .mermaid svg .loopText > tspan {
+  fill: #cbd5e1 !important;
+}
+.dark .prose .mermaid svg .activation0,
+.dark .prose .mermaid svg .activation1,
+.dark .prose .mermaid svg .activation2 {
+  fill: #475569 !important;
+  stroke: #64748b !important;
+}
+.dark .prose .mermaid svg .sequenceNumber {
+  fill: #f9fafb !important;
+}
+.dark .prose .mermaid svg marker path {
+  fill: #94a3b8 !important;
+  stroke: #94a3b8 !important;
+}
+.dark .prose .mermaid svg .node rect,
+.dark .prose .mermaid svg .node circle,
+.dark .prose .mermaid svg .node polygon {
+  fill: #334155 !important;
+  stroke: #64748b !important;
+}
+.dark .prose .mermaid svg .edgePath .path {
+  stroke: #94a3b8 !important;
 }
 
 /* Collaboration cursor styles (y-codemirror.next) */

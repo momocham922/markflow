@@ -153,68 +153,37 @@ marked.use({ renderer });
 const MERMAID_FONT =
   'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
 
-const DARK_THEME_VARS = {
-  fontFamily: MERMAID_FONT,
-  fontSize: "14px",
-  background: "transparent",
-  primaryColor: "#374151",
-  primaryTextColor: "#f3f4f6",
-  primaryBorderColor: "#6b7280",
-  secondaryColor: "#1f2937",
-  secondaryTextColor: "#e5e7eb",
-  secondaryBorderColor: "#4b5563",
-  tertiaryColor: "#111827",
-  tertiaryTextColor: "#d1d5db",
-  tertiaryBorderColor: "#4b5563",
-  lineColor: "#9ca3af",
-  textColor: "#e5e7eb",
-  mainBkg: "#1f2937",
-  nodeBkg: "#374151",
-  nodeTextColor: "#f3f4f6",
-  nodeBorder: "#6b7280",
-  edgeLabelBackground: "#1f2937",
-  clusterBkg: "#1f2937",
-  clusterBorder: "#4b5563",
-  noteBkgColor: "#713f12",
-  noteTextColor: "#fef9c3",
-  noteBorderColor: "#a16207",
-  actorBkg: "#374151",
-  actorBorder: "#6b7280",
-  actorTextColor: "#f9fafb",
-  actorLineColor: "#4b5563",
-  signalColor: "#9ca3af",
-  signalTextColor: "#e5e7eb",
-  labelBoxBkgColor: "#374151",
-  labelBoxBorderColor: "#6b7280",
-  labelTextColor: "#f3f4f6",
-  loopTextColor: "#d1d5db",
-  activationBorderColor: "#6b7280",
-  activationBkgColor: "#4b5563",
-  sequenceNumberColor: "#f9fafb",
-};
-
-function initMermaid(dark: boolean) {
+function initMermaid() {
   mermaid.initialize({
     startOnLoad: false,
-    theme: dark ? "base" : "default",
-    themeVariables: dark
-      ? DARK_THEME_VARS
-      : { fontFamily: MERMAID_FONT, fontSize: "14px" },
+    theme: "default",
+    themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
     flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
     sequence: { useMaxWidth: true },
   });
 }
 
-initMermaid(false);
+initMermaid();
+
+// Module-level cache — survives component remounts
+const mermaidSvgCache = new Map<string, string>();
 
 function fixMermaidSvg(el: HTMLElement, dark: boolean) {
   const svg = el.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
 
   let modified = false;
+  const SKIP_CLASSES = new Set([
+    "actor",
+    "note",
+    "activation0",
+    "activation1",
+    "activation2",
+  ]);
+  const allRects = Array.from(svg.querySelectorAll("rect"));
 
   // --- Expand note rects to fit CJK text ---
-  for (const noteRect of Array.from(svg.querySelectorAll("rect.note"))) {
+  for (const noteRect of allRects.filter((r) => r.classList.contains("note"))) {
     const g = noteRect.parentElement;
     if (!g) continue;
     const textEls = g.querySelectorAll("text");
@@ -233,7 +202,7 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
           maxTr = Math.max(maxTr, bb.x + bb.width);
         }
       } catch {
-        /* getBBox may fail if not visible */
+        /* getBBox fails if not visible */
       }
     }
     if (maxTr === -Infinity) continue;
@@ -248,69 +217,67 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
     }
   }
 
-  // --- Normalize background section rect widths ---
-  // Identify section rects by exclusion: large rects that aren't actors/notes/activations.
-  const SKIP = new Set([
-    "actor",
-    "note",
-    "activation0",
-    "activation1",
-    "activation2",
-  ]);
-  const allRects = Array.from(svg.querySelectorAll("rect"));
-  const largeRects = allRects.filter((r) => {
-    for (const c of r.classList) if (SKIP.has(c)) return false;
-    const w = parseFloat(r.getAttribute("width") || "0");
-    const h = parseFloat(r.getAttribute("height") || "0");
-    return w > 150 && h > 30;
+  // --- Identify section background rects by rgb() fill (from `rect rgb(...)` directive) ---
+  const sectionRects = allRects.filter((r) => {
+    for (const c of r.classList) if (SKIP_CLASSES.has(c)) return false;
+    const fill = r.getAttribute("fill") || "";
+    return /^rgba?\s*\(/i.test(fill);
   });
 
-  if (largeRects.length >= 2) {
-    // The largest rect is the main background — exclude it
+  // --- Normalize section rect widths ---
+  if (sectionRects.length >= 2) {
+    let minX = Infinity;
+    let maxR = 0;
+    for (const r of sectionRects) {
+      const x = parseFloat(r.getAttribute("x") || "0");
+      const w = parseFloat(r.getAttribute("width") || "0");
+      minX = Math.min(minX, x);
+      maxR = Math.max(maxR, x + w);
+    }
+    for (const r of sectionRects) {
+      r.setAttribute("x", String(minX));
+      r.setAttribute("width", String(maxR - minX));
+    }
+    modified = true;
+  }
+
+  // --- Dark mode: transparent main bg + darken section colors ---
+  if (dark) {
+    // Make the largest rect (main background) transparent
+    let mainBg: Element | null = null;
     let maxArea = 0;
-    let mainIdx = 0;
-    largeRects.forEach((r, i) => {
+    for (const r of allRects) {
+      if (sectionRects.includes(r)) continue;
       const a =
         parseFloat(r.getAttribute("width") || "0") *
         parseFloat(r.getAttribute("height") || "0");
       if (a > maxArea) {
         maxArea = a;
-        mainIdx = i;
+        mainBg = r;
       }
-    });
-
-    const sectionRects = largeRects.filter((_, i) => i !== mainIdx);
-    if (sectionRects.length >= 2) {
-      let minX = Infinity;
-      let maxR = 0;
-      for (const r of sectionRects) {
-        const x = parseFloat(r.getAttribute("x") || "0");
-        const w = parseFloat(r.getAttribute("width") || "0");
-        minX = Math.min(minX, x);
-        maxR = Math.max(maxR, x + w);
-      }
-      for (const r of sectionRects) {
-        r.setAttribute("x", String(minX));
-        r.setAttribute("width", String(maxR - minX));
-      }
+    }
+    if (mainBg) {
+      mainBg.setAttribute("fill", "transparent");
       modified = true;
     }
 
-    // In dark mode, darken user-specified section background colors
-    if (dark) {
-      const targets =
-        sectionRects.length >= 2 ? sectionRects : largeRects.slice(1);
-      for (const r of targets) {
-        const fill = r.getAttribute("fill") || "";
-        const m = fill.match(
-          /rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)/,
+    // Darken section background colors (30% brightness)
+    for (const r of sectionRects) {
+      const fill = r.getAttribute("fill") || "";
+      const m = fill.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (m) {
+        r.setAttribute(
+          "fill",
+          `rgb(${Math.round(Number(m[1]) * 0.3)}, ${Math.round(Number(m[2]) * 0.3)}, ${Math.round(Number(m[3]) * 0.3)})`,
         );
-        if (m) {
-          const dr = Math.round(Number(m[1]) * 0.3);
-          const dg = Math.round(Number(m[2]) * 0.3);
-          const db = Math.round(Number(m[3]) * 0.3);
-          r.setAttribute("fill", `rgb(${dr}, ${dg}, ${db})`);
-        }
+      }
+      const stroke = r.getAttribute("stroke") || "";
+      const sm = stroke.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (sm) {
+        r.setAttribute(
+          "stroke",
+          `rgb(${Math.round(Number(sm[1]) * 0.4)}, ${Math.round(Number(sm[2]) * 0.4)}, ${Math.round(Number(sm[3]) * 0.4)})`,
+        );
       }
     }
   }
@@ -607,7 +574,6 @@ export function Editor() {
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
-  const mermaidSvgCache = useRef(new Map<string, string>());
   const prevThemeRef = useRef(theme);
 
   const restoreMermaidFromCache = useCallback(
@@ -619,7 +585,7 @@ export function Editor() {
       for (const el of Array.from(divs)) {
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
-        const cached = mermaidSvgCache.current.get(prefix + source);
+        const cached = mermaidSvgCache.get(prefix + source);
         if (cached) {
           el.setAttribute("data-mermaid-processed", "true");
           el.innerHTML = cached;
@@ -648,7 +614,7 @@ export function Editor() {
 
   useEffect(() => {
     const isDark = theme === "dark";
-    initMermaid(isDark);
+    initMermaid();
     const container = previewRef.current;
     if (!container) return;
     const prefix = isDark ? "d:" : "l:";
@@ -674,8 +640,14 @@ export function Editor() {
           if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
-          fixMermaidSvg(el, isDark);
-          mermaidSvgCache.current.set(prefix + source, el.innerHTML);
+          // Cache original SVG first (guaranteed valid), then try post-processing
+          mermaidSvgCache.set(prefix + source, svg);
+          try {
+            fixMermaidSvg(el, isDark);
+            mermaidSvgCache.set(prefix + source, el.innerHTML);
+          } catch {
+            /* fixMermaidSvg failed — cache still has original SVG */
+          }
         } catch (e) {
           console.error(
             "[mermaid] render failed:",
