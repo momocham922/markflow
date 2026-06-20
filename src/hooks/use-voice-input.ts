@@ -217,7 +217,9 @@ export function useVoiceInput({
           if (isHallucination) {
             console.warn("[voice] Suppressed hallucination:", text);
           } else {
-            transcriptRef.current += (transcriptRef.current ? " " : "") + text;
+            const displayText = data.taggedText || text;
+            transcriptRef.current +=
+              (transcriptRef.current ? " " : "") + displayText;
             setFullTranscript(transcriptRef.current);
             setInterimText(text);
             onTranscriptRef.current?.(text);

@@ -28,7 +28,7 @@ function extractHints(text: string): string[] {
   if (katakana) katakana.forEach((w) => hints.add(w));
   const english = text.match(/[A-Z][a-zA-Z]{2,}/g);
   if (english) english.forEach((w) => hints.add(w));
-  return Array.from(hints).slice(0, 50);
+  return Array.from(hints).slice(0, 500);
 }
 
 function formatDuration(seconds: number): string {
@@ -166,7 +166,9 @@ export function VoicePanel({
       const hasNewPart = newPart.length > 0;
 
       const sttCorrection =
-        "The transcript is from speech-to-text and may contain misrecognitions, especially for proper nouns, brand names, technical terms, personal names, and place names. Correct obvious errors based on context. ";
+        "The transcript is from speech-to-text and may contain misrecognitions, especially for proper nouns, brand names, technical terms, personal names, and place names. Correct obvious errors based on context. " +
+        "If the transcript contains speaker labels like [Speaker 1], [Speaker 2], etc., preserve speaker attribution in the output (e.g., use bold speaker names or attribute quotes). " +
+        "Speaker labels may not be consistent across segments — use context to unify speakers when possible. ";
 
       let systemPrompt: string;
       let userContent: string;

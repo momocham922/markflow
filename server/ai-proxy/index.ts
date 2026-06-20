@@ -9,7 +9,7 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 const NANOBANANA_MODEL =
   process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
 const STT_LOCATION = process.env.STT_LOCATION || "us-central1";
-const STT_MODEL = process.env.STT_MODEL || "chirp_2";
+const STT_MODEL = process.env.STT_MODEL || "chirp_3";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
@@ -103,11 +103,22 @@ const server = http.createServer(async (req, res) => {
 
       const hints: string[] | undefined = parsed.hints;
 
+      const enableDiarization = parsed.diarization !== false;
+
       const sttConfig: Record<string, unknown> = {
         model: STT_MODEL,
         languageCodes: [language],
         features: {
           enableAutomaticPunctuation: true,
+          ...(enableDiarization && {
+            diarizationConfig: {
+              minSpeakerCount: parsed.minSpeakers || 1,
+              maxSpeakerCount: parsed.maxSpeakers || 6,
+            },
+          }),
+        },
+        denoiserConfig: {
+          denoiseAudio: true,
         },
       };
 
@@ -116,7 +127,7 @@ const server = http.createServer(async (req, res) => {
           phraseSets: [
             {
               phrases: hints
-                .slice(0, 50)
+                .slice(0, 500)
                 .map((h: string) => ({ value: h, boost: 10 })),
             },
           ],
@@ -164,8 +175,38 @@ const server = http.createServer(async (req, res) => {
           ?.map((r: any) => r.alternatives?.[0]?.transcript || "")
           .join("") || "";
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const lastResult = sttData.results?.[sttData.results.length - 1];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words: Array<{ word: string; speakerLabel: string }> =
+        lastResult?.alternatives?.[0]?.words || [];
+
+      let taggedText = transcript;
+      const speakerLabels = new Set(
+        words.map((w) => w.speakerLabel).filter(Boolean),
+      );
+      if (speakerLabels.size > 1) {
+        let currentSpeaker = "";
+        const parts: string[] = [];
+        for (const w of words) {
+          const label = w.speakerLabel || "";
+          if (label && label !== currentSpeaker) {
+            currentSpeaker = label;
+            parts.push(`\n[Speaker ${label}] `);
+          }
+          parts.push(w.word);
+        }
+        taggedText = parts.join("").trim();
+      }
+
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ text: transcript }));
+      res.end(
+        JSON.stringify({
+          text: transcript,
+          taggedText: speakerLabels.size > 1 ? taggedText : undefined,
+          speakerCount: speakerLabels.size,
+        }),
+      );
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
