@@ -1,5 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Mic, MicOff, Sparkles, Trash2, Loader2, Monitor } from "lucide-react";
+import {
+  Mic,
+  MicOff,
+  Sparkles,
+  Trash2,
+  Loader2,
+  Monitor,
+  Info,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
@@ -20,9 +28,15 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: VoicePanelProps) {
+export function VoicePanel({
+  onInsertMarkdown,
+  onSetContent,
+  documentContent,
+}: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [voiceInfo, setVoiceInfo] = useState<string | null>(null);
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [autoStructureInterval, setAutoStructureInterval] = useState<number>(0);
   const [autoElapsed, setAutoElapsed] = useState(0);
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -39,9 +53,11 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
   useEffect(() => {
     if (!isTauri) return;
     import("@tauri-apps/api/core").then(({ invoke }) => {
-      invoke<string[]>("list_audio_devices").then((devices) => {
-        setAudioDevices(devices);
-      }).catch(() => {});
+      invoke<string[]>("list_audio_devices")
+        .then((devices) => {
+          setAudioDevices(devices);
+        })
+        .catch(() => {});
     });
   }, []);
 
@@ -64,28 +80,52 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
     language: "ja-JP",
     deviceName: selectedDevice || undefined,
     systemAudio,
-    onError: (msg) => setVoiceError(msg),
-    onMaxDuration: () => setVoiceError("Recording stopped: maximum duration (60 min) reached."),
+    onError: (msg) => {
+      setVoiceError(msg);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = setTimeout(() => setVoiceError(null), 8000);
+    },
+    onInfo: (msg) => setVoiceInfo(msg),
+    onMaxDuration: () =>
+      setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
 
   useEffect(() => {
-    if (!isRecording || !isTauri) { setAudioLevel(0); return; }
+    if (!isRecording || !isTauri) {
+      setAudioLevel(0);
+      return;
+    }
     const id = setInterval(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const level = await invoke<number>("get_voice_level");
         setAudioLevel(level);
-      } catch { setAudioLevel(0); }
+      } catch {
+        setAudioLevel(0);
+      }
     }, 100);
-    return () => { clearInterval(id); setAudioLevel(0); };
+    return () => {
+      clearInterval(id);
+      setAudioLevel(0);
+    };
   }, [isRecording]);
 
   // Keep refs in sync
-  useEffect(() => { fullTranscriptRef.current = fullTranscript; }, [fullTranscript]);
-  useEffect(() => { structuringRef.current = structuring; }, [structuring]);
-  useEffect(() => { onInsertRef.current = onInsertMarkdown; }, [onInsertMarkdown]);
-  useEffect(() => { onSetContentRef.current = onSetContent; }, [onSetContent]);
-  useEffect(() => { docContentRef.current = documentContent; }, [documentContent]);
+  useEffect(() => {
+    fullTranscriptRef.current = fullTranscript;
+  }, [fullTranscript]);
+  useEffect(() => {
+    structuringRef.current = structuring;
+  }, [structuring]);
+  useEffect(() => {
+    onInsertRef.current = onInsertMarkdown;
+  }, [onInsertMarkdown]);
+  useEffect(() => {
+    onSetContentRef.current = onSetContent;
+  }, [onSetContent]);
+  useEffect(() => {
+    docContentRef.current = documentContent;
+  }, [documentContent]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -123,8 +163,7 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
           "Integrate the new transcript into the existing document. " +
           "Add new sections, expand existing sections, or reorganize as needed. " +
           "Keep the same language. Output the COMPLETE updated Markdown document — do not truncate.";
-        userContent =
-          `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${newPart}\n\nIntegrate this new content into the existing document. Output the complete updated document.`;
+        userContent = `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${newPart}\n\nIntegrate this new content into the existing document. Output the complete updated document.`;
       } else if (hasExisting) {
         systemPrompt =
           "You are a document assistant. You will receive an EXISTING document and a voice transcript. " +
@@ -132,8 +171,7 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
           "Preserve the existing document's structure and content, and integrate the transcript naturally. " +
           "Update, expand, or reorganize sections as needed. " +
           "Keep the same language. Do NOT add generic titles. Output the COMPLETE Markdown — do not truncate.";
-        userContent =
-          `## Existing Document\n\n${existingDoc}\n\n## Voice Transcript\n\n${transcript}\n\nMerge these into one cohesive Markdown document. Output the complete document without truncation.`;
+        userContent = `## Existing Document\n\n${existingDoc}\n\n## Voice Transcript\n\n${transcript}\n\nMerge these into one cohesive Markdown document. Output the complete document without truncation.`;
       } else {
         systemPrompt =
           "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
@@ -142,8 +180,7 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
           "Keep the same language as the transcript. " +
           "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
           "Output ONLY the structured Markdown content, no explanations or meta-commentary. Do not truncate.";
-        userContent =
-          `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`;
+        userContent = `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`;
       }
 
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
@@ -213,20 +250,28 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
   if (!isSupported) {
     return (
       <div className="border-t border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground text-center">
-        Microphone access is not available. Please check your browser/app permissions.
+        Microphone access is not available. Please check your browser/app
+        permissions.
       </div>
     );
   }
 
-  const progress = autoStructureInterval > 0 && isRecording
-    ? autoElapsed / autoStructureInterval
-    : 0;
+  const progress =
+    autoStructureInterval > 0 && isRecording
+      ? autoElapsed / autoStructureInterval
+      : 0;
 
   return (
     <div className="border-t border-border bg-background">
       {voiceError && (
         <div className="px-4 py-2 text-xs text-destructive bg-destructive/10 border-b border-destructive/20">
           {voiceError}
+        </div>
+      )}
+      {voiceInfo && !voiceError && (
+        <div className="flex items-center gap-1.5 px-4 py-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800/40">
+          <Info className="h-3 w-3 shrink-0" />
+          {voiceInfo}
         </div>
       )}
       {(fullTranscript || isRecording) && (
@@ -273,7 +318,11 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
           variant={isRecording ? "destructive" : "default"}
           size="sm"
           className="gap-1.5"
-          onClick={() => { setVoiceError(null); toggle(); }}
+          onClick={() => {
+            setVoiceError(null);
+            setVoiceInfo(null);
+            toggle();
+          }}
         >
           {isRecording ? (
             <>
@@ -296,13 +345,20 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
         )}
 
         {isRecording && (
-          <div className="flex items-end gap-px h-4" title={`Level: ${Math.round(audioLevel * 100)}%`}>
+          <div
+            className="flex items-end gap-px h-4"
+            title={`Level: ${Math.round(audioLevel * 100)}%`}
+          >
             {[0.15, 0.3, 0.45, 0.6, 0.75].map((threshold, i) => (
               <div
                 key={i}
                 className={`w-[3px] rounded-sm transition-all duration-75 ${
                   audioLevel >= threshold
-                    ? threshold >= 0.75 ? "bg-red-500" : threshold >= 0.45 ? "bg-amber-400" : "bg-emerald-500"
+                    ? threshold >= 0.75
+                      ? "bg-red-500"
+                      : threshold >= 0.45
+                        ? "bg-amber-400"
+                        : "bg-emerald-500"
                     : "bg-muted"
                 }`}
                 style={{ height: `${4 + i * 3}px` }}
@@ -319,9 +375,15 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
             size="icon"
             className="h-7 w-7"
             onClick={() => setSystemAudio((v) => !v)}
-            title={systemAudio ? "システム音声 ON（クリックで無効化）" : "システム音声も録音（会議等）"}
+            title={
+              systemAudio
+                ? "システム音声 ON（クリックで無効化）"
+                : "システム音声も録音（会議等）"
+            }
           >
-            <Monitor className={`h-3.5 w-3.5 ${systemAudio ? "text-amber-500" : ""}`} />
+            <Monitor
+              className={`h-3.5 w-3.5 ${systemAudio ? "text-amber-500" : ""}`}
+            />
           </Button>
         )}
 
@@ -334,7 +396,9 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
           >
             <option value="">Default mic</option>
             {audioDevices.map((d) => (
-              <option key={d} value={d}>{d}</option>
+              <option key={d} value={d}>
+                {d}
+              </option>
             ))}
           </select>
         )}
@@ -373,7 +437,10 @@ export function VoicePanel({ onInsertMarkdown, onSetContent, documentContent }: 
           variant="ghost"
           size="icon"
           className={isMobile ? "h-11 w-11" : "h-7 w-7"}
-          onClick={() => { clearTranscript(); lastStructuredRef.current = ""; }}
+          onClick={() => {
+            clearTranscript();
+            lastStructuredRef.current = "";
+          }}
           disabled={!fullTranscript}
           title="Clear transcript"
         >

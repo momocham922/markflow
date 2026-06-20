@@ -11,7 +11,8 @@ const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const useTauriAudio = isTauri && !isAndroid;
-const getAndroidAudio = () => isAndroid ? (window as unknown as Record<string, any>).AndroidAudio : null;
+const getAndroidAudio = () =>
+  isAndroid ? (window as unknown as Record<string, any>).AndroidAudio : null;
 
 export interface UseVoiceInputOptions {
   language?: string;
@@ -19,6 +20,7 @@ export interface UseVoiceInputOptions {
   systemAudio?: boolean;
   onTranscript?: (text: string) => void;
   onError?: (error: string) => void;
+  onInfo?: (message: string) => void;
   onMaxDuration?: () => void;
 }
 
@@ -52,12 +54,17 @@ export function useVoiceInput({
   systemAudio,
   onTranscript,
   onError,
+  onInfo,
   onMaxDuration,
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [interimText, setInterimText] = useState("");
   const savedTranscript = (() => {
-    try { return localStorage.getItem("voice_transcript") || ""; } catch { return ""; }
+    try {
+      return localStorage.getItem("voice_transcript") || "";
+    } catch {
+      return "";
+    }
   })();
   const [fullTranscript, setFullTranscript] = useState(savedTranscript);
   const [duration, setDuration] = useState(0);
@@ -70,10 +77,13 @@ export function useVoiceInput({
   const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
-  const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const transcriptRef = useRef(savedTranscript);
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
+  const onInfoRef = useRef(onInfo);
   const onMaxDurationRef = useRef(onMaxDuration);
 
   useEffect(() => {
@@ -82,6 +92,9 @@ export function useVoiceInput({
   useEffect(() => {
     onErrorRef.current = onError;
   }, [onError]);
+  useEffect(() => {
+    onInfoRef.current = onInfo;
+  }, [onInfo]);
   useEffect(() => {
     onMaxDurationRef.current = onMaxDuration;
   }, [onMaxDuration]);
@@ -100,7 +113,9 @@ export function useVoiceInput({
       try {
         const user = useAuthStore.getState().user;
         if (!user) {
-          console.warn("[voice] No authenticated user — skipping transcription");
+          console.warn(
+            "[voice] No authenticated user — skipping transcription",
+          );
           return;
         }
         const token = await user.getIdToken();
@@ -110,7 +125,9 @@ export function useVoiceInput({
         if (!base64) return;
 
         const byteLen = Math.round((base64.length * 3) / 4);
-        console.log(`[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`);
+        console.log(
+          `[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`,
+        );
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 60_000);
@@ -149,26 +166,52 @@ export function useVoiceInput({
           // Multi-pattern hallucination suppression
           const isHallucination = (() => {
             // 1. Repeated short phrases (2+ repetitions): え、え / はい。はい / ん、ん
-            if (text.length <= 40 && /^(.{1,5}[、。,.!？\s]*)\1{1,}$/.test(text)) return true;
+            if (
+              text.length <= 40 &&
+              /^(.{1,5}[、。,.!？\s]*)\1{1,}$/.test(text)
+            )
+              return true;
             // 2. Single filler character repeated with punctuation
             if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
             // 3. Common STT silence hallucinations (Japanese)
-            if (/^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(text)) return true;
+            if (
+              /^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(
+                text,
+              )
+            )
+              return true;
             // 4. Only numbers/punctuation (noise artifacts)
             if (/^[\d、。,.\s-]+$/.test(text)) return true;
             // 5. Very short text (1-2 chars) that's just a filler
-            if (text.length <= 2 && /^[えあうんはへほおいのでがをにと]$/.test(text)) return true;
+            if (
+              text.length <= 2 &&
+              /^[えあうんはへほおいのでがをにと]$/.test(text)
+            )
+              return true;
             // 6. Standalone backchannel responses (相槌)
-            if (/^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお)[、。.!？\s]*$/.test(text)) return true;
+            if (
+              /^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお)[、。.!？\s]*$/.test(
+                text,
+              )
+            )
+              return true;
             // 7. Repeated common words with varied punctuation
-            if (text.length <= 30 && /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(text) && !/[ぁ-ん]{3,}/.test(text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""))) return true;
+            if (
+              text.length <= 30 &&
+              /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(
+                text,
+              ) &&
+              !/[ぁ-ん]{3,}/.test(
+                text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""),
+              )
+            )
+              return true;
             return false;
           })();
           if (isHallucination) {
             console.warn("[voice] Suppressed hallucination:", text);
           } else {
-            transcriptRef.current +=
-              (transcriptRef.current ? " " : "") + text;
+            transcriptRef.current += (transcriptRef.current ? " " : "") + text;
             setFullTranscript(transcriptRef.current);
             setInterimText(text);
             onTranscriptRef.current?.(text);
@@ -185,7 +228,9 @@ export function useVoiceInput({
   const stopRecording = useCallback(() => {
     const androidBridge = getAndroidAudio();
     if (androidBridge) {
-      try { androidBridge.stop(); } catch {}
+      try {
+        androidBridge.stop();
+      } catch {}
     } else if (useTauriAudio) {
       import("@tauri-apps/api/core").then(({ invoke }) => {
         invoke("stop_voice_recording").catch(() => {});
@@ -221,11 +266,15 @@ export function useVoiceInput({
       if (isAndroid) {
         // Android: native AudioRecord via JS bridge
         if (!androidAudio) {
-          throw new Error("音声キャプチャの初期化中です。数秒後にもう一度お試しください。");
+          throw new Error(
+            "音声キャプチャの初期化中です。数秒後にもう一度お試しください。",
+          );
         }
         const bridge = androidAudio;
         if (!bridge.hasPermission()) {
-          throw new Error("マイクへのアクセスが拒否されました。設定 → アプリ → MarkFlow → 権限 でマイクを許可してください。");
+          throw new Error(
+            "マイクへのアクセスが拒否されました。設定 → アプリ → MarkFlow → 権限 でマイクを許可してください。",
+          );
         }
         const ok = bridge.start();
         if (!ok) throw new Error("マイクの起動に失敗しました。");
@@ -233,18 +282,30 @@ export function useVoiceInput({
           try {
             const chunk = bridge.getChunk();
             if (chunk) {
-              await sendChunk(chunk, { encoding: "LINEAR16", sampleRate: 16000 });
+              await sendChunk(chunk, {
+                encoding: "LINEAR16",
+                sampleRate: 16000,
+              });
             }
-          } catch (e) { console.error("[voice] Android chunk error:", e); }
+          } catch (e) {
+            console.error("[voice] Android chunk error:", e);
+          }
         }, CHUNK_MS);
       } else if (useTauriAudio) {
         // Rust audio capture (macOS/Windows)
         const { invoke } = await import("@tauri-apps/api/core");
-        const result = await invoke<string>("start_voice_recording", { deviceName: deviceName || null, systemAudio: systemAudio || false });
+        const result = await invoke<string>("start_voice_recording", {
+          deviceName: deviceName || null,
+          systemAudio: systemAudio || false,
+        });
         if (result && result.startsWith("mic_unavailable:")) {
-          onErrorRef.current?.("マイクが見つかりません（システム音声のみで録音中）");
+          onInfoRef.current?.(
+            "マイクが見つかりません（システム音声のみで録音中）",
+          );
         } else if (result && result.startsWith("sys_audio_failed:")) {
-          onErrorRef.current?.(`システム音声の録音に失敗しました（マイクのみで録音中）: ${result.slice("sys_audio_failed:".length)}`);
+          onInfoRef.current?.(
+            "システム音声の録音に失敗しました（マイクのみで録音中）",
+          );
         }
 
         // Poll Rust buffer every CHUNK_MS and send to transcription API.
@@ -277,7 +338,9 @@ export function useVoiceInput({
               sample_rate: number;
             } | null>("get_voice_chunk");
             if (result) {
-              console.log(`[voice] Got chunk from Rust: ${result.audio.length} base64 chars, rate=${result.sample_rate}`);
+              console.log(
+                `[voice] Got chunk from Rust: ${result.audio.length} base64 chars, rate=${result.sample_rate}`,
+              );
               if (chunkQueue.length >= MAX_QUEUE) {
                 console.warn("[voice] Queue full, dropping oldest chunk");
                 chunkQueue.shift();
@@ -311,7 +374,9 @@ export function useVoiceInput({
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (msg.includes("Permission") || msg.includes("NotAllowed")) {
-            throw new Error("マイクへのアクセスが拒否されました。設定でマイク権限を許可してください。");
+            throw new Error(
+              "マイクへのアクセスが拒否されました。設定でマイク権限を許可してください。",
+            );
           }
           throw new Error(`マイクの起動に失敗しました: ${msg}`);
         }
@@ -393,7 +458,8 @@ export function useVoiceInput({
 
   useEffect(() => {
     try {
-      if (fullTranscript) localStorage.setItem("voice_transcript", fullTranscript);
+      if (fullTranscript)
+        localStorage.setItem("voice_transcript", fullTranscript);
       else localStorage.removeItem("voice_transcript");
     } catch {}
   }, [fullTranscript]);
