@@ -13,6 +13,42 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Downgrade guard: compare new version against current version in package.json
+CURRENT_VERSION=$(grep '"version"' "$ROOT/package.json" | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/')
+
+version_to_comparable() {
+  local v="$1"
+  local base=$(echo "$v" | sed 's/-.*//')
+  local pre=$(echo "$v" | grep -o '\-.*' || echo "")
+  local major=$(echo "$base" | cut -d. -f1)
+  local minor=$(echo "$base" | cut -d. -f2)
+  local patch=$(echo "$base" | cut -d. -f3)
+  local pre_num=999999
+  if [ -n "$pre" ]; then
+    pre_num=$(echo "$pre" | grep -o '[0-9]*$' || echo "0")
+  fi
+  printf "%06d%06d%06d%06d" "$major" "$minor" "$patch" "$pre_num"
+}
+
+CURRENT_CMP=$(version_to_comparable "$CURRENT_VERSION")
+NEW_CMP=$(version_to_comparable "$VERSION")
+
+if [ "$NEW_CMP" -lt "$CURRENT_CMP" ]; then
+  echo "ERROR: Version downgrade detected!"
+  echo "  Current: $CURRENT_VERSION"
+  echo "  New:     $VERSION"
+  echo "  Bump target must be greater than current version."
+  exit 1
+fi
+
+if [ "$NEW_CMP" -eq "$CURRENT_CMP" ]; then
+  echo "ERROR: Version unchanged!"
+  echo "  Current: $CURRENT_VERSION"
+  echo "  New:     $VERSION"
+  echo "  Same version won't trigger auto-updater."
+  exit 1
+fi
+
 # 1. package.json
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$ROOT/package.json"
 
