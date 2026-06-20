@@ -17,7 +17,9 @@ interface PublishOptions {
 }
 
 /** Extract headings from markdown for TOC generation */
-function extractHeadings(html: string): { level: number; text: string; id: string }[] {
+function extractHeadings(
+  html: string,
+): { level: number; text: string; id: string }[] {
   const headings: { level: number; text: string; id: string }[] = [];
   const re = /<h([1-4])[^>]*id="([^"]*)"[^>]*>(.*?)<\/h[1-4]>/gi;
   let m;
@@ -50,7 +52,9 @@ function buildThemeVars(theme: PreviewTheme, isDark: boolean): string {
 }
 
 /** Generate TOC HTML from headings */
-function buildTocHtml(headings: { level: number; text: string; id: string }[]): string {
+function buildTocHtml(
+  headings: { level: number; text: string; id: string }[],
+): string {
   if (headings.length === 0) return "";
   const items = headings
     .map(
@@ -65,21 +69,39 @@ function buildTocHtml(headings: { level: number; text: string; id: string }[]): 
 }
 
 export function generatePublishHtml(opts: PublishOptions): string {
-  const { title, content, themeId, isDark, customPreviewThemes, customPreviewCss } = opts;
+  const {
+    title,
+    content,
+    themeId,
+    isDark,
+    customPreviewThemes,
+    customPreviewCss,
+  } = opts;
 
   // Configure marked with heading IDs
   const renderer = new marked.Renderer();
-  renderer.heading = function ({ text, depth }: { text: string; depth: number }) {
+  renderer.heading = function ({
+    text,
+    depth,
+  }: {
+    text: string;
+    depth: number;
+  }) {
     const id = slugify(text);
     return `<h${depth} id="${id}">${text}</h${depth}>`;
   };
   renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
     if (lang === "mermaid") {
-      return `<div class="mermaid">${text}</div>`;
+      const safe = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return `<div class="mermaid">${safe}</div>`;
     }
-    const highlighted = lang && hljs.getLanguage(lang)
-      ? hljs.highlight(text, { language: lang }).value
-      : hljs.highlightAuto(text).value;
+    const highlighted =
+      lang && hljs.getLanguage(lang)
+        ? hljs.highlight(text, { language: lang }).value
+        : hljs.highlightAuto(text).value;
     return `<pre><code class="hljs${lang ? ` language-${lang}` : ""}">${highlighted}</code></pre>`;
   };
 
@@ -99,7 +121,10 @@ export function generatePublishHtml(opts: PublishOptions): string {
   const themeVarsLight = buildThemeVars(preset, false);
   const themeVarsDark = buildThemeVars(preset, true);
 
-  const escTitle = title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escTitle = title
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 
   return `<!DOCTYPE html>
 <html lang="ja" class="${isDark ? "dark" : ""}">
@@ -109,6 +134,16 @@ export function generatePublishHtml(opts: PublishOptions): string {
 <title>${escTitle}</title>
 <meta property="og:title" content="${escTitle}">
 <meta property="og:type" content="article">
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'default',
+  themeVariables: { fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif', fontSize: '14px' },
+  flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
+  sequence: { useMaxWidth: true },
+});
+</script>
 <style>
 /* Theme variables */
 :root {
@@ -373,7 +408,9 @@ ${customPreviewCss || ""}
 ${bodyHtml}
     </article>
   </div>
-  ${hasToc ? `<script>
+  ${
+    hasToc
+      ? `<script>
 (function() {
   var items = document.querySelectorAll('.toc-item');
   var targets = [];
@@ -398,7 +435,9 @@ ${bodyHtml}
   window.addEventListener('scroll', onScroll, { passive: true });
   onScroll();
 })();
-</script>` : ""}
+</script>`
+      : ""
+  }
 </body>
 </html>`;
 }

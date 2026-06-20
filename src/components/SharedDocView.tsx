@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { fetchDocumentByToken } from "@/services/sharing";
-import { marked } from "marked";
+import { Marked } from "marked";
 import hljs from "highlight.js";
 import mermaid from "mermaid";
 import { useAppStore } from "@/stores/app-store";
@@ -23,7 +23,8 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-const sharedRenderer = new marked.Renderer();
+const sharedMarked = new Marked({ gfm: true, breaks: true });
+const sharedRenderer = new sharedMarked.Renderer();
 sharedRenderer.code = function ({
   text,
   lang,
@@ -51,6 +52,7 @@ sharedRenderer.link = function ({
   }
   return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
 };
+sharedMarked.use({ renderer: sharedRenderer });
 
 mermaid.initialize({
   startOnLoad: false,
@@ -63,6 +65,127 @@ mermaid.initialize({
   flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
   sequence: { useMaxWidth: true },
 });
+
+function fixMermaidSvg(el: HTMLElement, dark: boolean) {
+  const svg = el.querySelector("svg") as SVGSVGElement | null;
+  if (!svg) return;
+
+  let modified = false;
+  const SKIP_CLASSES = new Set([
+    "actor",
+    "note",
+    "activation0",
+    "activation1",
+    "activation2",
+  ]);
+  const allRects = Array.from(svg.querySelectorAll("rect"));
+
+  for (const noteRect of allRects.filter((r) => r.classList.contains("note"))) {
+    const g = noteRect.parentElement;
+    if (!g) continue;
+    const textEls = g.querySelectorAll("text");
+    if (textEls.length === 0) continue;
+    const rx = parseFloat(noteRect.getAttribute("x") || "0");
+    const rw = parseFloat(noteRect.getAttribute("width") || "0");
+    let minTx = Infinity;
+    let maxTr = -Infinity;
+    for (const t of Array.from(textEls)) {
+      try {
+        const bb = (t as SVGTextElement).getBBox();
+        if (bb.width > 0) {
+          minTx = Math.min(minTx, bb.x);
+          maxTr = Math.max(maxTr, bb.x + bb.width);
+        }
+      } catch {
+        /* getBBox fails if not visible */
+      }
+    }
+    if (maxTr === -Infinity) continue;
+    const pad = 18;
+    const newX = Math.min(rx, minTx - pad);
+    const newRight = Math.max(rx + rw, maxTr + pad);
+    if (newRight - newX > rw + 1) {
+      noteRect.setAttribute("x", String(newX));
+      noteRect.setAttribute("width", String(newRight - newX));
+      modified = true;
+    }
+  }
+
+  const sectionRects = allRects.filter((r) => {
+    for (const c of r.classList) if (SKIP_CLASSES.has(c)) return false;
+    const fill = r.getAttribute("fill") || "";
+    return /^rgba?\s*\(/i.test(fill);
+  });
+
+  if (sectionRects.length >= 2) {
+    let minX = Infinity;
+    let maxR = 0;
+    for (const r of sectionRects) {
+      const x = parseFloat(r.getAttribute("x") || "0");
+      const w = parseFloat(r.getAttribute("width") || "0");
+      minX = Math.min(minX, x);
+      maxR = Math.max(maxR, x + w);
+    }
+    for (const r of sectionRects) {
+      r.setAttribute("x", String(minX));
+      r.setAttribute("width", String(maxR - minX));
+    }
+    modified = true;
+  }
+
+  if (dark) {
+    let mainBg: Element | null = null;
+    let maxArea = 0;
+    for (const r of allRects) {
+      if (sectionRects.includes(r)) continue;
+      const a =
+        parseFloat(r.getAttribute("width") || "0") *
+        parseFloat(r.getAttribute("height") || "0");
+      if (a > maxArea) {
+        maxArea = a;
+        mainBg = r;
+      }
+    }
+    if (mainBg) {
+      mainBg.setAttribute("fill", "transparent");
+      modified = true;
+    }
+    for (const r of sectionRects) {
+      const fill = r.getAttribute("fill") || "";
+      const m = fill.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (m) {
+        r.setAttribute(
+          "fill",
+          `rgba(${Math.round(Number(m[1]) * 0.25)}, ${Math.round(Number(m[2]) * 0.25)}, ${Math.round(Number(m[3]) * 0.25)}, 0.6)`,
+        );
+      }
+      const stroke = r.getAttribute("stroke") || "";
+      const sm = stroke.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (sm) {
+        r.setAttribute(
+          "stroke",
+          `rgba(${Math.round(Number(sm[1]) * 0.35)}, ${Math.round(Number(sm[2]) * 0.35)}, ${Math.round(Number(sm[3]) * 0.35)}, 0.5)`,
+        );
+      }
+    }
+  }
+
+  if (modified) {
+    try {
+      const bbox = svg.getBBox();
+      if (bbox.width > 10 && bbox.height > 10) {
+        const pad = 8;
+        svg.setAttribute(
+          "viewBox",
+          `${bbox.x - pad} ${bbox.y - pad} ${bbox.width + pad * 2} ${bbox.height + pad * 2}`,
+        );
+        svg.style.maxWidth = `${bbox.width + pad * 2}px`;
+      }
+    } catch {
+      /* getBBox may fail if SVG not yet laid out */
+    }
+  }
+}
 
 interface SharedDocViewProps {
   token: string;
@@ -108,11 +231,7 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     if (!doc) return "";
     const content = editing ? editContent : doc.content;
     try {
-      return marked.parse(content, {
-        renderer: sharedRenderer,
-        gfm: true,
-        breaks: true,
-      }) as string;
+      return sharedMarked.parse(content) as string;
     } catch {
       return content;
     }
@@ -121,32 +240,47 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   useEffect(() => {
     const container = contentRef.current || editPreviewRef.current;
     if (!container) return;
-    const divs = container.querySelectorAll<HTMLElement>(
-      ".mermaid:not([data-mermaid-processed])",
-    );
-    if (divs.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      for (const el of Array.from(divs)) {
-        if (cancelled || !el.isConnected) continue;
-        const source = el.getAttribute("data-mermaid-source") || "";
-        if (!source) continue;
-        el.setAttribute("data-mermaid-processed", "true");
-        try {
-          const { svg, bindFunctions } = await mermaid.render(
-            `mermaid-${Math.random().toString(36).slice(2)}`,
-            source,
-          );
-          if (cancelled || !el.isConnected) continue;
-          el.innerHTML = svg;
-          bindFunctions?.(el);
-        } catch (e) {
-          el.textContent = String(e);
+    const isDark = theme === "dark";
+    const renderDiagrams = () => {
+      const divs = container.querySelectorAll<HTMLElement>(
+        ".mermaid:not([data-mermaid-processed])",
+      );
+      if (divs.length === 0) return;
+      (async () => {
+        for (const el of Array.from(divs)) {
+          if (
+            !el.isConnected ||
+            el.getAttribute("data-mermaid-processed") === "true"
+          )
+            continue;
+          const source = el.getAttribute("data-mermaid-source") || "";
+          if (!source) continue;
+          el.setAttribute("data-mermaid-processed", "true");
+          try {
+            const { svg, bindFunctions } = await mermaid.render(
+              `mermaid-${Math.random().toString(36).slice(2)}`,
+              source,
+            );
+            if (!el.isConnected) continue;
+            el.innerHTML = svg;
+            bindFunctions?.(el);
+            try {
+              fixMermaidSvg(el, isDark);
+            } catch {
+              /* OK */
+            }
+          } catch (e) {
+            el.textContent = String(e);
+          }
         }
-      }
-    })();
+      })();
+    };
+    renderDiagrams();
+    const t1 = setTimeout(renderDiagrams, 150);
+    const t2 = setTimeout(renderDiagrams, 600);
     return () => {
-      cancelled = true;
+      clearTimeout(t1);
+      clearTimeout(t2);
     };
   }, [previewHtml, theme]);
 

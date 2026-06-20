@@ -644,15 +644,15 @@ export function Editor() {
             `mermaid-${Math.random().toString(36).slice(2)}`,
             source,
           );
+          mermaidSvgCache.set(prefix + source, svg);
           if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
-          mermaidSvgCache.set(prefix + source, svg);
           try {
             fixMermaidSvg(el, isDark);
             mermaidSvgCache.set(prefix + source, el.innerHTML);
           } catch {
-            /* fixMermaidSvg failed — cache still has original SVG */
+            /* fixMermaidSvg failed — cache still has raw SVG */
           }
         } catch (e) {
           console.error("[mermaid] render failed:", e);
@@ -665,6 +665,12 @@ export function Editor() {
   useEffect(() => {
     if (!previewVisible) return;
     renderMermaidRef.current?.();
+    const t1 = setTimeout(() => renderMermaidRef.current?.(), 150);
+    const t2 = setTimeout(() => renderMermaidRef.current?.(), 600);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
   }, [previewHtml, theme, previewVisible]);
 
   useEffect(() => {
