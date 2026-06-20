@@ -242,17 +242,13 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     if (!container) return;
     const isDark = theme === "dark";
     const renderDiagrams = () => {
-      const divs = container.querySelectorAll<HTMLElement>(
-        ".mermaid:not([data-mermaid-processed])",
-      );
+      const divs = Array.from(
+        container.querySelectorAll<HTMLElement>(".mermaid"),
+      ).filter((el) => !el.querySelector("svg"));
       if (divs.length === 0) return;
       (async () => {
-        for (const el of Array.from(divs)) {
-          if (
-            !el.isConnected ||
-            el.getAttribute("data-mermaid-processed") === "true"
-          )
-            continue;
+        for (const el of divs) {
+          if (!el.isConnected || el.querySelector("svg")) continue;
           const source = el.getAttribute("data-mermaid-source") || "";
           if (!source) continue;
           el.setAttribute("data-mermaid-processed", "true");
@@ -278,9 +274,11 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     renderDiagrams();
     const t1 = setTimeout(renderDiagrams, 150);
     const t2 = setTimeout(renderDiagrams, 600);
+    const t3 = setTimeout(renderDiagrams, 2000);
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
+      clearTimeout(t3);
     };
   }, [previewHtml, theme]);
 

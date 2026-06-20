@@ -578,16 +578,18 @@ export function Editor() {
   const restoreMermaidFromCache = useCallback(
     (container: HTMLElement) => {
       const prefix = theme === "dark" ? "d:" : "l:";
-      const divs = container.querySelectorAll<HTMLElement>(
-        ".mermaid:not([data-mermaid-processed])",
-      );
+      const divs = container.querySelectorAll<HTMLElement>(".mermaid");
       for (const el of Array.from(divs)) {
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
+        const hasSvg = el.querySelector("svg") !== null;
+        if (hasSvg) continue;
         const cached = mermaidSvgCache.get(prefix + source);
         if (cached) {
           el.setAttribute("data-mermaid-processed", "true");
           el.innerHTML = cached;
+        } else {
+          el.removeAttribute("data-mermaid-processed");
         }
       }
     },
@@ -620,17 +622,15 @@ export function Editor() {
     if (!container) return;
     const isDark = theme === "dark";
     const prefix = isDark ? "d:" : "l:";
-    const divs = container.querySelectorAll<HTMLElement>(
-      ".mermaid:not([data-mermaid-processed])",
-    );
-    if (divs.length === 0) return;
+    const divs = container.querySelectorAll<HTMLElement>(".mermaid");
+    const needsRender = Array.from(divs).filter((el) => {
+      if (el.querySelector("svg")) return false;
+      return true;
+    });
+    if (needsRender.length === 0) return;
     (async () => {
-      for (const el of Array.from(divs)) {
-        if (
-          !el.isConnected ||
-          el.getAttribute("data-mermaid-processed") === "true"
-        )
-          continue;
+      for (const el of needsRender) {
+        if (!el.isConnected || el.querySelector("svg")) continue;
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
         el.setAttribute("data-mermaid-processed", "true");
@@ -667,9 +667,11 @@ export function Editor() {
     renderMermaidRef.current?.();
     const t1 = setTimeout(() => renderMermaidRef.current?.(), 150);
     const t2 = setTimeout(() => renderMermaidRef.current?.(), 600);
+    const t3 = setTimeout(() => renderMermaidRef.current?.(), 2000);
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
+      clearTimeout(t3);
     };
   }, [previewHtml, theme, previewVisible]);
 

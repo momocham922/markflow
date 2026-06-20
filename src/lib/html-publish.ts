@@ -137,12 +137,120 @@ export function generatePublishHtml(opts: PublishOptions): string {
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 mermaid.initialize({
-  startOnLoad: true,
+  startOnLoad: false,
   theme: 'default',
   themeVariables: { fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif', fontSize: '14px' },
   flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
   sequence: { useMaxWidth: true },
 });
+
+function fixMermaidSvg(el, dark) {
+  var svg = el.querySelector('svg');
+  if (!svg) return;
+  var modified = false;
+  var SKIP = ['actor','note','activation0','activation1','activation2'];
+  var allRects = Array.from(svg.querySelectorAll('rect'));
+
+  allRects.filter(function(r){ return r.classList.contains('note'); }).forEach(function(noteRect){
+    var g = noteRect.parentElement;
+    if (!g) return;
+    var textEls = g.querySelectorAll('text');
+    if (textEls.length === 0) return;
+    var rx = parseFloat(noteRect.getAttribute('x') || '0');
+    var rw = parseFloat(noteRect.getAttribute('width') || '0');
+    var minTx = Infinity, maxTr = -Infinity;
+    Array.from(textEls).forEach(function(t){
+      try { var bb = t.getBBox(); if (bb.width > 0) { minTx = Math.min(minTx, bb.x); maxTr = Math.max(maxTr, bb.x + bb.width); } } catch(e) {}
+    });
+    if (maxTr === -Infinity) return;
+    var pad = 18;
+    var newX = Math.min(rx, minTx - pad);
+    var newRight = Math.max(rx + rw, maxTr + pad);
+    if (newRight - newX > rw + 1) {
+      noteRect.setAttribute('x', String(newX));
+      noteRect.setAttribute('width', String(newRight - newX));
+      modified = true;
+    }
+  });
+
+  var sectionRects = allRects.filter(function(r){
+    for (var i = 0; i < SKIP.length; i++) if (r.classList.contains(SKIP[i])) return false;
+    return /^rgba?\\s*\\(/i.test(r.getAttribute('fill') || '');
+  });
+
+  if (sectionRects.length >= 2) {
+    var minX = Infinity, maxR = 0;
+    sectionRects.forEach(function(r){
+      var x = parseFloat(r.getAttribute('x') || '0');
+      var w = parseFloat(r.getAttribute('width') || '0');
+      minX = Math.min(minX, x);
+      maxR = Math.max(maxR, x + w);
+    });
+    sectionRects.forEach(function(r){
+      r.setAttribute('x', String(minX));
+      r.setAttribute('width', String(maxR - minX));
+    });
+    modified = true;
+  }
+
+  if (dark) {
+    var mainBg = null, maxArea = 0;
+    allRects.forEach(function(r){
+      if (sectionRects.indexOf(r) >= 0) return;
+      var a = parseFloat(r.getAttribute('width') || '0') * parseFloat(r.getAttribute('height') || '0');
+      if (a > maxArea) { maxArea = a; mainBg = r; }
+    });
+    if (mainBg) { mainBg.setAttribute('fill', 'transparent'); modified = true; }
+    sectionRects.forEach(function(r){
+      var fill = r.getAttribute('fill') || '';
+      var m = fill.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
+      if (m) r.setAttribute('fill', 'rgba(' + Math.round(Number(m[1])*0.25) + ',' + Math.round(Number(m[2])*0.25) + ',' + Math.round(Number(m[3])*0.25) + ',0.6)');
+      var stroke = r.getAttribute('stroke') || '';
+      var sm = stroke.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
+      if (sm) r.setAttribute('stroke', 'rgba(' + Math.round(Number(sm[1])*0.35) + ',' + Math.round(Number(sm[2])*0.35) + ',' + Math.round(Number(sm[3])*0.35) + ',0.5)');
+    });
+  }
+
+  if (modified) {
+    try {
+      var bbox = svg.getBBox();
+      if (bbox.width > 10 && bbox.height > 10) {
+        var p = 8;
+        svg.setAttribute('viewBox', (bbox.x-p)+' '+(bbox.y-p)+' '+(bbox.width+p*2)+' '+(bbox.height+p*2));
+        svg.style.maxWidth = (bbox.width+p*2)+'px';
+      }
+    } catch(e) {}
+  }
+}
+
+document.querySelectorAll('.mermaid').forEach(function(el){
+  el.setAttribute('data-source', el.textContent || '');
+});
+
+async function renderAllMermaid() {
+  var dark = document.documentElement.classList.contains('dark');
+  var divs = document.querySelectorAll('.mermaid');
+  for (var i = 0; i < divs.length; i++) {
+    var el = divs[i];
+    var source = el.getAttribute('data-source');
+    if (!source) continue;
+    try {
+      var result = await mermaid.render('mermaid-' + Date.now() + '-' + i, source);
+      el.innerHTML = result.svg;
+      if (result.bindFunctions) result.bindFunctions(el);
+      fixMermaidSvg(el, dark);
+    } catch(e) { el.textContent = String(e); }
+  }
+}
+
+await renderAllMermaid();
+
+var toggleBtn = document.querySelector('.theme-toggle');
+if (toggleBtn) {
+  toggleBtn.addEventListener('click', function(){
+    setTimeout(function(){ renderAllMermaid(); }, 50);
+  });
+}
 </script>
 <style>
 /* Theme variables */
