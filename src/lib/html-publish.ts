@@ -484,6 +484,37 @@ html.dark .prose th { background: oklch(1 1 1 / 0.03); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: bold; }
 
+/* Mermaid diagram styles */
+.prose .mermaid { margin: 1.5em 0; min-height: 40px; background: rgba(0,0,0,0.02); border-radius: 0.375rem; padding: 1em 0; }
+html.dark .prose .mermaid { background: #161b22; }
+.prose .mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.prose .mermaid .actor { stroke-width: 1.5px; }
+.prose .mermaid .note { stroke-width: 1px; }
+.prose .mermaid rect.note { rx: 4px; ry: 4px; }
+.prose .mermaid .actor-line { stroke-dasharray: 4, 4; }
+.prose .mermaid .activation0, .prose .mermaid .activation1, .prose .mermaid .activation2 { rx: 3px; ry: 3px; }
+html.dark .prose .mermaid svg text, html.dark .prose .mermaid svg tspan { fill: #c9d1d9 !important; }
+html.dark .prose .mermaid svg .actor { fill: #21262d !important; stroke: #8b949e !important; }
+html.dark .prose .mermaid svg text.actor > tspan { fill: #e6edf3 !important; }
+html.dark .prose .mermaid svg rect.note { fill: #1c2128 !important; stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .noteText, html.dark .prose .mermaid svg .noteText > tspan { fill: #e6edf3 !important; }
+html.dark .prose .mermaid svg .actor-line { stroke: #484f58 !important; }
+html.dark .prose .mermaid svg .messageLine0, html.dark .prose .mermaid svg .messageLine1 { stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .messageText { fill: #c9d1d9 !important; }
+html.dark .prose .mermaid svg .loopLine { stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .labelBox { fill: #21262d !important; stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .labelText, html.dark .prose .mermaid svg .labelText > tspan { fill: #e6edf3 !important; }
+html.dark .prose .mermaid svg .loopText, html.dark .prose .mermaid svg .loopText > tspan { fill: #c9d1d9 !important; }
+html.dark .prose .mermaid svg .activation0, html.dark .prose .mermaid svg .activation1, html.dark .prose .mermaid svg .activation2 { fill: #30363d !important; stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .sequenceNumber { fill: #e6edf3 !important; }
+html.dark .prose .mermaid svg marker path { fill: #8b949e !important; stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .node rect, html.dark .prose .mermaid svg .node circle, html.dark .prose .mermaid svg .node polygon { fill: #21262d !important; stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .node .label { fill: #e6edf3 !important; }
+html.dark .prose .mermaid svg .edgePath .path { stroke: #8b949e !important; }
+html.dark .prose .mermaid svg .edgeLabel { background-color: #161b22 !important; color: #c9d1d9 !important; }
+html.dark .prose .mermaid svg .cluster rect { fill: #161b22 !important; stroke: #30363d !important; }
+html.dark .prose .mermaid svg .cluster text { fill: #c9d1d9 !important; }
+
 /* Task list checkboxes */
 .prose input[type="checkbox"] { margin-right: 0.4em; }
 
