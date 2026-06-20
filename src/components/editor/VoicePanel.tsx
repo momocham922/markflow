@@ -22,6 +22,15 @@ interface VoicePanelProps {
   documentContent: string;
 }
 
+function extractHints(text: string): string[] {
+  const hints = new Set<string>();
+  const katakana = text.match(/[゠-ヿ]{3,}/g);
+  if (katakana) katakana.forEach((w) => hints.add(w));
+  const english = text.match(/[A-Z][a-zA-Z]{2,}/g);
+  if (english) english.forEach((w) => hints.add(w));
+  return Array.from(hints).slice(0, 50);
+}
+
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -86,6 +95,8 @@ export function VoicePanel({
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 8000);
     },
     onInfo: (msg) => setVoiceInfo(msg),
+    getHints: () =>
+      extractHints(docContentRef.current + " " + fullTranscriptRef.current),
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
@@ -154,12 +165,16 @@ export function VoicePanel({
       const hasExisting = existingDoc.length > 0;
       const hasNewPart = newPart.length > 0;
 
+      const sttCorrection =
+        "The transcript is from speech-to-text and may contain misrecognitions, especially for proper nouns, brand names, technical terms, personal names, and place names. Correct obvious errors based on context. ";
+
       let systemPrompt: string;
       let userContent: string;
 
       if (hasExisting && hasNewPart) {
         systemPrompt =
           "You are a document assistant. You will receive an EXISTING document and NEW additional voice transcript. " +
+          sttCorrection +
           "Integrate the new transcript into the existing document. " +
           "Add new sections, expand existing sections, or reorganize as needed. " +
           "Keep the same language. Output the COMPLETE updated Markdown document — do not truncate.";
@@ -167,6 +182,7 @@ export function VoicePanel({
       } else if (hasExisting) {
         systemPrompt =
           "You are a document assistant. You will receive an EXISTING document and a voice transcript. " +
+          sttCorrection +
           "Merge them into a single, well-structured Markdown document. " +
           "Preserve the existing document's structure and content, and integrate the transcript naturally. " +
           "Update, expand, or reorganize sections as needed. " +
@@ -175,6 +191,7 @@ export function VoicePanel({
       } else {
         systemPrompt =
           "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
+          sttCorrection +
           "Integrate all content coherently — do not produce fragments or partial updates. " +
           "Use appropriate headings, bullet points, and formatting. " +
           "Keep the same language as the transcript. " +
@@ -281,11 +298,6 @@ export function VoicePanel({
         >
           {fullTranscript && (
             <span className="text-foreground">{fullTranscript}</span>
-          )}
-          {isRecording && interimText && (
-            <span className="text-muted-foreground animate-pulse ml-1">
-              {interimText}
-            </span>
           )}
           {isRecording && !fullTranscript && !interimText && (
             <span className="text-muted-foreground animate-pulse">

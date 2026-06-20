@@ -6,7 +6,8 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 const GCP_REGION = process.env.GCP_REGION || "us-east5";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
-const NANOBANANA_MODEL = process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
+const NANOBANANA_MODEL =
+  process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
 const STT_LOCATION = process.env.STT_LOCATION || "us-central1";
 const STT_MODEL = process.env.STT_MODEL || "chirp_2";
 
@@ -27,12 +28,15 @@ async function getGcpAccessToken(): Promise<string> {
   const res = await fetch(metadataUrl, {
     headers: { "Metadata-Flavor": "Google" },
   });
-  if (!res.ok) throw new Error("Failed to get access token from metadata server");
+  if (!res.ok)
+    throw new Error("Failed to get access token from metadata server");
   const data = (await res.json()) as { access_token: string };
   return data.access_token;
 }
 
-async function verifyFirebaseToken(authHeader: string | undefined): Promise<string> {
+async function verifyFirebaseToken(
+  authHeader: string | undefined,
+): Promise<string> {
   if (!authHeader?.startsWith("Bearer ")) {
     throw new Error("Missing or invalid Authorization header");
   }
@@ -97,6 +101,8 @@ const server = http.createServer(async (req, res) => {
       const sampleRate: number | undefined = parsed.sampleRate;
       const channels: number | undefined = parsed.channels;
 
+      const hints: string[] | undefined = parsed.hints;
+
       const sttConfig: Record<string, unknown> = {
         model: STT_MODEL,
         languageCodes: [language],
@@ -104,6 +110,18 @@ const server = http.createServer(async (req, res) => {
           enableAutomaticPunctuation: true,
         },
       };
+
+      if (hints?.length) {
+        sttConfig.adaptation = {
+          phraseSets: [
+            {
+              phrases: hints
+                .slice(0, 50)
+                .map((h: string) => ({ value: h, boost: 10 })),
+            },
+          ],
+        };
+      }
 
       if (encoding) {
         sttConfig.explicitDecodingConfig = {
@@ -130,7 +148,9 @@ const server = http.createServer(async (req, res) => {
       if (!sttRes.ok) {
         const errText = await sttRes.text();
         const audioBytes = Math.round((audio.length * 3) / 4);
-        console.error(`[voice] STT error: ${sttRes.status} | encoding=${encoding} rate=${sampleRate} audioBytes=${audioBytes} | ${errText}`);
+        console.error(
+          `[voice] STT error: ${sttRes.status} | encoding=${encoding} rate=${sampleRate} audioBytes=${audioBytes} | ${errText}`,
+        );
         res.writeHead(sttRes.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: errText }));
         return;
@@ -147,7 +167,8 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ text: transcript }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Internal server error";
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
     }
@@ -205,7 +226,8 @@ const server = http.createServer(async (req, res) => {
 
       // Find the image part (inlineData)
       const imagePart = parts.find(
-        (p: { inlineData?: { mimeType: string; data: string } }) => p.inlineData,
+        (p: { inlineData?: { mimeType: string; data: string } }) =>
+          p.inlineData,
       );
       if (!imagePart?.inlineData) {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -214,12 +236,15 @@ const server = http.createServer(async (req, res) => {
       }
 
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        data: imagePart.inlineData.data,
-        media_type: imagePart.inlineData.mimeType || "image/png",
-      }));
+      res.end(
+        JSON.stringify({
+          data: imagePart.inlineData.data,
+          media_type: imagePart.inlineData.mimeType || "image/png",
+        }),
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Internal server error";
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
     }
@@ -299,7 +324,8 @@ const server = http.createServer(async (req, res) => {
       res.end(data);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Internal server error";
+    const message =
+      err instanceof Error ? err.message : "Internal server error";
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: message }));
   }

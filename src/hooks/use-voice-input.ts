@@ -21,6 +21,7 @@ export interface UseVoiceInputOptions {
   onTranscript?: (text: string) => void;
   onError?: (error: string) => void;
   onInfo?: (message: string) => void;
+  getHints?: () => string[];
   onMaxDuration?: () => void;
 }
 
@@ -55,6 +56,7 @@ export function useVoiceInput({
   onTranscript,
   onError,
   onInfo,
+  getHints,
   onMaxDuration,
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
@@ -84,6 +86,7 @@ export function useVoiceInput({
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
   const onInfoRef = useRef(onInfo);
+  const getHintsRef = useRef(getHints);
   const onMaxDurationRef = useRef(onMaxDuration);
 
   useEffect(() => {
@@ -95,6 +98,9 @@ export function useVoiceInput({
   useEffect(() => {
     onInfoRef.current = onInfo;
   }, [onInfo]);
+  useEffect(() => {
+    getHintsRef.current = getHints;
+  }, [getHints]);
   useEffect(() => {
     onMaxDurationRef.current = onMaxDuration;
   }, [onMaxDuration]);
@@ -147,6 +153,7 @@ export function useVoiceInput({
                   channels: 1,
                 }
               : {}),
+            ...(getHintsRef.current ? { hints: getHintsRef.current() } : {}),
           }),
           signal: controller.signal,
         });
