@@ -24,10 +24,18 @@ interface VoicePanelProps {
 
 function extractHints(text: string): string[] {
   const hints = new Set<string>();
+  // 漢字複合語（2文字以上 — 固有名詞・ブランド名・専門用語）
+  const kanji = text.match(/[一-鿿]{2,}/g);
+  if (kanji) kanji.forEach((w) => hints.add(w));
+  // カタカナ語（3文字以上）
   const katakana = text.match(/[゠-ヿ]{3,}/g);
   if (katakana) katakana.forEach((w) => hints.add(w));
+  // 英単語（大文字始まり3文字以上）
   const english = text.match(/[A-Z][a-zA-Z]{2,}/g);
   if (english) english.forEach((w) => hints.add(w));
+  // 漢字+かな混合語（例: 赤ちゃん本舗）
+  const mixed = text.match(/[一-鿿ぁ-ゖァ-ヿ]{4,}/g);
+  if (mixed) mixed.forEach((w) => hints.add(w));
   return Array.from(hints).slice(0, 500);
 }
 
