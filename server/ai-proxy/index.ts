@@ -103,7 +103,10 @@ const server = http.createServer(async (req, res) => {
 
       const hints: string[] | undefined = parsed.hints;
 
-      const enableDiarization = parsed.diarization !== false;
+      // chirp_3: diarization + adaptation の併用は非対応（404エラー）
+      // adaptation（phrase hints）がある場合はそちらを優先し、diarizationは無効化
+      const hasHints = hints && hints.length > 0;
+      const enableDiarization = parsed.diarization !== false && !hasHints;
 
       const sttConfig: Record<string, unknown> = {
         model: STT_MODEL,
@@ -122,7 +125,7 @@ const server = http.createServer(async (req, res) => {
         },
       };
 
-      if (hints?.length) {
+      if (hasHints) {
         sttConfig.adaptation = {
           phraseSets: [
             {
