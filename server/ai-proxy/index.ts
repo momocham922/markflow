@@ -126,9 +126,11 @@ const server = http.createServer(async (req, res) => {
         sttConfig.adaptation = {
           phraseSets: [
             {
-              phrases: hints
-                .slice(0, 500)
-                .map((h: string) => ({ value: h, boost: 10 })),
+              inlinePhraseSet: {
+                phrases: hints
+                  .slice(0, 500)
+                  .map((h: string) => ({ value: h, boost: 10 })),
+              },
             },
           ],
         };
