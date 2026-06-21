@@ -181,10 +181,12 @@ const server = http.createServer(async (req, res) => {
           .join("") || "";
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const lastResult = sttData.results?.[sttData.results.length - 1];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const words: Array<{ word: string; speakerLabel: string }> =
-        lastResult?.alternatives?.[0]?.words || [];
+      const words: Array<{ word: string; speakerLabel: string }> = (
+        sttData.results || []
+      ).flatMap(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (r: any) => r.alternatives?.[0]?.words || [],
+      );
 
       let taggedText = transcript;
       const speakerLabels = new Set(

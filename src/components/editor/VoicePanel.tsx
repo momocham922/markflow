@@ -33,10 +33,10 @@ function extractHints(text: string): string[] {
   // 英単語（大文字始まり3文字以上）
   const english = text.match(/[A-Z][a-zA-Z]{2,}/g);
   if (english) english.forEach((w) => hints.add(w));
-  // 漢字+かな混合語（例: 赤ちゃん本舗）
-  const mixed = text.match(/[一-鿿ぁ-ゖァ-ヿ]{4,}/g);
-  if (mixed) mixed.forEach((w) => hints.add(w));
-  return Array.from(hints).slice(0, 500);
+  // 長い語を優先（固有名詞は一般語より長い傾向）
+  return Array.from(hints)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 500);
 }
 
 function formatDuration(seconds: number): string {
