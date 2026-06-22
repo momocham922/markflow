@@ -102,6 +102,7 @@ export function VoicePanel({
     language: "ja-JP",
     deviceName: selectedDevice || undefined,
     systemAudio,
+    getHints: () => extractHints(docContentRef.current),
     onError: (msg) => {
       setVoiceError(msg);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
