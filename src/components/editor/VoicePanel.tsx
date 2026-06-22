@@ -431,9 +431,6 @@ export function VoicePanel({
           onChange={(e) => setAutoStructureInterval(Number(e.target.value))}
         >
           <option value={0}>Manual</option>
-          <option value={15}>15s auto</option>
-          <option value={30}>30s auto</option>
-          <option value={45}>45s auto</option>
           <option value={60}>1min auto</option>
           <option value={120}>2min auto</option>
           <option value={180}>3min auto</option>

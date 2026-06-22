@@ -10,6 +10,7 @@ const NANOBANANA_MODEL =
   process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
 const STT_LOCATION = process.env.STT_LOCATION || "asia-northeast1";
 const STT_MODEL = process.env.STT_MODEL || "chirp_3";
+const STT_PHRASE_SET = `projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/phraseSets/ja-common-vocabulary`;
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
@@ -102,42 +103,33 @@ const server = http.createServer(async (req, res) => {
       const channels: number | undefined = parsed.channels;
 
       const hints: string[] | undefined = parsed.hints;
-
-      // chirp_3: diarization + adaptation の併用は非対応（404エラー）
-      // adaptation（phrase hints）がある場合はそちらを優先し、diarizationは無効化
       const hasHints = hints && hints.length > 0;
-      const enableDiarization = parsed.diarization !== false && !hasHints;
 
+      // chirp_3: diarization + adaptation は併用不可
+      // 永続PhraseSetを常に参照するため、adaptationは常時有効 → diarization無効
       const sttConfig: Record<string, unknown> = {
         model: STT_MODEL,
         languageCodes: [language],
         features: {
           enableAutomaticPunctuation: true,
-          ...(enableDiarization && {
-            diarizationConfig: {
-              minSpeakerCount: parsed.minSpeakers || 1,
-              maxSpeakerCount: parsed.maxSpeakers || 6,
-            },
-          }),
         },
         denoiserConfig: {
           denoiseAudio: true,
         },
       };
 
+      // 永続PhraseSet（共通語彙）+ インラインhints（ドキュメント固有語彙）を併用
+      const phraseSets: unknown[] = [{ phraseSet: STT_PHRASE_SET }];
       if (hasHints) {
-        sttConfig.adaptation = {
-          phraseSets: [
-            {
-              inlinePhraseSet: {
-                phrases: hints
-                  .slice(0, 500)
-                  .map((h: string) => ({ value: h, boost: 10 })),
-              },
-            },
-          ],
-        };
+        phraseSets.push({
+          inlinePhraseSet: {
+            phrases: hints
+              .slice(0, 500)
+              .map((h: string) => ({ value: h, boost: 10 })),
+          },
+        });
       }
+      sttConfig.adaptation = { phraseSets };
 
       if (encoding) {
         sttConfig.explicitDecodingConfig = {

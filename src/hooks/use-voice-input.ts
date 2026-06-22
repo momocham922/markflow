@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
-const CHUNK_MS = 8000; // 8 second chunks: fewer boundaries = better accuracy
+const CHUNK_MS = 25000; // 25 second chunks: longer context = better accuracy
 const MAX_DURATION_SECONDS = 4 * 60 * 60; // 4 hours hard limit
 
 import { isAndroid } from "@/platform";
