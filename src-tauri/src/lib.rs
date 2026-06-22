@@ -1720,17 +1720,38 @@ fn get_voice_level() -> f32 {
 
 /// Drain the audio buffer and return raw LINEAR16 PCM as base64, plus sample rate.
 /// Audio is resampled to 16 kHz mono for optimal STT quality.
+/// Returns at most ~25s of audio per call; remaining audio stays in the buffer
+/// so callers can loop until None to drain accumulated background audio.
 #[tauri::command]
 fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     use base64::Engine;
 
+    let mic_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(16000) as usize;
+    let sys_rate = SYSTEM_AUDIO_RATE.load(Ordering::Relaxed).max(16000) as usize;
+    let channels = VOICE_CHANNELS.load(Ordering::Relaxed).max(1) as usize;
+    // Max samples per source = 25s worth at source rate (accounting for channels)
+    let mic_max = mic_rate * 25 * channels;
+    let sys_max = sys_rate * 25;
+
     let mic_samples: Vec<f32> = {
         let mut buf = VOICE_BUFFER.lock().unwrap();
-        std::mem::take(&mut *buf)
+        if buf.len() <= mic_max {
+            std::mem::take(&mut *buf)
+        } else {
+            let chunk = buf[..mic_max].to_vec();
+            buf.drain(..mic_max);
+            chunk
+        }
     };
     let sys_samples: Vec<f32> = {
         let mut buf = SYSTEM_AUDIO_BUFFER.lock().unwrap();
-        std::mem::take(&mut *buf)
+        if buf.len() <= sys_max {
+            std::mem::take(&mut *buf)
+        } else {
+            let chunk = buf[..sys_max].to_vec();
+            buf.drain(..sys_max);
+            chunk
+        }
     };
     let has_sys_audio = !sys_samples.is_empty();
 
@@ -1743,10 +1764,9 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         return Ok(None);
     }
 
-    let mic_rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed);
-    let sys_rate = SYSTEM_AUDIO_RATE.load(Ordering::Relaxed);
-    let channels = VOICE_CHANNELS.load(Ordering::Relaxed);
-    // Use the higher rate as the common sample_rate for downstream processing
+    let mic_rate = mic_rate as u32;
+    let sys_rate = sys_rate as u32;
+    let channels = channels as u32;
     let sample_rate = mic_rate.max(sys_rate).max(16000);
 
     // Mix mic to mono if multi-channel

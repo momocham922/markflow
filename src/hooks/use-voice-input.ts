@@ -341,13 +341,17 @@ export function useVoiceInput({
         chunkIntervalRef.current = setInterval(async () => {
           try {
             const { invoke: inv } = await import("@tauri-apps/api/core");
-            const result = await inv<{
-              audio: string;
-              sample_rate: number;
-            } | null>("get_voice_chunk");
-            if (result) {
+            // Loop to drain all accumulated chunks (handles background throttling)
+            let drained = 0;
+            while (true) {
+              const result = await inv<{
+                audio: string;
+                sample_rate: number;
+              } | null>("get_voice_chunk");
+              if (!result) break;
+              drained++;
               console.log(
-                `[voice] Got chunk from Rust: ${result.audio.length} base64 chars, rate=${result.sample_rate}`,
+                `[voice] Got chunk ${drained} from Rust: ${result.audio.length} base64 chars, rate=${result.sample_rate}`,
               );
               if (chunkQueue.length >= MAX_QUEUE) {
                 console.warn("[voice] Queue full, dropping oldest chunk");
@@ -355,8 +359,13 @@ export function useVoiceInput({
               }
               chunkQueue.push(result);
               processQueue();
-            } else {
+            }
+            if (drained === 0) {
               console.log("[voice] No audio data in buffer");
+            } else if (drained > 1) {
+              console.log(
+                `[voice] Drained ${drained} chunks (background catchup)`,
+              );
             }
           } catch (e) {
             console.error("[voice] Chunk error:", e);
