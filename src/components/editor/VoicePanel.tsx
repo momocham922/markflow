@@ -103,8 +103,7 @@ export function VoicePanel({
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 8000);
     },
     onInfo: (msg) => setVoiceInfo(msg),
-    getHints: () =>
-      extractHints(docContentRef.current + " " + fullTranscriptRef.current),
+    getHints: () => extractHints(docContentRef.current),
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
