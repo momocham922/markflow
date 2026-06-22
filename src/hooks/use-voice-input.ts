@@ -219,7 +219,7 @@ export function useVoiceInput({
           } else {
             const displayText = data.taggedText || text;
             transcriptRef.current +=
-              (transcriptRef.current ? " " : "") + displayText;
+              (transcriptRef.current ? "\n---\n" : "") + displayText;
             setFullTranscript(transcriptRef.current);
             setInterimText(text);
             onTranscriptRef.current?.(text);

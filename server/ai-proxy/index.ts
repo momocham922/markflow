@@ -224,6 +224,175 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- /v1/voice/batch-transcribe ---
+  if (req.url === "/v1/voice/batch-transcribe") {
+    try {
+      await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = JSON.parse(body);
+      const gcsUri: string = parsed.gcsUri;
+      const language: string = parsed.language || "ja-JP";
+
+      if (!gcsUri) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "gcsUri is required" }));
+        return;
+      }
+
+      const accessToken = await getGcpAccessToken();
+      const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
+
+      const batchRes = await fetch(batchUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          config: {
+            model: STT_MODEL,
+            languageCodes: [language],
+            features: {
+              enableAutomaticPunctuation: true,
+              diarizationConfig: {
+                minSpeakerCount: 1,
+                maxSpeakerCount: 10,
+              },
+            },
+            denoiserConfig: { denoiseAudio: true },
+            autoDecodingConfig: {},
+          },
+          files: [{ uri: gcsUri }],
+          recognitionOutputConfig: {
+            inlineResponseConfig: {},
+          },
+        }),
+      });
+
+      if (!batchRes.ok) {
+        const errText = await batchRes.text();
+        console.error(
+          `[batch] BatchRecognize start error: ${batchRes.status} | ${errText}`,
+        );
+        res.writeHead(batchRes.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errText }));
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const operation = (await batchRes.json()) as any;
+      const opName: string = operation.name;
+      console.log(`[batch] Operation started: ${opName}`);
+
+      // Poll for completion (max 10 minutes, every 5 seconds)
+      const maxPollMs = 10 * 60 * 1000;
+      const pollInterval = 5000;
+      const startTime = Date.now();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let result: any = null;
+
+      while (Date.now() - startTime < maxPollMs) {
+        await new Promise((r) => setTimeout(r, pollInterval));
+
+        const freshToken = await getGcpAccessToken();
+        const pollUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/${opName}`;
+        const pollRes = await fetch(pollUrl, {
+          headers: { Authorization: `Bearer ${freshToken}` },
+        });
+
+        if (!pollRes.ok) {
+          const errText = await pollRes.text();
+          console.error(`[batch] Poll error: ${pollRes.status} | ${errText}`);
+          continue;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const status = (await pollRes.json()) as any;
+        if (status.done) {
+          result = status;
+          break;
+        }
+
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[batch] Polling... ${elapsed}s elapsed`);
+      }
+
+      if (!result) {
+        res.writeHead(504, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "BatchRecognize timed out (10 min)" }));
+        return;
+      }
+
+      if (result.error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: JSON.stringify(result.error) }));
+        return;
+      }
+
+      // Extract transcript with speaker labels from inline result
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fileResults = result.response?.results || {};
+      const fileKey = Object.keys(fileResults)[0];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sttResults: any[] =
+        fileResults[fileKey]?.inlineResult?.transcript?.results || [];
+
+      const transcript = sttResults
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((r: any) => r.alternatives?.[0]?.transcript || "")
+        .join("");
+
+      // Build speaker-tagged transcript from word-level labels
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words: Array<{ word: string; speakerLabel: string }> =
+        sttResults.flatMap(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (r: any) => r.alternatives?.[0]?.words || [],
+        );
+
+      const speakerLabels = new Set(
+        words.map((w) => w.speakerLabel).filter(Boolean),
+      );
+
+      let taggedTranscript = transcript;
+      if (speakerLabels.size > 1) {
+        let currentSpeaker = "";
+        const parts: string[] = [];
+        for (const w of words) {
+          const label = w.speakerLabel || "";
+          if (label && label !== currentSpeaker) {
+            currentSpeaker = label;
+            parts.push(`\n[Speaker ${label}] `);
+          }
+          parts.push(w.word);
+        }
+        taggedTranscript = parts.join("").trim();
+      }
+
+      console.log(
+        `[batch] Done: ${transcript.length} chars, ${speakerLabels.size} speakers`,
+      );
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          transcript,
+          taggedTranscript:
+            speakerLabels.size > 1 ? taggedTranscript : transcript,
+          speakerCount: speakerLabels.size,
+        }),
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[batch] Error: ${message}`);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+    }
+    return;
+  }
+
   // --- /v1/image/generate ---
   if (req.url === "/v1/image/generate") {
     try {

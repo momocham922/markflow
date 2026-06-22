@@ -1100,6 +1100,16 @@ struct VoiceChunkData {
     sample_rate: u32,
 }
 
+/// Archive file handle for full-session audio (used by Refine pipeline).
+static VOICE_ARCHIVE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static VOICE_ARCHIVE_PATH: Mutex<Option<String>> = Mutex::new(None);
+
+#[derive(serde::Serialize)]
+struct VoiceArchiveResult {
+    gcs_uri: String,
+    download_url: String,
+}
+
 #[cfg(target_os = "macos")]
 fn stop_system_audio_inner() {
     if SC_STREAM_ACTIVE.swap(false, Ordering::SeqCst) {
@@ -1205,6 +1215,24 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 #[tauri::command]
 fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<String, String> {
     let want_sys = system_audio.unwrap_or(false);
+
+    // Create archive temp file for full-session audio (Refine pipeline)
+    {
+        let archive_path = std::env::temp_dir().join(format!("markflow_voice_{}.pcm", uuid::Uuid::new_v4()));
+        let path_str = archive_path.to_string_lossy().to_string();
+        match std::fs::File::create(&archive_path) {
+            Ok(file) => {
+                *VOICE_ARCHIVE_FILE.lock().unwrap() = Some(file);
+                *VOICE_ARCHIVE_PATH.lock().unwrap() = Some(path_str.clone());
+                println!("[voice] Archive file created: {}", path_str);
+            }
+            Err(e) => {
+                println!("[voice] Failed to create archive file: {} (Refine will be unavailable)", e);
+                *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+                *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
+            }
+        }
+    }
 
     // --- Try microphone ---
     let mic_ok = 'mic: {
@@ -1812,6 +1840,34 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         }).collect()
     };
 
+    // Archive: write mono audio to temp file BEFORE overlap/VAD (continuous, no gaps)
+    if !mono.is_empty() {
+        use std::io::Write;
+        const ARCHIVE_RATE: u32 = 16000;
+        let archive_samples: Vec<f32> = if sample_rate > ARCHIVE_RATE {
+            let ratio = sample_rate as f64 / ARCHIVE_RATE as f64;
+            let new_len = (mono.len() as f64 / ratio) as usize;
+            (0..new_len).map(|i| {
+                let src = i as f64 * ratio;
+                let idx = src as usize;
+                let frac = src - idx as f64;
+                let s0 = mono[idx.min(mono.len() - 1)];
+                let s1 = mono[(idx + 1).min(mono.len() - 1)];
+                s0 + (s1 - s0) * frac as f32
+            }).collect()
+        } else {
+            mono.clone()
+        };
+        if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
+            if let Some(ref mut file) = *archive {
+                for &s in &archive_samples {
+                    let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                    let _ = file.write_all(&sample.to_le_bytes());
+                }
+            }
+        }
+    }
+
     // Prepend overlap from previous chunk (0.5s) for boundary accuracy
     let overlap_samples = (sample_rate as usize) / 2; // 0.5 seconds
     let with_overlap = {
@@ -1896,6 +1952,131 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         audio: base64::engine::general_purpose::STANDARD.encode(&pcm_bytes),
         sample_rate: output_rate,
     }))
+}
+
+/// Upload the full-session voice archive to Firebase Storage as a WAV file.
+/// Returns GCS URI (for BatchRecognize) and download URL.
+#[tauri::command]
+async fn upload_voice_archive(
+    uid: String,
+    token: String,
+    bucket: String,
+) -> Result<VoiceArchiveResult, String> {
+    use base64::Engine;
+
+    let archive_path = VOICE_ARCHIVE_PATH.lock().unwrap().clone()
+        .ok_or("No voice archive available")?;
+
+    // Close the archive file handle before reading
+    *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+
+    let pcm_data = std::fs::read(&archive_path)
+        .map_err(|e| format!("Failed to read archive: {}", e))?;
+
+    if pcm_data.is_empty() {
+        return Err("Voice archive is empty".into());
+    }
+
+    // Build WAV file: header + PCM data
+    let data_size = pcm_data.len() as u32;
+    let file_size = 36 + data_size;
+    let sample_rate: u32 = 16000;
+    let channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = channels * bits_per_sample / 8;
+
+    let mut wav = Vec::with_capacity(44 + pcm_data.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&file_size.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes());  // PCM format
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    wav.extend_from_slice(&pcm_data);
+
+    let duration_secs = pcm_data.len() as f64 / (sample_rate as f64 * 2.0);
+    println!("[voice] Archive WAV: {} bytes, {:.1}s", wav.len(), duration_secs);
+
+    // Upload to Firebase Storage (same pattern as upload_image_cloud)
+    let id = uuid::Uuid::new_v4().to_string();
+    let object_path = format!("audio/{}/{}.wav", uid, id);
+
+    let upload_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
+        bucket,
+        urlencoding::encode(&object_path),
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .post(&upload_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .header("Content-Type", "audio/wav")
+        .header("X-Goog-Upload-Protocol", "raw")
+        .header("X-Goog-Upload-Command", "upload, finalize")
+        .body(wav)
+        .send()
+        .await
+        .map_err(|e| format!("Upload failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    let encoded_path = urlencoding::encode(&object_path);
+
+    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
+                bucket, encoded_path, dl_token
+            )
+        } else {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+                bucket, encoded_path
+            )
+        }
+    } else {
+        format!(
+            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+            bucket, encoded_path
+        )
+    };
+
+    let gcs_uri = format!("gs://{}/{}", bucket, object_path);
+    println!("[voice] Archive uploaded: {} (GCS: {})", download_url, gcs_uri);
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&archive_path);
+    *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
+
+    Ok(VoiceArchiveResult { gcs_uri, download_url })
+}
+
+/// Clean up voice archive temp file.
+#[tauri::command]
+fn clear_voice_archive() {
+    *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+    if let Some(path) = VOICE_ARCHIVE_PATH.lock().unwrap().take() {
+        let _ = std::fs::remove_file(&path);
+        println!("[voice] Archive file cleaned up");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2099,7 +2280,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

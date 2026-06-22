@@ -7,6 +7,7 @@ import {
   Loader2,
   Monitor,
   Info,
+  Wand2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isMobile, isTauri } from "@/platform";
@@ -51,6 +52,10 @@ export function VoicePanel({
   documentContent,
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
+  const [refining, setRefining] = useState(false);
+  const [refineStage, setRefineStage] = useState<
+    "upload" | "transcribe" | "structure" | null
+  >(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voiceInfo, setVoiceInfo] = useState<string | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -186,7 +191,7 @@ export function VoicePanel({
         "You MUST deeply understand the content and produce an INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
         "Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
         "Use speaker information to attribute decisions and opinions where relevant (e.g., 'Aさんが指摘した問題点'), but NEVER format as dialogue (Speaker 0: ... / Speaker 1: ...). " +
-        "Speaker labels may not be consistent across segments — use context to unify speakers when possible. " +
+        "The transcript contains '---' markers indicating chunk boundaries. Speaker labels are ONLY consistent WITHIN segments between --- markers — the same speaker may have different labels in different segments. Use speech content to identify and unify speakers across segments. " +
         "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
         "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate.";
@@ -254,6 +259,133 @@ export function VoicePanel({
       structuringRef.current = false;
     }
   }, []);
+
+  const doRefine = useCallback(async () => {
+    const transcript = fullTranscriptRef.current;
+    if (!transcript.trim() || refining) return;
+
+    setRefining(true);
+    try {
+      const user = useAuthStore.getState().user;
+      if (!user) throw new Error("Not authenticated");
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error("No token");
+      const uid = user.uid;
+      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
+      if (!bucket) throw new Error("Storage bucket not configured");
+
+      // Stage 1: Upload audio archive
+      setRefineStage("upload");
+      const { invoke } = await import("@tauri-apps/api/core");
+      const archiveResult = await invoke<{
+        gcs_uri: string;
+        download_url: string;
+      }>("upload_voice_archive", { uid, token, bucket });
+
+      // Stage 2: Batch transcribe with full-session diarization
+      setRefineStage("transcribe");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 11 * 60 * 1000);
+      const batchRes = await fetch(
+        `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            gcsUri: archiveResult.gcs_uri,
+            language: "ja-JP",
+          }),
+          signal: controller.signal,
+        },
+      );
+      clearTimeout(timeout);
+
+      if (!batchRes.ok) {
+        const errText = await batchRes.text();
+        throw new Error(
+          `Batch transcribe failed: ${batchRes.status} ${errText}`,
+        );
+      }
+
+      const batchData = await batchRes.json();
+      const diarizedTranscript =
+        batchData.taggedTranscript || batchData.transcript || "";
+      const speakerCount = batchData.speakerCount || 0;
+
+      if (!diarizedTranscript.trim()) {
+        throw new Error("Batch transcription returned empty result");
+      }
+
+      // Stage 3: Claude refinement with diarized transcript + existing structure
+      setRefineStage("structure");
+      const existingDoc = docContentRef.current.trim();
+      const docVocabulary = existingDoc ? extractHints(existingDoc) : [];
+      const vocabularyHint =
+        docVocabulary.length > 0
+          ? `The following terms appear in the existing document and may have been misrecognized — use them as the correct spelling: [${docVocabulary.slice(0, 100).join(", ")}]. `
+          : "";
+
+      const refineSystemPrompt =
+        "You are a document assistant performing a FINAL REFINEMENT. " +
+        "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session with globally consistent speaker labels, " +
+        (existingDoc
+          ? "and an EXISTING DOCUMENT (a preliminary structure created during recording). "
+          : "") +
+        "The transcript is from speech-to-text and may contain misrecognitions. Correct obvious errors based on context. " +
+        vocabularyHint +
+        `There are ${speakerCount} speaker(s) in this recording. ` +
+        "CRITICAL: You are NOT creating a cleaned-up transcript. " +
+        "Produce a POLISHED, FINAL informational document organized by TOPIC, not chronologically. " +
+        "The speaker labels (Speaker 1, Speaker 2, etc.) are globally consistent — trust them for attribution. " +
+        "Attribute decisions, opinions, and action items to specific speakers. If speakers introduced themselves, use their names. " +
+        "Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
+        "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
+        "Keep the same language as the transcript. Do NOT add generic titles. " +
+        "Output ONLY the structured Markdown, no explanations. Do not truncate.";
+
+      const refineUserContent = existingDoc
+        ? `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
+        : `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\nProduce a polished structured document from this transcript.`;
+
+      const refineRes = await fetch(`${AI_PROXY_URL}/v1/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          system: refineSystemPrompt,
+          messages: [{ role: "user", content: refineUserContent }],
+          max_tokens: 16384,
+          stream: false,
+        }),
+      });
+
+      if (!refineRes.ok) {
+        throw new Error(`Refine structuring failed: ${refineRes.status}`);
+      }
+
+      const refineData = await refineRes.json();
+      const refinedOutput =
+        refineData.content?.[0]?.text || refineData.content || "";
+
+      if (refinedOutput.trim()) {
+        onSetContentRef.current(refinedOutput.trim());
+      }
+    } catch (err) {
+      console.error("[voice] Refine failed:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      setVoiceError(`Refine failed: ${msg}`);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = setTimeout(() => setVoiceError(null), 10000);
+    } finally {
+      setRefining(false);
+      setRefineStage(null);
+    }
+  }, [refining]);
 
   // Auto-structure timer — stable callback, no deps on fullTranscript/structuring
   useEffect(() => {
@@ -458,6 +590,23 @@ export function VoicePanel({
           Structure
         </Button>
 
+        {isTauri && !isRecording && fullTranscript.trim() && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 text-xs"
+            onClick={() => doRefine()}
+            disabled={refining || structuring}
+          >
+            {refining ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="h-3.5 w-3.5" />
+            )}
+            Refine
+          </Button>
+        )}
+
         <Button
           variant="ghost"
           size="icon"
@@ -465,6 +614,9 @@ export function VoicePanel({
           onClick={() => {
             clearTranscript();
             lastStructuredRef.current = "";
+            import("@tauri-apps/api/core")
+              .then(({ invoke }) => invoke("clear_voice_archive"))
+              .catch(() => {});
           }}
           disabled={!fullTranscript}
           title="Clear transcript"
@@ -472,6 +624,45 @@ export function VoicePanel({
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </div>
+
+      {refineStage && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-t">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <div className="flex gap-1">
+            <span
+              className={
+                refineStage === "upload"
+                  ? "font-medium text-foreground"
+                  : refineStage === "transcribe" || refineStage === "structure"
+                    ? "text-muted-foreground/50"
+                    : ""
+              }
+            >
+              Upload
+            </span>
+            <span>→</span>
+            <span
+              className={
+                refineStage === "transcribe"
+                  ? "font-medium text-foreground"
+                  : refineStage === "structure"
+                    ? "text-muted-foreground/50"
+                    : ""
+              }
+            >
+              Analyze
+            </span>
+            <span>→</span>
+            <span
+              className={
+                refineStage === "structure" ? "font-medium text-foreground" : ""
+              }
+            >
+              Structure
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
