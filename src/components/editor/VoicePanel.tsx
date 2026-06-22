@@ -103,7 +103,6 @@ export function VoicePanel({
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 8000);
     },
     onInfo: (msg) => setVoiceInfo(msg),
-    getHints: () => extractHints(docContentRef.current),
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
@@ -172,8 +171,15 @@ export function VoicePanel({
       const hasExisting = existingDoc.length > 0;
       const hasNewPart = newPart.length > 0;
 
+      const docVocabulary = hasExisting ? extractHints(existingDoc) : [];
+      const vocabularyHint =
+        docVocabulary.length > 0
+          ? `The following terms appear in the existing document and may have been misrecognized in the transcript — use them as the correct spelling: [${docVocabulary.slice(0, 100).join(", ")}]. `
+          : "";
+
       const sttCorrection =
         "The transcript is from speech-to-text and may contain misrecognitions, especially for proper nouns, brand names, technical terms, personal names, and place names. Correct obvious errors based on context. " +
+        vocabularyHint +
         "If the transcript contains speaker labels like [Speaker 1], [Speaker 2], etc., preserve speaker attribution in the output (e.g., use bold speaker names or attribute quotes). " +
         "Speaker labels may not be consistent across segments — use context to unify speakers when possible. ";
 
