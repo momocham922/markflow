@@ -179,9 +179,17 @@ export function VoicePanel({
 
       const sttCorrection =
         "The transcript is from speech-to-text and may contain misrecognitions, especially for proper nouns, brand names, technical terms, personal names, and place names. Correct obvious errors based on context. " +
-        vocabularyHint +
-        "If the transcript contains speaker labels like [Speaker 1], [Speaker 2], etc., preserve speaker attribution in the output (e.g., use bold speaker names or attribute quotes). " +
-        "Speaker labels may not be consistent across segments — use context to unify speakers when possible. ";
+        vocabularyHint;
+
+      const structuringRules =
+        "CRITICAL: You are NOT creating a cleaned-up transcript or conversation log. " +
+        "You MUST deeply understand the content and produce an INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
+        "Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
+        "Use speaker information to attribute decisions and opinions where relevant (e.g., 'Aさんが指摘した問題点'), but NEVER format as dialogue (Speaker 0: ... / Speaker 1: ...). " +
+        "Speaker labels may not be consistent across segments — use context to unify speakers when possible. " +
+        "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
+        "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
+        "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate.";
 
       let systemPrompt: string;
       let userContent: string;
@@ -190,29 +198,22 @@ export function VoicePanel({
         systemPrompt =
           "You are a document assistant. You will receive an EXISTING document and NEW additional voice transcript. " +
           sttCorrection +
-          "Integrate the new transcript into the existing document. " +
-          "Add new sections, expand existing sections, or reorganize as needed. " +
-          "Keep the same language. Output the COMPLETE updated Markdown document — do not truncate.";
-        userContent = `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${newPart}\n\nIntegrate this new content into the existing document. Output the complete updated document.`;
+          structuringRules +
+          " Integrate the new information into the existing document — add to, expand, or reorganize sections as needed. Output the COMPLETE updated document.";
+        userContent = `## Existing Document\n\n${existingDoc}\n\n## New Voice Transcript\n\n${newPart}\n\nIntegrate the information from this transcript into the existing document. Output the complete updated document.`;
       } else if (hasExisting) {
         systemPrompt =
           "You are a document assistant. You will receive an EXISTING document and a voice transcript. " +
           sttCorrection +
-          "Merge them into a single, well-structured Markdown document. " +
-          "Preserve the existing document's structure and content, and integrate the transcript naturally. " +
-          "Update, expand, or reorganize sections as needed. " +
-          "Keep the same language. Do NOT add generic titles. Output the COMPLETE Markdown — do not truncate.";
-        userContent = `## Existing Document\n\n${existingDoc}\n\n## Voice Transcript\n\n${transcript}\n\nMerge these into one cohesive Markdown document. Output the complete document without truncation.`;
+          structuringRules +
+          " Merge the information into a single cohesive document. Preserve the existing document's structure and integrate new information naturally. Output the COMPLETE document.";
+        userContent = `## Existing Document\n\n${existingDoc}\n\n## Voice Transcript\n\n${transcript}\n\nMerge the information into one cohesive document. Output the complete document.`;
       } else {
         systemPrompt =
-          "You are a document assistant. Convert the ENTIRE voice transcript into a single, well-structured Markdown document. " +
+          "You are a document assistant. You will receive a voice transcript to convert into a structured informational document. " +
           sttCorrection +
-          "Integrate all content coherently — do not produce fragments or partial updates. " +
-          "Use appropriate headings, bullet points, and formatting. " +
-          "Keep the same language as the transcript. " +
-          "Do NOT add generic titles like 'Voice Notes', '音声メモ', '会議メモ', etc. " +
-          "Output ONLY the structured Markdown content, no explanations or meta-commentary. Do not truncate.";
-        userContent = `Convert this complete voice transcript into one structured Markdown document:\n\n${transcript}`;
+          structuringRules;
+        userContent = `Convert this voice transcript into a structured informational document:\n\n${transcript}`;
       }
 
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
