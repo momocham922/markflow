@@ -89,6 +89,7 @@ export function VoicePanel({
   const onInsertRef = useRef(onInsertMarkdown);
   const onSetContentRef = useRef(onSetContent);
   const docContentRef = useRef(documentContent);
+  const sttVocabRef = useRef<Set<string>>(new Set());
 
   const {
     isRecording,
@@ -102,7 +103,12 @@ export function VoicePanel({
     language: "ja-JP",
     deviceName: selectedDevice || undefined,
     systemAudio,
-    getHints: () => extractHints(docContentRef.current),
+    getHints: () => {
+      const docHints = extractHints(docContentRef.current);
+      const vocabHints = Array.from(sttVocabRef.current);
+      const merged = new Set([...vocabHints, ...docHints]);
+      return Array.from(merged).slice(0, 500);
+    },
     preferDiarization: systemAudio,
     onError: (msg) => {
       setVoiceError(msg);
@@ -196,7 +202,8 @@ export function VoicePanel({
         "The transcript contains '---' markers indicating chunk boundaries. Speaker labels are ONLY consistent WITHIN segments between --- markers — the same speaker may have different labels in different segments. Use speech content to identify and unify speakers across segments. " +
         "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
-        "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate.";
+        "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate. " +
+        'FINALLY, after the document, append a single line: <!--VOCAB:["term1","term2",...]-->  containing up to 50 key proper nouns, person names, technical terms, project names, and specialized vocabulary that appeared in or were corrected from the transcript. Include the CORRECT spelling. This line will be stripped and used to improve future speech recognition — it is NOT part of the document.';
 
       let systemPrompt: string;
       let userContent: string;
@@ -246,11 +253,30 @@ export function VoicePanel({
         "";
 
       if (markdown.trim()) {
-        const newOutput = markdown.trim();
+        // Extract vocabulary feedback from <!--VOCAB:[...]-->
+        const vocabMatch = markdown.match(
+          /<!--\s*VOCAB\s*:\s*(\[.*?\])\s*-->/s,
+        );
+        let cleanOutput = markdown;
+        if (vocabMatch) {
+          cleanOutput = markdown.replace(vocabMatch[0], "").trim();
+          try {
+            const terms: string[] = JSON.parse(vocabMatch[1]);
+            for (const t of terms) {
+              if (t && t.length >= 2) sttVocabRef.current.add(t);
+            }
+            console.log(
+              `[voice] Extracted ${terms.length} vocab terms for STT hints (total: ${sttVocabRef.current.size})`,
+            );
+          } catch {
+            console.warn("[voice] Failed to parse VOCAB JSON");
+          }
+        }
+
         if (hasExisting) {
-          onSetContentRef.current(newOutput);
+          onSetContentRef.current(cleanOutput);
         } else {
-          onInsertRef.current(`\n\n${newOutput}\n`);
+          onInsertRef.current(`\n\n${cleanOutput}\n`);
         }
         lastStructuredRef.current = transcript;
       }
@@ -632,6 +658,7 @@ export function VoicePanel({
           onClick={() => {
             clearTranscript();
             lastStructuredRef.current = "";
+            sttVocabRef.current.clear();
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))
               .catch(() => {});
