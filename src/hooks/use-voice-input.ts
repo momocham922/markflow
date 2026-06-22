@@ -22,6 +22,7 @@ export interface UseVoiceInputOptions {
   onError?: (error: string) => void;
   onInfo?: (message: string) => void;
   getHints?: () => string[];
+  preferDiarization?: boolean;
   onMaxDuration?: () => void;
 }
 
@@ -57,6 +58,7 @@ export function useVoiceInput({
   onError,
   onInfo,
   getHints,
+  preferDiarization,
   onMaxDuration,
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
@@ -153,7 +155,9 @@ export function useVoiceInput({
                   channels: 1,
                 }
               : {}),
-            ...(getHintsRef.current ? { hints: getHintsRef.current() } : {}),
+            ...(!preferDiarization && getHintsRef.current
+              ? { hints: getHintsRef.current() }
+              : {}),
           }),
           signal: controller.signal,
         });

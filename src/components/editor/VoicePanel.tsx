@@ -103,6 +103,7 @@ export function VoicePanel({
     deviceName: selectedDevice || undefined,
     systemAudio,
     getHints: () => extractHints(docContentRef.current),
+    preferDiarization: systemAudio,
     onError: (msg) => {
       setVoiceError(msg);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
