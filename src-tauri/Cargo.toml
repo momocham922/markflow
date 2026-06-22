@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.5.0-beta.86"
+version = "0.5.0-beta.87"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -22,7 +22,7 @@ serde_json = "1"
 urlencoding = "2"
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-fs = "2.4.5"
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-deep-link = "2"
@@ -30,7 +30,10 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 url = "2"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+bytes = "1"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "tls-native"] }
 ndarray = { version = "0.17", features = ["std"] }
 tauri-plugin-opener = "2.5.4"

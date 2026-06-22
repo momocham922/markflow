@@ -7,6 +7,8 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Base64
 import androidx.core.content.ContextCompat
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.concurrent.thread
@@ -18,6 +20,8 @@ class AudioCapture(private val activity: MainActivity) {
     private val lock = Object()
     private var sampleRate = 16000
     private var useFloat = true
+    private var archiveFile: FileOutputStream? = null
+    private var archivePath: String? = null
 
     fun hasPermission(): Boolean {
         return ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
@@ -70,6 +74,18 @@ class AudioCapture(private val activity: MainActivity) {
         record.startRecording()
         android.util.Log.i("MarkFlow", "AudioRecord started: ${sampleRate}Hz, float=$useFloat")
 
+        // Create archive temp file for Refine pipeline (16kHz mono i16 PCM)
+        try {
+            val tempFile = File(activity.cacheDir, "markflow_voice_${System.currentTimeMillis()}.pcm")
+            archivePath = tempFile.absolutePath
+            archiveFile = FileOutputStream(tempFile)
+            android.util.Log.i("MarkFlow", "Archive file created: ${tempFile.absolutePath}")
+        } catch (e: Exception) {
+            android.util.Log.w("MarkFlow", "Failed to create archive file: ${e.message}")
+            archiveFile = null
+            archivePath = null
+        }
+
         thread(isDaemon = true) {
             if (useFloat) {
                 val readBuf = FloatArray(1024)
@@ -79,6 +95,7 @@ class AudioCapture(private val activity: MainActivity) {
                         synchronized(lock) {
                             for (i in 0 until read) buffer.add(readBuf[i])
                         }
+                        writeToArchive(readBuf, read)
                     }
                 }
             } else {
@@ -89,6 +106,7 @@ class AudioCapture(private val activity: MainActivity) {
                         synchronized(lock) {
                             for (i in 0 until read) buffer.add(readBuf[i].toFloat() / 32768f)
                         }
+                        writeToArchiveShort(readBuf, read)
                     }
                 }
             }
@@ -97,11 +115,71 @@ class AudioCapture(private val activity: MainActivity) {
         return true
     }
 
+    private fun writeToArchive(samples: FloatArray, count: Int) {
+        val out = archiveFile ?: return
+        try {
+            // Resample to 16kHz if needed, then write as i16 PCM
+            if (sampleRate != 16000) {
+                val ratio = sampleRate.toDouble() / 16000.0
+                val newLen = (count / ratio).toInt()
+                val buf = ByteBuffer.allocate(newLen * 2).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until newLen) {
+                    val idx = (i * ratio).toInt().coerceAtMost(count - 1)
+                    buf.putShort((samples[idx].coerceIn(-1f, 1f) * 32767f).toInt().toShort())
+                }
+                synchronized(out) { out.write(buf.array()) }
+            } else {
+                val buf = ByteBuffer.allocate(count * 2).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until count) {
+                    buf.putShort((samples[i].coerceIn(-1f, 1f) * 32767f).toInt().toShort())
+                }
+                synchronized(out) { out.write(buf.array()) }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MarkFlow", "Archive write error: ${e.message}")
+        }
+    }
+
+    private fun writeToArchiveShort(samples: ShortArray, count: Int) {
+        val out = archiveFile ?: return
+        try {
+            if (sampleRate != 16000) {
+                val ratio = sampleRate.toDouble() / 16000.0
+                val newLen = (count / ratio).toInt()
+                val buf = ByteBuffer.allocate(newLen * 2).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until newLen) {
+                    val idx = (i * ratio).toInt().coerceAtMost(count - 1)
+                    buf.putShort(samples[idx])
+                }
+                synchronized(out) { out.write(buf.array()) }
+            } else {
+                val buf = ByteBuffer.allocate(count * 2).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until count) { buf.putShort(samples[i]) }
+                synchronized(out) { out.write(buf.array()) }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MarkFlow", "Archive write error: ${e.message}")
+        }
+    }
+
     fun stop() {
         isRecording = false
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
+        try { archiveFile?.close() } catch (_: Exception) {}
+        archiveFile = null
+    }
+
+    fun getArchivePath(): String? = archivePath
+
+    fun clearArchive() {
+        try { archiveFile?.close() } catch (_: Exception) {}
+        archiveFile = null
+        archivePath?.let {
+            try { File(it).delete() } catch (_: Exception) {}
+        }
+        archivePath = null
     }
 
     fun getSampleRate(): Int = sampleRate

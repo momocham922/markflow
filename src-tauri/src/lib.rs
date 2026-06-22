@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tauri_plugin_updater::UpdaterExt;
+use futures::StreamExt;
 
 // ── Crash reporting ─────────────────────────────────────────
 static CRASH_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
@@ -1955,30 +1956,34 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
 }
 
 /// Upload the full-session voice archive to Firebase Storage as a WAV file.
-/// Returns GCS URI (for BatchRecognize) and download URL.
+/// Accepts optional `archive_path` for Android (Kotlin archive) — falls back to Rust archive.
+/// Uses chunked reading to avoid loading entire file into memory (iOS OOM protection).
 #[tauri::command]
 async fn upload_voice_archive(
     uid: String,
     token: String,
     bucket: String,
+    archive_path: Option<String>,
 ) -> Result<VoiceArchiveResult, String> {
-    use base64::Engine;
+    let is_external = archive_path.is_some();
+    let path = if let Some(p) = archive_path {
+        p
+    } else {
+        // Close the Rust archive file handle before reading
+        *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+        VOICE_ARCHIVE_PATH.lock().unwrap().clone()
+            .ok_or("No voice archive available")?
+    };
 
-    let archive_path = VOICE_ARCHIVE_PATH.lock().unwrap().clone()
-        .ok_or("No voice archive available")?;
-
-    // Close the archive file handle before reading
-    *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
-
-    let pcm_data = std::fs::read(&archive_path)
+    let file_meta = std::fs::metadata(&path)
         .map_err(|e| format!("Failed to read archive: {}", e))?;
-
-    if pcm_data.is_empty() {
+    let pcm_size = file_meta.len();
+    if pcm_size == 0 {
         return Err("Voice archive is empty".into());
     }
 
-    // Build WAV file: header + PCM data
-    let data_size = pcm_data.len() as u32;
+    // Build WAV header (44 bytes) — PCM data stays on disk
+    let data_size = pcm_size as u32;
     let file_size = 36 + data_size;
     let sample_rate: u32 = 16000;
     let channels: u16 = 1;
@@ -1986,26 +1991,32 @@ async fn upload_voice_archive(
     let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
     let block_align = channels * bits_per_sample / 8;
 
-    let mut wav = Vec::with_capacity(44 + pcm_data.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&file_size.to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes());  // PCM format
-    wav.extend_from_slice(&channels.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_size.to_le_bytes());
-    wav.extend_from_slice(&pcm_data);
+    let mut wav_header = Vec::with_capacity(44);
+    wav_header.extend_from_slice(b"RIFF");
+    wav_header.extend_from_slice(&file_size.to_le_bytes());
+    wav_header.extend_from_slice(b"WAVE");
+    wav_header.extend_from_slice(b"fmt ");
+    wav_header.extend_from_slice(&16u32.to_le_bytes());
+    wav_header.extend_from_slice(&1u16.to_le_bytes());
+    wav_header.extend_from_slice(&channels.to_le_bytes());
+    wav_header.extend_from_slice(&sample_rate.to_le_bytes());
+    wav_header.extend_from_slice(&byte_rate.to_le_bytes());
+    wav_header.extend_from_slice(&block_align.to_le_bytes());
+    wav_header.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav_header.extend_from_slice(b"data");
+    wav_header.extend_from_slice(&data_size.to_le_bytes());
 
-    let duration_secs = pcm_data.len() as f64 / (sample_rate as f64 * 2.0);
-    println!("[voice] Archive WAV: {} bytes, {:.1}s", wav.len(), duration_secs);
+    let duration_secs = pcm_size as f64 / (sample_rate as f64 * 2.0);
+    println!("[voice] Archive WAV: {} + {} bytes PCM, {:.1}s", wav_header.len(), pcm_size, duration_secs);
 
-    // Upload to Firebase Storage (same pattern as upload_image_cloud)
+    // Stream upload: WAV header + PCM file in 64KB chunks (avoids loading entire file into RAM)
+    let pcm_file = tokio::fs::File::open(&path).await
+        .map_err(|e| format!("Failed to open archive: {}", e))?;
+    let header_stream = futures::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(wav_header)) });
+    let file_stream = tokio_util::io::ReaderStream::with_capacity(pcm_file, 65536);
+    let body_stream = header_stream.chain(file_stream);
+    let total_size = 44 + pcm_size;
+
     let id = uuid::Uuid::new_v4().to_string();
     let object_path = format!("audio/{}/{}.wav", uid, id);
 
@@ -2024,9 +2035,10 @@ async fn upload_voice_archive(
         .post(&upload_url)
         .header("Authorization", format!("Firebase {}", token))
         .header("Content-Type", "audio/wav")
+        .header("Content-Length", total_size.to_string())
         .header("X-Goog-Upload-Protocol", "raw")
         .header("X-Goog-Upload-Command", "upload, finalize")
-        .body(wav)
+        .body(reqwest::Body::wrap_stream(body_stream))
         .send()
         .await
         .map_err(|e| format!("Upload failed: {}", e))?;
@@ -2063,8 +2075,10 @@ async fn upload_voice_archive(
     println!("[voice] Archive uploaded: {} (GCS: {})", download_url, gcs_uri);
 
     // Clean up temp file
-    let _ = std::fs::remove_file(&archive_path);
-    *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
+    let _ = std::fs::remove_file(&path);
+    if !is_external {
+        *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
+    }
 
     Ok(VoiceArchiveResult { gcs_uri, download_url })
 }

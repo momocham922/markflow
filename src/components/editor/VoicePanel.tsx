@@ -10,7 +10,7 @@ import {
   Wand2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { isMobile, isTauri } from "@/platform";
+import { isAndroid, isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { auth } from "@/services/firebase";
@@ -277,10 +277,26 @@ export function VoicePanel({
       // Stage 1: Upload audio archive
       setRefineStage("upload");
       const { invoke } = await import("@tauri-apps/api/core");
+
+      // Android: get archive path from Kotlin JS bridge
+      let androidArchivePath: string | undefined;
+      if (isAndroid) {
+        const bridge = (window as unknown as Record<string, unknown>)
+          .AndroidAudio as { getArchivePath?: () => string | null } | undefined;
+        const p = bridge?.getArchivePath?.();
+        if (!p) throw new Error("No voice archive available on this device");
+        androidArchivePath = p;
+      }
+
       const archiveResult = await invoke<{
         gcs_uri: string;
         download_url: string;
-      }>("upload_voice_archive", { uid, token, bucket });
+      }>("upload_voice_archive", {
+        uid,
+        token,
+        bucket,
+        archivePath: androidArchivePath,
+      });
 
       // Stage 2: Batch transcribe with full-session diarization
       setRefineStage("transcribe");
@@ -617,6 +633,11 @@ export function VoicePanel({
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))
               .catch(() => {});
+            if (isAndroid) {
+              const bridge = (window as unknown as Record<string, unknown>)
+                .AndroidAudio as { clearArchive?: () => void } | undefined;
+              bridge?.clearArchive?.();
+            }
           }}
           disabled={!fullTranscript}
           title="Clear transcript"
@@ -661,6 +682,11 @@ export function VoicePanel({
               Structure
             </span>
           </div>
+          {isMobile && (
+            <span className="text-[10px] text-amber-500 ml-1">
+              — アプリを閉じないでください
+            </span>
+          )}
         </div>
       )}
     </div>

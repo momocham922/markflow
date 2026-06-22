@@ -79,4 +79,10 @@ class AudioBridge(private val activity: MainActivity) {
 
   @JavascriptInterface
   fun getChunk(): String? = activity.audioCapture.getChunk()
+
+  @JavascriptInterface
+  fun getArchivePath(): String? = activity.audioCapture.getArchivePath()
+
+  @JavascriptInterface
+  fun clearArchive() = activity.audioCapture.clearArchive()
 }
