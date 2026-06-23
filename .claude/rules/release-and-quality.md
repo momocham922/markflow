@@ -13,17 +13,19 @@ globs:
 4. `pnpm test` — Vitest全通過
 5. `npx playwright test e2e/` — Playwright E2E全通過
 6. `pnpm test:tauri` — Tauri E2E全通過（Docker必須）
-7. `./scripts/bump-version.sh X.Y.Z(-beta.N)`
-8. `git add + commit + push`
-9. `pnpm tauri build`（署名環境変数付き）
-10. `./scripts/release-beta.sh` or `./scripts/release-stable.sh`
-11. リリース完了を確認してからユーザーに報告
+7. **インフラ連動チェック** — `.claude/rules/infra-sync.md` に従い漏れを確認
+8. `./scripts/bump-version.sh X.Y.Z(-beta.N)`
+9. `git add + commit + push`
+10. `pnpm tauri build`（署名環境変数付き）
+11. `./scripts/release-beta.sh` or `./scripts/release-stable.sh`
+12. リリース完了を確認してからユーザーに報告
 
 ## 禁止事項
 
 - **テスト省略**: 「後でやる」「次から気をつける」は禁止。環境問題（Docker未起動等）は自分で解決して再実行
 - **リリース未完遂**: ビルドだけしてリリーススクリプト未実行は「未完了」。ユーザーにとって完了＝手元にアップデートが届くこと
 - **推測リリース**: エラー内容を確認せず推測で修正を連打するな。再現→根本原因特定→修正→実機検証の順守。beta.85-92の教訓: 8回リリースしても直らなかったのはコードではなくFirestoreルールが原因だった
+- **インフラ漏れ**: コード変更に連動するインフラ変更（Storage rules, Cloud Runデプロイ, IAM権限）を同一リリースで完結させない限りリリース禁止。詳細は `.claude/rules/infra-sync.md`
 - **検証未完了での完了報告**: 全ページ・全機能の正常動作を確認するまで作業を続ける
 
 ## バージョン管理

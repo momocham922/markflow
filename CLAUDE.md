@@ -235,5 +235,6 @@ All at `src-tauri/target/release/bundle/`:
 
 - `.claude/rules/release-and-quality.md` — リリース手順・テスト・品質プロセス
 - `.claude/rules/architecture.md` — Cloud-first設計・Firestore実装・バージョン管理
+- `.claude/rules/infra-sync.md` — インフラ連動（Storage rules・Cloud Runデプロイ・IAM権限の漏れ防止）
 
 リリーススキル（`/release-beta`, `/release-all`）は `.claude/skills/` に定義。
