@@ -424,7 +424,7 @@ export function VoicePanel({
       const msg = err instanceof Error ? err.message : String(err);
       setVoiceError(`Refine failed: ${msg}`);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => setVoiceError(null), 10000);
+      errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
     } finally {
       setRefining(false);
       setRefineStage(null);
@@ -473,7 +473,11 @@ export function VoicePanel({
   return (
     <div className="border-t border-border bg-background">
       {voiceError && (
-        <div className="px-4 py-2 text-xs text-destructive bg-destructive/10 border-b border-destructive/20">
+        <div
+          className="px-4 py-2 text-xs text-destructive bg-destructive/10 border-b border-destructive/20 cursor-pointer"
+          onClick={() => setVoiceError(null)}
+          title="Click to dismiss"
+        >
           {voiceError}
         </div>
       )}
