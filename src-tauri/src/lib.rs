@@ -981,9 +981,9 @@ static SYSTEM_AUDIO_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static SYSTEM_AUDIO_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
 static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Safety backstop for system-audio buffers: drop oldest beyond this many samples
-/// if the frontend stops draining (normal drain is every CHUNK_MS = 8s).
-/// MUST be comfortably larger than one drain interval, or every chunk loses its head.
-const SYS_AUDIO_MAX_SAMPLES: usize = 48000 * 30; // ~30s
+/// if the frontend stops draining (normal drain is every CHUNK_MS = 25s).
+/// Set to 120s to survive macOS background throttling (setInterval delayed 40-60s+).
+const SYS_AUDIO_MAX_SAMPLES: usize = 48000 * 120; // ~120s at 48kHz
 
 /// Wall-clock milliseconds since the UNIX epoch (monotonic enough for stall detection).
 #[allow(dead_code)] // used by the macOS SCStream watchdog only
@@ -1111,6 +1111,51 @@ struct VoiceArchiveResult {
     download_url: String,
 }
 
+// ── App Nap prevention (macOS) ──
+// macOS throttles timers for background apps via App Nap, causing setInterval
+// delays of 40-60s+. This starves the chunk polling loop and causes audio gaps.
+// We disable App Nap while any recording is active.
+#[cfg(target_os = "macos")]
+static APP_NAP_ACTIVITY: Mutex<usize> = Mutex::new(0);
+
+#[cfg(target_os = "macos")]
+fn disable_app_nap() {
+    {
+        let guard = APP_NAP_ACTIVITY.lock().unwrap();
+        if *guard != 0 { return; }
+    }
+    use objc2::{class, msg_send, runtime::AnyObject};
+    unsafe {
+        let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
+        let reason = objc2_foundation::NSString::from_str("Voice recording");
+        let options: u64 = 0x00EFFFFF; // NSActivityUserInitiatedAllowingIdleSystemSleep
+        let activity: *mut AnyObject = msg_send![pi, beginActivityWithOptions: options reason: &*reason];
+        let _: *mut AnyObject = msg_send![activity, retain];
+        *APP_NAP_ACTIVITY.lock().unwrap() = activity as usize;
+    }
+    println!("[voice] App Nap disabled for recording");
+}
+
+#[cfg(target_os = "macos")]
+fn enable_app_nap() {
+    let ptr = {
+        let mut guard = APP_NAP_ACTIVITY.lock().unwrap();
+        let p = *guard;
+        *guard = 0;
+        p
+    };
+    if ptr != 0 {
+        use objc2::{class, msg_send, runtime::AnyObject};
+        unsafe {
+            let activity = ptr as *mut AnyObject;
+            let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
+            let _: () = msg_send![pi, endActivity: activity];
+            let _: () = msg_send![activity, release];
+        }
+        println!("[voice] App Nap re-enabled");
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn stop_system_audio_inner() {
     if SC_STREAM_ACTIVE.swap(false, Ordering::SeqCst) {
@@ -1137,7 +1182,10 @@ fn stop_voice_recording_inner() {
         extern "C" { fn stop_av_audio_capture(); }
         unsafe { stop_av_audio_capture(); }
         #[cfg(target_os = "macos")]
-        stop_system_audio_inner();
+        {
+            stop_system_audio_inner();
+            enable_app_nap();
+        }
     }
     #[cfg(target_os = "windows")]
     {
@@ -1293,8 +1341,12 @@ fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>
                 }
             }
             if let Some(w) = sys_warning {
+                #[cfg(target_os = "macos")]
+                disable_app_nap();
                 return Ok(format!("sys_audio_failed:{}", w));
             }
+            #[cfg(target_os = "macos")]
+            disable_app_nap();
             Ok(String::new())
         }
         Err(mic_err) if want_sys => {
@@ -1320,6 +1372,8 @@ fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>
             match sys_result {
                 Ok(()) => {
                     println!("[voice] System-audio-only mode started");
+                    #[cfg(target_os = "macos")]
+                    disable_app_nap();
                     Ok(format!("mic_unavailable:{}", mic_err))
                 }
                 Err(sys_err) => {

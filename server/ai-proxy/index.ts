@@ -132,8 +132,8 @@ const server = http.createServer(async (req, res) => {
             {
               inlinePhraseSet: {
                 phrases: hints
-                  .slice(0, 500)
-                  .map((h: string) => ({ value: h, boost: 10 })),
+                  .slice(0, 100)
+                  .map((h: string) => ({ value: h, boost: 3 })),
               },
             },
           ],

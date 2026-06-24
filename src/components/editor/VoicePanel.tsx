@@ -25,19 +25,19 @@ interface VoicePanelProps {
 
 function extractHints(text: string): string[] {
   const hints = new Set<string>();
-  // 漢字複合語（2文字以上 — 固有名詞・ブランド名・専門用語）
-  const kanji = text.match(/[一-鿿]{2,}/g);
+  // 漢字複合語（3文字以上 — 短い一般語を除外して固有名詞・専門用語に絞る）
+  const kanji = text.match(/[一-鿿]{3,}/g);
   if (kanji) kanji.forEach((w) => hints.add(w));
-  // カタカナ語（3文字以上）
-  const katakana = text.match(/[゠-ヿ]{3,}/g);
+  // カタカナ語（4文字以上 — 一般的なカタカナ語を除外）
+  const katakana = text.match(/[゠-ヿ]{4,}/g);
   if (katakana) katakana.forEach((w) => hints.add(w));
-  // 英単語（大文字始まり3文字以上）
-  const english = text.match(/[A-Z][a-zA-Z]{2,}/g);
+  // 英単語（大文字始まり4文字以上）
+  const english = text.match(/[A-Z][a-zA-Z]{3,}/g);
   if (english) english.forEach((w) => hints.add(w));
   // 長い語を優先（固有名詞は一般語より長い傾向）
   return Array.from(hints)
     .sort((a, b) => b.length - a.length)
-    .slice(0, 500);
+    .slice(0, 50);
 }
 
 function formatDuration(seconds: number): string {
@@ -104,10 +104,10 @@ export function VoicePanel({
     deviceName: selectedDevice || undefined,
     systemAudio,
     getHints: () => {
-      const docHints = extractHints(docContentRef.current);
-      const vocabHints = Array.from(sttVocabRef.current);
+      const vocabHints = Array.from(sttVocabRef.current).slice(0, 30);
+      const docHints = extractHints(docContentRef.current).slice(0, 70);
       const merged = new Set([...vocabHints, ...docHints]);
-      return Array.from(merged).slice(0, 500);
+      return Array.from(merged).slice(0, 100);
     },
     preferDiarization: systemAudio,
     onError: (msg) => {

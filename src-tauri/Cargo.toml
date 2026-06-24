@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.5.0-beta.91"
+version = "0.5.0-beta.92"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -43,6 +43,8 @@ cpal = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { version = "6", features = ["macos_13_0"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
