@@ -295,6 +295,7 @@ const server = http.createServer(async (req, res) => {
       const maxPollMs = 14 * 60 * 1000;
       const pollInterval = 5000;
       const startTime = Date.now();
+      let consecutiveFailures = 0;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let result: any = null;
@@ -309,10 +310,21 @@ const server = http.createServer(async (req, res) => {
         });
 
         if (!pollRes.ok) {
+          consecutiveFailures++;
           const errText = await pollRes.text();
-          console.error(`[batch] Poll error: ${pollRes.status} | ${errText}`);
+          console.error(
+            `[batch] Poll error (${consecutiveFailures}/5): ${pollRes.status} | ${errText}`,
+          );
+          if (consecutiveFailures >= 5) {
+            console.error(
+              `[batch] Circuit breaker: 5 consecutive poll failures`,
+            );
+            break;
+          }
           continue;
         }
+
+        consecutiveFailures = 0;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const status = (await pollRes.json()) as any;
@@ -551,7 +563,13 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Internal server error";
-    res.writeHead(401, { "Content-Type": "application/json" });
+    const isAuthError =
+      message.includes("Authorization") ||
+      message.includes("Firebase ID token") ||
+      message.includes("Decoding Firebase ID token");
+    res.writeHead(isAuthError ? 401 : 500, {
+      "Content-Type": "application/json",
+    });
     res.end(JSON.stringify({ error: message }));
   }
 });

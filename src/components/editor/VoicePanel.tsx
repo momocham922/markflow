@@ -66,6 +66,7 @@ export function VoicePanel({
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const refineAbortRef = useRef<AbortController | null>(null);
 
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
@@ -121,6 +122,17 @@ export function VoicePanel({
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (4 hours) reached."),
   });
+
+  useEffect(() => {
+    if (!isTauri) return;
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      invoke<boolean>("check_voice_archive")
+        .then((exists) => {
+          if (exists) setHasArchive(true);
+        })
+        .catch(() => {});
+    });
+  }, []);
 
   useEffect(() => {
     if (isRecording) setHasArchive(true);
@@ -299,6 +311,9 @@ export function VoicePanel({
     const transcript = fullTranscriptRef.current;
     if (!transcript.trim() || refiningRef.current) return;
 
+    const abortController = new AbortController();
+    refineAbortRef.current = abortController;
+
     setRefining(true);
     refiningRef.current = true;
     try {
@@ -336,8 +351,7 @@ export function VoicePanel({
 
       // Stage 2: Batch transcribe with full-session diarization
       setRefineStage("transcribe");
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15 * 60 * 1000);
+      const timeout = setTimeout(() => abortController.abort(), 15 * 60 * 1000);
       const batchRes = await fetch(
         `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
         {
@@ -350,7 +364,7 @@ export function VoicePanel({
             gcsUri: archiveResult.gcs_uri,
             language: "ja-JP",
           }),
-          signal: controller.signal,
+          signal: abortController.signal,
         },
       );
       clearTimeout(timeout);
@@ -414,6 +428,7 @@ export function VoicePanel({
           max_tokens: 16384,
           stream: false,
         }),
+        signal: abortController.signal,
       });
 
       if (!refineRes.ok) {
@@ -441,6 +456,7 @@ export function VoicePanel({
       setRefining(false);
       refiningRef.current = false;
       setRefineStage(null);
+      refineAbortRef.current = null;
     }
   }, []);
 
@@ -468,6 +484,14 @@ export function VoicePanel({
       if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     };
   }, [autoStructureInterval, isRecording, doStructure]);
+
+  // Cleanup on unmount: abort in-flight refine fetches + clear error timer
+  useEffect(() => {
+    return () => {
+      refineAbortRef.current?.abort();
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
+  }, []);
 
   if (!isSupported) {
     return (
