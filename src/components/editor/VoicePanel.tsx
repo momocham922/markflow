@@ -53,6 +53,7 @@ export function VoicePanel({
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [refining, setRefining] = useState(false);
+  const [archiveConsumed, setArchiveConsumed] = useState(false);
   const [refineStage, setRefineStage] = useState<
     "upload" | "transcribe" | "structure" | null
   >(null);
@@ -119,6 +120,10 @@ export function VoicePanel({
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (60 min) reached."),
   });
+
+  useEffect(() => {
+    if (isRecording) setArchiveConsumed(false);
+  }, [isRecording]);
 
   useEffect(() => {
     if (!isRecording || !isTauri) {
@@ -419,6 +424,7 @@ export function VoicePanel({
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
       }
+      setArchiveConsumed(true);
     } catch (err) {
       console.error("[voice] Refine failed:", err);
       const msg = err instanceof Error ? err.message : String(err);
@@ -595,7 +601,7 @@ export function VoicePanel({
           </Button>
         )}
 
-        {isTauri && audioDevices.length > 0 && !isRecording && (
+        {isTauri && isDesktop && audioDevices.length > 0 && !isRecording && (
           <select
             className="h-7 max-w-[120px] rounded-md border border-input bg-background px-1.5 text-[11px] outline-none truncate"
             value={selectedDevice}
@@ -638,22 +644,25 @@ export function VoicePanel({
           Structure
         </Button>
 
-        {isTauri && !isRecording && fullTranscript.trim() && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 text-xs"
-            onClick={() => doRefine()}
-            disabled={refining || structuring}
-          >
-            {refining ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Wand2 className="h-3.5 w-3.5" />
-            )}
-            Refine
-          </Button>
-        )}
+        {isTauri &&
+          !isRecording &&
+          fullTranscript.trim() &&
+          !archiveConsumed && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={() => doRefine()}
+              disabled={refining || structuring}
+            >
+              {refining ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Wand2 className="h-3.5 w-3.5" />
+              )}
+              Refine
+            </Button>
+          )}
 
         <Button
           variant="ghost"
