@@ -425,6 +425,9 @@ export function VoicePanel({
         onSetContentRef.current(refinedOutput.trim());
       }
       setHasArchive(false);
+      import("@tauri-apps/api/core")
+        .then(({ invoke }) => invoke("clear_voice_archive"))
+        .catch(() => {});
     } catch (err) {
       console.error("[voice] Refine failed:", err);
       const msg = err instanceof Error ? err.message : String(err);

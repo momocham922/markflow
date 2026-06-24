@@ -2019,7 +2019,6 @@ async fn upload_voice_archive(
     bucket: String,
     archive_path: Option<String>,
 ) -> Result<VoiceArchiveResult, String> {
-    let is_external = archive_path.is_some();
     let path = if let Some(p) = archive_path {
         p
     } else {
@@ -2127,12 +2126,6 @@ async fn upload_voice_archive(
 
     let gcs_uri = format!("gs://{}/{}", bucket, object_path);
     println!("[voice] Archive uploaded: {} (GCS: {})", download_url, gcs_uri);
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&path);
-    if !is_external {
-        *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
-    }
 
     Ok(VoiceArchiveResult { gcs_uri, download_url })
 }
