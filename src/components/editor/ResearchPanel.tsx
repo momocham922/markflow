@@ -14,6 +14,8 @@ import {
   ExternalLink,
   Check,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useResearchStore } from "@/stores/research-store";
@@ -108,7 +110,7 @@ function ResearchCardItem({
   };
 
   return (
-    <div className="rounded-lg border border-border bg-background/95 p-3 text-xs shadow-md backdrop-blur">
+    <div className="w-full rounded-lg border border-border bg-background/95 p-3 text-xs shadow-md backdrop-blur">
       <div className="flex items-start justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
           <span
@@ -178,10 +180,61 @@ function ResearchCardItem({
 
       {!card.loading && !card.error && (
         <>
-          <p className="mt-1.5 leading-relaxed text-foreground">
-            {expanded ? card.summary : card.summary.slice(0, 150)}
-            {!expanded && card.summary.length > 150 && "..."}
-          </p>
+          <div className="mt-1.5 leading-relaxed text-foreground research-markdown">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                p: ({ node, ...props }) => (
+                  <p className="mb-1 last:mb-0" {...props} />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                ul: ({ node, ...props }) => (
+                  <ul className="list-disc pl-3.5 mb-1" {...props} />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                ol: ({ node, ...props }) => (
+                  <ol className="list-decimal pl-3.5 mb-1" {...props} />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                li: ({ node, ...props }) => (
+                  <li className="mb-0.5" {...props} />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                strong: ({ node, ...props }) => (
+                  <strong className="font-semibold" {...props} />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                h3: ({ node, ...props }) => (
+                  <h3
+                    className="text-xs font-semibold mt-1.5 mb-0.5"
+                    {...props}
+                  />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                code: ({ node, ...props }) => (
+                  <code
+                    className="bg-muted rounded px-1 py-0.5 text-[10px]"
+                    {...props}
+                  />
+                ),
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                a: ({ node, ...props }) => (
+                  <a
+                    className="text-blue-600 hover:underline dark:text-blue-400"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    {...props}
+                  />
+                ),
+              }}
+            >
+              {expanded ? card.summary : card.summary.slice(0, 200)}
+            </ReactMarkdown>
+            {!expanded && card.summary.length > 200 && (
+              <span className="text-muted-foreground">...</span>
+            )}
+          </div>
 
           {expanded && card.sources.length > 0 && (
             <div className="mt-2 space-y-1 border-t border-border pt-2">
@@ -257,7 +310,7 @@ export function ResearchPanel() {
   if (!panelVisible || activeCards.length === 0) return null;
 
   return (
-    <div className="absolute bottom-20 right-4 z-30 flex w-80 max-h-[60vh] flex-col gap-2">
+    <div className="absolute bottom-20 right-4 z-50 flex w-80 max-h-[60vh] flex-col gap-2">
       <div className="flex items-center justify-between rounded-lg border border-border bg-background/95 px-3 py-1.5 shadow-lg backdrop-blur">
         <div className="flex items-center gap-1.5 text-xs font-medium">
           <Search className="h-3.5 w-3.5" />

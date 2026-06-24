@@ -560,24 +560,35 @@ const server = http.createServer(async (req, res) => {
               role: "user",
               parts: [
                 {
-                  text: `You analyze real-time meeting transcript deltas to decide if a web search would provide useful supplementary information.
+                  text: `あなたは会議のリアルタイム音声認識テキストを分析し、参加者に役立つ補足情報（カンペ）を提供するために検索すべきトピックを判定するアシスタントです。
 
-TRANSCRIPT CONTEXT (last portion):
+会議の文脈（直近部分）:
 ${transcript.slice(-2000)}
 
-NEW DELTA (recently spoken):
+新しく検出されたキーワード:
 ${delta}
 
-ALREADY SEARCHED TOPICS:
-${existingTopics.length > 0 ? existingTopics.join(", ") : "(none)"}
+検索済みトピック:
+${existingTopics.length > 0 ? existingTopics.join(", ") : "(なし)"}
 
-Decide if the delta introduces a topic worth searching. Return JSON:
-- shouldSearch: true only for concrete claims, statistics, product/company names, technical terms, factual assertions, or explicit requests like "調べておいて" / "確認が必要"
-- query: search-optimized query in the most relevant language (Japanese or English). Include both languages if the topic spans both.
-- type: "topic" for new subjects, "fact-check" for verifiable claims/numbers, "explicit-request" for user-initiated search requests
-- reason: one-line explanation
+判定基準:
+- shouldSearch: true にすべきケース:
+  - 具体的な企業名・製品名・人名・技術用語が出た（深掘り価値あり）
+  - 数値・統計・市場データへの言及（「売上が○○億」「シェアは○%」等）
+  - 事実確認が必要な主張（「○○は△△だったはず」等）
+  - 明示的な調査依頼（「調べておいて」「確認が必要」「正確な数字は？」等）
+  - 議論の文脈で背景知識があると有利なトピック
+- shouldSearch: false にすべきケース:
+  - 一般的な雑談・挨拶・意見表明
+  - 既に検索済みのトピックと実質同じ内容
+  - 検索しても有用な情報が得られないほど曖昧な話題
 
-Skip: general discussion, opinions, small talk, topics already searched.`,
+queryの作成指針:
+- 議論の文脈を踏まえた具体的な検索クエリにする（単語の羅列ではなく、何を知りたいのかが明確なクエリ）
+- 日本語トピックは日本語で、技術用語や英語固有名詞は英語で
+- 最新データが重要な場合は年号を含める
+
+type: "topic"=新しい話題の深掘り, "fact-check"=発言された数値・事実の裏付け, "explicit-request"=参加者が明示的に調査を依頼`,
                 },
               ],
             },
@@ -663,8 +674,37 @@ Skip: general discussion, opinions, small talk, topics already searched.`,
 
       const systemPrompt =
         type === "fact-check"
-          ? `You are a fact-checking assistant. Search for authoritative sources to verify or refute the following claim. Be precise about what the evidence shows. Search in both Japanese and English for comprehensive coverage. Cite specific numbers and dates when available.`
-          : `You are a research assistant supporting a live meeting. Provide a concise, informative summary about the following topic. Search in both Japanese and English for comprehensive coverage. Focus on the most relevant and recent information. Include key facts, numbers, and context that would be useful in a meeting discussion.`;
+          ? `あなたは会議中にリアルタイムで発言内容をファクトチェックするアシスタントです。
+日本語と英語の両方で検索し、権威あるソースから裏付けを取ってください。
+
+出力フォーマット（Markdown）:
+### 検証結果
+- **主張**: [発言された主張を簡潔に記述]
+- **判定**: [正確 / 概ね正確 / 不正確 / 要確認] のいずれか
+- **正確な数値・事実**: [検索で見つかった正確なデータ。年月日・出典名を必ず含める]
+- **補足**: [主張と事実の差異、注意すべきニュアンス、文脈で知っておくべき追加情報]`
+          : `あなたは会議中にリアルタイムで「カンペ」を提供するリサーチアシスタントです。
+参加者が議論中に即座に活用できる、深い分析と具体的なデータを提供してください。
+表面的なWeb検索のダイジェストではなく、議論に直接貢献できるインサイトを生成してください。
+日本語と英語の両方で検索し、学術論文・公式レポート・業界分析も含めてください。
+
+出力フォーマット（Markdown）:
+### 要点
+[このトピックについて、会議で即座に使える2-3文のエグゼクティブサマリー]
+
+### キーデータ
+- **[指標/事実名]**: [具体的な数値・日付・出典]（1-3個の最重要データポイント）
+
+### 議論のポイント
+- [この話題で押さえるべき論点や、発言に使える具体的な知見を2-3個。「〜という見方がある」ではなく「〜である（出典）」の形式で]
+
+### 注意点
+- [よくある誤解、落とし穴、考慮すべきリスクがあれば1-2個]`;
+
+      const userPrompt =
+        type === "fact-check"
+          ? `以下の会議で出た発言を検証してください。\n\n会議の文脈:\n${context.slice(-1000)}\n\n検証対象:\n${query}`
+          : `以下の会議で話題になっているトピックについて、参加者が議論に使えるカンペを作成してください。\n会議で今まさに話されている内容なので、議論の文脈に沿った情報を優先してください。\n\n会議の文脈:\n${context.slice(-1000)}\n\nリサーチ対象:\n${query}`;
 
       const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
         method: "POST",
@@ -679,11 +719,7 @@ Skip: general discussion, opinions, small talk, topics already searched.`,
           contents: [
             {
               role: "user",
-              parts: [
-                {
-                  text: `MEETING CONTEXT:\n${context.slice(-1000)}\n\nRESEARCH QUERY:\n${query}`,
-                },
-              ],
+              parts: [{ text: userPrompt }],
             },
           ],
           tools: [{ googleSearch: {} }],
