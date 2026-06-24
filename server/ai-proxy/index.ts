@@ -284,8 +284,8 @@ const server = http.createServer(async (req, res) => {
       const opName: string = operation.name;
       console.log(`[batch] Operation started: ${opName}`);
 
-      // Poll for completion (max 10 minutes, every 5 seconds)
-      const maxPollMs = 10 * 60 * 1000;
+      // Poll for completion (max 14 minutes, every 5 seconds)
+      const maxPollMs = 14 * 60 * 1000;
       const pollInterval = 5000;
       const startTime = Date.now();
 
@@ -320,7 +320,7 @@ const server = http.createServer(async (req, res) => {
 
       if (!result) {
         res.writeHead(504, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "BatchRecognize timed out (10 min)" }));
+        res.end(JSON.stringify({ error: "BatchRecognize timed out (14 min)" }));
         return;
       }
 

@@ -334,7 +334,7 @@ export function VoicePanel({
       // Stage 2: Batch transcribe with full-session diarization
       setRefineStage("transcribe");
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 11 * 60 * 1000);
+      const timeout = setTimeout(() => controller.abort(), 15 * 60 * 1000);
       const batchRes = await fetch(
         `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
         {
