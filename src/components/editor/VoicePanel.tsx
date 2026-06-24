@@ -203,7 +203,7 @@ export function VoicePanel({
         "CRITICAL: You are NOT creating a cleaned-up transcript or conversation log. " +
         "You MUST deeply understand the content and produce an INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
         "Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
-        "Use speaker information to attribute decisions and opinions where relevant (e.g., 'Aさんが指摘した問題点'), but NEVER format as dialogue (Speaker 0: ... / Speaker 1: ...). " +
+        "Use speaker information INTERNALLY to understand context and perspectives. NEVER output raw speaker labels like 'Speaker 0', 'speaker1'. If a speaker's name is identifiable from the transcript, use their real name for attribution (e.g., '田中さんが指摘した問題点'). Otherwise describe by role or paraphrase without attribution. " +
         "The transcript contains '---' markers indicating chunk boundaries. Speaker labels are ONLY consistent WITHIN segments between --- markers — the same speaker may have different labels in different segments. Use speech content to identify and unify speakers across segments. " +
         "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
@@ -386,13 +386,13 @@ export function VoicePanel({
         "The transcript is from speech-to-text and may contain misrecognitions. Correct obvious errors based on context. " +
         vocabularyHint +
         `There are ${speakerCount} speaker(s) in this recording. ` +
-        "CRITICAL: You are NOT creating a cleaned-up transcript. " +
-        "Produce a POLISHED, FINAL informational document organized by TOPIC, not chronologically. " +
-        "The speaker labels (Speaker 1, Speaker 2, etc.) are globally consistent — trust them for attribution. " +
-        "Attribute decisions, opinions, and action items to specific speakers. If speakers introduced themselves, use their names. " +
-        "Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
-        "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
-        "Keep the same language as the transcript. Do NOT add generic titles. " +
+        "CRITICAL RULES: " +
+        "1) You are NOT creating a cleaned-up transcript or conversation log. Produce a POLISHED INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
+        "2) Use the speaker labels INTERNALLY to understand who holds which opinion, who proposed what, and the dynamics between participants — but NEVER output raw speaker labels like 'Speaker 1', 'Speaker 0', 'speaker0', etc. " +
+        "3) When attribution matters: if a speaker's name can be identified from the transcript (e.g., they introduced themselves or were addressed by name), use their real name (e.g., '田中さんからの質問', '鈴木の提案'). Otherwise, describe by inferred role or position (e.g., '提案側の意見として', 'プロジェクトリーダーが指摘した点'). If neither name nor role can be inferred, paraphrase without attribution rather than using speaker numbers. " +
+        "4) Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
+        "5) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
+        "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
         "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
       const refineUserContent = existingDoc
@@ -527,7 +527,9 @@ export function VoicePanel({
       )}
 
       {/* Controls */}
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-t border-border/50">
+      <div
+        className={`flex items-center border-t border-border/50 ${isMobile ? "gap-1.5 px-2 py-2" : "gap-2 px-3 py-2"}`}
+      >
         <Button
           variant={isRecording ? "destructive" : "default"}
           size="sm"
@@ -581,7 +583,7 @@ export function VoicePanel({
           </div>
         )}
 
-        <div className="flex-1 min-w-0" />
+        {isDesktop && <div className="flex-1" />}
 
         {isTauri && isDesktop && !isRecording && (
           <Button
@@ -618,46 +620,50 @@ export function VoicePanel({
         )}
 
         <select
-          className="h-7 rounded-md border border-input bg-background px-2 text-[11px] outline-none"
+          className={`h-7 rounded-md border border-input bg-background text-[11px] outline-none shrink-0 ${isMobile ? "px-1" : "px-2"}`}
           value={autoStructureInterval}
           onChange={(e) => setAutoStructureInterval(Number(e.target.value))}
         >
-          <option value={0}>Manual</option>
-          <option value={60}>1min auto</option>
-          <option value={120}>2min auto</option>
-          <option value={180}>3min auto</option>
-          <option value={300}>5min auto</option>
+          <option value={0}>{isMobile ? "手動" : "Manual"}</option>
+          <option value={60}>1min</option>
+          <option value={120}>2min</option>
+          <option value={180}>3min</option>
+          <option value={300}>5min</option>
         </select>
 
         <Button
           variant="outline"
-          size="sm"
-          className="gap-1.5 text-xs shrink-0"
+          size={isMobile ? "icon" : "sm"}
+          className={isMobile ? "h-9 w-9 shrink-0" : "gap-1.5 text-xs shrink-0"}
           onClick={() => doStructure(true)}
           disabled={!fullTranscript.trim() || structuring}
+          title="Structure"
         >
           {structuring ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
             <Sparkles className="h-3.5 w-3.5" />
           )}
-          Structure
+          {!isMobile && "Structure"}
         </Button>
 
         {isTauri && !isRecording && fullTranscript.trim() && hasArchive && (
           <Button
             variant="outline"
-            size="sm"
-            className="gap-1.5 text-xs shrink-0"
+            size={isMobile ? "icon" : "sm"}
+            className={
+              isMobile ? "h-9 w-9 shrink-0" : "gap-1.5 text-xs shrink-0"
+            }
             onClick={() => doRefine()}
             disabled={refining || structuring}
+            title="Refine"
           >
             {refining ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Wand2 className="h-3.5 w-3.5" />
             )}
-            Refine
+            {!isMobile && "Refine"}
           </Button>
         )}
 
