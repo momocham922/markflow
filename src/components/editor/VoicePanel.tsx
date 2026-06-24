@@ -651,7 +651,7 @@ export function VoicePanel({
         )}
 
         <select
-          className={`h-7 rounded-md border border-input bg-background text-[11px] outline-none shrink-0 ${isMobile ? "px-1" : "px-2"}`}
+          className={`rounded-md border border-input bg-background text-[11px] outline-none shrink-0 ${isMobile ? "h-8 px-2" : "h-7 px-2"}`}
           value={autoStructureInterval}
           onChange={(e) => setAutoStructureInterval(Number(e.target.value))}
         >
@@ -664,8 +664,8 @@ export function VoicePanel({
 
         <Button
           variant="outline"
-          size={isMobile ? "icon" : "sm"}
-          className={isMobile ? "h-9 w-9 shrink-0" : "gap-1.5 text-xs shrink-0"}
+          size="sm"
+          className="gap-1 text-xs shrink-0"
           onClick={() => doStructure(true)}
           disabled={!fullTranscript.trim() || structuring}
           title="Structure"
@@ -675,16 +675,14 @@ export function VoicePanel({
           ) : (
             <Sparkles className="h-3.5 w-3.5" />
           )}
-          {!isMobile && "Structure"}
+          Structure
         </Button>
 
         {isTauri && !isRecording && fullTranscript.trim() && hasArchive && (
           <Button
             variant="outline"
-            size={isMobile ? "icon" : "sm"}
-            className={
-              isMobile ? "h-9 w-9 shrink-0" : "gap-1.5 text-xs shrink-0"
-            }
+            size="sm"
+            className="gap-1 text-xs shrink-0"
             onClick={() => doRefine()}
             disabled={refining || structuring}
             title="Refine"
@@ -694,14 +692,14 @@ export function VoicePanel({
             ) : (
               <Wand2 className="h-3.5 w-3.5" />
             )}
-            {!isMobile && "Refine"}
+            Refine
           </Button>
         )}
 
         <Button
           variant="ghost"
           size="icon"
-          className={`shrink-0 ${isMobile ? "h-11 w-11" : "h-7 w-7"}`}
+          className={`shrink-0 ${isMobile ? "h-8 w-8" : "h-7 w-7"}`}
           onClick={() => {
             clearTranscript();
             lastStructuredRef.current = "";
