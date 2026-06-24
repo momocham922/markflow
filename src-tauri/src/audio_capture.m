@@ -136,6 +136,24 @@ int start_av_audio_capture(void) {
         return 0;
     }
 
+#if TARGET_OS_IOS
+    // Configure AVAudioSession for background recording + screen-off
+    NSError *sessionErr = nil;
+    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+    [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                  withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker |
+                              AVAudioSessionCategoryOptionAllowBluetooth
+                        error:&sessionErr];
+    if (sessionErr) {
+        NSLog(@"[audio] AVAudioSession setCategory error: %@", sessionErr);
+    }
+    [audioSession setActive:YES error:&sessionErr];
+    if (sessionErr) {
+        NSLog(@"[audio] AVAudioSession setActive error: %@", sessionErr);
+    }
+    NSLog(@"[audio] AVAudioSession configured for background recording");
+#endif
+
     @try {
         _audioBuf = [NSMutableData new];
         _audioLock = [NSLock new];
@@ -230,6 +248,12 @@ void stop_av_audio_capture(void) {
         _delegate = nil;
         NSLog(@"[audio] AVCaptureSession stopped");
     }
+#if TARGET_OS_IOS
+    NSError *err = nil;
+    [[AVAudioSession sharedInstance] setActive:NO
+                                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                         error:&err];
+#endif
     [_audioLock lock];
     [_audioBuf setLength:0];
     [_audioLock unlock];
