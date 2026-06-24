@@ -53,7 +53,7 @@ export function VoicePanel({
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [refining, setRefining] = useState(false);
-  const [archiveConsumed, setArchiveConsumed] = useState(false);
+  const [hasArchive, setHasArchive] = useState(false);
   const [refineStage, setRefineStage] = useState<
     "upload" | "transcribe" | "structure" | null
   >(null);
@@ -122,7 +122,7 @@ export function VoicePanel({
   });
 
   useEffect(() => {
-    if (isRecording) setArchiveConsumed(false);
+    if (isRecording) setHasArchive(true);
   }, [isRecording]);
 
   useEffect(() => {
@@ -424,7 +424,7 @@ export function VoicePanel({
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
       }
-      setArchiveConsumed(true);
+      setHasArchive(false);
     } catch (err) {
       console.error("[voice] Refine failed:", err);
       const msg = err instanceof Error ? err.message : String(err);
@@ -527,7 +527,7 @@ export function VoicePanel({
       )}
 
       {/* Controls */}
-      <div className="flex items-center gap-2 px-3 py-2 border-t border-border/50">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-t border-border/50">
         <Button
           variant={isRecording ? "destructive" : "default"}
           size="sm"
@@ -581,7 +581,7 @@ export function VoicePanel({
           </div>
         )}
 
-        <div className="flex-1" />
+        <div className="flex-1 min-w-0" />
 
         {isTauri && isDesktop && !isRecording && (
           <Button
@@ -632,7 +632,7 @@ export function VoicePanel({
         <Button
           variant="outline"
           size="sm"
-          className="gap-1.5 text-xs"
+          className="gap-1.5 text-xs shrink-0"
           onClick={() => doStructure(true)}
           disabled={!fullTranscript.trim() || structuring}
         >
@@ -644,34 +644,32 @@ export function VoicePanel({
           Structure
         </Button>
 
-        {isTauri &&
-          !isRecording &&
-          fullTranscript.trim() &&
-          !archiveConsumed && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5 text-xs"
-              onClick={() => doRefine()}
-              disabled={refining || structuring}
-            >
-              {refining ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Wand2 className="h-3.5 w-3.5" />
-              )}
-              Refine
-            </Button>
-          )}
+        {isTauri && !isRecording && fullTranscript.trim() && hasArchive && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 text-xs shrink-0"
+            onClick={() => doRefine()}
+            disabled={refining || structuring}
+          >
+            {refining ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="h-3.5 w-3.5" />
+            )}
+            Refine
+          </Button>
+        )}
 
         <Button
           variant="ghost"
           size="icon"
-          className={isMobile ? "h-11 w-11" : "h-7 w-7"}
+          className={`shrink-0 ${isMobile ? "h-11 w-11" : "h-7 w-7"}`}
           onClick={() => {
             clearTranscript();
             lastStructuredRef.current = "";
             sttVocabRef.current.clear();
+            setHasArchive(false);
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))
               .catch(() => {});
