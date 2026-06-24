@@ -87,6 +87,7 @@ export function VoicePanel({
   // Refs to avoid stale closures in setInterval callbacks
   const fullTranscriptRef = useRef("");
   const structuringRef = useRef(false);
+  const refiningRef = useRef(false);
   const onInsertRef = useRef(onInsertMarkdown);
   const onSetContentRef = useRef(onSetContent);
   const docContentRef = useRef(documentContent);
@@ -118,7 +119,7 @@ export function VoicePanel({
     },
     onInfo: (msg) => setVoiceInfo(msg),
     onMaxDuration: () =>
-      setVoiceError("Recording stopped: maximum duration (60 min) reached."),
+      setVoiceError("Recording stopped: maximum duration (4 hours) reached."),
   });
 
   useEffect(() => {
@@ -170,7 +171,8 @@ export function VoicePanel({
 
   const doStructure = useCallback(async (manual = false) => {
     const transcript = fullTranscriptRef.current;
-    if (!transcript.trim() || structuringRef.current) return;
+    if (!transcript.trim() || structuringRef.current || refiningRef.current)
+      return;
 
     const newPart = lastStructuredRef.current
       ? transcript.slice(lastStructuredRef.current.length).trim()
@@ -295,9 +297,10 @@ export function VoicePanel({
 
   const doRefine = useCallback(async () => {
     const transcript = fullTranscriptRef.current;
-    if (!transcript.trim() || refining) return;
+    if (!transcript.trim() || refiningRef.current) return;
 
     setRefining(true);
+    refiningRef.current = true;
     try {
       const user = useAuthStore.getState().user;
       if (!user) throw new Error("Not authenticated");
@@ -436,9 +439,10 @@ export function VoicePanel({
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
     } finally {
       setRefining(false);
+      refiningRef.current = false;
       setRefineStage(null);
     }
-  }, [refining]);
+  }, []);
 
   // Auto-structure timer — stable callback, no deps on fullTranscript/structuring
   useEffect(() => {

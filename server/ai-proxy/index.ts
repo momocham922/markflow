@@ -227,7 +227,7 @@ const server = http.createServer(async (req, res) => {
   // --- /v1/voice/batch-transcribe ---
   if (req.url === "/v1/voice/batch-transcribe") {
     try {
-      await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
       const gcsUri: string = parsed.gcsUri;
@@ -236,6 +236,13 @@ const server = http.createServer(async (req, res) => {
       if (!gcsUri) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "gcsUri is required" }));
+        return;
+      }
+
+      const expectedPrefix = `gs://markflow-app-2026.firebasestorage.app/audio/${uid}/`;
+      if (!gcsUri.startsWith(expectedPrefix)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Access denied: invalid audio path" }));
         return;
       }
 
@@ -256,7 +263,7 @@ const server = http.createServer(async (req, res) => {
               enableAutomaticPunctuation: true,
               diarizationConfig: {
                 minSpeakerCount: 1,
-                maxSpeakerCount: 10,
+                maxSpeakerCount: 6,
               },
             },
             denoiserConfig: { denoiseAudio: true },

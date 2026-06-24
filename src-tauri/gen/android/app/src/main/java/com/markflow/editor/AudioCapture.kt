@@ -15,7 +15,7 @@ import kotlin.concurrent.thread
 
 class AudioCapture(private val activity: MainActivity) {
     private var audioRecord: AudioRecord? = null
-    private var isRecording = false
+    @Volatile private var isRecording = false
     private val buffer = mutableListOf<Float>()
     private val lock = Object()
     private var sampleRate = 16000

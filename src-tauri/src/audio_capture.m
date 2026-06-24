@@ -125,6 +125,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 static AVCaptureSession *_session = nil;
 static AudioDelegate *_delegate = nil;
+#if TARGET_OS_IOS
+static id _interruptionObserver = nil;
+#endif
 
 // Returns: 1=OK, 0=permission, -1=no device, -2=session error, -3=exception
 int start_av_audio_capture(void) {
@@ -152,6 +155,28 @@ int start_av_audio_capture(void) {
         NSLog(@"[audio] AVAudioSession setActive error: %@", sessionErr);
     }
     NSLog(@"[audio] AVAudioSession configured for background recording");
+
+    // Handle interruptions (phone calls, Siri, etc.)
+    _interruptionObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVAudioSessionInterruptionNotification
+                    object:audioSession
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        NSUInteger type = [note.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+        if (type == AVAudioSessionInterruptionTypeBegan) {
+            NSLog(@"[audio] AVAudioSession interrupted — recording paused by system");
+        } else if (type == AVAudioSessionInterruptionTypeEnded) {
+            NSLog(@"[audio] AVAudioSession interruption ended — resuming");
+            NSError *err = nil;
+            [[AVAudioSession sharedInstance] setActive:YES error:&err];
+            if (err) {
+                NSLog(@"[audio] Failed to reactivate session: %@", err);
+            } else if (_session && !_session.isRunning) {
+                [_session startRunning];
+                NSLog(@"[audio] AVCaptureSession restarted after interruption");
+            }
+        }
+    }];
 #endif
 
     @try {
@@ -208,9 +233,8 @@ int start_av_audio_capture(void) {
             return -2;
         }
 
-        // Get sample rate from device format
-        CMFormatDescriptionRef fmtDesc = (CMFormatDescriptionRef)CFBridgingRetain(mic.activeFormat.formatDescription);
-        // Note: we retain then immediately use, no need to release since ARC manages the source
+        // Get sample rate from device format (formatDescription returns CF type directly, no bridging needed)
+        CMFormatDescriptionRef fmtDesc = mic.activeFormat.formatDescription;
         const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc);
         _sampleRate = asbd ? asbd->mSampleRate : 44100;
 
@@ -249,6 +273,10 @@ void stop_av_audio_capture(void) {
         NSLog(@"[audio] AVCaptureSession stopped");
     }
 #if TARGET_OS_IOS
+    if (_interruptionObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:_interruptionObserver];
+        _interruptionObserver = nil;
+    }
     NSError *err = nil;
     [[AVAudioSession sharedInstance] setActive:NO
                                    withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation

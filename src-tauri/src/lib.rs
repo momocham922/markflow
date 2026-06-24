@@ -984,6 +984,7 @@ static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// if the frontend stops draining (normal drain is every CHUNK_MS = 25s).
 /// Set to 120s to survive macOS background throttling (setInterval delayed 40-60s+).
 const SYS_AUDIO_MAX_SAMPLES: usize = 48000 * 120; // ~120s at 48kHz
+const MIC_BUFFER_MAX_SAMPLES: usize = 48000 * 120; // ~120s at 48kHz — same cap as system audio
 
 /// Wall-clock milliseconds since the UNIX epoch (monotonic enough for stall detection).
 #[allow(dead_code)] // used by the macOS SCStream watchdog only
@@ -1130,7 +1131,6 @@ fn disable_app_nap() {
         let reason = objc2_foundation::NSString::from_str("Voice recording");
         let options: u64 = 0x00EFFFFF; // NSActivityUserInitiatedAllowingIdleSystemSleep
         let activity: *mut AnyObject = msg_send![pi, beginActivityWithOptions: options reason: &*reason];
-        let _: *mut AnyObject = msg_send![activity, retain];
         *APP_NAP_ACTIVITY.lock().unwrap() = activity as usize;
     }
     println!("[voice] App Nap disabled for recording");
@@ -1150,7 +1150,6 @@ fn enable_app_nap() {
             let activity = ptr as *mut AnyObject;
             let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
             let _: () = msg_send![pi, endActivity: activity];
-            let _: () = msg_send![activity, release];
         }
         println!("[voice] App Nap re-enabled");
     }
@@ -1265,6 +1264,13 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<String, String> {
     let want_sys = system_audio.unwrap_or(false);
 
+    // Clean up any previous archive before creating a new one
+    {
+        if let Some(old_path) = VOICE_ARCHIVE_PATH.lock().unwrap().take() {
+            let _ = std::fs::remove_file(&old_path);
+        }
+        *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+    }
     // Create archive temp file for full-session audio (Refine pipeline)
     {
         let archive_path = std::env::temp_dir().join(format!("markflow_voice_{}.pcm", uuid::Uuid::new_v4()));
@@ -1442,6 +1448,10 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
             if count > 0 {
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     buf.extend_from_slice(&temp[..count as usize]);
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES {
+                        let drop = buf.len() - MIC_BUFFER_MAX_SAMPLES;
+                        buf.drain(..drop);
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1504,13 +1514,19 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
         cpal::SampleFormat::F32 => device.build_input_stream(&config,
             |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
-                if let Ok(mut buf) = VOICE_BUFFER.try_lock() { buf.extend_from_slice(data); }
+                if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                    buf.extend_from_slice(data);
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); }
+                }
             }, |e| eprintln!("[voice] {}", e), None,
         ).map_err(|e| format!("録音開始失敗: {}", e))?,
         cpal::SampleFormat::I16 => device.build_input_stream(&config,
             |data: &[i16], _: &cpal::InputCallbackInfo| {
                 if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
-                if let Ok(mut buf) = VOICE_BUFFER.try_lock() { for &s in data { buf.push(s as f32 / 32768.0); } }
+                if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
+                    for &s in data { buf.push(s as f32 / 32768.0); }
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); }
+                }
             }, |e| eprintln!("[voice] {}", e), None,
         ).map_err(|e| format!("録音開始失敗: {}", e))?,
         fmt => return Err(format!("未対応のオーディオ形式: {:?}", fmt)),
