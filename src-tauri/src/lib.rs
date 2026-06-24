@@ -1130,7 +1130,9 @@ fn disable_app_nap() {
         let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
         let reason = objc2_foundation::NSString::from_str("Voice recording");
         let options: u64 = 0x00EFFFFF; // NSActivityUserInitiatedAllowingIdleSystemSleep
-        let activity: *mut AnyObject = msg_send![pi, beginActivityWithOptions: options reason: &*reason];
+        let activity: *mut AnyObject = msg_send![pi, beginActivityWithOptions: options, reason: &*reason];
+        // beginActivityWithOptions: returns an autoreleased object — retain to prevent ARC from freeing it
+        let _: *mut AnyObject = msg_send![activity, retain];
         *APP_NAP_ACTIVITY.lock().unwrap() = activity as usize;
     }
     println!("[voice] App Nap disabled for recording");
@@ -1150,6 +1152,8 @@ fn enable_app_nap() {
             let activity = ptr as *mut AnyObject;
             let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
             let _: () = msg_send![pi, endActivity: activity];
+            // Balance the retain from disable_app_nap
+            let _: () = msg_send![activity, release];
         }
         println!("[voice] App Nap re-enabled");
     }
