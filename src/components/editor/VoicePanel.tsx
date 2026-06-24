@@ -14,6 +14,7 @@ import { isAndroid, isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { auth } from "@/services/firebase";
+import { extractHints } from "@/lib/text-utils";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
@@ -21,23 +22,8 @@ interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
   onSetContent: (content: string) => void;
   documentContent: string;
-}
-
-function extractHints(text: string): string[] {
-  const hints = new Set<string>();
-  // 漢字複合語（3文字以上 — 短い一般語を除外して固有名詞・専門用語に絞る）
-  const kanji = text.match(/[一-鿿]{3,}/g);
-  if (kanji) kanji.forEach((w) => hints.add(w));
-  // カタカナ語（4文字以上 — 一般的なカタカナ語を除外）
-  const katakana = text.match(/[゠-ヿ]{4,}/g);
-  if (katakana) katakana.forEach((w) => hints.add(w));
-  // 英単語（大文字始まり4文字以上）
-  const english = text.match(/[A-Z][a-zA-Z]{3,}/g);
-  if (english) english.forEach((w) => hints.add(w));
-  // 長い語を優先（固有名詞は一般語より長い傾向）
-  return Array.from(hints)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 50);
+  onTranscriptChange?: (transcript: string) => void;
+  onRecordingChange?: (isRecording: boolean) => void;
 }
 
 function formatDuration(seconds: number): string {
@@ -50,6 +36,8 @@ export function VoicePanel({
   onInsertMarkdown,
   onSetContent,
   documentContent,
+  onTranscriptChange,
+  onRecordingChange,
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [refining, setRefining] = useState(false);
@@ -158,6 +146,14 @@ export function VoicePanel({
     };
   }, [isRecording]);
 
+  useEffect(() => {
+    onTranscriptChange?.(fullTranscript);
+  }, [fullTranscript, onTranscriptChange]);
+
+  useEffect(() => {
+    onRecordingChange?.(isRecording);
+  }, [isRecording, onRecordingChange]);
+
   // Keep refs in sync
   useEffect(() => {
     fullTranscriptRef.current = fullTranscript;
@@ -249,6 +245,26 @@ export function VoicePanel({
         userContent = `Convert this voice transcript into a structured informational document:\n\n${transcript}`;
       }
 
+      const { useResearchStore } = await import("@/stores/research-store");
+      const researchCards = useResearchStore
+        .getState()
+        .cards.filter((c) => !c.integrated && c.summary);
+      if (researchCards.length > 0) {
+        userContent +=
+          "\n\n## Research Context\n" +
+          "The following supplementary information was gathered via web search during the recording. " +
+          "Integrate relevant findings where appropriate, citing sources with markdown links. " +
+          "Only include information directly relevant to the discussion.\n\n" +
+          researchCards
+            .map((c) => {
+              const srcList = c.sources
+                .map((s) => `  - [${s.title}](${s.url})`)
+                .join("\n");
+              return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
+            })
+            .join("\n\n");
+      }
+
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
         headers: {
@@ -298,6 +314,9 @@ export function VoicePanel({
           onInsertRef.current(`\n\n${cleanOutput}\n`);
         }
         lastStructuredRef.current = transcript;
+        if (researchCards.length > 0) {
+          useResearchStore.getState().markAllIntegrated();
+        }
       }
     } catch (err) {
       console.error("[voice] Structuring failed:", err);
@@ -412,9 +431,29 @@ export function VoicePanel({
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
         "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
-      const refineUserContent = existingDoc
+      let refineUserContent = existingDoc
         ? `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
         : `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\nProduce a polished structured document from this transcript.`;
+
+      const { useResearchStore: getResearchStore } =
+        await import("@/stores/research-store");
+      const refineResearchCards = getResearchStore().cards.filter(
+        (c) => !c.integrated && c.summary,
+      );
+      if (refineResearchCards.length > 0) {
+        refineUserContent +=
+          "\n\n## Research Context\n" +
+          "Supplementary information gathered via web search during the recording. " +
+          "Integrate relevant findings where appropriate with source citations.\n\n" +
+          refineResearchCards
+            .map((c) => {
+              const srcList = c.sources
+                .map((s) => `  - [${s.title}](${s.url})`)
+                .join("\n");
+              return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
+            })
+            .join("\n\n");
+      }
 
       const refineRes = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
@@ -441,6 +480,9 @@ export function VoicePanel({
 
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
+        if (refineResearchCards.length > 0) {
+          getResearchStore().markAllIntegrated();
+        }
       }
       setHasArchive(false);
       import("@tauri-apps/api/core")

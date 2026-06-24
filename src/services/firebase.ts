@@ -28,12 +28,7 @@ import {
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
-import {
-  getStorage,
-  ref,
-  uploadBytes,
-  getDownloadURL,
-} from "firebase/storage";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -44,14 +39,10 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "",
 };
 
-const GOOGLE_CLIENT_ID =
-  import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-const GOOGLE_CLIENT_SECRET =
-  import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
-const GITHUB_CLIENT_ID =
-  import.meta.env.VITE_GITHUB_CLIENT_ID || "";
-const GITHUB_CLIENT_SECRET =
-  import.meta.env.VITE_GITHUB_CLIENT_SECRET || "";
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
+const GITHUB_CLIENT_ID = import.meta.env.VITE_GITHUB_CLIENT_ID || "";
+const GITHUB_CLIENT_SECRET = import.meta.env.VITE_GITHUB_CLIENT_SECRET || "";
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
@@ -97,7 +88,10 @@ export async function checkPendingOAuthCode(): Promise<User | null> {
     }
 
     const tokens = await tokenResponse.json();
-    const credential = GoogleAuthProvider.credential(tokens.id_token, tokens.access_token);
+    const credential = GoogleAuthProvider.credential(
+      tokens.id_token,
+      tokens.access_token,
+    );
     const result = await signInWithCredential(auth, credential);
     return result.user;
   } catch (e) {
@@ -166,13 +160,15 @@ export async function signInWithGoogle(): Promise<User | null> {
       }, 300000);
 
       // Open system browser for OAuth
-      import("@/platform").then(({ isIOS: isIOSPlatform }) => {
-        if (isIOSPlatform) {
-          invoke("open_safari_vc", { url: authUrl }).catch(reject);
-        } else {
-          invoke("open_external_url", { url: authUrl }).catch(reject);
-        }
-      }).catch(reject);
+      import("@/platform")
+        .then(({ isIOS: isIOSPlatform }) => {
+          if (isIOSPlatform) {
+            invoke("open_safari_vc", { url: authUrl }).catch(reject);
+          } else {
+            invoke("open_external_url", { url: authUrl }).catch(reject);
+          }
+        })
+        .catch(reject);
     });
 
     // Exchange code for tokens
@@ -194,7 +190,10 @@ export async function signInWithGoogle(): Promise<User | null> {
     }
 
     const tokens = await tokenResponse.json();
-    const credential = GoogleAuthProvider.credential(tokens.id_token, tokens.access_token);
+    const credential = GoogleAuthProvider.credential(
+      tokens.id_token,
+      tokens.access_token,
+    );
     const result = await signInWithCredential(auth, credential);
     return result.user;
   }
@@ -299,36 +298,62 @@ export async function signInWithGitHub(): Promise<User | null> {
     const authCode = await new Promise<string>((resolve, reject) => {
       let settled = false;
       const unlistenOk = listen<string>("oauth-callback", (event) => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); resolve(event.payload); }
+        if (!settled) {
+          settled = true;
+          unlistenOk.then((fn) => fn());
+          unlistenErr.then((fn) => fn());
+          resolve(event.payload);
+        }
       });
       const unlistenErr = listen<string>("oauth-error", (event) => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error(event.payload)); }
+        if (!settled) {
+          settled = true;
+          unlistenOk.then((fn) => fn());
+          unlistenErr.then((fn) => fn());
+          reject(new Error(event.payload));
+        }
       });
       setTimeout(() => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); invoke("dismiss_safari_vc").catch(() => {}); reject(new Error("Authentication timed out")); }
-      }, 300000);
-      import("@/platform").then(({ isIOS: isIOSPlatform }) => {
-        if (isIOSPlatform) {
-          invoke("open_safari_vc", { url: authUrl }).catch(reject);
-        } else {
-          invoke("open_external_url", { url: authUrl }).catch(reject);
+        if (!settled) {
+          settled = true;
+          unlistenOk.then((fn) => fn());
+          unlistenErr.then((fn) => fn());
+          invoke("dismiss_safari_vc").catch(() => {});
+          reject(new Error("Authentication timed out"));
         }
-      }).catch(reject);
+      }, 300000);
+      import("@/platform")
+        .then(({ isIOS: isIOSPlatform }) => {
+          if (isIOSPlatform) {
+            invoke("open_safari_vc", { url: authUrl }).catch(reject);
+          } else {
+            invoke("open_external_url", { url: authUrl }).catch(reject);
+          }
+        })
+        .catch(reject);
     });
 
-    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code: authCode,
-        redirect_uri: redirectUri,
-      }),
-    });
+    const tokenResponse = await fetch(
+      "https://github.com/login/oauth/access_token",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          client_secret: GITHUB_CLIENT_SECRET,
+          code: authCode,
+          redirect_uri: redirectUri,
+        }),
+      },
+    );
 
     if (!tokenResponse.ok) {
-      throw new Error(`GitHub token exchange failed: ${await tokenResponse.text()}`);
+      throw new Error(
+        `GitHub token exchange failed: ${await tokenResponse.text()}`,
+      );
     }
 
     const tokens = await tokenResponse.json();
@@ -351,30 +376,53 @@ export async function signInWithGitHub(): Promise<User | null> {
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
     const unlistenOk = platform.onOAuthCallback((code) => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); resolve(code); }
+      if (!settled) {
+        settled = true;
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        resolve(code);
+      }
     });
     const unlistenErr = platform.onOAuthError((error) => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error(error)); }
+      if (!settled) {
+        settled = true;
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        reject(new Error(error));
+      }
     });
     setTimeout(() => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error("Authentication timed out")); }
+      if (!settled) {
+        settled = true;
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        reject(new Error("Authentication timed out"));
+      }
     }, 300000);
     platform.openExternal(authUrl).catch(reject);
   });
 
-  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      client_secret: GITHUB_CLIENT_SECRET,
-      code: authCode,
-      redirect_uri: redirectUri,
-    }),
-  });
+  const tokenResponse = await fetch(
+    "https://github.com/login/oauth/access_token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code: authCode,
+        redirect_uri: redirectUri,
+      }),
+    },
+  );
 
   if (!tokenResponse.ok) {
-    throw new Error(`GitHub token exchange failed: ${await tokenResponse.text()}`);
+    throw new Error(
+      `GitHub token exchange failed: ${await tokenResponse.text()}`,
+    );
   }
 
   const tokens = await tokenResponse.json();
@@ -384,7 +432,9 @@ export async function signInWithGitHub(): Promise<User | null> {
   return result.user;
 }
 
-export async function reportCrash(data: Record<string, unknown>): Promise<void> {
+export async function reportCrash(
+  data: Record<string, unknown>,
+): Promise<void> {
   try {
     const userId = auth.currentUser?.uid || null;
     await addDoc(collection(firestore, "crash_reports"), {
@@ -411,7 +461,10 @@ export interface FirestoreDocument {
   ownerId: string;
   ownerName?: string;
   docType?: string;
-  collaborators: Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
+  collaborators: Record<
+    string,
+    { email: string; role: "editor" | "viewer"; addedAt: number }
+  >;
   tags: string[];
   folder: string;
   titlePinned?: boolean;
@@ -487,7 +540,9 @@ export async function saveDocumentToFirestore(docData: {
       folder: docData.folder ?? "/",
       tags: docData.tags ?? [],
       titlePinned: docData.titlePinned ?? false,
-      updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
+      updatedAt: docData.updatedAt
+        ? Timestamp.fromMillis(docData.updatedAt)
+        : serverTimestamp(),
     };
     if (docData.ownerName) payload.ownerName = docData.ownerName;
     if (docData.docType) payload.docType = docData.docType;
@@ -558,18 +613,24 @@ export async function saveDocumentMerge(docData: {
     if (docData.updatedAt && cloudUpdatedAt > docData.updatedAt) return;
     if (!docData.content?.trim() && cloudData.content?.trim()) return;
   }
-  await setDoc(ref, {
-    title: docData.title,
-    content: docData.content,
-    ownerId: docData.ownerId,
-    ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
-    folder: docData.folder ?? "/",
-    tags: docData.tags ?? [],
-    titlePinned: docData.titlePinned ?? false,
-    ...(docData.docType ? { docType: docData.docType } : {}),
-    ...(docData.teamId !== undefined ? { teamId: docData.teamId } : {}),
-    updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
-  }, { merge: true });
+  await setDoc(
+    ref,
+    {
+      title: docData.title,
+      content: docData.content,
+      ownerId: docData.ownerId,
+      ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
+      folder: docData.folder ?? "/",
+      tags: docData.tags ?? [],
+      titlePinned: docData.titlePinned ?? false,
+      ...(docData.docType ? { docType: docData.docType } : {}),
+      ...(docData.teamId !== undefined ? { teamId: docData.teamId } : {}),
+      updatedAt: docData.updatedAt
+        ? Timestamp.fromMillis(docData.updatedAt)
+        : serverTimestamp(),
+    },
+    { merge: true },
+  );
 }
 
 export async function deleteDocumentFromFirestore(
@@ -582,7 +643,11 @@ export async function updateShareLink(
   docId: string,
   shareLink: { enabled: boolean; token: string; permission: "view" | "edit" },
 ): Promise<void> {
-  await setDoc(doc(firestore, DOCS_COLLECTION, docId), { shareLink }, { merge: true });
+  await setDoc(
+    doc(firestore, DOCS_COLLECTION, docId),
+    { shareLink },
+    { merge: true },
+  );
 }
 
 // ─── Publish URL management ─────────────────────────────────
@@ -591,10 +656,14 @@ export async function setPublishUrl(
   docId: string,
   publishUrl: string | null,
 ): Promise<void> {
-  await setDoc(doc(firestore, DOCS_COLLECTION, docId), {
-    publishUrl: publishUrl,
-    publishedAt: publishUrl ? serverTimestamp() : null,
-  }, { merge: true });
+  await setDoc(
+    doc(firestore, DOCS_COLLECTION, docId),
+    {
+      publishUrl: publishUrl,
+      publishedAt: publishUrl ? serverTimestamp() : null,
+    },
+    { merge: true },
+  );
 }
 
 // ─── Version history cloud sync ─────────────────────────────
@@ -614,20 +683,36 @@ export interface FirestoreVersion {
 
 export async function syncVersionToCloud(
   documentId: string,
-  version: { id: string; content: string; title: string; message: string | null; createdAt: number },
+  version: {
+    id: string;
+    content: string;
+    title: string;
+    message: string | null;
+    createdAt: number;
+  },
   ownerId: string,
   ownerName: string,
 ): Promise<void> {
   if (!version.content?.trim()) return;
-  const ref = doc(firestore, DOCS_COLLECTION, documentId, "versions", version.id);
-  await setDoc(ref, {
-    content: version.content,
-    title: version.title,
-    message: version.message,
-    createdAt: version.createdAt,
-    ownerId,
-    ownerName,
-  }, { merge: true });
+  const ref = doc(
+    firestore,
+    DOCS_COLLECTION,
+    documentId,
+    "versions",
+    version.id,
+  );
+  await setDoc(
+    ref,
+    {
+      content: version.content,
+      title: version.title,
+      message: version.message,
+      createdAt: version.createdAt,
+      ownerId,
+      ownerName,
+    },
+    { merge: true },
+  );
 }
 
 export async function fetchVersionsFromCloud(
@@ -638,15 +723,23 @@ export async function fetchVersionsFromCloud(
     orderBy("createdAt", "desc"),
   );
   const snap = await getDocs(q);
-  return snap.docs.map((d) => ({
-    id: d.id,
-    documentId,
-    ...d.data(),
-  }) as FirestoreVersion);
+  return snap.docs.map(
+    (d) =>
+      ({
+        id: d.id,
+        documentId,
+        ...d.data(),
+      }) as FirestoreVersion,
+  );
 }
 
-export async function deleteVersionFromCloud(documentId: string, versionId: string): Promise<void> {
-  await deleteDoc(doc(firestore, DOCS_COLLECTION, documentId, "versions", versionId));
+export async function deleteVersionFromCloud(
+  documentId: string,
+  versionId: string,
+): Promise<void> {
+  await deleteDoc(
+    doc(firestore, DOCS_COLLECTION, documentId, "versions", versionId),
+  );
 }
 
 // ─── User settings (theme, preferences) ─────────────────────
@@ -658,7 +751,11 @@ export async function saveUserSettingsToFirestore(
   settings: Record<string, unknown>,
 ): Promise<void> {
   const ref = doc(firestore, SETTINGS_COLLECTION, uid);
-  await setDoc(ref, { ...settings, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(
+    ref,
+    { ...settings, updatedAt: serverTimestamp() },
+    { merge: true },
+  );
 }
 
 export async function fetchUserSettings(
@@ -717,7 +814,13 @@ export async function saveAiThreadsToCloud(
   docId: string,
   threads: { id: string; title: string; createdAt: number }[],
 ): Promise<void> {
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", `${docId}__meta`);
+  const ref = doc(
+    firestore,
+    SETTINGS_COLLECTION,
+    uid,
+    "ai_chats",
+    `${docId}__meta`,
+  );
   await setDoc(ref, { threads, updatedAt: serverTimestamp() });
 }
 
@@ -726,10 +829,20 @@ export async function fetchAiThreadsFromCloud(
   uid: string,
   docId: string,
 ): Promise<{ id: string; title: string; createdAt: number }[] | null> {
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", `${docId}__meta`);
+  const ref = doc(
+    firestore,
+    SETTINGS_COLLECTION,
+    uid,
+    "ai_chats",
+    `${docId}__meta`,
+  );
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
-  return (snap.data().threads || []) as { id: string; title: string; createdAt: number }[];
+  return (snap.data().threads || []) as {
+    id: string;
+    title: string;
+    createdAt: number;
+  }[];
 }
 
 // ─── Image upload (Firebase Storage) ────────────────────────
@@ -767,10 +880,14 @@ export async function logErrorToCloud(
     await addDoc(collection(firestore, "error_logs"), {
       uid,
       context,
-      error: error instanceof Error ? { message: error.message, code: (error as { code?: string }).code } : String(error),
+      error:
+        error instanceof Error
+          ? { message: error.message, code: (error as { code?: string }).code }
+          : String(error),
       meta: meta ?? {},
       createdAt: serverTimestamp(),
-      appVersion: (globalThis as Record<string, unknown>).__APP_VERSION__ ?? "unknown",
+      appVersion:
+        (globalThis as Record<string, unknown>).__APP_VERSION__ ?? "unknown",
     });
   } catch {
     // Best-effort — don't throw if logging itself fails
@@ -802,28 +919,30 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
   };
 
   // Force syncFromCloud — more reliable than page reload for E2E tests
-  (window as unknown as Record<string, unknown>).__TEST_FORCE_SYNC__ = async (): Promise<string> => {
-    try {
-      const { useAuthStore } = await import("../stores/auth-store");
-      await useAuthStore.getState().syncFromCloud();
-      return "ok";
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_FORCE_SYNC__ =
+    async (): Promise<string> => {
+      try {
+        const { useAuthStore } = await import("../stores/auth-store");
+        await useAuthStore.getState().syncFromCloud();
+        return "ok";
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
   // Verify sharing state — check if a doc has collaboratorUids for debugging
-  (window as unknown as Record<string, unknown>).__TEST_GET_SHARED_DOCS__ = async (): Promise<string> => {
-    try {
-      const currentUser = getAuth().currentUser;
-      if (!currentUser) return "error:not_logged_in";
-      const { fetchSharedWithMe } = await import("./sharing");
-      const docs = await fetchSharedWithMe(currentUser.uid);
-      return JSON.stringify(docs);
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_GET_SHARED_DOCS__ =
+    async (): Promise<string> => {
+      try {
+        const currentUser = getAuth().currentUser;
+        if (!currentUser) return "error:not_logged_in";
+        const { fetchSharedWithMe } = await import("./sharing");
+        const docs = await fetchSharedWithMe(currentUser.uid);
+        return JSON.stringify(docs);
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
   // Programmatic share: save doc to Firestore + add collaborator (bypasses UI)
   (window as unknown as Record<string, unknown>).__TEST_SHARE_DOC__ = async (
@@ -870,45 +989,48 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
   };
 
   // Save active doc directly to Firestore (bypasses syncToCloud transaction issues)
-  (window as unknown as Record<string, unknown>).__TEST_SAVE_TO_CLOUD__ = async (): Promise<string> => {
-    try {
-      const currentUser = getAuth().currentUser;
-      if (!currentUser) return "error:not_logged_in";
-      const { useAppStore } = await import("../stores/app-store");
-      const state = useAppStore.getState();
-      const activeDocId = state.activeDocId;
-      if (!activeDocId) return "error:no_active_doc";
-      const activeDoc = state.documents.find((d) => d.id === activeDocId);
-      if (!activeDoc) return "error:doc_not_found";
+  (window as unknown as Record<string, unknown>).__TEST_SAVE_TO_CLOUD__ =
+    async (): Promise<string> => {
+      try {
+        const currentUser = getAuth().currentUser;
+        if (!currentUser) return "error:not_logged_in";
+        const { useAppStore } = await import("../stores/app-store");
+        const state = useAppStore.getState();
+        const activeDocId = state.activeDocId;
+        if (!activeDocId) return "error:no_active_doc";
+        const activeDoc = state.documents.find((d) => d.id === activeDocId);
+        if (!activeDoc) return "error:doc_not_found";
 
-      const firestore = getFirestore();
-      const ref = doc(firestore, "documents", activeDocId);
-      // Use set with merge to avoid transaction read-rule issues
-      await setDoc(
-        ref,
-        {
-          title: activeDoc.title,
-          content: activeDoc.content,
-          ownerId: activeDoc.ownerId || currentUser.uid,
-          ownerName: currentUser.displayName || currentUser.email || undefined,
-          folder: activeDoc.folder ?? "/",
-          tags: activeDoc.tags ?? [],
-          titlePinned: activeDoc.titlePinned ?? false,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true },
-      );
-      return "ok";
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+        const firestore = getFirestore();
+        const ref = doc(firestore, "documents", activeDocId);
+        // Use set with merge to avoid transaction read-rule issues
+        await setDoc(
+          ref,
+          {
+            title: activeDoc.title,
+            content: activeDoc.content,
+            ownerId: activeDoc.ownerId || currentUser.uid,
+            ownerName:
+              currentUser.displayName || currentUser.email || undefined,
+            folder: activeDoc.folder ?? "/",
+            tags: activeDoc.tags ?? [],
+            titlePinned: activeDoc.titlePinned ?? false,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+        return "ok";
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
   // Debug: get current user UID
-  (window as unknown as Record<string, unknown>).__TEST_GET_UID__ = (): string => {
-    const currentUser = getAuth().currentUser;
-    return currentUser ? currentUser.uid : "not_logged_in";
-  };
+  (window as unknown as Record<string, unknown>).__TEST_GET_UID__ =
+    (): string => {
+      const currentUser = getAuth().currentUser;
+      return currentUser ? currentUser.uid : "not_logged_in";
+    };
 
   // Debug: check document info in Firestore
   (window as unknown as Record<string, unknown>).__TEST_DOC_INFO__ = async (
@@ -947,35 +1069,118 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
     }
   };
 
-  (window as unknown as Record<string, unknown>).__TEST_ADD_TEAM_MEMBER__ = async (
-    argsJson: string,
-  ): Promise<string> => {
-    try {
-      const { teamId, email, role } = JSON.parse(argsJson);
-      const { addTeamMember } = await import("./sharing");
-      await addTeamMember(teamId, { email, role: role || "member" });
-      return "ok";
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_ADD_TEAM_MEMBER__ =
+    async (argsJson: string): Promise<string> => {
+      try {
+        const { teamId, email, role } = JSON.parse(argsJson);
+        const { addTeamMember } = await import("./sharing");
+        await addTeamMember(teamId, { email, role: role || "member" });
+        return "ok";
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
-  (window as unknown as Record<string, unknown>).__TEST_CREATE_TEAM_DOC__ = async (
-    argsJson: string,
-  ): Promise<string> => {
-    try {
-      const { teamId, title, content } = JSON.parse(argsJson);
-      const currentUser = getAuth().currentUser;
-      if (!currentUser) return "error:not_logged_in";
-      const { createTeamDocument } = await import("./sharing");
-      const docId = await createTeamDocument(teamId, currentUser.uid, currentUser.displayName || currentUser.email || undefined);
-      // Update title and content after creation
-      const firestore = getFirestore();
-      const ref = doc(firestore, "documents", docId);
-      await setDoc(ref, { title, content, ownerName: currentUser.displayName || currentUser.email || undefined, updatedAt: serverTimestamp() }, { merge: true });
-      return "ok:" + docId;
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_CREATE_TEAM_DOC__ =
+    async (argsJson: string): Promise<string> => {
+      try {
+        const { teamId, title, content } = JSON.parse(argsJson);
+        const currentUser = getAuth().currentUser;
+        if (!currentUser) return "error:not_logged_in";
+        const { createTeamDocument } = await import("./sharing");
+        const docId = await createTeamDocument(
+          teamId,
+          currentUser.uid,
+          currentUser.displayName || currentUser.email || undefined,
+        );
+        // Update title and content after creation
+        const firestore = getFirestore();
+        const ref = doc(firestore, "documents", docId);
+        await setDoc(
+          ref,
+          {
+            title,
+            content,
+            ownerName:
+              currentUser.displayName || currentUser.email || undefined,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+        return "ok:" + docId;
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
+}
+
+// --- Research Sessions ---
+
+import type { ResearchCard } from "@/stores/research-store";
+
+export async function saveResearchSession(
+  documentId: string,
+  session: {
+    id: string;
+    cards: ResearchCard[];
+    startedAt: number;
+    endedAt: number | null;
+    ownerId: string;
+  },
+): Promise<void> {
+  const ref = doc(
+    firestore,
+    DOCS_COLLECTION,
+    documentId,
+    "research_sessions",
+    session.id,
+  );
+  await setDoc(
+    ref,
+    {
+      cards: session.cards.map((c) => ({
+        id: c.id,
+        timestamp: c.timestamp,
+        trigger: c.trigger,
+        query: c.query,
+        type: c.type,
+        summary: c.summary,
+        sources: c.sources,
+        credibility: c.credibility,
+        integrated: c.integrated,
+      })),
+      startedAt: Timestamp.fromMillis(session.startedAt),
+      endedAt: session.endedAt ? Timestamp.fromMillis(session.endedAt) : null,
+      ownerId: session.ownerId,
+    },
+    { merge: true },
+  );
+}
+
+export async function fetchResearchSessions(documentId: string): Promise<
+  Array<{
+    id: string;
+    cards: ResearchCard[];
+    startedAt: number;
+    endedAt: number | null;
+    ownerId: string;
+  }>
+> {
+  const q = query(
+    collection(firestore, DOCS_COLLECTION, documentId, "research_sessions"),
+    orderBy("startedAt", "desc"),
+  );
+  const snap = await getDocs(q);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return snap.docs.map((d) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = d.data() as any;
+    return {
+      id: d.id,
+      cards: data.cards || [],
+      startedAt: data.startedAt?.toMillis?.() || 0,
+      endedAt: data.endedAt?.toMillis?.() || null,
+      ownerId: data.ownerId || "",
+    };
+  });
 }

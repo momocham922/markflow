@@ -29,6 +29,8 @@ import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel } from "./VoicePanel";
+import { ResearchPanel } from "./ResearchPanel";
+import { useResearchPipeline } from "@/hooks/use-research-pipeline";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import {
@@ -316,6 +318,8 @@ export function Editor() {
   );
   const [scrollSyncEnabled, setScrollSyncEnabled] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState("");
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
   const setView = useEditorStore((s) => s.setView);
@@ -422,6 +426,12 @@ export function Editor() {
     content: activeDoc?.content ?? "",
     title: activeDoc?.title ?? "",
     collabActive: isCollabReady,
+  });
+
+  useResearchPipeline({
+    isRecording: voiceRecording,
+    fullTranscript: voiceTranscript,
+    activeDocId,
   });
 
   // Auto-convert legacy HTML content to Markdown on first load
@@ -1139,7 +1149,8 @@ export function Editor() {
           ) : undefined
         }
       />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
+        {voiceOpen && <ResearchPanel />}
         {/* Editor pane — always mounted, hidden in preview-only and mindmap modes */}
         <div
           ref={editorScrollRef}
@@ -1288,6 +1299,8 @@ export function Editor() {
           onInsertMarkdown={handleInsertMarkdown}
           onSetContent={handleSetContent}
           documentContent={activeDoc?.content || ""}
+          onTranscriptChange={setVoiceTranscript}
+          onRecordingChange={setVoiceRecording}
         />
       )}
     </div>

@@ -10,6 +10,7 @@ const NANOBANANA_MODEL =
   process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
 const STT_LOCATION = process.env.STT_LOCATION || "asia-northeast1";
 const STT_MODEL = process.env.STT_MODEL || "chirp_3";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
@@ -20,6 +21,48 @@ function getVertexAiUrl(): string {
 
 function getNanoBananaUrl(): string {
   return `https://aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/global/publishers/google/models/${NANOBANANA_MODEL}:generateContent`;
+}
+
+function getGeminiUrl(model: string): string {
+  return `https://aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/global/publishers/google/models/${model}:generateContent`;
+}
+
+function classifyCredibility(
+  domain: string,
+): "academic" | "official" | "news" | "general" {
+  const d = domain.toLowerCase();
+  if (
+    [".edu", ".ac.jp", ".ac.uk"].some((s) => d.endsWith(s)) ||
+    [
+      "scholar.google",
+      "arxiv.org",
+      "pubmed",
+      "researchgate.net",
+      "doi.org",
+    ].some((s) => d.includes(s))
+  )
+    return "academic";
+  if (
+    [".go.jp", ".gov", ".gov.uk"].some((s) => d.endsWith(s)) ||
+    ["who.int", "un.org", "europa.eu"].some((s) => d.includes(s))
+  )
+    return "official";
+  if (
+    [
+      "nikkei.com",
+      "reuters.com",
+      "bloomberg.com",
+      "nhk.or.jp",
+      "bbc.com",
+      "nytimes.com",
+      "wsj.com",
+      "ft.com",
+      "techcrunch.com",
+      "theverge.com",
+    ].some((s) => d.includes(s))
+  )
+    return "news";
+  return "general";
 }
 
 async function getGcpAccessToken(): Promise<string> {
@@ -482,6 +525,218 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+    }
+    return;
+  }
+
+  // --- /v1/research/judge-topic ---
+  if (req.url === "/v1/research/judge-topic") {
+    try {
+      await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = JSON.parse(body);
+      const transcript: string = parsed.transcript || "";
+      const delta: string = parsed.delta || "";
+      const existingTopics: string[] = parsed.existingTopics || [];
+
+      if (!delta) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "delta is required" }));
+        return;
+      }
+
+      const accessToken = await getGcpAccessToken();
+      const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `You analyze real-time meeting transcript deltas to decide if a web search would provide useful supplementary information.
+
+TRANSCRIPT CONTEXT (last portion):
+${transcript.slice(-2000)}
+
+NEW DELTA (recently spoken):
+${delta}
+
+ALREADY SEARCHED TOPICS:
+${existingTopics.length > 0 ? existingTopics.join(", ") : "(none)"}
+
+Decide if the delta introduces a topic worth searching. Return JSON:
+- shouldSearch: true only for concrete claims, statistics, product/company names, technical terms, factual assertions, or explicit requests like "調べておいて" / "確認が必要"
+- query: search-optimized query in the most relevant language (Japanese or English). Include both languages if the topic spans both.
+- type: "topic" for new subjects, "fact-check" for verifiable claims/numbers, "explicit-request" for user-initiated search requests
+- reason: one-line explanation
+
+Skip: general discussion, opinions, small talk, topics already searched.`,
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                shouldSearch: { type: "BOOLEAN" },
+                query: { type: "STRING" },
+                type: {
+                  type: "STRING",
+                  enum: ["topic", "fact-check", "explicit-request"],
+                },
+                reason: { type: "STRING" },
+              },
+              required: ["shouldSearch", "query", "type", "reason"],
+            },
+          },
+        }),
+      });
+
+      if (!geminiRes.ok) {
+        const errText = await geminiRes.text();
+        console.error(
+          `[research] judge-topic error: ${geminiRes.status} | ${errText}`,
+        );
+        res.writeHead(geminiRes.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errText }));
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const geminiData = (await geminiRes.json()) as any;
+      const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            shouldSearch: false,
+            query: "",
+            type: "topic",
+            reason: "No response from model",
+          }),
+        );
+        return;
+      }
+
+      const result = JSON.parse(text);
+      console.log(
+        `[research] judge-topic: shouldSearch=${result.shouldSearch} query="${result.query}" type=${result.type}`,
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[research] judge-topic error: ${message}`);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
+    }
+    return;
+  }
+
+  // --- /v1/research/grounded-search ---
+  if (req.url === "/v1/research/grounded-search") {
+    try {
+      await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = JSON.parse(body);
+      const query: string = parsed.query || "";
+      const context: string = parsed.context || "";
+      const type: string = parsed.type || "topic";
+
+      if (!query) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "query is required" }));
+        return;
+      }
+
+      const accessToken = await getGcpAccessToken();
+
+      const systemPrompt =
+        type === "fact-check"
+          ? `You are a fact-checking assistant. Search for authoritative sources to verify or refute the following claim. Be precise about what the evidence shows. Search in both Japanese and English for comprehensive coverage. Cite specific numbers and dates when available.`
+          : `You are a research assistant supporting a live meeting. Provide a concise, informative summary about the following topic. Search in both Japanese and English for comprehensive coverage. Focus on the most relevant and recent information. Include key facts, numbers, and context that would be useful in a meeting discussion.`;
+
+      const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: systemPrompt }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `MEETING CONTEXT:\n${context.slice(-1000)}\n\nRESEARCH QUERY:\n${query}`,
+                },
+              ],
+            },
+          ],
+          tools: [{ googleSearch: {} }],
+        }),
+      });
+
+      if (!geminiRes.ok) {
+        const errText = await geminiRes.text();
+        console.error(
+          `[research] grounded-search error: ${geminiRes.status} | ${errText}`,
+        );
+        res.writeHead(geminiRes.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errText }));
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const geminiData = (await geminiRes.json()) as any;
+      const summary =
+        geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const groundingMeta = geminiData.candidates?.[0]?.groundingMetadata;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sources = (groundingMeta?.groundingChunks || []).map(
+        (chunk: any) => {
+          const uri: string = chunk.web?.uri || "";
+          const title: string = chunk.web?.title || "";
+          let domain = "";
+          try {
+            domain = new URL(uri).hostname;
+          } catch {
+            domain = uri;
+          }
+          return {
+            url: uri,
+            title,
+            domain,
+            credibility: classifyCredibility(domain),
+          };
+        },
+      );
+
+      const webSearchQueries: string[] = groundingMeta?.webSearchQueries || [];
+
+      console.log(
+        `[research] grounded-search: query="${query}" sources=${sources.length} searches=${webSearchQueries.length}`,
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ summary, sources, webSearchQueries }));
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[research] grounded-search error: ${message}`);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
     }
