@@ -4,6 +4,7 @@ import { useAuthStore } from "@/stores/auth-store";
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 25000; // 25 second chunks: longer context = better accuracy
 const MAX_DURATION_SECONDS = 4 * 60 * 60; // 4 hours hard limit
+const MAX_SEND_RETRIES = 2;
 
 import { isAndroid } from "@/platform";
 
@@ -118,120 +119,137 @@ export function useVoiceInput({
         if (input.size < 200) return;
       }
 
-      try {
-        const user = useAuthStore.getState().user;
-        if (!user) {
-          console.warn(
-            "[voice] No authenticated user — skipping transcription",
-          );
-          return;
-        }
-        const token = await user.getIdToken();
+      const user = useAuthStore.getState().user;
+      if (!user) {
+        console.warn("[voice] No authenticated user — skipping transcription");
+        return;
+      }
 
-        const base64 =
-          typeof input === "string" ? input : await blobToBase64(input);
-        if (!base64) return;
+      const base64 =
+        typeof input === "string" ? input : await blobToBase64(input);
+      if (!base64) return;
 
-        const byteLen = Math.round((base64.length * 3) / 4);
-        console.log(
-          `[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`,
-        );
+      const byteLen = Math.round((base64.length * 3) / 4);
+      console.log(
+        `[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`,
+      );
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 60_000);
-        const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            audio: base64,
-            language,
-            ...(meta
-              ? {
-                  encoding: meta.encoding,
-                  sampleRate: meta.sampleRate,
-                  channels: 1,
-                }
-              : {}),
-            ...(!preferDiarization && getHintsRef.current
-              ? { hints: getHintsRef.current() }
-              : {}),
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
+      const requestBody = JSON.stringify({
+        audio: base64,
+        language,
+        ...(meta
+          ? {
+              encoding: meta.encoding,
+              sampleRate: meta.sampleRate,
+              channels: 1,
+            }
+          : {}),
+        ...(!preferDiarization && getHintsRef.current
+          ? { hints: getHintsRef.current() }
+          : {}),
+      });
 
-        if (!res.ok) {
-          const errText = await res.text();
-          console.error("[voice] Transcription failed:", res.status, errText);
-          onErrorRef.current?.(`Transcription error: ${res.status}`);
-          return;
-        }
+      for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
+        try {
+          const token = await user.getIdToken();
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 60_000);
+          const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: requestBody,
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
 
-        const data = await res.json();
-        console.log("[voice] STT response:", JSON.stringify(data));
-        const text = data.text?.trim();
-        if (text) {
-          // Multi-pattern hallucination suppression
-          const isHallucination = (() => {
-            // 1. Entire text is a repeated short phrase (3+ occurrences)
-            if (/^(.{1,5}[、。,.!？\s]*)\1{2,}$/.test(text)) return true;
-            // 2. Single filler character repeated with punctuation
-            if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
-            // 3. Common STT silence hallucinations (Japanese)
-            if (
-              /^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(
-                text,
-              )
-            )
-              return true;
-            // 4. Only numbers/punctuation (noise artifacts)
-            if (/^[\d、。,.\s-]+$/.test(text)) return true;
-            // 5. Very short text (1-2 chars) that's just a filler
-            if (
-              text.length <= 2 &&
-              /^[えあうんはへほおいのでがをにと]$/.test(text)
-            )
-              return true;
-            // 6. Standalone backchannel responses (相槌・接続詞)
-            if (
-              /^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお|それで|それから|でも|だから|けど|ただ|まあ)[、。.!？\s]*$/.test(
-                text,
-              )
-            )
-              return true;
-            // 7. Repeated common words with varied punctuation
-            if (
-              text.length <= 30 &&
-              /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(
-                text,
-              ) &&
-              !/[ぁ-ん]{3,}/.test(
-                text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""),
-              )
-            )
-              return true;
-            // 8. A short phrase repeated 4+ times covers >50% of text (allows prefix)
-            const repMatch = text.match(/(.{2,8}[、。,.!？\s]*)\1{3,}/);
-            if (repMatch && repMatch[0].length > text.length * 0.5) return true;
-            return false;
-          })();
-          if (isHallucination) {
-            console.warn("[voice] Suppressed hallucination:", text);
-          } else {
-            const displayText = data.taggedText || text;
-            transcriptRef.current +=
-              (transcriptRef.current ? "\n---\n" : "") + displayText;
-            setFullTranscript(transcriptRef.current);
-            setInterimText(text);
-            onTranscriptRef.current?.(text);
+          if (!res.ok) {
+            const errText = await res.text();
+            console.error("[voice] Transcription failed:", res.status, errText);
+            if (res.status >= 500 && attempt < MAX_SEND_RETRIES) {
+              console.log(
+                `[voice] Retrying (${attempt + 1}/${MAX_SEND_RETRIES})...`,
+              );
+              await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+              continue;
+            }
+            onErrorRef.current?.(`Transcription error: ${res.status}`);
+            return;
           }
+
+          const data = await res.json();
+          console.log("[voice] STT response:", JSON.stringify(data));
+          const text = data.text?.trim();
+          if (text) {
+            const isHallucination = (() => {
+              if (/^(.{1,5}[、。,.!？\s]*)\1{2,}$/.test(text)) return true;
+              if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
+              if (
+                /^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(
+                  text,
+                )
+              )
+                return true;
+              if (/^[\d、。,.\s-]+$/.test(text)) return true;
+              if (
+                text.length <= 2 &&
+                /^[えあうんはへほおいのでがをにと]$/.test(text)
+              )
+                return true;
+              if (
+                /^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお|それで|それから|でも|だから|けど|ただ|まあ)[、。.!？\s]*$/.test(
+                  text,
+                )
+              )
+                return true;
+              if (
+                text.length <= 30 &&
+                /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(
+                  text,
+                ) &&
+                !/[ぁ-ん]{3,}/.test(
+                  text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""),
+                )
+              )
+                return true;
+              const repMatch = text.match(/(.{2,8}[、。,.!？\s]*)\1{3,}/);
+              if (repMatch && repMatch[0].length > text.length * 0.5)
+                return true;
+              return false;
+            })();
+            if (isHallucination) {
+              console.warn("[voice] Suppressed hallucination:", text);
+            } else {
+              const displayText = data.taggedText || text;
+              transcriptRef.current +=
+                (transcriptRef.current ? "\n---\n" : "") + displayText;
+              setFullTranscript(transcriptRef.current);
+              setInterimText(text);
+              onTranscriptRef.current?.(text);
+            }
+          }
+          return;
+        } catch (err) {
+          const isAbort =
+            err instanceof DOMException && err.name === "AbortError";
+          const isNetwork =
+            err instanceof TypeError && /fetch|network/i.test(err.message);
+
+          if ((isAbort || isNetwork) && attempt < MAX_SEND_RETRIES) {
+            console.warn(
+              `[voice] ${isAbort ? "Fetch aborted" : "Network error"}, retrying (${attempt + 1}/${MAX_SEND_RETRIES})...`,
+            );
+            await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+            continue;
+          }
+          console.error("[voice] Transcription error:", err);
+          if (!isAbort) {
+            onErrorRef.current?.(`Transcription error: ${err}`);
+          }
+          return;
         }
-      } catch (err) {
-        console.error("[voice] Transcription error:", err);
-        onErrorRef.current?.(`Transcription error: ${err}`);
       }
     },
     [language],
