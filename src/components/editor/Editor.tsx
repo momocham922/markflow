@@ -431,6 +431,7 @@ export function Editor() {
   useResearchPipeline({
     isRecording: voiceRecording,
     fullTranscript: voiceTranscript,
+    documentContent: activeDoc?.content || "",
     activeDocId,
   });
 

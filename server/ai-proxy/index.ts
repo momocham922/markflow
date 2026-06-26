@@ -531,123 +531,138 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- /v1/research/judge-topic ---
-  if (req.url === "/v1/research/judge-topic") {
+  // --- /v1/research/analyze (Research Director — Claude Opus) ---
+  if (req.url === "/v1/research/analyze") {
     try {
       await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
-      const transcript: string = parsed.transcript || "";
-      const delta: string = parsed.delta || "";
-      const existingTopics: string[] = parsed.existingTopics || [];
+      const transcriptDiff: string = parsed.transcriptDiff || "";
+      const fullContext: string = parsed.fullContext || "";
+      const documentContext: string = parsed.documentContext || "";
+      const searchedTopics: string[] = parsed.searchedTopics || [];
 
-      if (!delta) {
+      if (!transcriptDiff) {
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "delta is required" }));
+        res.end(JSON.stringify({ error: "transcriptDiff is required" }));
         return;
       }
 
       const accessToken = await getGcpAccessToken();
-      const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
+
+      const systemPrompt = `あなたは会議のシニアリサーチディレクターです。
+音声認識テキストを深く分析し、会議参加者に真に有益な調査を設計してください。
+
+## あなたの役割
+1. 会議の文脈・目的・参加者の関心事を深く読み解く
+2. リサーチ価値のあるトピックを特定する
+3. 各トピックについて「何を」「なぜ」「どの切り口で」調べるべきかを判断する
+4. Web検索担当（リサーチアシスタント）への詳細なブリーフを設計する
+
+## リサーチブリーフの設計指針
+あなたのブリーフの質が、最終的なアウトプットの質を決定します。
+
+**researchAngle（調査の焦点）の設計:**
+- 悪い例: 「ソニーについて調べて」
+- 良い例: 「ソニーのゲーム事業に焦点。議論ではPS5の販売台数が話題になっており、直近四半期のG&NS部門の売上・ハードウェア出荷台数・サブスクリプション会員数の推移が最も関連する。競合(Xbox, Nintendo)との比較データも有用」
+
+**desiredOutput（出力形式の指示）の設計:**
+- 悪い例: 「情報をまとめて」
+- 良い例: 「先頭に結論1行（例: PS5累計6000万台、前年比+15%）。続いて直近2Qの数値を箇条書き。議論で出た『1億台突破は来年』という発言の妥当性を最後に1行で判定」
+
+## リサーチ対象の判定基準
+以下に該当する場合にリサーチを設計:
+1. **企業・ブランド・人名**: 最新動向、財務状況、市場ポジション
+2. **数値・事実の主張**: 「シェアは○%」「売上○億」→ 正確な数値で裏付けor修正
+3. **業界動向・技術トレンド**: 最新の市場データ、競合情報
+4. **明示的な調査依頼**: 「調べて」「確認して」等の発言
+
+以下はリサーチ不要:
+- 一般的な雑談・挨拶・意見表明
+- 検索済みトピックと実質同じ内容
+- 検索しても有用な情報が得られない曖昧な話題
+
+0〜3件のsearchesを返してください。検索価値がなければ空配列。
+必ずJSON形式のみで出力してください。
+
+出力フォーマット:
+{
+  "searches": [
+    {
+      "query": "検索クエリ（具体的に。年号含む）",
+      "type": "topic | fact-check | financial | explicit-request",
+      "researchAngle": "調査の焦点。会議の文脈を踏まえ、何に焦点を当てて調べるべきか",
+      "desiredOutput": "最も有用な出力の形式と内容。具体的に指示",
+      "claim": "(fact-checkのみ) 検証対象の元の発言をそのまま引用"
+    }
+  ]
+}`;
+
+      let userPrompt = `## 新しいトランスクリプト（音声認識 — 誤認識を含む可能性あり）\n${transcriptDiff.slice(0, 3000)}`;
+      if (fullContext) {
+        userPrompt += `\n\n## 会議の全体コンテキスト（直近部分）\n${fullContext.slice(-4000)}`;
+      }
+      if (documentContext) {
+        userPrompt += `\n\n## 構造化済みドキュメント（参考）\n${documentContext.slice(0, 2000)}`;
+      }
+      userPrompt += `\n\n## 検索済みトピック（重複禁止）\n${searchedTopics.length > 0 ? searchedTopics.join(", ") : "(なし)"}`;
+
+      const vertexRes = await fetch(getVertexAiUrl(), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `あなたは会議のリアルタイム音声認識テキストを分析し、参加者に役立つ補足情報（カンペ）を提供するために検索すべきトピックを判定するアシスタントです。
-
-会議の文脈（直近部分）:
-${transcript.slice(-2000)}
-
-新しく検出されたキーワード:
-${delta}
-
-検索済みトピック:
-${existingTopics.length > 0 ? existingTopics.join(", ") : "(なし)"}
-
-判定基準:
-- shouldSearch: true にすべきケース:
-  - 具体的な企業名・製品名・人名・技術用語が出た（深掘り価値あり）
-  - 数値・統計・市場データへの言及（「売上が○○億」「シェアは○%」等）
-  - 事実確認が必要な主張（「○○は△△だったはず」等）
-  - 明示的な調査依頼（「調べておいて」「確認が必要」「正確な数字は？」等）
-  - 議論の文脈で背景知識があると有利なトピック
-- shouldSearch: false にすべきケース:
-  - 一般的な雑談・挨拶・意見表明
-  - 既に検索済みのトピックと実質同じ内容
-  - 検索しても有用な情報が得られないほど曖昧な話題
-
-queryの作成指針:
-- 議論の文脈を踏まえた具体的な検索クエリにする（単語の羅列ではなく、何を知りたいのかが明確なクエリ）
-- 日本語トピックは日本語で、技術用語や英語固有名詞は英語で
-- 最新データが重要な場合は年号を含める
-
-type: "topic"=新しい話題の深掘り, "fact-check"=発言された数値・事実の裏付け, "explicit-request"=参加者が明示的に調査を依頼`,
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                shouldSearch: { type: "BOOLEAN" },
-                query: { type: "STRING" },
-                type: {
-                  type: "STRING",
-                  enum: ["topic", "fact-check", "explicit-request"],
-                },
-                reason: { type: "STRING" },
-              },
-              required: ["shouldSearch", "query", "type", "reason"],
-            },
-          },
+          anthropic_version: "vertex-2023-10-16",
+          max_tokens: 2048,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userPrompt }],
+          stream: false,
         }),
       });
 
-      if (!geminiRes.ok) {
-        const errText = await geminiRes.text();
+      if (!vertexRes.ok) {
+        const errText = await vertexRes.text();
         console.error(
-          `[research] judge-topic error: ${geminiRes.status} | ${errText}`,
+          `[research] analyze error: ${vertexRes.status} | ${errText}`,
         );
-        res.writeHead(geminiRes.status, { "Content-Type": "application/json" });
+        res.writeHead(vertexRes.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: errText }));
         return;
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const geminiData = (await geminiRes.json()) as any;
-      const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+      const vertexData = (await vertexRes.json()) as any;
+      const text =
+        vertexData.content?.[0]?.text || vertexData.content?.text || "";
+
       if (!text) {
+        console.log("[research] analyze: empty response from Claude");
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            shouldSearch: false,
-            query: "",
-            type: "topic",
-            reason: "No response from model",
-          }),
-        );
+        res.end(JSON.stringify({ searches: [] }));
         return;
       }
 
-      const result = JSON.parse(text);
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.error("[research] analyze: no JSON found in response");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ searches: [] }));
+        return;
+      }
+
+      const result = JSON.parse(jsonMatch[0]);
+      const searches = Array.isArray(result.searches) ? result.searches : [];
       console.log(
-        `[research] judge-topic: shouldSearch=${result.shouldSearch} query="${result.query}" type=${result.type}`,
+        `[research] analyze: ${searches.length} searches — ${searches.map((s: { query: string }) => s.query).join(" | ")}`,
       );
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result));
+      res.end(JSON.stringify({ searches }));
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
-      console.error(`[research] judge-topic error: ${message}`);
+      console.error(`[research] analyze error: ${message}`);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
     }
@@ -661,8 +676,9 @@ type: "topic"=新しい話題の深掘り, "fact-check"=発言された数値・
       const body = await readBody();
       const parsed = JSON.parse(body);
       const query: string = parsed.query || "";
-      const context: string = parsed.context || "";
-      const type: string = parsed.type || "topic";
+      const researchAngle: string = parsed.researchAngle || "";
+      const desiredOutput: string = parsed.desiredOutput || "";
+      const claim: string = parsed.claim || "";
 
       if (!query) {
         res.writeHead(400, { "Content-Type": "application/json" });
@@ -672,39 +688,24 @@ type: "topic"=新しい話題の深掘り, "fact-check"=発言された数値・
 
       const accessToken = await getGcpAccessToken();
 
-      const systemPrompt =
-        type === "fact-check"
-          ? `あなたは会議中にリアルタイムで発言内容をファクトチェックするアシスタントです。
-日本語と英語の両方で検索し、権威あるソースから裏付けを取ってください。
+      const systemPrompt = researchAngle
+        ? `会議のリアルタイムリサーチアシスタント。ディレクターのブリーフに基づき、正確で具体的な情報を提供する。
 
-出力フォーマット（Markdown）:
-### 検証結果
-- **主張**: [発言された主張を簡潔に記述]
-- **判定**: [正確 / 概ね正確 / 不正確 / 要確認] のいずれか
-- **正確な数値・事実**: [検索で見つかった正確なデータ。年月日・出典名を必ず含める]
-- **補足**: [主張と事実の差異、注意すべきニュアンス、文脈で知っておくべき追加情報]`
-          : `あなたは会議中にリアルタイムで「カンペ」を提供するリサーチアシスタントです。
-参加者が議論中に即座に活用できる、深い分析と具体的なデータを提供してください。
-表面的なWeb検索のダイジェストではなく、議論に直接貢献できるインサイトを生成してください。
-日本語と英語の両方で検索し、学術論文・公式レポート・業界分析も含めてください。
+## 調査の焦点
+${researchAngle}
 
-出力フォーマット（Markdown）:
-### 要点
-[このトピックについて、会議で即座に使える2-3文のエグゼクティブサマリー]
+## 求められるアウトプット
+${desiredOutput || "数値・日付・固有名詞を含む具体的な情報を箇条書きで提供"}
+${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
-### キーデータ
-- **[指標/事実名]**: [具体的な数値・日付・出典]（1-3個の最重要データポイント）
+## 品質基準（厳守）
+- 数値・日付・固有名詞を必ず含める。抽象的な記述は禁止
+- 「〜と言われている」「〜の見方がある」等の曖昧表現禁止。断定と出典で書く
+- 不明な情報は「確認不能」と明記。推測で補完しない
+- コンパクトに。会議中にチラ見して即座に使える分量（最大8行）`
+        : `会議中にチラ見するカンペを生成する。数値・固有名詞・日付を含め、曖昧表現は禁止。最大8行。`;
 
-### 議論のポイント
-- [この話題で押さえるべき論点や、発言に使える具体的な知見を2-3個。「〜という見方がある」ではなく「〜である（出典）」の形式で]
-
-### 注意点
-- [よくある誤解、落とし穴、考慮すべきリスクがあれば1-2個]`;
-
-      const userPrompt =
-        type === "fact-check"
-          ? `以下の会議で出た発言を検証してください。\n\n会議の文脈:\n${context.slice(-1000)}\n\n検証対象:\n${query}`
-          : `以下の会議で話題になっているトピックについて、参加者が議論に使えるカンペを作成してください。\n会議で今まさに話されている内容なので、議論の文脈に沿った情報を優先してください。\n\n会議の文脈:\n${context.slice(-1000)}\n\nリサーチ対象:\n${query}`;
+      const userPrompt = query;
 
       const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
         method: "POST",

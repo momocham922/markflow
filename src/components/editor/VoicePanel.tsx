@@ -275,17 +275,37 @@ export function VoicePanel({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
           max_tokens: 16384,
-          stream: false,
+          stream: true,
         }),
       });
 
       if (!res.ok) throw new Error(`Structure failed: ${res.status}`);
 
-      const data = await res.json();
-      const markdown =
-        data.content?.[0]?.text ||
-        data.content?.map((c: { text?: string }) => c.text || "").join("") ||
-        "";
+      const structReader = res.body?.getReader();
+      if (!structReader) throw new Error("No response body");
+      const structDecoder = new TextDecoder();
+      let structSseBuffer = "";
+      let markdown = "";
+      while (true) {
+        const { done, value } = await structReader.read();
+        if (done) break;
+        structSseBuffer += structDecoder.decode(value, { stream: true });
+        const sseLines = structSseBuffer.split("\n");
+        structSseBuffer = sseLines.pop() || "";
+        for (const sseLine of sseLines) {
+          if (!sseLine.startsWith("data: ")) continue;
+          const ssePayload = sseLine.slice(6).trim();
+          if (ssePayload === "[DONE]") continue;
+          try {
+            const sseEvt = JSON.parse(ssePayload);
+            if (sseEvt.type === "content_block_delta" && sseEvt.delta?.text) {
+              markdown += sseEvt.delta.text;
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
 
       if (markdown.trim()) {
         // Extract vocabulary feedback from <!--VOCAB:[...]-->
@@ -465,18 +485,44 @@ export function VoicePanel({
           system: refineSystemPrompt,
           messages: [{ role: "user", content: refineUserContent }],
           max_tokens: 16384,
-          stream: false,
+          stream: true,
         }),
         signal: abortController.signal,
       });
 
       if (!refineRes.ok) {
-        throw new Error(`Refine structuring failed: ${refineRes.status}`);
+        const errBody = await refineRes.text().catch(() => "");
+        throw new Error(
+          `Refine structuring failed: ${refineRes.status} ${errBody}`.trim(),
+        );
       }
 
-      const refineData = await refineRes.json();
-      const refinedOutput =
-        refineData.content?.[0]?.text || refineData.content || "";
+      // Read SSE stream to collect full response
+      const reader = refineRes.body?.getReader();
+      if (!reader) throw new Error("No response body");
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      let refinedOutput = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const evt = JSON.parse(payload);
+            if (evt.type === "content_block_delta" && evt.delta?.text) {
+              refinedOutput += evt.delta.text;
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
 
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());

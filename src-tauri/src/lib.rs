@@ -1836,9 +1836,16 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     let mic_max = mic_rate * 25 * channels;
     let sys_max = sys_rate * 25;
 
+    let voice_active = VOICE_ACTIVE.load(Ordering::Relaxed);
+    // Minimum 5s of mic audio to avoid short "tail" chunks with poor STT quality.
+    // When recording stops (voice_active=false), flush all remaining audio.
+    let mic_min = if voice_active { mic_rate * 5 * channels } else { 0 };
+
     let mic_samples: Vec<f32> = {
         let mut buf = VOICE_BUFFER.lock().unwrap();
-        if buf.len() <= mic_max {
+        if buf.len() < mic_min {
+            Vec::new()
+        } else if buf.len() <= mic_max {
             std::mem::take(&mut *buf)
         } else {
             let chunk = buf[..mic_max].to_vec();
