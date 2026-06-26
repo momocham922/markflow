@@ -215,8 +215,21 @@ export function useVoiceInput({
               )
                 return true;
               const repMatch = text.match(/(.{2,8}[、。,.!？\s]*)\1{3,}/);
-              if (repMatch && repMatch[0].length > text.length * 0.5)
+              if (repMatch && repMatch[0].length > text.length * 0.3)
                 return true;
+              if (text.length > 100) {
+                const words = text
+                  .replace(/[、。,.!？\s]+/g, " ")
+                  .trim()
+                  .split(" ");
+                const freq = new Map<string, number>();
+                for (const w of words) {
+                  if (w.length >= 1) freq.set(w, (freq.get(w) || 0) + 1);
+                }
+                for (const [, count] of freq) {
+                  if (count >= 10 && count > words.length * 0.4) return true;
+                }
+              }
               return false;
             })();
             if (isHallucination) {
