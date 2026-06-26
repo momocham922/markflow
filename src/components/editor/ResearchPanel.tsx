@@ -308,10 +308,7 @@ export function ResearchPanel() {
   if (!panelVisible || activeCards.length === 0) return null;
 
   return (
-    <div
-      className="absolute right-4 bottom-4 z-30 flex w-72 flex-col rounded-lg border border-border bg-background/95 shadow-lg backdrop-blur"
-      style={{ maxHeight: "calc(100% - 2rem)" }}
-    >
+    <div className="absolute right-4 top-12 z-50 flex max-h-[60vh] w-80 flex-col rounded-lg border border-border bg-background/95 shadow-lg backdrop-blur">
       <div className="flex shrink-0 items-center justify-between border-b border-border px-2.5 py-1.5">
         <div className="flex items-center gap-1.5 text-xs font-medium">
           <Search className="h-3 w-3" />

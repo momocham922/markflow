@@ -1102,7 +1102,8 @@ export function Editor() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
+      {voiceOpen && <ResearchPanel />}
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
@@ -1151,7 +1152,6 @@ export function Editor() {
         }
       />
       <div className="relative flex flex-1 overflow-hidden">
-        {voiceOpen && <ResearchPanel />}
         {/* Editor pane — always mounted, hidden in preview-only and mindmap modes */}
         <div
           ref={editorScrollRef}
