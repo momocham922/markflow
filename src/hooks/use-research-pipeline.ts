@@ -1,11 +1,6 @@
 import { useRef, useEffect } from "react";
 import { useResearchStore } from "@/stores/research-store";
-import {
-  analyzeTranscript,
-  groundedSearch,
-  searchUserDocuments,
-} from "@/services/research";
-import { useAppStore } from "@/stores/app-store";
+import { analyzeTranscript, groundedSearch } from "@/services/research";
 import { useAuthStore } from "@/stores/auth-store";
 import { saveResearchSession } from "@/services/firebase";
 import { isMobile } from "@/platform";
@@ -46,9 +41,6 @@ export function useResearchPipeline({
 
   const { startSession, endSession, addCard, updateCard, addSearchedTopic } =
     useResearchStore();
-  const documents = useAppStore((s) => s.documents);
-  const documentsRef = useRef(documents);
-  documentsRef.current = documents;
 
   const sessionStartRef = useRef<number>(0);
   const sessionIdRef = useRef<string>("");
@@ -140,38 +132,6 @@ export function useResearchPipeline({
           });
 
           await Promise.all(searchPromises);
-
-          const docs = documentsRef.current;
-          const docId = activeDocIdRef.current;
-          if (docs.length > 0) {
-            for (const search of searches) {
-              const internalResults = searchUserDocuments(
-                docs,
-                search.query,
-                docId || undefined,
-              );
-              if (internalResults.length > 0) {
-                addCard({
-                  id: crypto.randomUUID(),
-                  timestamp: Date.now(),
-                  trigger: search.researchAngle,
-                  query: search.query,
-                  type: "internal",
-                  summary: `${internalResults.length}件の関連ドキュメント: ${internalResults.map((r) => r.title).join(", ")}`,
-                  sources: internalResults.map((r) => ({
-                    url: `markflow://doc/${r.id}`,
-                    title: r.title,
-                    domain: "MarkFlow",
-                    snippet: r.snippet,
-                    credibility: "general" as const,
-                  })),
-                  credibility: "general",
-                  integrated: false,
-                  expandable: true,
-                });
-              }
-            }
-          }
         } catch (err) {
           console.error("[research] Pipeline error:", err);
         } finally {

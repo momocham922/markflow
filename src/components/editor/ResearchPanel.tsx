@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import {
   Search,
   X,
@@ -13,6 +13,7 @@ import {
   FileText,
   ExternalLink,
   Check,
+  GripVertical,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -119,9 +120,9 @@ function ResearchCardItem({
   };
 
   return (
-    <div className="w-full rounded-lg border border-border bg-background/95 p-2.5 text-xs shadow-md backdrop-blur">
+    <div className="w-full overflow-hidden rounded-lg border border-border bg-background/95 p-2.5 text-xs shadow-md backdrop-blur">
       <div className="flex items-center justify-between gap-1">
-        <div className="flex items-center gap-1.5 min-w-0">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span
             className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${typeStyle.className}`}
           >
@@ -163,7 +164,7 @@ function ResearchCardItem({
 
       {card.error && (
         <div className="mt-1.5 flex items-center gap-1.5">
-          <span className="text-destructive text-[10px]">{card.error}</span>
+          <span className="text-[10px] text-destructive">{card.error}</span>
           <Button
             variant="ghost"
             size="sm"
@@ -182,7 +183,7 @@ function ResearchCardItem({
 
       {!card.loading && !card.error && (
         <>
-          <div className="mt-1 leading-relaxed text-foreground research-markdown">
+          <div className="research-markdown mt-1 break-words leading-relaxed text-foreground">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
@@ -192,11 +193,11 @@ function ResearchCardItem({
                 ),
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 ul: ({ node, ...props }) => (
-                  <ul className="list-disc pl-3 mb-0.5" {...props} />
+                  <ul className="mb-0.5 list-disc pl-3" {...props} />
                 ),
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 ol: ({ node, ...props }) => (
-                  <ol className="list-decimal pl-3 mb-0.5" {...props} />
+                  <ol className="mb-0.5 list-decimal pl-3" {...props} />
                 ),
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 li: ({ node, ...props }) => <li className="mb-0" {...props} />,
@@ -207,21 +208,21 @@ function ResearchCardItem({
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 h3: ({ node, ...props }) => (
                   <h3
-                    className="text-xs font-semibold mt-1 mb-0.5"
+                    className="mb-0.5 mt-1 text-xs font-semibold"
                     {...props}
                   />
                 ),
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 code: ({ node, ...props }) => (
                   <code
-                    className="bg-muted rounded px-1 py-0.5 text-[10px]"
+                    className="rounded bg-muted px-1 py-0.5 text-[10px]"
                     {...props}
                   />
                 ),
                 // eslint-disable-next-line @typescript-eslint/no-unused-vars
                 a: ({ node, ...props }) => (
                   <a
-                    className="text-blue-600 hover:underline dark:text-blue-400"
+                    className="break-all text-blue-600 hover:underline dark:text-blue-400"
                     target="_blank"
                     rel="noopener noreferrer"
                     {...props}
@@ -244,7 +245,10 @@ function ResearchCardItem({
                 const isInternal = source.url.startsWith("markflow://");
 
                 return (
-                  <div key={i} className="flex items-center gap-1 text-[10px]">
+                  <div
+                    key={i}
+                    className="flex min-w-0 items-center gap-1 text-[10px]"
+                  >
                     <Icon className={`h-2.5 w-2.5 shrink-0 ${cfg.className}`} />
                     {isInternal ? (
                       <button
@@ -265,9 +269,11 @@ function ResearchCardItem({
                         href={source.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center gap-0.5 truncate text-blue-600 hover:underline dark:text-blue-400"
+                        className="flex min-w-0 items-center gap-0.5 truncate text-blue-600 hover:underline dark:text-blue-400"
                       >
-                        {source.title || source.domain}
+                        <span className="truncate">
+                          {source.title || source.domain}
+                        </span>
                         <ExternalLink className="h-2 w-2 shrink-0" />
                       </a>
                     )}
@@ -302,15 +308,64 @@ export function ResearchPanel() {
   const { cards, panelVisible, togglePanel, removeCard, markIntegrated } =
     useResearchStore();
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0, ox: 0, oy: 0 });
 
   const activeCards = cards.filter((c) => !c.integrated);
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      isDraggingRef.current = true;
+      dragStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        ox: dragOffset.x,
+        oy: dragOffset.y,
+      };
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    [dragOffset],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDraggingRef.current) return;
+      setDragOffset({
+        x: dragStartRef.current.ox + (e.clientX - dragStartRef.current.x),
+        y: dragStartRef.current.oy + (e.clientY - dragStartRef.current.y),
+      });
+    },
+    [],
+  );
+
+  const handlePointerUp = useCallback(() => {
+    isDraggingRef.current = false;
+  }, []);
+
+  const handleResetPosition = useCallback(() => {
+    setDragOffset({ x: 0, y: 0 });
+  }, []);
 
   if (!panelVisible || activeCards.length === 0) return null;
 
   return (
-    <div className="absolute right-4 top-12 z-50 flex max-h-[60vh] w-80 flex-col rounded-lg border border-border bg-background/95 shadow-lg backdrop-blur">
-      <div className="flex shrink-0 items-center justify-between border-b border-border px-2.5 py-1.5">
+    <div
+      className="fixed right-4 top-12 z-[9999] flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-lg border border-border bg-background/95 shadow-xl backdrop-blur"
+      style={{
+        transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)`,
+      }}
+    >
+      <div
+        className="flex shrink-0 cursor-grab items-center justify-between border-b border-border px-2.5 py-1.5 select-none active:cursor-grabbing"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onDoubleClick={handleResetPosition}
+        style={{ touchAction: "none" }}
+      >
         <div className="flex items-center gap-1.5 text-xs font-medium">
+          <GripVertical className="h-3 w-3 text-muted-foreground" />
           <Search className="h-3 w-3" />
           <span>Research ({activeCards.length})</span>
         </div>
