@@ -8,11 +8,14 @@ import {
   Monitor,
   Info,
   Wand2,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isAndroid, isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
+import { useResearchStore } from "@/stores/research-store";
+import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
 import { extractHints } from "@/lib/text-utils";
 
@@ -24,6 +27,26 @@ interface VoicePanelProps {
   documentContent: string;
   onTranscriptChange?: (transcript: string) => void;
   onRecordingChange?: (isRecording: boolean) => void;
+}
+
+function ResearchTriggerButton() {
+  const analyzing = useResearchStore((s) => s.analyzing);
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="h-7 w-7 shrink-0"
+      onClick={triggerResearchAnalysis}
+      disabled={analyzing}
+      title="Analyze now"
+    >
+      {analyzing ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />
+      ) : (
+        <Search className="h-3.5 w-3.5" />
+      )}
+    </Button>
+  );
 }
 
 function formatDuration(seconds: number): string {
@@ -749,6 +772,8 @@ export function VoicePanel({
           <option value={180}>3min</option>
           <option value={300}>5min</option>
         </select>
+
+        {isRecording && <ResearchTriggerButton />}
 
         <Button
           variant="outline"

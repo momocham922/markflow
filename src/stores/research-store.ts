@@ -28,6 +28,7 @@ interface ResearchState {
   cards: ResearchCard[];
   searchedTopics: string[];
   panelVisible: boolean;
+  analyzing: boolean;
 
   startSession: () => void;
   endSession: () => void;
@@ -39,6 +40,7 @@ interface ResearchState {
   addSearchedTopic: (topic: string) => void;
   togglePanel: () => void;
   clearCards: () => void;
+  setAnalyzing: (v: boolean) => void;
 }
 
 export const useResearchStore = create<ResearchState>((set) => ({
@@ -46,9 +48,15 @@ export const useResearchStore = create<ResearchState>((set) => ({
   cards: [],
   searchedTopics: [],
   panelVisible: true,
+  analyzing: false,
 
   startSession: () =>
-    set({ sessionActive: true, cards: [], searchedTopics: [] }),
+    set({
+      sessionActive: true,
+      cards: [],
+      searchedTopics: [],
+      analyzing: false,
+    }),
   endSession: () => set({ sessionActive: false }),
   addCard: (card) => set((s) => ({ cards: [...s.cards, card] })),
   updateCard: (id, updates) =>
@@ -69,4 +77,5 @@ export const useResearchStore = create<ResearchState>((set) => ({
     set((s) => ({ searchedTopics: [...s.searchedTopics, topic] })),
   togglePanel: () => set((s) => ({ panelVisible: !s.panelVisible })),
   clearCards: () => set({ cards: [], searchedTopics: [] }),
+  setAnalyzing: (v) => set({ analyzing: v }),
 }));

@@ -6,6 +6,7 @@ import { saveResearchSession } from "@/services/firebase";
 import { isMobile } from "@/platform";
 import type { ResearchCard, ResearchSource } from "@/stores/research-store";
 
+const FIRST_ANALYSIS_MS = 15_000;
 const INTERVAL_MS = 45_000;
 const MIN_DIFF_CHARS = 200;
 const CRED_ORDER: ResearchCard["credibility"][] = [
@@ -14,6 +15,12 @@ const CRED_ORDER: ResearchCard["credibility"][] = [
   "news",
   "general",
 ];
+
+let _triggerFn: (() => void) | null = null;
+
+export function triggerResearchAnalysis() {
+  _triggerFn?.();
+}
 
 interface UseResearchPipelineOptions {
   isRecording: boolean;
@@ -31,6 +38,7 @@ export function useResearchPipeline({
   const lastAnalyzedLengthRef = useRef<number>(0);
   const pendingRef = useRef<boolean>(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const firstTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fullTranscriptRef = useRef(fullTranscript);
   fullTranscriptRef.current = fullTranscript;
@@ -53,15 +61,17 @@ export function useResearchPipeline({
       sessionStartRef.current = Date.now();
       sessionIdRef.current = crypto.randomUUID();
 
-      const runAnalysis = async () => {
+      const runAnalysis = async (manual = false) => {
         if (pendingRef.current) return;
         const transcript = fullTranscriptRef.current;
         if (!transcript || transcript.length < 50) return;
 
         const diff = transcript.slice(lastAnalyzedLengthRef.current);
-        if (diff.length < MIN_DIFF_CHARS) return;
+        if (!manual && diff.length < MIN_DIFF_CHARS) return;
+        if (manual && diff.length < 30) return;
 
         pendingRef.current = true;
+        useResearchStore.getState().setAnalyzing(true);
         try {
           const searchedTopics = useResearchStore.getState().searchedTopics;
 
@@ -136,18 +146,33 @@ export function useResearchPipeline({
           console.error("[research] Pipeline error:", err);
         } finally {
           pendingRef.current = false;
+          useResearchStore.getState().setAnalyzing(false);
         }
       };
 
-      intervalRef.current = setInterval(runAnalysis, INTERVAL_MS);
+      _triggerFn = () => runAnalysis(true);
+
+      firstTimeoutRef.current = setTimeout(() => {
+        runAnalysis();
+        intervalRef.current = setInterval(() => runAnalysis(), INTERVAL_MS);
+      }, FIRST_ANALYSIS_MS);
 
       return () => {
+        _triggerFn = null;
+        if (firstTimeoutRef.current) {
+          clearTimeout(firstTimeoutRef.current);
+          firstTimeoutRef.current = null;
+        }
         if (intervalRef.current) {
           clearInterval(intervalRef.current);
           intervalRef.current = null;
         }
       };
     } else {
+      if (firstTimeoutRef.current) {
+        clearTimeout(firstTimeoutRef.current);
+        firstTimeoutRef.current = null;
+      }
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;

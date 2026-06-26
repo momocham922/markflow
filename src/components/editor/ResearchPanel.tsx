@@ -14,6 +14,8 @@ import {
   ExternalLink,
   Check,
   GripVertical,
+  Copy,
+  Trash2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -86,6 +88,7 @@ function ResearchCardItem({
   onIntegrate: () => void;
 }) {
   const [retrying, setRetrying] = useState(false);
+  const [copied, setCopied] = useState(false);
   const typeStyle = TYPE_STYLES[card.type];
 
   const handleRetry = async () => {
@@ -115,6 +118,17 @@ function ResearchCardItem({
     }
   };
 
+  const handleCopy = async () => {
+    const sourcesText = card.sources
+      .slice(0, 3)
+      .map((s) => `- ${s.title}: ${s.url}`)
+      .join("\n");
+    const text = `${card.summary}${sourcesText ? `\n\nSources:\n${sourcesText}` : ""}`;
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   const handleInternalLink = (docId: string) => {
     useAppStore.getState().setActiveDocId(docId);
   };
@@ -134,15 +148,30 @@ function ResearchCardItem({
         </div>
         <div className="flex shrink-0 items-center">
           {!card.loading && !card.error && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-5 w-5"
-              onClick={onIntegrate}
-              title="Mark as integrated"
-            >
-              <Check className="h-3 w-3" />
-            </Button>
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={handleCopy}
+                title="Copy to clipboard"
+              >
+                {copied ? (
+                  <Check className="h-3 w-3 text-emerald-500" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={onIntegrate}
+                title="Mark as integrated"
+              >
+                <Check className="h-3 w-3" />
+              </Button>
+            </>
           )}
           <Button
             variant="ghost"
@@ -305,8 +334,15 @@ function ResearchCardItem({
 }
 
 export function ResearchPanel() {
-  const { cards, panelVisible, togglePanel, removeCard, markIntegrated } =
-    useResearchStore();
+  const {
+    cards,
+    panelVisible,
+    analyzing,
+    togglePanel,
+    removeCard,
+    markIntegrated,
+    clearCards,
+  } = useResearchStore();
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const isDraggingRef = useRef(false);
@@ -366,17 +402,39 @@ export function ResearchPanel() {
       >
         <div className="flex items-center gap-1.5 text-xs font-medium">
           <GripVertical className="h-3 w-3 text-muted-foreground" />
-          <Search className="h-3 w-3" />
-          <span>Research ({activeCards.length})</span>
+          {analyzing ? (
+            <Loader2 className="h-3 w-3 animate-spin text-blue-500" />
+          ) : (
+            <Search className="h-3 w-3" />
+          )}
+          <span>
+            Research ({activeCards.length})
+            {analyzing && (
+              <span className="ml-1 text-[10px] font-normal text-blue-500">
+                Analyzing...
+              </span>
+            )}
+          </span>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-5 w-5"
-          onClick={togglePanel}
-        >
-          <X className="h-3 w-3" />
-        </Button>
+        <div className="flex items-center">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5"
+            onClick={clearCards}
+            title="Clear all"
+          >
+            <Trash2 className="h-3 w-3" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5"
+            onClick={togglePanel}
+          >
+            <X className="h-3 w-3" />
+          </Button>
+        </div>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
