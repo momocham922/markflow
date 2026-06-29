@@ -246,7 +246,8 @@ export function useVoiceInput({
           return;
         } catch (err) {
           const isAbort =
-            err instanceof DOMException && err.name === "AbortError";
+            err instanceof Error &&
+            (err.name === "AbortError" || /abort/i.test(err.message));
           const isNetwork =
             err instanceof TypeError && /fetch|network/i.test(err.message);
 
