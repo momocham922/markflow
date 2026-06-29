@@ -480,9 +480,9 @@ export function VoicePanel({
 
       const { useResearchStore: getResearchStore } =
         await import("@/stores/research-store");
-      const refineResearchCards = getResearchStore().cards.filter(
-        (c) => !c.integrated && c.summary,
-      );
+      const refineResearchCards = getResearchStore
+        .getState()
+        .cards.filter((c) => !c.integrated && c.summary);
       if (refineResearchCards.length > 0) {
         refineUserContent +=
           "\n\n## Research Context\n" +
@@ -550,7 +550,7 @@ export function VoicePanel({
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
         if (refineResearchCards.length > 0) {
-          getResearchStore().markAllIntegrated();
+          getResearchStore.getState().markAllIntegrated();
         }
       }
       setHasArchive(false);
