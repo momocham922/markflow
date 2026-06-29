@@ -472,6 +472,9 @@ export interface FirestoreDocument {
   updatedAt: Timestamp | null;
   teamId?: string | null;
   shareLink?: { enabled: boolean; token: string; permission: "view" | "edit" };
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: Timestamp | null;
 }
 
 const DOCS_COLLECTION = "documents";
@@ -510,6 +513,9 @@ export async function saveDocumentToFirestore(docData: {
   titlePinned?: boolean;
   updatedAt?: number;
   teamId?: string | null;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
 
@@ -547,6 +553,15 @@ export async function saveDocumentToFirestore(docData: {
     if (docData.ownerName) payload.ownerName = docData.ownerName;
     if (docData.docType) payload.docType = docData.docType;
     if (docData.teamId !== undefined) payload.teamId = docData.teamId;
+    if (docData.voiceTranscript !== undefined)
+      payload.voiceTranscript = docData.voiceTranscript;
+    if (docData.voiceGcsUri !== undefined)
+      payload.voiceGcsUri = docData.voiceGcsUri;
+    if (docData.voiceRecordedAt !== undefined)
+      payload.voiceRecordedAt =
+        docData.voiceRecordedAt !== null
+          ? Timestamp.fromMillis(docData.voiceRecordedAt)
+          : null;
 
     if (snap.exists()) {
       transaction.update(ref, payload);
@@ -602,6 +617,9 @@ export async function saveDocumentMerge(docData: {
   titlePinned?: boolean;
   updatedAt?: number;
   teamId?: string | null;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   // Safety checks: owner, timestamp, and empty content — same guards as saveDocumentToFirestore
@@ -625,6 +643,20 @@ export async function saveDocumentMerge(docData: {
       titlePinned: docData.titlePinned ?? false,
       ...(docData.docType ? { docType: docData.docType } : {}),
       ...(docData.teamId !== undefined ? { teamId: docData.teamId } : {}),
+      ...(docData.voiceTranscript !== undefined
+        ? { voiceTranscript: docData.voiceTranscript }
+        : {}),
+      ...(docData.voiceGcsUri !== undefined
+        ? { voiceGcsUri: docData.voiceGcsUri }
+        : {}),
+      ...(docData.voiceRecordedAt !== undefined
+        ? {
+            voiceRecordedAt:
+              docData.voiceRecordedAt !== null
+                ? Timestamp.fromMillis(docData.voiceRecordedAt)
+                : null,
+          }
+        : {}),
       updatedAt: docData.updatedAt
         ? Timestamp.fromMillis(docData.updatedAt)
         : serverTimestamp(),

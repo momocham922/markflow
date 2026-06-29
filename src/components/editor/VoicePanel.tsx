@@ -21,12 +21,21 @@ import { extractHints } from "@/lib/text-utils";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
+export interface VoiceDataUpdate {
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
+}
+
 interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
   onSetContent: (content: string) => void;
   documentContent: string;
   onTranscriptChange?: (transcript: string) => void;
   onRecordingChange?: (isRecording: boolean) => void;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  onVoiceDataChange?: (update: VoiceDataUpdate) => void;
 }
 
 function ResearchTriggerButton() {
@@ -61,6 +70,9 @@ export function VoicePanel({
   documentContent,
   onTranscriptChange,
   onRecordingChange,
+  voiceTranscript: savedVoiceTranscript,
+  voiceGcsUri: savedVoiceGcsUri,
+  onVoiceDataChange,
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [refining, setRefining] = useState(false);
@@ -104,6 +116,8 @@ export function VoicePanel({
   const onSetContentRef = useRef(onSetContent);
   const docContentRef = useRef(documentContent);
   const sttVocabRef = useRef<Set<string>>(new Set());
+  const onVoiceDataChangeRef = useRef(onVoiceDataChange);
+  const savedVoiceGcsUriRef = useRef(savedVoiceGcsUri);
 
   const {
     isRecording,
@@ -132,6 +146,10 @@ export function VoicePanel({
     onInfo: (msg) => setVoiceInfo(msg),
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (4 hours) reached."),
+    initialTranscript: savedVoiceTranscript || "",
+    onTranscriptUpdate: (text) => {
+      onVoiceDataChangeRef.current?.({ voiceTranscript: text || null });
+    },
   });
 
   useEffect(() => {
@@ -146,7 +164,13 @@ export function VoicePanel({
   }, []);
 
   useEffect(() => {
-    if (isRecording) setHasArchive(true);
+    if (isRecording) {
+      setHasArchive(true);
+      onVoiceDataChangeRef.current?.({
+        voiceGcsUri: null,
+        voiceRecordedAt: null,
+      });
+    }
   }, [isRecording]);
 
   useEffect(() => {
@@ -193,6 +217,12 @@ export function VoicePanel({
   useEffect(() => {
     docContentRef.current = documentContent;
   }, [documentContent]);
+  useEffect(() => {
+    onVoiceDataChangeRef.current = onVoiceDataChange;
+  }, [onVoiceDataChange]);
+  useEffect(() => {
+    savedVoiceGcsUriRef.current = savedVoiceGcsUri;
+  }, [savedVoiceGcsUri]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -387,29 +417,47 @@ export function VoicePanel({
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
       if (!bucket) throw new Error("Storage bucket not configured");
 
-      // Stage 1: Upload audio archive
-      setRefineStage("upload");
-      const { invoke } = await import("@tauri-apps/api/core");
+      // Stage 1: Upload audio archive (skip if GCS URI already exists from prior attempt)
+      let gcsUri = savedVoiceGcsUriRef.current;
 
-      // Android: get archive path from Kotlin JS bridge
-      let androidArchivePath: string | undefined;
-      if (isAndroid) {
-        const bridge = (window as unknown as Record<string, unknown>)
-          .AndroidAudio as { getArchivePath?: () => string | null } | undefined;
-        const p = bridge?.getArchivePath?.();
-        if (!p) throw new Error("No voice archive available on this device");
-        androidArchivePath = p;
+      if (gcsUri) {
+        console.log(
+          "[voice] Reusing existing GCS URI for refine retry:",
+          gcsUri,
+        );
+      } else {
+        setRefineStage("upload");
+        const { invoke } = await import("@tauri-apps/api/core");
+
+        let androidArchivePath: string | undefined;
+        if (isAndroid) {
+          const bridge = (window as unknown as Record<string, unknown>)
+            .AndroidAudio as
+            | {
+                getArchivePath?: () => string | null;
+              }
+            | undefined;
+          const p = bridge?.getArchivePath?.();
+          if (!p) throw new Error("No voice archive available on this device");
+          androidArchivePath = p;
+        }
+
+        const archiveResult = await invoke<{
+          gcs_uri: string;
+          download_url: string;
+        }>("upload_voice_archive", {
+          uid,
+          token,
+          bucket,
+          archivePath: androidArchivePath,
+        });
+        gcsUri = archiveResult.gcs_uri;
+
+        onVoiceDataChangeRef.current?.({
+          voiceGcsUri: gcsUri,
+          voiceRecordedAt: Date.now(),
+        });
       }
-
-      const archiveResult = await invoke<{
-        gcs_uri: string;
-        download_url: string;
-      }>("upload_voice_archive", {
-        uid,
-        token,
-        bucket,
-        archivePath: androidArchivePath,
-      });
 
       // Stage 2: Batch transcribe with full-session diarization
       setRefineStage("transcribe");
@@ -423,7 +471,7 @@ export function VoicePanel({
             Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({
-            gcsUri: archiveResult.gcs_uri,
+            gcsUri,
             language: "ja-JP",
           }),
           signal: abortController.signal,
@@ -554,6 +602,11 @@ export function VoicePanel({
         }
       }
       setHasArchive(false);
+      onVoiceDataChangeRef.current?.({
+        voiceTranscript: null,
+        voiceGcsUri: null,
+        voiceRecordedAt: null,
+      });
       import("@tauri-apps/api/core")
         .then(({ invoke }) => invoke("clear_voice_archive"))
         .catch(() => {});
@@ -791,23 +844,26 @@ export function VoicePanel({
           Structure
         </Button>
 
-        {isTauri && !isRecording && fullTranscript.trim() && hasArchive && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1 text-xs shrink-0"
-            onClick={() => doRefine()}
-            disabled={refining || structuring}
-            title="Refine"
-          >
-            {refining ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Wand2 className="h-3.5 w-3.5" />
-            )}
-            Refine
-          </Button>
-        )}
+        {isTauri &&
+          !isRecording &&
+          fullTranscript.trim() &&
+          (hasArchive || !!savedVoiceGcsUri) && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1 text-xs shrink-0"
+              onClick={() => doRefine()}
+              disabled={refining || structuring}
+              title="Refine"
+            >
+              {refining ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Wand2 className="h-3.5 w-3.5" />
+              )}
+              Refine
+            </Button>
+          )}
 
         <Button
           variant="ghost"
@@ -818,6 +874,11 @@ export function VoicePanel({
             lastStructuredRef.current = "";
             sttVocabRef.current.clear();
             setHasArchive(false);
+            onVoiceDataChangeRef.current?.({
+              voiceTranscript: null,
+              voiceGcsUri: null,
+              voiceRecordedAt: null,
+            });
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))
               .catch(() => {});

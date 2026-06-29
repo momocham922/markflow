@@ -28,7 +28,7 @@ import { previewThemes } from "@/styles/preview-themes";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
-import { VoicePanel } from "./VoicePanel";
+import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
 import { ResearchPanel } from "./ResearchPanel";
 import { useResearchPipeline } from "@/hooks/use-research-pipeline";
 import { useAutoVersion } from "@/hooks/use-auto-version";
@@ -1070,6 +1070,14 @@ export function Editor() {
     [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
   );
 
+  const handleVoiceDataChange = useCallback(
+    (update: VoiceDataUpdate) => {
+      if (!activeDocId) return;
+      updateDocument(activeDocId, update);
+    },
+    [activeDocId, updateDocument],
+  );
+
   if (!activeDoc) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -1297,11 +1305,15 @@ export function Editor() {
       </div>
       {voiceOpen && (
         <VoicePanel
+          key={activeDocId}
           onInsertMarkdown={handleInsertMarkdown}
           onSetContent={handleSetContent}
           documentContent={activeDoc?.content || ""}
           onTranscriptChange={setVoiceTranscript}
           onRecordingChange={setVoiceRecording}
+          voiceTranscript={activeDoc?.voiceTranscript}
+          voiceGcsUri={activeDoc?.voiceGcsUri}
+          onVoiceDataChange={handleVoiceDataChange}
         />
       )}
     </div>

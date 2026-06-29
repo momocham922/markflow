@@ -19,6 +19,9 @@ export interface Document {
   titlePinned?: boolean;
   docType?: DocType;
   ownerName?: string;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
 }
 
 export interface CustomPreviewTheme {
@@ -218,7 +221,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.error("[app-store] SQLite theme save failed:", e),
       );
       // Backup: localStorage (always works in WebView)
-      try { localStorage.setItem("markflow:themeSettings", json); } catch {}
+      try {
+        localStorage.setItem("markflow:themeSettings", json);
+      } catch {}
       // Cloud sync
       syncSettingToCloud({ themeSettings });
       return { themeSettings };
@@ -227,12 +232,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
 
   activeDocId: null,
-  setActiveDocId: (id) => set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) }),
+  setActiveDocId: (id) =>
+    set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) }),
 
   documents: [],
   folders: ["/"],
   pendingRestoreContent: null,
-  setPendingRestoreContent: (content) => set({ pendingRestoreContent: content }),
+  setPendingRestoreContent: (content) =>
+    set({ pendingRestoreContent: content }),
 
   customPreviewThemes: [],
 
@@ -244,7 +251,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       for (const r of rows) {
         let tags: string[] = [];
-        try { tags = JSON.parse(r.tags || "[]"); } catch { /* ignore */ }
+        try {
+          tags = JSON.parse(r.tags || "[]");
+        } catch {
+          /* ignore */
+        }
         let content = r.content;
         let title = r.title;
 
@@ -254,13 +265,20 @@ export const useAppStore = create<AppState>((set, get) => ({
           if (recovered) {
             content = recovered.content;
             title = recovered.title || r.title;
-            console.warn(`[app-store] Recovered doc ${r.id} from ${recovered.source}`);
+            console.warn(
+              `[app-store] Recovered doc ${r.id} from ${recovered.source}`,
+            );
             // Persist the recovery back to documents table
             db.upsertDocument({
-              id: r.id, title, content,
-              createdAt: r.created_at, updatedAt: Date.now(),
-              folder: r.folder || "/", tags: JSON.parse(r.tags || "[]"),
-              ownerId: r.owner_id ?? null, isShared: r.is_shared === 1,
+              id: r.id,
+              title,
+              content,
+              createdAt: r.created_at,
+              updatedAt: Date.now(),
+              folder: r.folder || "/",
+              tags: JSON.parse(r.tags || "[]"),
+              ownerId: r.owner_id ?? null,
+              isShared: r.is_shared === 1,
               titlePinned: r.title_pinned === 1,
               docType: (r.doc_type as DocType) || "markdown",
             }).catch(console.error);
@@ -282,6 +300,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           isShared: r.is_shared === 1,
           titlePinned: r.title_pinned === 1,
           docType: (r.doc_type as DocType) || "markdown",
+          voiceTranscript: r.voice_transcript ?? null,
+          voiceGcsUri: r.voice_gcs_uri ?? null,
+          voiceRecordedAt: r.voice_recorded_at ?? null,
         });
       }
 
@@ -294,20 +315,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Load theme settings: SQLite primary, localStorage fallback
       let savedThemeSettings = await db.getSetting("themeSettings");
       if (!savedThemeSettings) {
-        try { savedThemeSettings = localStorage.getItem("markflow:themeSettings"); } catch {}
+        try {
+          savedThemeSettings = localStorage.getItem("markflow:themeSettings");
+        } catch {}
       }
       let themeSettings = { ...defaultThemeSettings };
       if (savedThemeSettings) {
         try {
-          themeSettings = { ...defaultThemeSettings, ...JSON.parse(savedThemeSettings) };
-        } catch { /* ignore */ }
+          themeSettings = {
+            ...defaultThemeSettings,
+            ...JSON.parse(savedThemeSettings),
+          };
+        } catch {
+          /* ignore */
+        }
       }
 
       // Load persisted empty folders
       let extraFolders: string[] = [];
       const savedFolders = await db.getSetting("folders");
       if (savedFolders) {
-        try { extraFolders = JSON.parse(savedFolders); } catch { /* ignore */ }
+        try {
+          extraFolders = JSON.parse(savedFolders);
+        } catch {
+          /* ignore */
+        }
       }
 
       const folders = deriveFolders(documents, extraFolders);
@@ -316,7 +348,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       let customPreviewThemes: CustomPreviewTheme[] = [];
       const savedCustomThemes = await db.getSetting("customPreviewThemes");
       if (savedCustomThemes) {
-        try { customPreviewThemes = JSON.parse(savedCustomThemes); } catch { /* ignore */ }
+        try {
+          customPreviewThemes = JSON.parse(savedCustomThemes);
+        } catch {
+          /* ignore */
+        }
       }
 
       if (savedTheme === "light" || savedTheme === "dark") {
@@ -324,16 +360,30 @@ export const useAppStore = create<AppState>((set, get) => ({
           "dark",
           savedTheme === "dark",
         );
-        set({ documents, folders, theme: savedTheme, themeSettings, customPreviewThemes, initialized: true });
+        set({
+          documents,
+          folders,
+          theme: savedTheme,
+          themeSettings,
+          customPreviewThemes,
+          initialized: true,
+        });
       } else {
-        set({ documents, folders, themeSettings, customPreviewThemes, initialized: true });
+        set({
+          documents,
+          folders,
+          themeSettings,
+          customPreviewThemes,
+          initialized: true,
+        });
       }
     } catch {
       // Running in browser without Tauri — skip DB, but still restore themes from localStorage
       let themeSettings = { ...defaultThemeSettings };
       try {
         const lsTheme = localStorage.getItem("markflow:themeSettings");
-        if (lsTheme) themeSettings = { ...defaultThemeSettings, ...JSON.parse(lsTheme) };
+        if (lsTheme)
+          themeSettings = { ...defaultThemeSettings, ...JSON.parse(lsTheme) };
       } catch {}
       set({ themeSettings, initialized: true });
     }
@@ -345,7 +395,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const exists = s.documents.some((d) => d.id === doc.id);
       if (exists) {
         return {
-          documents: s.documents.map((d) => d.id === doc.id ? { ...d, ...doc } : d),
+          documents: s.documents.map((d) =>
+            d.id === doc.id ? { ...d, ...doc } : d,
+          ),
         };
       }
       return {
@@ -395,9 +447,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Ignore if no DB
     }
     // Also delete from cloud
-    import("@/stores/auth-store").then(({ useAuthStore }) => {
-      useAuthStore.getState().deleteFromCloud(id);
-    }).catch(() => {})
+    import("@/stores/auth-store")
+      .then(({ useAuthStore }) => {
+        useAuthStore.getState().deleteFromCloud(id);
+      })
+      .catch(() => {});
   },
 
   createFolder: (path) => {
@@ -441,13 +495,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (doc.folder === oldPath) {
         updateDocument(doc.id, { folder: newPath, updatedAt: Date.now() });
       } else if (doc.folder.startsWith(oldPath + "/")) {
-        updateDocument(doc.id, { folder: newPath + doc.folder.slice(oldPath.length), updatedAt: Date.now() });
+        updateDocument(doc.id, {
+          folder: newPath + doc.folder.slice(oldPath.length),
+          updatedAt: Date.now(),
+        });
       }
     }
     set((s) => {
       const folders = s.folders.map((f) => {
         if (f === oldPath) return newPath;
-        if (f.startsWith(oldPath + "/")) return newPath + f.slice(oldPath.length);
+        if (f.startsWith(oldPath + "/"))
+          return newPath + f.slice(oldPath.length);
         return f;
       });
       const toSave = folders.filter((f) => f !== "/");
@@ -464,8 +522,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addCustomPreviewTheme: (theme) => {
     set((s) => {
-      const customPreviewThemes = [...s.customPreviewThemes.filter((t) => t.id !== theme.id), theme];
-      db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      const customPreviewThemes = [
+        ...s.customPreviewThemes.filter((t) => t.id !== theme.id),
+        theme,
+      ];
+      db.setSetting(
+        "customPreviewThemes",
+        JSON.stringify(customPreviewThemes),
+      ).catch(console.error);
       syncSettingToCloud({ customPreviewThemes });
       return { customPreviewThemes };
     });
@@ -473,13 +537,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   removeCustomPreviewTheme: (id) => {
     set((s) => {
-      const customPreviewThemes = s.customPreviewThemes.filter((t) => t.id !== id);
-      db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      const customPreviewThemes = s.customPreviewThemes.filter(
+        (t) => t.id !== id,
+      );
+      db.setSetting(
+        "customPreviewThemes",
+        JSON.stringify(customPreviewThemes),
+      ).catch(console.error);
       syncSettingToCloud({ customPreviewThemes });
       // Reset to default if the removed theme was active
       if (s.themeSettings.previewTheme === id) {
         const themeSettings = { ...s.themeSettings, previewTheme: "github" };
-        db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(console.error);
+        db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(
+          console.error,
+        );
         return { customPreviewThemes, themeSettings };
       }
       return { customPreviewThemes };

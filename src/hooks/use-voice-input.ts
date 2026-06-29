@@ -25,6 +25,8 @@ export interface UseVoiceInputOptions {
   getHints?: () => string[];
   preferDiarization?: boolean;
   onMaxDuration?: () => void;
+  initialTranscript?: string;
+  onTranscriptUpdate?: (fullTranscript: string) => void;
 }
 
 export interface UseVoiceInputReturn {
@@ -61,17 +63,12 @@ export function useVoiceInput({
   getHints,
   preferDiarization,
   onMaxDuration,
+  initialTranscript,
+  onTranscriptUpdate,
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [interimText, setInterimText] = useState("");
-  const savedTranscript = (() => {
-    try {
-      return localStorage.getItem("voice_transcript") || "";
-    } catch {
-      return "";
-    }
-  })();
-  const [fullTranscript, setFullTranscript] = useState(savedTranscript);
+  const [fullTranscript, setFullTranscript] = useState(initialTranscript || "");
   const [duration, setDuration] = useState(0);
 
   const isSupported = typeof navigator !== "undefined";
@@ -85,8 +82,10 @@ export function useVoiceInput({
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const transcriptRef = useRef(savedTranscript);
+  const startTimeRef = useRef(0);
+  const transcriptRef = useRef(initialTranscript || "");
   const onTranscriptRef = useRef(onTranscript);
+  const onTranscriptUpdateRef = useRef(onTranscriptUpdate);
   const onErrorRef = useRef(onError);
   const onInfoRef = useRef(onInfo);
   const getHintsRef = useRef(getHints);
@@ -107,6 +106,9 @@ export function useVoiceInput({
   useEffect(() => {
     onMaxDurationRef.current = onMaxDuration;
   }, [onMaxDuration]);
+  useEffect(() => {
+    onTranscriptUpdateRef.current = onTranscriptUpdate;
+  }, [onTranscriptUpdate]);
 
   const sendChunk = useCallback(
     async (
@@ -477,9 +479,10 @@ export function useVoiceInput({
       }
 
       // Common setup for both paths
+      startTimeRef.current = Date.now();
       setDuration(0);
       durationIntervalRef.current = setInterval(() => {
-        setDuration((d) => d + 1);
+        setDuration(Math.floor((Date.now() - startTimeRef.current) / 1000));
       }, 1000);
 
       // Auto-stop after MAX_DURATION_SECONDS
@@ -509,12 +512,13 @@ export function useVoiceInput({
     else startRecording();
   }, [isRecording, startRecording, stopRecording]);
 
+  const mountedRef = useRef(false);
   useEffect(() => {
-    try {
-      if (fullTranscript)
-        localStorage.setItem("voice_transcript", fullTranscript);
-      else localStorage.removeItem("voice_transcript");
-    } catch {}
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    onTranscriptUpdateRef.current?.(fullTranscript);
   }, [fullTranscript]);
 
   const clearTranscript = useCallback(() => {

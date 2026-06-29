@@ -13,7 +13,12 @@ import {
   saveUserSettingsToFirestore,
   fetchUserSettings,
 } from "@/services/firebase";
-import { saveUserProfile, fetchSharedWithMe, fetchUserTeams, fetchTeamDocuments } from "@/services/sharing";
+import {
+  saveUserProfile,
+  fetchSharedWithMe,
+  fetchUserTeams,
+  fetchTeamDocuments,
+} from "@/services/sharing";
 import { useAppStore, type Document, type DocType } from "./app-store";
 import { getDeletedDocIds, clearDeletedDoc } from "@/services/database";
 
@@ -24,7 +29,8 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
   versionBackfillDone = true;
 
   try {
-    const { getSetting, setSetting, getAllVersions } = await import("@/services/database");
+    const { getSetting, setSetting, getAllVersions } =
+      await import("@/services/database");
     const flag = await getSetting("versions_backfill_v2_done");
     if (flag === "1") return;
 
@@ -34,7 +40,8 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
       return;
     }
 
-    const { syncVersionToCloud, fetchVersionsFromCloud, logErrorToCloud } = await import("@/services/firebase");
+    const { syncVersionToCloud, fetchVersionsFromCloud, logErrorToCloud } =
+      await import("@/services/firebase");
 
     // Collect existing cloud version IDs per document to avoid overwriting
     // other users' ownerId/ownerName with the backfilling user's info
@@ -45,7 +52,11 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
         const cloudVersions = await fetchVersionsFromCloud(did);
         for (const cv of cloudVersions) existingCloudIds.add(cv.id);
       } catch (e) {
-        console.warn("[backfill] Failed to fetch cloud versions for doc", did, e);
+        console.warn(
+          "[backfill] Failed to fetch cloud versions for doc",
+          did,
+          e,
+        );
       }
     }
 
@@ -69,11 +80,22 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
         );
         uploaded++;
       } catch (e) {
-        console.error("[backfill] Failed to upload version", v.id, "for doc", v.document_id, e);
-        logErrorToCloud(uid, "backfill-version-upload", e, { versionId: v.id, docId: v.document_id });
+        console.error(
+          "[backfill] Failed to upload version",
+          v.id,
+          "for doc",
+          v.document_id,
+          e,
+        );
+        logErrorToCloud(uid, "backfill-version-upload", e, {
+          versionId: v.id,
+          docId: v.document_id,
+        });
       }
     }
-    console.log(`[auth-store] Backfilled ${uploaded}/${allVersions.length} local versions to Firestore`);
+    console.log(
+      `[auth-store] Backfilled ${uploaded}/${allVersions.length} local versions to Firestore`,
+    );
     await setSetting("versions_backfill_v2_done", "1");
   } catch (e) {
     console.error("[auth-store] Version backfill failed:", e);
@@ -102,8 +124,12 @@ const collabActiveDocIds = new Set<string>();
 // --- Track docs pulled from cloud during syncFromCloud ---
 // Prevents syncToCloud from re-uploading docs that were just downloaded
 const cloudPulledDocIds = new Set<string>();
-export function markCollabActive(docId: string) { collabActiveDocIds.add(docId); }
-export function markCollabInactive(docId: string) { collabActiveDocIds.delete(docId); }
+export function markCollabActive(docId: string) {
+  collabActiveDocIds.add(docId);
+}
+export function markCollabInactive(docId: string) {
+  collabActiveDocIds.delete(docId);
+}
 
 interface AuthState {
   user: User | null;
@@ -149,7 +175,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             try {
               const { setSetting } = await import("@/services/database");
               await setSetting("lastSyncAt", String(syncStartedAt));
-            } catch { /* ignore */ }
+            } catch {
+              /* ignore */
+            }
           }
           cloudPulledDocIds.clear();
           // Backfill local versions to Firestore (one-time, background)
@@ -182,7 +210,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           try {
             const { setSetting } = await import("@/services/database");
             await setSetting("lastSyncAt", String(syncStartedAt));
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
         }
         cloudPulledDocIds.clear();
       }
@@ -203,7 +233,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           try {
             const { setSetting } = await import("@/services/database");
             await setSetting("lastSyncAt", String(syncStartedAt));
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
         }
         cloudPulledDocIds.clear();
       }
@@ -257,18 +289,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
 
         // Parallel fetch: user docs, shared docs, teams, and user settings
-        const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all([
-          fetchUserDocuments(user.uid),
-          fetchSharedWithMe(user.uid).catch((err) => {
-            console.error("Fetch shared docs failed:", err);
-            return [] as Awaited<ReturnType<typeof fetchSharedWithMe>>;
-          }),
-          fetchUserTeams(user.uid).catch((err) => {
-            console.error("Fetch teams failed:", err);
-            return [] as Awaited<ReturnType<typeof fetchUserTeams>>;
-          }),
-          fetchUserSettings(user.uid).catch(() => null),
-        ]);
+        const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all(
+          [
+            fetchUserDocuments(user.uid),
+            fetchSharedWithMe(user.uid).catch((err) => {
+              console.error("Fetch shared docs failed:", err);
+              return [] as Awaited<ReturnType<typeof fetchSharedWithMe>>;
+            }),
+            fetchUserTeams(user.uid).catch((err) => {
+              console.error("Fetch teams failed:", err);
+              return [] as Awaited<ReturnType<typeof fetchUserTeams>>;
+            }),
+            fetchUserSettings(user.uid).catch(() => null),
+          ],
+        );
 
         // Restore all user settings from cloud
         if (cloudSettings) {
@@ -278,56 +312,99 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           if (cloudSettings.theme && typeof cloudSettings.theme === "string") {
             const cloudThemeMode = cloudSettings.theme as "light" | "dark";
             if (appStore.theme !== cloudThemeMode) {
-              document.documentElement.classList.toggle("dark", cloudThemeMode === "dark");
+              document.documentElement.classList.toggle(
+                "dark",
+                cloudThemeMode === "dark",
+              );
               useAppStore.setState({ theme: cloudThemeMode });
             }
           }
 
           // Theme settings (only if local has defaults)
           const local = appStore.themeSettings;
-          const defaults = { previewTheme: "github", editorTheme: "default", mindMapTheme: "lavender", customPreviewCss: "" };
-          const isDefault = local.previewTheme === defaults.previewTheme
-            && local.editorTheme === defaults.editorTheme
-            && local.mindMapTheme === defaults.mindMapTheme;
+          const defaults = {
+            previewTheme: "github",
+            editorTheme: "default",
+            mindMapTheme: "lavender",
+            customPreviewCss: "",
+          };
+          const isDefault =
+            local.previewTheme === defaults.previewTheme &&
+            local.editorTheme === defaults.editorTheme &&
+            local.mindMapTheme === defaults.mindMapTheme;
           if (isDefault && cloudSettings.themeSettings) {
             try {
-              const cloudTheme = typeof cloudSettings.themeSettings === "string"
-                ? JSON.parse(cloudSettings.themeSettings as string)
-                : cloudSettings.themeSettings;
+              const cloudTheme =
+                typeof cloudSettings.themeSettings === "string"
+                  ? JSON.parse(cloudSettings.themeSettings as string)
+                  : cloudSettings.themeSettings;
               appStore.setThemeSettings(cloudTheme);
-            } catch { /* ignore parse errors */ }
+            } catch {
+              /* ignore parse errors */
+            }
           }
 
           // Folders
-          if (Array.isArray(cloudSettings.folders) && cloudSettings.folders.length > 0) {
+          if (
+            Array.isArray(cloudSettings.folders) &&
+            cloudSettings.folders.length > 0
+          ) {
             const localFolders = appStore.folders;
             if (localFolders.length <= 1) {
               // Local has only "/" default — restore from cloud
-              const restored = ["/", ...cloudSettings.folders.filter((f: unknown) => f !== "/")];
+              const restored = [
+                "/",
+                ...cloudSettings.folders.filter((f: unknown) => f !== "/"),
+              ];
               useAppStore.setState({ folders: restored as string[] });
             }
           }
 
           // Custom preview themes
-          if (Array.isArray(cloudSettings.customPreviewThemes) && cloudSettings.customPreviewThemes.length > 0) {
+          if (
+            Array.isArray(cloudSettings.customPreviewThemes) &&
+            cloudSettings.customPreviewThemes.length > 0
+          ) {
             if (appStore.customPreviewThemes.length === 0) {
-              useAppStore.setState({ customPreviewThemes: cloudSettings.customPreviewThemes as typeof appStore.customPreviewThemes });
+              useAppStore.setState({
+                customPreviewThemes:
+                  cloudSettings.customPreviewThemes as typeof appStore.customPreviewThemes,
+              });
             }
           }
 
           // AI custom rules, MCP servers, Slack config → write to SQLite
           try {
             const { setSetting } = await import("@/services/database");
-            if (cloudSettings.ai_custom_rules && typeof cloudSettings.ai_custom_rules === "string") {
-              await setSetting("ai_custom_rules", cloudSettings.ai_custom_rules).catch(() => {});
+            if (
+              cloudSettings.ai_custom_rules &&
+              typeof cloudSettings.ai_custom_rules === "string"
+            ) {
+              await setSetting(
+                "ai_custom_rules",
+                cloudSettings.ai_custom_rules,
+              ).catch(() => {});
             }
-            if (cloudSettings.mcp_servers && typeof cloudSettings.mcp_servers === "string") {
-              await setSetting("mcp_servers", cloudSettings.mcp_servers).catch(() => {});
+            if (
+              cloudSettings.mcp_servers &&
+              typeof cloudSettings.mcp_servers === "string"
+            ) {
+              await setSetting("mcp_servers", cloudSettings.mcp_servers).catch(
+                () => {},
+              );
             }
-            if (cloudSettings.slack_notify_config && typeof cloudSettings.slack_notify_config === "string") {
-              await setSetting("slack_notify_config", cloudSettings.slack_notify_config).catch(() => {});
+            if (
+              cloudSettings.slack_notify_config &&
+              typeof cloudSettings.slack_notify_config === "string"
+            ) {
+              await setSetting(
+                "slack_notify_config",
+                cloudSettings.slack_notify_config,
+              ).catch(() => {});
             }
-          } catch { /* DB not available */ }
+          } catch {
+            /* DB not available */
+          }
         }
 
         const appStore = useAppStore.getState();
@@ -351,7 +428,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           if (!cloudDoc.content?.trim()) continue; // track existence but skip empty content
           const local = localDocs.find((d) => d.id === cloudDoc.id);
           if (!local) {
-            const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
+            const hasCollaborators =
+              cloudDoc.collaborators &&
+              Object.keys(cloudDoc.collaborators).length > 0;
             const hasShareLink = cloudDoc.shareLink?.enabled === true;
             const newDoc: Document = {
               id: cloudDoc.id,
@@ -364,22 +443,34 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               ownerId: user.uid,
               isShared: hasCollaborators || hasShareLink,
               docType: (cloudDoc.docType as DocType) || "markdown",
+              voiceTranscript: cloudDoc.voiceTranscript ?? null,
+              voiceGcsUri: cloudDoc.voiceGcsUri ?? null,
+              voiceRecordedAt: cloudDoc.voiceRecordedAt?.toMillis() ?? null,
             };
             await appStore.addDocument(newDoc);
             cloudPulledDocIds.add(cloudDoc.id);
           } else {
-            const hasCollaborators = cloudDoc.collaborators && Object.keys(cloudDoc.collaborators).length > 0;
+            const hasCollaborators =
+              cloudDoc.collaborators &&
+              Object.keys(cloudDoc.collaborators).length > 0;
             const hasShareLink = cloudDoc.shareLink?.enabled === true;
             const cloudUpdatedAt = cloudDoc.updatedAt?.toMillis() ?? 0;
             const updates: Partial<Document> = {
               ownerId: user.uid,
               isShared: hasCollaborators || hasShareLink,
             };
-            if (cloudDoc.folder && cloudDoc.folder !== "/" && local.folder === "/") {
+            if (
+              cloudDoc.folder &&
+              cloudDoc.folder !== "/" &&
+              local.folder === "/"
+            ) {
               updates.folder = cloudDoc.folder;
             }
             // Sync content/title from cloud if cloud version is newer
-            if (cloudUpdatedAt > local.updatedAt && !collabActiveDocIds.has(local.id)) {
+            if (
+              cloudUpdatedAt > local.updatedAt &&
+              !collabActiveDocIds.has(local.id)
+            ) {
               if (cloudDoc.content?.trim()) {
                 updates.content = cloudDoc.content;
               }
@@ -397,6 +488,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               updates.folder = cloudDoc.folder ?? local.folder;
               updates.tags = cloudDoc.tags ?? local.tags;
               updates.docType = (cloudDoc.docType as DocType) || local.docType;
+              updates.voiceTranscript = cloudDoc.voiceTranscript ?? null;
+              updates.voiceGcsUri = cloudDoc.voiceGcsUri ?? null;
+              updates.voiceRecordedAt =
+                cloudDoc.voiceRecordedAt?.toMillis() ?? null;
               // Mark as pulled from cloud — don't re-upload in syncToCloud
               cloudPulledDocIds.add(local.id);
             }
@@ -434,7 +529,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               const fullDoc = results[j];
               const entry = batch[j];
               if (!fullDoc || !fullDoc.content?.trim()) {
-                if (!entry.isNew) appStore.updateDocument(entry.id, { isShared: true });
+                if (!entry.isNew)
+                  appStore.updateDocument(entry.id, { isShared: true });
                 continue;
               }
               if (entry.isNew) {
@@ -455,7 +551,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               } else {
                 // Non-owned shared docs: Yjs/IndexedDB is source of truth for content.
                 // Only update content if cloud version is genuinely newer.
-                const localDoc = useAppStore.getState().documents.find((d) => d.id === entry.id);
+                const localDoc = useAppStore
+                  .getState()
+                  .documents.find((d) => d.id === entry.id);
                 const cloudUpdatedAt = fullDoc.updatedAt?.toMillis() ?? 0;
                 const localUpdatedAt = localDoc?.updatedAt ?? 0;
                 const updates: Partial<Document> = {
@@ -470,7 +568,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 }
                 // Never overwrite content for collab-active docs.
                 // For inactive docs, only update if cloud is genuinely newer.
-                if (!collabActiveDocIds.has(entry.id) && cloudUpdatedAt > localUpdatedAt) {
+                if (
+                  !collabActiveDocIds.has(entry.id) &&
+                  cloudUpdatedAt > localUpdatedAt
+                ) {
                   updates.content = fullDoc.content;
                 }
                 appStore.updateDocument(entry.id, updates);
@@ -487,7 +588,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               .catch(() => [] as { id: string; teamId: string }[]),
           ),
         );
-        const teamDocsToFetch: { id: string; teamId: string; isNew: boolean }[] = [];
+        const teamDocsToFetch: {
+          id: string;
+          teamId: string;
+          isNew: boolean;
+        }[] = [];
         for (const teamDocs of teamDocBatches) {
           for (const td of teamDocs) {
             if (deletedDocIds.has(td.id)) continue;
@@ -496,12 +601,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             const local = currentDocs.find((d) => d.id === td.id);
             if (local) {
               if (local.ownerId !== user.uid) {
-                teamDocsToFetch.push({ id: td.id, teamId: td.teamId, isNew: false });
+                teamDocsToFetch.push({
+                  id: td.id,
+                  teamId: td.teamId,
+                  isNew: false,
+                });
               } else {
-                appStore.updateDocument(td.id, { isShared: true, teamId: td.teamId });
+                appStore.updateDocument(td.id, {
+                  isShared: true,
+                  teamId: td.teamId,
+                });
               }
             } else {
-              teamDocsToFetch.push({ id: td.id, teamId: td.teamId, isNew: true });
+              teamDocsToFetch.push({
+                id: td.id,
+                teamId: td.teamId,
+                isNew: true,
+              });
             }
           }
         }
@@ -526,7 +642,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               const fullDoc = results[j];
               const entry = batch[j];
               if (!fullDoc || !fullDoc.content?.trim()) {
-                if (!entry.isNew) appStore.updateDocument(entry.id, { isShared: true, teamId: entry.teamId });
+                if (!entry.isNew)
+                  appStore.updateDocument(entry.id, {
+                    isShared: true,
+                    teamId: entry.teamId,
+                  });
                 continue;
               }
               if (entry.isNew) {
@@ -539,7 +659,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                   folder: fullDoc.folder ?? "/",
                   tags: fullDoc.tags ?? [],
                   ownerId: fullDoc.ownerId,
-                  ownerName: fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
+                  ownerName:
+                    fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
                   teamId: entry.teamId,
                   isShared: true,
                   docType: (fullDoc.docType as DocType) || "markdown",
@@ -548,24 +669,31 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               } else {
                 // Non-owned team docs: Yjs/IndexedDB is source of truth for content.
                 // Only update content/title if cloud version is genuinely newer.
-                const localTeamDoc = useAppStore.getState().documents.find((d) => d.id === entry.id);
+                const localTeamDoc = useAppStore
+                  .getState()
+                  .documents.find((d) => d.id === entry.id);
                 const cloudTeamUpdatedAt = fullDoc.updatedAt?.toMillis() ?? 0;
                 const localTeamUpdatedAt = localTeamDoc?.updatedAt ?? 0;
                 const updates: Partial<Document> = {
                   isShared: true,
                   teamId: entry.teamId,
                   titlePinned: true,
-                  ownerName: fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
+                  ownerName:
+                    fullDoc.ownerName || teamOwnerMap.get(fullDoc.ownerId),
                 };
                 // Only update title/folder if cloud is newer (preserves local folder moves)
                 if (cloudTeamUpdatedAt > localTeamUpdatedAt) {
                   updates.title = fullDoc.title;
                   updates.updatedAt = cloudTeamUpdatedAt;
-                  updates.folder = fullDoc.folder ?? localTeamDoc?.folder ?? "/";
+                  updates.folder =
+                    fullDoc.folder ?? localTeamDoc?.folder ?? "/";
                 }
                 // Never overwrite content for collab-active docs.
                 // For inactive docs, only update if cloud is genuinely newer.
-                if (!collabActiveDocIds.has(entry.id) && cloudTeamUpdatedAt > localTeamUpdatedAt) {
+                if (
+                  !collabActiveDocIds.has(entry.id) &&
+                  cloudTeamUpdatedAt > localTeamUpdatedAt
+                ) {
                   updates.content = fullDoc.content;
                 }
                 appStore.updateDocument(entry.id, updates);
@@ -590,15 +718,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             try {
               const cloudDoc = await fetchDocument(local.id);
               if (!cloudDoc) {
-                console.warn(`[sync] Removing own doc ${local.id} "${local.title}" (confirmed deleted from cloud)`);
+                console.warn(
+                  `[sync] Removing own doc ${local.id} "${local.title}" (confirmed deleted from cloud)`,
+                );
                 useAppStore.setState((s) => ({
                   documents: s.documents.filter((d) => d.id !== local.id),
-                  activeDocId: s.activeDocId === local.id ? null : s.activeDocId,
+                  activeDocId:
+                    s.activeDocId === local.id ? null : s.activeDocId,
                 }));
                 try {
-                  const { deleteDocument: dbDelete } = await import("@/services/database");
+                  const { deleteDocument: dbDelete } =
+                    await import("@/services/database");
                   await dbDelete(local.id);
-                } catch { /* ignore */ }
+                } catch {
+                  /* ignore */
+                }
               }
               // else: doc exists in Firestore but query missed it — keep locally, syncToCloud will handle
             } catch {
@@ -606,7 +740,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             }
           } else if (local.isShared || local.teamId) {
             // Non-owned shared/team doc not in cloud → removed by owner
-            console.warn(`[sync] Removing non-owned doc ${local.id} (deleted from cloud)`);
+            console.warn(
+              `[sync] Removing non-owned doc ${local.id} (deleted from cloud)`,
+            );
             await appStore.deleteDocument(local.id);
           }
         }
@@ -648,7 +784,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // 1. Fetch all own docs from cloud
         const cloudDocs = await fetchUserDocuments(user.uid);
         const appState = useAppStore.getState();
-        const localIds = new Set(appState.documents.filter((d) => !d.ownerId || d.ownerId === user.uid).map((d) => d.id));
+        const localIds = new Set(
+          appState.documents
+            .filter((d) => !d.ownerId || d.ownerId === user.uid)
+            .map((d) => d.id),
+        );
 
         // 2. Delete cloud docs that don't exist locally (= garbage)
         let deleted = 0;
@@ -665,7 +805,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         console.warn(`[resetCloud] Deleted ${deleted} garbage docs from cloud`);
 
         // 3. Re-upload all local docs to ensure cloud matches local
-        const ownDocs = appState.documents.filter((d) => (!d.ownerId || d.ownerId === user.uid) && d.content?.trim());
+        const ownDocs = appState.documents.filter(
+          (d) => (!d.ownerId || d.ownerId === user.uid) && d.content?.trim(),
+        );
         for (const d of ownDocs) {
           try {
             await saveDocumentMerge({
@@ -689,16 +831,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         try {
           const { setSetting } = await import("@/services/database");
           await setSetting("lastSyncAt", String(Date.now()));
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
         // Clear all deleted_docs entries
         try {
           const deletedIds = await getDeletedDocIds();
           for (const id of deletedIds) {
             await clearDeletedDoc(id);
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
 
-        console.warn("[resetCloud] Cloud reset complete. Cloud now matches this device.");
+        console.warn(
+          "[resetCloud] Cloud reset complete. Cloud now matches this device.",
+        );
       } catch (error) {
         console.error("[resetCloud] Failed:", error);
       } finally {
@@ -737,9 +885,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             if (aiRules) settingsToSync.ai_custom_rules = aiRules;
             if (mcpServers) settingsToSync.mcp_servers = mcpServers;
             if (slackConfig) settingsToSync.slack_notify_config = slackConfig;
-          } catch { /* DB not available */ }
-          saveUserSettingsToFirestore(user.uid, settingsToSync)
-            .catch((err) => console.error("Failed to sync settings:", err));
+          } catch {
+            /* DB not available */
+          }
+          saveUserSettingsToFirestore(user.uid, settingsToSync).catch((err) =>
+            console.error("Failed to sync settings:", err),
+          );
         }
 
         // Retry pending cloud deletions
@@ -756,7 +907,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               }
             }
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
 
         // Only upload docs that were locally modified since last sync cycle.
         // Skip docs just pulled from cloud (cloudPulledDocIds) to avoid ping-pong.
@@ -767,7 +920,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           const { getSetting } = await import("@/services/database");
           const saved = await getSetting("lastSyncAt");
           if (saved) lastSyncAt = parseInt(saved, 10) || 0;
-        } catch { /* DB not available */ }
+        } catch {
+          /* DB not available */
+        }
 
         const syncableDocs = documents.filter((d) => {
           if (d.ownerId && d.ownerId !== user.uid) return false; // non-owner
@@ -775,7 +930,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           if (!d.content?.trim()) return false; // never upload empty content
           // On first sync ever (lastSyncAt=0), upload everything.
           // After that, only upload docs modified OR created since last sync cycle.
-          if (lastSyncAt > 0 && d.updatedAt < lastSyncAt && d.createdAt < lastSyncAt) return false;
+          // Also check voiceRecordedAt: voice data updates don't bump updatedAt
+          // (to avoid content conflict resolution issues), so we need a separate check.
+          if (
+            lastSyncAt > 0 &&
+            d.updatedAt < lastSyncAt &&
+            d.createdAt < lastSyncAt &&
+            (!d.voiceRecordedAt || d.voiceRecordedAt < lastSyncAt)
+          )
+            return false;
           return true;
         });
         for (const d of syncableDocs) {
@@ -791,6 +954,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             titlePinned: d.titlePinned,
             updatedAt: d.updatedAt,
             teamId: d.teamId ?? null,
+            voiceTranscript: d.voiceTranscript ?? null,
+            voiceGcsUri: d.voiceGcsUri ?? null,
+            voiceRecordedAt: d.voiceRecordedAt ?? null,
           };
           try {
             await saveDocumentToFirestore(payload);
@@ -799,7 +965,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             try {
               await saveDocumentMerge(payload);
             } catch (mergeErr) {
-              console.error(`Failed to sync document ${d.id}:`, saveErr, mergeErr);
+              console.error(
+                `Failed to sync document ${d.id}:`,
+                saveErr,
+                mergeErr,
+              );
             }
           }
         }
