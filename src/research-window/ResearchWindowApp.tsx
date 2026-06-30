@@ -123,7 +123,7 @@ export function ResearchWindowApp() {
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea className="research-scroll min-h-0 flex-1">
         <div className="flex flex-col gap-1.5 p-2">
           {cards.length === 0 ? (
             <div className="px-2 py-6 text-center text-[11px] text-muted-foreground">

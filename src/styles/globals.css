@@ -614,6 +614,15 @@ input::selection {
   width: 4px;
 }
 
+/* Research panel: force ScrollArea content to wrap to the container width.
+   Radix renders the viewport's child as `display: table; min-width: 100%`,
+   which sizes content to its intrinsic width — long lines then overflow and
+   get clipped by the card's overflow-hidden instead of wrapping. Forcing the
+   wrapper to block makes text wrap to the available width at any window size. */
+.research-scroll [data-slot="scroll-area-viewport"] > div {
+  display: block !important;
+}
+
 /* ---- Task checkbox in preview ---- */
 .prose .task-list-item {
   list-style: none;

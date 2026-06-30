@@ -57,7 +57,8 @@ export async function openResearchWindow(): Promise<void> {
   // Position near the top-right of the current screen (logical px).
   const screenW =
     typeof window !== "undefined" ? window.screen.availWidth : 1200;
-  const width = 380;
+  // Default wide enough that card content never clips at the default size.
+  const width = 440;
   const x = Math.max(24, screenW - width - 24);
   const y = 72;
 
@@ -65,9 +66,9 @@ export async function openResearchWindow(): Promise<void> {
     url: "research.html",
     title: "Research",
     width,
-    height: 600,
-    minWidth: 280,
-    minHeight: 180,
+    height: 620,
+    minWidth: 340,
+    minHeight: 200,
     x,
     y,
     decorations: false,

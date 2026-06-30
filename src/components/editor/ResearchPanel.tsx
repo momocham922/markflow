@@ -9,6 +9,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "@/components/ui/tooltip";
 import { useResearchStore } from "@/stores/research-store";
 import type { ResearchSource } from "@/stores/research-store";
 import { useAppStore } from "@/stores/app-store";
@@ -23,6 +28,45 @@ function openExternal(url: string) {
   getPlatform()
     .then((p) => p.openExternal(url))
     .catch((e) => console.error("[research] openExternal failed", e));
+}
+
+/**
+ * Desktop: a minimal presence indicator. The actual reading experience is the
+ * detached floating window (content clips when squeezed into the editor), so
+ * this just signals that research suggestions exist and nudges to detach.
+ */
+function ResearchIndicator({
+  count,
+  analyzing,
+}: {
+  count: number;
+  analyzing: boolean;
+}) {
+  return (
+    <div className="fixed right-4 top-12 z-[9999]">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={() => openResearchWindow()}
+            className="flex items-center gap-1.5 rounded-full border border-border bg-background/95 px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-accent"
+          >
+            {analyzing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />
+            ) : (
+              <Search className="h-3.5 w-3.5 text-blue-500" />
+            )}
+            <span>{count > 0 ? `リサーチ ${count}` : "リサーチ中…"}</span>
+            <PictureInPicture2 className="h-3.5 w-3.5 text-muted-foreground" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="left">
+          {count > 0
+            ? `リサーチ候補が${count}件。クリックで別ウィンドウに表示`
+            : "リサーチアシスタントが分析中。クリックで別ウィンドウを開く"}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  );
 }
 
 export function ResearchPanel() {
@@ -93,8 +137,16 @@ export function ResearchPanel() {
     setDragOffset({ x: 0, y: 0 });
   }, []);
 
-  // When popped out to the standalone window (desktop), hide the in-app panel.
-  if (canPopOut && poppedOut) return null;
+  // Desktop: the floating window is the reading surface; show a minimal chip.
+  if (canPopOut) {
+    if (poppedOut) return null;
+    if (activeCards.length === 0 && !analyzing) return null;
+    return (
+      <ResearchIndicator count={activeCards.length} analyzing={analyzing} />
+    );
+  }
+
+  // Web fallback (no detach available): full in-app panel.
   if (!panelVisible || activeCards.length === 0) return null;
 
   return (
@@ -130,17 +182,6 @@ export function ResearchPanel() {
           </span>
         </div>
         <div className="flex items-center">
-          {canPopOut && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-5 w-5"
-              onClick={() => openResearchWindow()}
-              title="別ウィンドウで開く"
-            >
-              <PictureInPicture2 className="h-3 w-3" />
-            </Button>
-          )}
           <Button
             variant="ghost"
             size="icon"
@@ -161,7 +202,7 @@ export function ResearchPanel() {
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea className="research-scroll min-h-0 flex-1">
         <div className="flex flex-col gap-1.5 p-2">
           {activeCards.map((card) => (
             <ResearchCardItem
