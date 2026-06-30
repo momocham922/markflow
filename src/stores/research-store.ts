@@ -29,6 +29,7 @@ interface ResearchState {
   searchedTopics: string[];
   panelVisible: boolean;
   analyzing: boolean;
+  poppedOut: boolean;
 
   startSession: () => void;
   endSession: () => void;
@@ -41,6 +42,7 @@ interface ResearchState {
   togglePanel: () => void;
   clearCards: () => void;
   setAnalyzing: (v: boolean) => void;
+  setPoppedOut: (v: boolean) => void;
 }
 
 export const useResearchStore = create<ResearchState>((set) => ({
@@ -49,6 +51,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
   searchedTopics: [],
   panelVisible: true,
   analyzing: false,
+  poppedOut: false,
 
   startSession: () =>
     set({
@@ -78,4 +81,5 @@ export const useResearchStore = create<ResearchState>((set) => ({
   togglePanel: () => set((s) => ({ panelVisible: !s.panelVisible })),
   clearCards: () => set({ cards: [], searchedTopics: [] }),
   setAnalyzing: (v) => set({ analyzing: v }),
+  setPoppedOut: (v) => set({ poppedOut: v }),
 }));

@@ -31,6 +31,7 @@ import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
 import { ResearchPanel } from "./ResearchPanel";
 import { useResearchPipeline } from "@/hooks/use-research-pipeline";
+import { useResearchWindowManager } from "@/hooks/use-research-window";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import {
@@ -434,6 +435,9 @@ export function Editor() {
     documentContent: activeDoc?.content || "",
     activeDocId,
   });
+
+  // Bridges research-store state to the standalone floating window (desktop).
+  useResearchWindowManager();
 
   // Auto-convert legacy HTML content to Markdown on first load
   useEffect(() => {
