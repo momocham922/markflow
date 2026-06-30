@@ -64,6 +64,24 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
+/**
+ * Prepare the live transcript for display: strip raw diarization labels
+ * (e.g. "[Speaker 0]") — these are for internal pipeline use only and must
+ * never be shown raw — and split chunk boundaries ("\n---\n") into segments
+ * so they can be rendered as visual divider lines.
+ */
+function toTranscriptSegments(raw: string): string[] {
+  return raw
+    .split(/\n---\n/)
+    .map((seg) =>
+      seg
+        .replace(/\[Speaker[^\]]*\]\s*/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    )
+    .filter((seg) => seg.length > 0);
+}
+
 export function VoicePanel({
   onInsertMarkdown,
   onSetContent,
@@ -693,9 +711,15 @@ export function VoicePanel({
           ref={scrollRef}
           className="max-h-32 overflow-y-auto px-4 py-2 text-sm leading-relaxed whitespace-pre-wrap wrap-break-word select-text cursor-text"
         >
-          {fullTranscript && (
-            <span className="text-foreground">{fullTranscript}</span>
-          )}
+          {fullTranscript &&
+            toTranscriptSegments(fullTranscript).map((seg, i) => (
+              <div
+                key={i}
+                className={i > 0 ? "mt-2 border-t border-border pt-2" : ""}
+              >
+                <span className="text-foreground">{seg}</span>
+              </div>
+            ))}
           {isRecording && !fullTranscript && !interimText && (
             <span className="text-muted-foreground animate-pulse">
               Listening...
