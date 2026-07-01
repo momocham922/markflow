@@ -317,9 +317,13 @@ export function VoicePanel({
       }
 
       const { useResearchStore } = await import("@/stores/research-store");
-      const researchCards = useResearchStore
-        .getState()
-        .cards.filter((c) => !c.integrated && c.summary);
+      // Only weave research into the document when the user opted in.
+      const includeResearch = useResearchStore.getState().includeInStructure;
+      const researchCards = includeResearch
+        ? useResearchStore
+            .getState()
+            .cards.filter((c) => !c.integrated && c.summary)
+        : [];
       if (researchCards.length > 0) {
         userContent +=
           "\n\n## Research Context\n" +
@@ -546,9 +550,12 @@ export function VoicePanel({
 
       const { useResearchStore: getResearchStore } =
         await import("@/stores/research-store");
-      const refineResearchCards = getResearchStore
-        .getState()
-        .cards.filter((c) => !c.integrated && c.summary);
+      // Only weave research into the document when the user opted in.
+      const refineResearchCards = getResearchStore.getState().includeInStructure
+        ? getResearchStore
+            .getState()
+            .cards.filter((c) => !c.integrated && c.summary)
+        : [];
       if (refineResearchCards.length > 0) {
         refineUserContent +=
           "\n\n## Research Context\n" +

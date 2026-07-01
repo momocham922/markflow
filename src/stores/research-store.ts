@@ -1,5 +1,15 @@
 import { create } from "zustand";
 
+const INCLUDE_KEY = "markflow:research:includeInStructure";
+
+function loadIncludeInStructure(): boolean {
+  try {
+    return localStorage.getItem(INCLUDE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 export interface ResearchSource {
   url: string;
   title: string;
@@ -17,6 +27,7 @@ export interface ResearchCard {
   summary: string;
   sources: ResearchSource[];
   credibility: "academic" | "official" | "news" | "general";
+  /** Woven into the structured document. Shown with a badge — NOT hidden. */
   integrated: boolean;
   expandable: boolean;
   loading?: boolean;
@@ -30,6 +41,8 @@ interface ResearchState {
   panelVisible: boolean;
   analyzing: boolean;
   poppedOut: boolean;
+  /** User choice: weave research findings into the structured document. */
+  includeInStructure: boolean;
 
   startSession: () => void;
   endSession: () => void;
@@ -43,6 +56,7 @@ interface ResearchState {
   clearCards: () => void;
   setAnalyzing: (v: boolean) => void;
   setPoppedOut: (v: boolean) => void;
+  setIncludeInStructure: (v: boolean) => void;
 }
 
 export const useResearchStore = create<ResearchState>((set) => ({
@@ -52,6 +66,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
   panelVisible: true,
   analyzing: false,
   poppedOut: false,
+  includeInStructure: loadIncludeInStructure(),
 
   startSession: () =>
     set({
@@ -82,4 +97,12 @@ export const useResearchStore = create<ResearchState>((set) => ({
   clearCards: () => set({ cards: [], searchedTopics: [] }),
   setAnalyzing: (v) => set({ analyzing: v }),
   setPoppedOut: (v) => set({ poppedOut: v }),
+  setIncludeInStructure: (v) => {
+    try {
+      localStorage.setItem(INCLUDE_KEY, String(v));
+    } catch {
+      /* ignore */
+    }
+    set({ includeInStructure: v });
+  },
 }));

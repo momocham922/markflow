@@ -12,8 +12,8 @@ function applyTheme(theme: "light" | "dark") {
 }
 
 function emitAction(
-  action: "dismiss" | "integrate" | "clear" | "retry" | "open-doc",
-  extra?: { id?: string; docId?: string },
+  action: "dismiss" | "insert" | "clear" | "retry" | "open-doc" | "set-include",
+  extra?: { id?: string; docId?: string; value?: boolean },
 ) {
   emit("research:action", { action, ...extra }).catch(() => {});
 }
@@ -39,6 +39,7 @@ async function closeWindow() {
 export function ResearchWindowApp() {
   const [cards, setCards] = useState<ResearchCard[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
+  const [includeInStructure, setIncludeInStructure] = useState(false);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,6 +57,7 @@ export function ResearchWindowApp() {
       unlisten = await listen<ResearchSyncPayload>("research:sync", (ev) => {
         setCards(ev.payload.cards);
         setAnalyzing(ev.payload.analyzing);
+        setIncludeInStructure(ev.payload.includeInStructure);
         applyTheme(ev.payload.theme);
       });
       if (disposed) {
@@ -101,7 +103,20 @@ export function ResearchWindowApp() {
             )}
           </span>
         </div>
-        <div className="flex items-center">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() =>
+              emitAction("set-include", { value: !includeInStructure })
+            }
+            title="リサーチ結果をStructure（自動整形）に組み込む"
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+              includeInStructure
+                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                : "bg-muted text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            組込 {includeInStructure ? "ON" : "OFF"}
+          </button>
           <Button
             variant="ghost"
             size="icon"
@@ -139,7 +154,7 @@ export function ResearchWindowApp() {
                   setExpandedCardId(expandedCardId === card.id ? null : card.id)
                 }
                 onDismiss={() => emitAction("dismiss", { id: card.id })}
-                onIntegrate={() => emitAction("integrate", { id: card.id })}
+                onInsert={() => emitAction("insert", { id: card.id })}
                 onRetry={async () => emitAction("retry", { id: card.id })}
                 onOpenInternal={handleOpenInternal}
                 onOpenExternal={openExternal}

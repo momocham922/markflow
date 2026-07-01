@@ -31,7 +31,10 @@ import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
 import { ResearchPanel } from "./ResearchPanel";
 import { useResearchPipeline } from "@/hooks/use-research-pipeline";
-import { useResearchWindowManager } from "@/hooks/use-research-window";
+import {
+  useResearchWindowManager,
+  registerResearchInsert,
+} from "@/hooks/use-research-window";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import {
@@ -1058,6 +1061,12 @@ export function Editor() {
       isCollabReady,
       collabReplaceContent,
     ],
+  );
+
+  // Let the research UI (panel / floating window) insert a card into the doc.
+  useEffect(
+    () => registerResearchInsert(handleInsertMarkdown),
+    [handleInsertMarkdown],
   );
 
   const handleSetContent = useCallback(

@@ -19,7 +19,10 @@ import type { ResearchSource } from "@/stores/research-store";
 import { useAppStore } from "@/stores/app-store";
 import { groundedSearch } from "@/services/research";
 import { getPlatform, isTauri, isMobile } from "@/platform";
-import { openResearchWindow } from "@/hooks/use-research-window";
+import {
+  openResearchWindow,
+  insertResearchCard,
+} from "@/hooks/use-research-window";
 import { ResearchCardItem } from "./ResearchCardItem";
 
 const canPopOut = isTauri && !isMobile;
@@ -43,7 +46,9 @@ function ResearchIndicator({
   analyzing: boolean;
 }) {
   return (
-    <div className="fixed right-4 top-12 z-[9999]">
+    // Anchored to the editor's right-middle edge — clear of the top toolbar
+    // buttons and the bottom voice panel.
+    <div className="absolute right-3 top-1/2 z-40 -translate-y-1/2">
       <Tooltip>
         <TooltipTrigger asChild>
           <button
@@ -75,11 +80,12 @@ export function ResearchPanel() {
     panelVisible,
     analyzing,
     poppedOut,
+    includeInStructure,
     togglePanel,
     removeCard,
-    markIntegrated,
     updateCard,
     clearCards,
+    setIncludeInStructure,
   } = useResearchStore();
   const setActiveDocId = useAppStore((s) => s.setActiveDocId);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
@@ -88,7 +94,8 @@ export function ResearchPanel() {
   const dragStartRef = useRef({ x: 0, y: 0, ox: 0, oy: 0 });
   const panelRef = useRef<HTMLDivElement>(null);
 
-  const activeCards = cards.filter((c) => !c.integrated);
+  // Show all cards — integrated ones get a badge, they are NOT hidden.
+  const activeCards = cards;
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -181,7 +188,18 @@ export function ResearchPanel() {
             )}
           </span>
         </div>
-        <div className="flex items-center">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setIncludeInStructure(!includeInStructure)}
+            title="リサーチ結果をStructure（自動整形）に組み込む"
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+              includeInStructure
+                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                : "bg-muted text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            組込 {includeInStructure ? "ON" : "OFF"}
+          </button>
           <Button
             variant="ghost"
             size="icon"
@@ -213,7 +231,7 @@ export function ResearchPanel() {
                 setExpandedCardId(expandedCardId === card.id ? null : card.id)
               }
               onDismiss={() => removeCard(card.id)}
-              onIntegrate={() => markIntegrated(card.id)}
+              onInsert={() => insertResearchCard(card)}
               onRetry={async () => {
                 try {
                   const result = await groundedSearch(

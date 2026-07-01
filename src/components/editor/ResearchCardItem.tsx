@@ -13,6 +13,7 @@ import {
   ExternalLink,
   Check,
   Copy,
+  FilePlus2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -77,7 +78,7 @@ export function ResearchCardItem({
   expanded,
   onToggle,
   onDismiss,
-  onIntegrate,
+  onInsert,
   onRetry,
   onOpenInternal,
   onOpenExternal,
@@ -86,7 +87,8 @@ export function ResearchCardItem({
   expanded: boolean;
   onToggle: () => void;
   onDismiss: () => void;
-  onIntegrate: () => void;
+  /** Insert this card's content into the active document. */
+  onInsert: () => void;
   /** Re-run the grounded search for this card. */
   onRetry: () => Promise<void>;
   /** Open an internal markflow:// document by id. */
@@ -130,6 +132,14 @@ export function ResearchCardItem({
           <span className="truncate text-[10px] text-muted-foreground">
             {card.query}
           </span>
+          {card.integrated && (
+            <span
+              className="shrink-0 rounded bg-emerald-500/10 px-1 py-0.5 text-[9px] font-medium text-emerald-600 dark:text-emerald-400"
+              title="Structureに組込済み"
+            >
+              組込済
+            </span>
+          )}
         </div>
         <div className="flex shrink-0 items-center">
           {!card.loading && !card.error && (
@@ -147,15 +157,24 @@ export function ResearchCardItem({
                   <Copy className="h-3 w-3" />
                 )}
               </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-5 w-5"
-                onClick={onIntegrate}
-                title="Mark as integrated"
-              >
-                <Check className="h-3 w-3" />
-              </Button>
+              {card.integrated ? (
+                <span
+                  className="flex h-5 w-5 items-center justify-center"
+                  title="Structureに組込済み"
+                >
+                  <Check className="h-3 w-3 text-emerald-500" />
+                </span>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5"
+                  onClick={onInsert}
+                  title="本文へ挿入"
+                >
+                  <FilePlus2 className="h-3 w-3" />
+                </Button>
+              )}
             </>
           )}
           <Button

@@ -79,7 +79,9 @@ export function useResearchPipeline({
             transcriptDiff: diff.slice(0, 3000),
             fullContext: transcript.slice(-4000),
             documentContext: documentContentRef.current.slice(0, 2000),
-            searchedTopics,
+            // Cap to the most recent topics — an unbounded list bloats the
+            // prompt over long sessions and makes the director return nothing.
+            searchedTopics: searchedTopics.slice(-40),
           });
 
           lastAnalyzedLengthRef.current = transcript.length;

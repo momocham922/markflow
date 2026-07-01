@@ -1,11 +1,30 @@
 import { auth } from "./firebase";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 async function getToken(): Promise<string> {
   const user = auth.currentUser;
   if (!user) throw new Error("Not authenticated");
   return user.getIdToken();
+}
+
+/**
+ * fetch with a hard timeout. Without this, a stalled request leaves the
+ * pipeline's `pendingRef` stuck true forever, silently killing all further
+ * research analysis for the rest of a long recording session.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface AnalyzeSearch {
@@ -23,7 +42,7 @@ export async function analyzeTranscript(params: {
   searchedTopics: string[];
 }): Promise<{ searches: AnalyzeSearch[] }> {
   const token = await getToken();
-  const res = await fetch(`${AI_PROXY_URL}/v1/research/analyze`, {
+  const res = await fetchWithTimeout(`${AI_PROXY_URL}/v1/research/analyze`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -52,14 +71,23 @@ export async function groundedSearch(
   webSearchQueries: string[];
 }> {
   const token = await getToken();
-  const res = await fetch(`${AI_PROXY_URL}/v1/research/grounded-search`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithTimeout(
+    `${AI_PROXY_URL}/v1/research/grounded-search`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query,
+        type,
+        researchAngle,
+        desiredOutput,
+        claim,
+      }),
     },
-    body: JSON.stringify({ query, type, researchAngle, desiredOutput, claim }),
-  });
+  );
   if (!res.ok) throw new Error(`Grounded search failed: ${res.status}`);
   return res.json();
 }

@@ -25,15 +25,51 @@ export interface ResearchSyncPayload {
   cards: ResearchCard[];
   analyzing: boolean;
   theme: "light" | "dark";
+  includeInStructure: boolean;
 }
 
 export interface ResearchActionPayload {
-  action: "dismiss" | "integrate" | "clear" | "retry" | "open-doc";
+  action: "dismiss" | "clear" | "retry" | "open-doc" | "insert" | "set-include";
   id?: string;
   docId?: string;
+  value?: boolean;
 }
 
 const isDesktopTauri = () => isTauri && !isMobile;
+
+/** Format a research card as a Markdown block for insertion into the doc. */
+export function formatResearchCardMarkdown(card: ResearchCard): string {
+  const sources = card.sources
+    .filter((s) => !s.url.startsWith("markflow://"))
+    .slice(0, 3)
+    .map((s) => `- [${s.title || s.domain}](${s.url})`)
+    .join("\n");
+  return (
+    `\n\n### ${card.query}\n\n${card.summary}` +
+    (sources ? `\n\n**Sources**\n${sources}` : "") +
+    "\n"
+  );
+}
+
+// Editor registers its markdown-insert function here so the research UI (main
+// window and, via events, the floating window) can weave a card into the doc.
+let _insertFn: ((markdown: string) => void) | null = null;
+
+export function registerResearchInsert(
+  fn: (markdown: string) => void,
+): () => void {
+  _insertFn = fn;
+  return () => {
+    if (_insertFn === fn) _insertFn = null;
+  };
+}
+
+/** Insert a card's content into the active document and mark it integrated. */
+export function insertResearchCard(card: ResearchCard): void {
+  if (!card.summary) return;
+  _insertFn?.(formatResearchCardMarkdown(card));
+  useResearchStore.getState().markIntegrated(card.id);
+}
 
 /** Open (or focus) the floating research window. */
 export async function openResearchWindow(): Promise<void> {
@@ -94,9 +130,11 @@ export async function openResearchWindow(): Promise<void> {
 function buildSyncPayload(): ResearchSyncPayload {
   const r = useResearchStore.getState();
   return {
-    cards: r.cards.filter((c) => !c.integrated),
+    // Show all cards — integrated ones get a badge, they are NOT hidden.
+    cards: r.cards,
     analyzing: r.analyzing,
     theme: useAppStore.getState().theme,
+    includeInStructure: r.includeInStructure,
   };
 }
 
@@ -139,12 +177,15 @@ export function useResearchWindowManager(): void {
       // Apply user actions from the floating window.
       unlisteners.push(
         await listen<ResearchActionPayload>("research:action", async (ev) => {
-          const { action, id, docId } = ev.payload;
+          const { action, id, docId, value } = ev.payload;
           const store = useResearchStore.getState();
           if (action === "dismiss" && id) {
             store.removeCard(id);
-          } else if (action === "integrate" && id) {
-            store.markIntegrated(id);
+          } else if (action === "insert" && id) {
+            const card = store.cards.find((c) => c.id === id);
+            if (card) insertResearchCard(card);
+          } else if (action === "set-include") {
+            store.setIncludeInStructure(!!value);
           } else if (action === "clear") {
             store.clearCards();
           } else if (action === "open-doc" && docId) {
