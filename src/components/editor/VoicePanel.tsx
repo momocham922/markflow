@@ -430,6 +430,8 @@ export function VoicePanel({
 
     setRefining(true);
     refiningRef.current = true;
+    // Tracks the current stage so a failure can report where it happened.
+    let stageLabel = "準備";
     try {
       const user = useAuthStore.getState().user;
       if (!user) throw new Error("Not authenticated");
@@ -449,6 +451,7 @@ export function VoicePanel({
         );
       } else {
         setRefineStage("upload");
+        stageLabel = "音声アップロード";
         const { invoke } = await import("@tauri-apps/api/core");
 
         let androidArchivePath: string | undefined;
@@ -483,6 +486,7 @@ export function VoicePanel({
 
       // Stage 2: Batch transcribe with full-session diarization
       setRefineStage("transcribe");
+      stageLabel = "文字起こし";
       const timeout = setTimeout(() => abortController.abort(), 15 * 60 * 1000);
       const batchRes = await fetch(
         `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
@@ -519,6 +523,7 @@ export function VoicePanel({
 
       // Stage 3: Claude refinement with diarized transcript + existing structure
       setRefineStage("structure");
+      stageLabel = "整形";
       const existingDoc = docContentRef.current.trim();
       const docVocabulary = existingDoc ? extractHints(existingDoc) : [];
       const vocabularyHint =
@@ -638,7 +643,15 @@ export function VoicePanel({
     } catch (err) {
       console.error("[voice] Refine failed:", err);
       const msg = err instanceof Error ? err.message : String(err);
-      setVoiceError(`Refine failed: ${msg}`);
+      const isNetwork =
+        /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
+          msg,
+        );
+      // Audio is already uploaded on failure, so retrying skips re-upload.
+      const friendly = isNetwork
+        ? `${stageLabel}中に通信エラー。時間がかかりすぎたか回線が不安定な可能性があります。「Refine」をもう一度押して再試行してください。`
+        : `${stageLabel}で失敗: ${msg}`;
+      setVoiceError(`Refine failed: ${friendly}`);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
     } finally {
