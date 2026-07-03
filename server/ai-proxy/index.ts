@@ -4,8 +4,11 @@ import { getAuth } from "firebase-admin/auth";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
-const GCP_REGION = process.env.GCP_REGION || "us-east5";
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
+// Claude (Anthropic) Vertex region. Opus 4.7+ are served from the global
+// endpoint, not us-east5 regional. GCP_REGION is used ONLY for the Claude
+// endpoint below (Gemini/image/STT have their own locations).
+const GCP_REGION = process.env.GCP_REGION || "global";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-8";
 const NANOBANANA_MODEL =
   process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
 const STT_LOCATION = process.env.STT_LOCATION || "asia-northeast1";
@@ -16,7 +19,12 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 initializeApp();
 
 function getVertexAiUrl(): string {
-  return `https://${GCP_REGION}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/publishers/anthropic/models/${CLAUDE_MODEL}:streamRawPredict`;
+  // The global endpoint host has no region prefix.
+  const host =
+    GCP_REGION === "global"
+      ? "aiplatform.googleapis.com"
+      : `${GCP_REGION}-aiplatform.googleapis.com`;
+  return `https://${host}/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/publishers/anthropic/models/${CLAUDE_MODEL}:streamRawPredict`;
 }
 
 function getNanoBananaUrl(): string {
