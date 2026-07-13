@@ -404,9 +404,52 @@ const server = http.createServer(async (req, res) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fileResults = result.response?.results || {};
       const fileKey = Object.keys(fileResults)[0];
+
+      // Surface per-file failures instead of masking them as an "empty result".
+      // In BatchRecognize v2, a file that fails to process still completes with
+      // done:true and NO operation-level error — the failure is reported per
+      // file as results[<uri>].error (with no inlineResult). If we skip this
+      // check the transcript silently becomes "" and the client shows the
+      // generic "empty result" message, hiding the real cause (decode error,
+      // permission denied, unsupported config, etc.).
+      if (!fileKey) {
+        console.error(
+          `[batch] No file results. response=${JSON.stringify(
+            result.response || {},
+          ).slice(0, 2000)}`,
+        );
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ error: "BatchRecognize returned no file results" }),
+        );
+        return;
+      }
+      const fileError = fileResults[fileKey]?.error;
+      if (fileError) {
+        console.error(
+          `[batch] Per-file STT error for ${fileKey}: ${JSON.stringify(fileError)}`,
+        );
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: `STT failed: ${fileError.message || JSON.stringify(fileError)}`,
+          }),
+        );
+        return;
+      }
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const sttResults: any[] =
-        fileResults[fileKey]?.inlineResult?.transcript?.results || [];
+      const inlineResults: any[] | undefined =
+        fileResults[fileKey]?.inlineResult?.transcript?.results;
+      if (!inlineResults) {
+        console.error(
+          `[batch] No inline transcript for ${fileKey}. fileResult=${JSON.stringify(
+            fileResults[fileKey] || {},
+          ).slice(0, 2000)}`,
+        );
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sttResults: any[] = inlineResults || [];
 
       const transcript = sttResults
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

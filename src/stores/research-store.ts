@@ -46,6 +46,12 @@ interface ResearchState {
 
   startSession: () => void;
   endSession: () => void;
+  /**
+   * Replace the current cards with persisted ones loaded from Firestore.
+   * Used when a document opens so previously-gathered research reappears.
+   * Does NOT touch sessionActive — this is a read-only hydration, not a live session.
+   */
+  hydrateCards: (cards: ResearchCard[]) => void;
   addCard: (card: ResearchCard) => void;
   updateCard: (id: string, updates: Partial<ResearchCard>) => void;
   removeCard: (id: string) => void;
@@ -76,6 +82,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
       analyzing: false,
     }),
   endSession: () => set({ sessionActive: false }),
+  hydrateCards: (cards) => set({ cards }),
   addCard: (card) => set((s) => ({ cards: [...s.cards, card] })),
   updateCard: (id, updates) =>
     set((s) => ({

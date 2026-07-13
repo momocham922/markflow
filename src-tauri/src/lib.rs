@@ -1431,7 +1431,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     }
     let sample_rate = unsafe { get_av_sample_rate() } as u32;
     let channels = unsafe { get_av_channels() } as u32;
-    println!("[voice] AVAudioEngine started: {}Hz, {}ch", sample_rate, channels);
+    println!("[voice] AVCaptureSession started: {}Hz, {}ch", sample_rate, channels);
 
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
@@ -1443,11 +1443,15 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     }
     VOICE_ACTIVE.store(true, Ordering::SeqCst);
 
-    // Poll AVAudioEngine buffer → VOICE_BUFFER
+    // Poll native capture buffer → VOICE_BUFFER
     std::thread::spawn(|| {
+        extern "C" {
+            fn drain_av_audio_buffer(dest: *mut f32, max: i32) -> i32;
+            fn get_av_total_samples() -> u64;
+        }
         let mut temp = vec![0.0f32; 16384];
+        let mut last_log = std::time::Instant::now();
         while VOICE_ACTIVE.load(Ordering::Relaxed) {
-            extern "C" { fn drain_av_audio_buffer(dest: *mut f32, max: i32) -> i32; }
             let count = unsafe { drain_av_audio_buffer(temp.as_mut_ptr(), temp.len() as i32) };
             if count > 0 {
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
@@ -1455,8 +1459,30 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                     if buf.len() > MIC_BUFFER_MAX_SAMPLES {
                         let drop = buf.len() - MIC_BUFFER_MAX_SAMPLES;
                         buf.drain(..drop);
+                        // Smoking gun for background loss: the JS drain loop
+                        // (get_voice_chunk) stalled long enough that the ~120s
+                        // cap discarded the oldest audio. Previously silent.
+                        let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
+                        println!(
+                            "[voice][buffer-overflow] dropped {} samples (~{:.1}s) — drain loop stalled (likely backgrounded)",
+                            drop,
+                            drop as f64 / rate,
+                        );
                     }
                 }
+            }
+            // Periodic diagnostics (~every 10s): compare native captured audio
+            // against buffer occupancy to tell "capture stopped" (native flat)
+            // from "drain stalled" (native rising, occupancy rising) on iOS.
+            if last_log.elapsed().as_secs() >= 10 {
+                last_log = std::time::Instant::now();
+                let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
+                let native_total = unsafe { get_av_total_samples() } as f64 / rate;
+                let occupancy = VOICE_BUFFER.lock().map(|b| b.len()).unwrap_or(0) as f64 / rate;
+                println!(
+                    "[voice][diag] native_captured={:.1}s buffer_occupancy={:.1}s",
+                    native_total, occupancy,
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

@@ -10,6 +10,14 @@ globs:
 ローカルビルド成功は完了ではない。変更が実際にユーザーの手元で動く状態にするまでが1つの作業単位。
 以下のチェックを変更内容に応じて**自動的に**実行する。「忘れた」は許容されない。
 
+## GCP アカウント（最優先・アクティブ依存禁止）
+
+- **markflow-app-2026 の gcloud/gsutil/logging/Cloud Run/Firestore/Speech-to-Text 操作は必ず `--account ga.crossmedia@gmail.com` を明示する。**
+- 複数プロジェクトを別窓で並行運用しておりアクティブアカウントは頻繁にドリフトする。アクティブアカウント前提のコマンドを書くな。
+- 権限を持つのは `ga.crossmedia@gmail.com` のみ。`ryouhei.mita922@gmail.com`（git identity）・`zaburou2005@gmail.com` 等は PERMISSION_DENIED。
+- アクセストークンは `gcloud auth print-access-token --account ga.crossmedia@gmail.com`。
+- `PERMISSION_DENIED` が出たら **まず `--account` を疑う**。アカウントが違うだけで止まるな（正しいアカウントで即やり直す）。
+
 ## トリガー別の必須アクション
 
 ### 1. Firebase Storage の新パス追加

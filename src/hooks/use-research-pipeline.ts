@@ -2,7 +2,10 @@ import { useRef, useEffect } from "react";
 import { useResearchStore } from "@/stores/research-store";
 import { analyzeTranscript, groundedSearch } from "@/services/research";
 import { useAuthStore } from "@/stores/auth-store";
-import { saveResearchSession } from "@/services/firebase";
+import {
+  saveResearchSession,
+  fetchResearchSessions,
+} from "@/services/firebase";
 import { isMobile } from "@/platform";
 import type { ResearchCard, ResearchSource } from "@/stores/research-store";
 
@@ -52,6 +55,40 @@ export function useResearchPipeline({
 
   const sessionStartRef = useRef<number>(0);
   const sessionIdRef = useRef<string>("");
+
+  // Hydrate persisted research when a document opens/switches (not while
+  // recording — a live session owns the card list). Runs on all platforms so
+  // mobile users can view research gathered earlier on desktop, read-only.
+  useEffect(() => {
+    if (!activeDocId) return;
+    if (useResearchStore.getState().sessionActive) return;
+    const user = useAuthStore.getState().user;
+    if (!user) {
+      useResearchStore.getState().hydrateCards([]);
+      return;
+    }
+    let cancelled = false;
+    fetchResearchSessions(activeDocId)
+      .then((sessions) => {
+        if (cancelled) return;
+        // Flatten newest-session-first; sessions already come ordered desc.
+        const cards: ResearchCard[] = sessions.flatMap((s) =>
+          s.cards.map((c) => ({
+            ...c,
+            // Fields not persisted to Firestore — restore sane defaults.
+            expandable: true,
+            loading: false,
+          })),
+        );
+        useResearchStore.getState().hydrateCards(cards);
+      })
+      .catch((err) =>
+        console.error("[research] Failed to hydrate sessions:", err),
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDocId]);
 
   useEffect(() => {
     if (isMobile) return;
@@ -144,6 +181,25 @@ export function useResearchPipeline({
           });
 
           await Promise.all(searchPromises);
+
+          // Persist incrementally after each analysis round so research
+          // survives even if the recording never stops cleanly (crash, close).
+          const docId = activeDocIdRef.current;
+          const currentCards = useResearchStore.getState().cards;
+          if (docId && currentCards.length > 0) {
+            const u = useAuthStore.getState().user;
+            if (u) {
+              saveResearchSession(docId, {
+                id: sessionIdRef.current,
+                cards: currentCards,
+                startedAt: sessionStartRef.current,
+                endedAt: null,
+                ownerId: u.uid,
+              }).catch((err) =>
+                console.error("[research] Incremental save failed:", err),
+              );
+            }
+          }
         } catch (err) {
           console.error("[research] Pipeline error:", err);
         } finally {

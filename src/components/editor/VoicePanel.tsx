@@ -106,6 +106,10 @@ export function VoicePanel({
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
+  // Mirror of lastStructuredRef for the UI: the transcript text as of the last
+  // successful Structure run. Drives the highlighted divider in the preview.
+  // (A ref alone doesn't trigger re-render.)
+  const [lastStructuredText, setLastStructuredText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const refineAbortRef = useRef<AbortController | null>(null);
 
@@ -288,6 +292,7 @@ export function VoicePanel({
         "The transcript contains '---' markers indicating chunk boundaries. Speaker labels are ONLY consistent WITHIN segments between --- markers — the same speaker may have different labels in different segments. Use speech content to identify and unify speakers across segments. " +
         "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
+        "SEPARATION RULE: If web-search supplementary information is provided in the input (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place ALL of it in a SINGLE dedicated section at the very end of the document, titled '## 補足情報（Web調査）' (translate the title to match the document's language). The meeting minutes and the web-research supplement must be clearly and visually separated. Do NOT create this section if no research information was provided. " +
         "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate. " +
         'FINALLY, after the document, append a single line: <!--VOCAB:["term1","term2",...]-->  containing up to 50 key proper nouns, person names, technical terms, project names, and specialized vocabulary that appeared in or were corrected from the transcript. Include the CORRECT spelling. This line will be stripped and used to improve future speech recognition — it is NOT part of the document.';
 
@@ -326,10 +331,10 @@ export function VoicePanel({
         : [];
       if (researchCards.length > 0) {
         userContent +=
-          "\n\n## Research Context\n" +
-          "The following supplementary information was gathered via web search during the recording. " +
-          "Integrate relevant findings where appropriate, citing sources with markdown links. " +
-          "Only include information directly relevant to the discussion.\n\n" +
+          "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
+          "The following was gathered via web search during the recording — it is background reference, NOT something anyone said in the meeting. " +
+          "Do NOT merge these into the minutes body. Instead, place the relevant items in a single dedicated section at the very END of the document titled '## 補足情報（Web調査）' (match the document's language), keeping it clearly separated from the meeting minutes. " +
+          "Cite sources as markdown links, and include only items directly relevant to the discussion.\n\n" +
           researchCards
             .map((c) => {
               const srcList = c.sources
@@ -349,7 +354,9 @@ export function VoicePanel({
         body: JSON.stringify({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
-          max_tokens: 16384,
+          // Opus 4.8 supports up to 128K output tokens (streaming). 64K gives
+          // long meetings headroom while keeping cost/latency reasonable.
+          max_tokens: 64000,
           stream: true,
         }),
       });
@@ -361,6 +368,7 @@ export function VoicePanel({
       const structDecoder = new TextDecoder();
       let structSseBuffer = "";
       let markdown = "";
+      let structStopReason = "";
       while (true) {
         const { done, value } = await structReader.read();
         if (done) break;
@@ -375,11 +383,25 @@ export function VoicePanel({
             const sseEvt = JSON.parse(ssePayload);
             if (sseEvt.type === "content_block_delta" && sseEvt.delta?.text) {
               markdown += sseEvt.delta.text;
+            } else if (
+              sseEvt.type === "message_delta" &&
+              sseEvt.delta?.stop_reason
+            ) {
+              structStopReason = sseEvt.delta.stop_reason;
             }
           } catch {
             // skip malformed SSE lines
           }
         }
+      }
+
+      // No-silent-failure: warn when the model hit the output cap and truncated.
+      if (structStopReason === "max_tokens") {
+        setVoiceError(
+          "構造化がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
+        );
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
       }
 
       if (markdown.trim()) {
@@ -409,6 +431,7 @@ export function VoicePanel({
           onInsertRef.current(`\n\n${cleanOutput}\n`);
         }
         lastStructuredRef.current = transcript;
+        setLastStructuredText(transcript);
         if (researchCards.length > 0) {
           useResearchStore.getState().markAllIntegrated();
         }
@@ -507,6 +530,13 @@ export function VoicePanel({
 
       if (!batchRes.ok) {
         const errText = await batchRes.text();
+        // BatchRecognize (chirp_3) rejects files longer than 60 minutes. Turn
+        // the raw STT error into a clear, actionable message for the user.
+        if (/too long|60 ?minutes|60\s*分/i.test(errText)) {
+          throw new Error(
+            "録音が60分を超えているためRefineできません（一括文字起こしの上限）。録音中の自動Structureは全長で機能します。長時間の録音は60分以内で区切ってください。",
+          );
+        }
         throw new Error(
           `Batch transcribe failed: ${batchRes.status} ${errText}`,
         );
@@ -546,6 +576,7 @@ export function VoicePanel({
         "3) When attribution matters: if a speaker's name can be identified from the transcript (e.g., they introduced themselves or were addressed by name), use their real name (e.g., '田中さんからの質問', '鈴木の提案'). Otherwise, describe by inferred role or position (e.g., '提案側の意見として', 'プロジェクトリーダーが指摘した点'). If neither name nor role can be inferred, paraphrase without attribution rather than using speaker numbers. " +
         "4) Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
         "5) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
+        "6) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place ALL of it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Do NOT create this section if no research information was provided. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
         "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
@@ -563,9 +594,9 @@ export function VoicePanel({
         : [];
       if (refineResearchCards.length > 0) {
         refineUserContent +=
-          "\n\n## Research Context\n" +
-          "Supplementary information gathered via web search during the recording. " +
-          "Integrate relevant findings where appropriate with source citations.\n\n" +
+          "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
+          "Gathered via web search during the recording — background reference, NOT meeting speech. " +
+          "Do NOT merge into the minutes body. Place relevant items in a single dedicated section at the very END titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes, with source citations.\n\n" +
           refineResearchCards
             .map((c) => {
               const srcList = c.sources
@@ -585,7 +616,9 @@ export function VoicePanel({
         body: JSON.stringify({
           system: refineSystemPrompt,
           messages: [{ role: "user", content: refineUserContent }],
-          max_tokens: 16384,
+          // Opus 4.8 supports up to 128K output tokens (streaming). 64K gives
+          // long meetings headroom while keeping cost/latency reasonable.
+          max_tokens: 64000,
           stream: true,
         }),
         signal: abortController.signal,
@@ -604,6 +637,7 @@ export function VoicePanel({
       const decoder = new TextDecoder();
       let sseBuffer = "";
       let refinedOutput = "";
+      let refineStopReason = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -618,11 +652,22 @@ export function VoicePanel({
             const evt = JSON.parse(payload);
             if (evt.type === "content_block_delta" && evt.delta?.text) {
               refinedOutput += evt.delta.text;
+            } else if (evt.type === "message_delta" && evt.delta?.stop_reason) {
+              refineStopReason = evt.delta.stop_reason;
             }
           } catch {
             // skip malformed SSE lines
           }
         }
+      }
+
+      // No-silent-failure: warn when the model hit the output cap and truncated.
+      if (refineStopReason === "max_tokens") {
+        setVoiceError(
+          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
+        );
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
       }
 
       if (refinedOutput.trim()) {
@@ -732,14 +777,36 @@ export function VoicePanel({
           className="max-h-32 overflow-y-auto px-4 py-2 text-sm leading-relaxed whitespace-pre-wrap wrap-break-word select-text cursor-text"
         >
           {fullTranscript &&
-            toTranscriptSegments(fullTranscript).map((seg, i) => (
-              <div
-                key={i}
-                className={i > 0 ? "mt-2 border-t border-border pt-2" : ""}
-              >
-                <span className="text-foreground">{seg}</span>
-              </div>
-            ))}
+            (() => {
+              // Segments already covered by the last Structure run. The divider
+              // above the first NOT-yet-structured segment marks where Structure
+              // most recently ran, and gets highlighted.
+              const structuredCount = lastStructuredText
+                ? toTranscriptSegments(lastStructuredText).length
+                : 0;
+              return toTranscriptSegments(fullTranscript).map((seg, i) => {
+                const isStructureBoundary = i > 0 && i === structuredCount;
+                return (
+                  <div
+                    key={i}
+                    className={
+                      i === 0
+                        ? ""
+                        : isStructureBoundary
+                          ? "mt-2 border-t-2 border-primary pt-2"
+                          : "mt-2 border-t border-border pt-2"
+                    }
+                  >
+                    {isStructureBoundary && (
+                      <span className="mb-1 block text-[10px] font-medium text-primary">
+                        最新の構造化位置
+                      </span>
+                    )}
+                    <span className="text-foreground">{seg}</span>
+                  </div>
+                );
+              });
+            })()}
           {isRecording && !fullTranscript && !interimText && (
             <span className="text-muted-foreground animate-pulse">
               Listening...
@@ -916,6 +983,7 @@ export function VoicePanel({
           onClick={() => {
             clearTranscript();
             lastStructuredRef.current = "";
+            setLastStructuredText("");
             sttVocabRef.current.clear();
             setHasArchive(false);
             onVoiceDataChangeRef.current?.({

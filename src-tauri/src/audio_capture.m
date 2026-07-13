@@ -36,7 +36,20 @@ static NSLock *_audioLock = nil;
 static double _sampleRate = 0;
 static char _lastError[512] = {0};
 
+// ── Background-loss diagnostics ──
+// Cumulative mono samples appended by the capture delegate. On iOS this reveals
+// whether AVCaptureSession keeps delivering audio while backgrounded / screen
+// off: if this keeps climbing in the background the capture layer is alive and
+// any data loss is downstream (JS drain loop stall + ~120s buffer cap); if it
+// plateaus, capture itself was suspended by the OS. Only the (serial) delegate
+// queue mutates these, so no lock is needed for the counter itself.
+static unsigned long long _totalSamplesAppended = 0;
+static unsigned long long _lastLoggedSamples = 0;
+
 const char* get_last_audio_error(void) { return _lastError; }
+
+// Total mono samples captured since the session started (see diagnostics above).
+unsigned long long get_av_total_samples(void) { return _totalSamplesAppended; }
 
 void set_audio_device_name(const char *name) {
     _requestedDeviceName = name ? [NSString stringWithUTF8String:name] : nil;
@@ -120,6 +133,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     [_audioLock lock];
     [_audioBuf appendBytes:tempBuf length:sampleCount * sizeof(float)];
     [_audioLock unlock];
+
+    // Liveness heartbeat (~every 10s of captured audio). Watch these in
+    // Console.app while backgrounded to see if capture keeps running.
+    _totalSamplesAppended += (unsigned long long)sampleCount;
+    double rate = _sampleRate > 0 ? _sampleRate : 44100;
+    if (_totalSamplesAppended - _lastLoggedSamples >=
+        (unsigned long long)(rate * 10.0)) {
+        _lastLoggedSamples = _totalSamplesAppended;
+        NSLog(@"[audio][capture-alive] %.1fs total captured (%.0f Hz)",
+              _totalSamplesAppended / rate, rate);
+    }
 }
 @end
 
@@ -182,6 +206,8 @@ int start_av_audio_capture(void) {
     @try {
         _audioBuf = [NSMutableData new];
         _audioLock = [NSLock new];
+        _totalSamplesAppended = 0;
+        _lastLoggedSamples = 0;
 
         AVCaptureDevice *mic = nil;
         NSString *requestedDevice = _requestedDeviceName;
