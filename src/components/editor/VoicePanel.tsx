@@ -332,19 +332,22 @@ export function VoicePanel({
       }
 
       const { useResearchStore } = await import("@/stores/research-store");
-      // Only weave research into the document when the user opted in.
-      const includeResearch = useResearchStore.getState().includeInStructure;
-      const researchCards = includeResearch
-        ? useResearchStore
-            .getState()
-            .cards.filter((c) => !c.integrated && c.summary)
-        : [];
+      // Weave research either when the global toggle is on, OR when the user
+      // queued specific cards ("組み込む") for the next run. Individual queued
+      // cards are honored even if the global toggle is off.
+      const includeAll = useResearchStore.getState().includeInStructure;
+      const researchCards = useResearchStore
+        .getState()
+        .cards.filter(
+          (c) =>
+            !c.integrated && c.summary && (includeAll || c.queuedForStructure),
+        );
       if (researchCards.length > 0) {
         userContent +=
           "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
-          "The following was gathered via web search during the recording — it is background reference, NOT something anyone said in the meeting. " +
-          "Do NOT merge these into the minutes body. Instead, place the relevant items in a single dedicated section at the very END of the document titled '## 補足情報（Web調査）' (match the document's language), keeping it clearly separated from the meeting minutes. " +
-          "Cite sources as markdown links, and include only items directly relevant to the discussion.\n\n" +
+          "The following was gathered via web search during the recording — background reference, NOT something anyone said in the meeting. " +
+          "Follow the SEPARATION RULE: put these in the trailing '## 補足情報（Web調査）' section, NOT in the minutes body. " +
+          "For EACH item: use a natural H3 heading like '### 〇〇の件について' (never the raw query); write 1–2 concise sentences (do not dump the summary verbatim); include ONLY what adds to the minutes; and, if it clearly supplements a specific meeting section, add a link on its own line — [本文「<見出し>」への補足](#<見出し>) — copying that body heading VERBATIM. Cite sources as markdown links.\n\n" +
           researchCards
             .map((c) => {
               const srcList = c.sources
@@ -442,8 +445,11 @@ export function VoicePanel({
         }
         lastStructuredRef.current = transcript;
         setLastStructuredText(transcript);
+        // Mark only the cards we actually wove in (clears their queued flag);
+        // don't touch cards that weren't included this run.
         if (researchCards.length > 0) {
-          useResearchStore.getState().markAllIntegrated();
+          const store = useResearchStore.getState();
+          for (const c of researchCards) store.markIntegrated(c.id);
         }
       }
     } catch (err) {
@@ -631,17 +637,23 @@ export function VoicePanel({
 
       const { useResearchStore: getResearchStore } =
         await import("@/stores/research-store");
-      // Only weave research into the document when the user opted in.
-      const refineResearchCards = getResearchStore.getState().includeInStructure
-        ? getResearchStore
-            .getState()
-            .cards.filter((c) => !c.integrated && c.summary)
-        : [];
+      // Weave research when the global toggle is on OR specific cards were
+      // queued for the next run ("組み込む").
+      const includeAllRefine = getResearchStore.getState().includeInStructure;
+      const refineResearchCards = getResearchStore
+        .getState()
+        .cards.filter(
+          (c) =>
+            !c.integrated &&
+            c.summary &&
+            (includeAllRefine || c.queuedForStructure),
+        );
       if (refineResearchCards.length > 0) {
         refineUserContent +=
           "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
           "Gathered via web search during the recording — background reference, NOT meeting speech. " +
-          "Do NOT merge into the minutes body. Place relevant items in a single dedicated section at the very END titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes, with source citations.\n\n" +
+          "Follow the SEPARATION RULE: put these in the trailing '## 補足情報（Web調査）' section, NOT in the minutes body. " +
+          "For EACH item: use a natural H3 heading like '### 〇〇の件について' (never the raw query); write 1–2 concise sentences (do not dump the summary verbatim); include ONLY what adds to the minutes; and, if it clearly supplements a specific meeting section, add a link on its own line — [本文「<見出し>」への補足](#<見出し>) — copying that body heading VERBATIM. Cite sources as markdown links.\n\n" +
           refineResearchCards
             .map((c) => {
               const srcList = c.sources
@@ -717,8 +729,10 @@ export function VoicePanel({
 
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
+        // Mark only the cards actually woven in (clears their queued flag).
         if (refineResearchCards.length > 0) {
-          getResearchStore.getState().markAllIntegrated();
+          const store = getResearchStore.getState();
+          for (const c of refineResearchCards) store.markIntegrated(c.id);
         }
       }
       setHasArchive(false);

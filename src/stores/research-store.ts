@@ -29,6 +29,11 @@ export interface ResearchCard {
   credibility: "academic" | "official" | "news" | "general";
   /** Woven into the structured document. Shown with a badge — NOT hidden. */
   integrated: boolean;
+  /**
+   * User queued this card to be woven into the NEXT Structure/Refine run
+   * (instead of an immediate insert). Processed and cleared on that run.
+   */
+  queuedForStructure?: boolean;
   expandable: boolean;
   loading?: boolean;
   error?: string;
@@ -57,6 +62,8 @@ interface ResearchState {
   removeCard: (id: string) => void;
   markIntegrated: (id: string) => void;
   markAllIntegrated: () => void;
+  /** Toggle whether a card is queued for the NEXT Structure/Refine run. */
+  toggleQueued: (id: string) => void;
   addSearchedTopic: (topic: string) => void;
   togglePanel: () => void;
   clearCards: () => void;
@@ -92,11 +99,23 @@ export const useResearchStore = create<ResearchState>((set) => ({
     set((s) => ({ cards: s.cards.filter((c) => c.id !== id) })),
   markIntegrated: (id) =>
     set((s) => ({
-      cards: s.cards.map((c) => (c.id === id ? { ...c, integrated: true } : c)),
+      cards: s.cards.map((c) =>
+        c.id === id ? { ...c, integrated: true, queuedForStructure: false } : c,
+      ),
     })),
   markAllIntegrated: () =>
     set((s) => ({
-      cards: s.cards.map((c) => ({ ...c, integrated: true })),
+      cards: s.cards.map((c) => ({
+        ...c,
+        integrated: true,
+        queuedForStructure: false,
+      })),
+    })),
+  toggleQueued: (id) =>
+    set((s) => ({
+      cards: s.cards.map((c) =>
+        c.id === id ? { ...c, queuedForStructure: !c.queuedForStructure } : c,
+      ),
     })),
   addSearchedTopic: (topic) =>
     set((s) => ({ searchedTopics: [...s.searchedTopics, topic] })),

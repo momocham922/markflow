@@ -132,14 +132,21 @@ export function ResearchCardItem({
           <span className="truncate text-[10px] text-muted-foreground">
             {card.query}
           </span>
-          {card.integrated && (
+          {card.integrated ? (
             <span
               className="shrink-0 rounded bg-emerald-500/10 px-1 py-0.5 text-[9px] font-medium text-emerald-600 dark:text-emerald-400"
               title="Structureに組込済み"
             >
               組込済
             </span>
-          )}
+          ) : card.queuedForStructure ? (
+            <span
+              className="shrink-0 rounded bg-amber-500/10 px-1 py-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400"
+              title="次回のStructure/Refineで補足として反映予定"
+            >
+              次回反映
+            </span>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center">
           {!card.loading && !card.error && (
@@ -170,9 +177,15 @@ export function ResearchCardItem({
                   size="icon"
                   className="h-5 w-5"
                   onClick={onInsert}
-                  title="本文へ挿入"
+                  title={
+                    card.queuedForStructure
+                      ? "次回のStructure/Refineで反映予定（クリックで取消）"
+                      : "次回のStructure/Refineで補足として反映"
+                  }
                 >
-                  <FilePlus2 className="h-3 w-3" />
+                  <FilePlus2
+                    className={`h-3 w-3 ${card.queuedForStructure ? "text-primary" : ""}`}
+                  />
                 </Button>
               )}
             </>
