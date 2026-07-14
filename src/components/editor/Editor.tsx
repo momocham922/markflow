@@ -1289,6 +1289,42 @@ export function Editor() {
                   e.preventDefault();
                   const docId = target.getAttribute("data-doc-id");
                   if (docId) setActiveDocId(docId);
+                  return;
+                }
+                // In-document anchor link ([text](#見出しテキスト)) → scroll to the
+                // heading whose text matches the fragment. Used by research
+                // supplements to link back to the related meeting topic.
+                const anchorEl = (e.target as HTMLElement).closest(
+                  'a[href^="#"]',
+                ) as HTMLAnchorElement | null;
+                if (anchorEl) {
+                  const rawFrag = (anchorEl.getAttribute("href") || "").slice(
+                    1,
+                  );
+                  let frag = rawFrag.trim();
+                  try {
+                    frag = decodeURIComponent(rawFrag).trim();
+                  } catch {
+                    /* malformed %-sequence — use raw fragment */
+                  }
+                  if (frag) {
+                    e.preventDefault();
+                    const container = previewScrollRef.current;
+                    const headings = container?.querySelectorAll(
+                      "h1, h2, h3, h4, h5, h6",
+                    );
+                    if (headings) {
+                      for (const heading of headings) {
+                        if (heading.textContent?.trim() === frag) {
+                          heading.scrollIntoView({
+                            behavior: "smooth",
+                            block: "start",
+                          });
+                          break;
+                        }
+                      }
+                    }
+                  }
                 }
               }}
             />
