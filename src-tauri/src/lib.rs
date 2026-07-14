@@ -1469,6 +1469,45 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
         while VOICE_ACTIVE.load(Ordering::Relaxed) {
             let count = unsafe { drain_av_audio_buffer(temp.as_mut_ptr(), temp.len() as i32) };
             if count > 0 {
+                // iOS: write the Refine archive HERE (native poll thread, which
+                // keeps running under UIBackgroundModes audio) instead of in
+                // get_voice_chunk, which is driven by WKWebView JS timers that
+                // stall when backgrounded/screen-off. This preserves full audio
+                // fidelity for Refine while the screen is off. Mic is always
+                // mono on iOS (no system audio), and this runs before the
+                // VOICE_BUFFER try_lock so it's immune to buffer contention.
+                #[cfg(target_os = "ios")]
+                {
+                    use std::io::Write;
+                    const ARCHIVE_RATE: u32 = 16000;
+                    let src_rate =
+                        VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(ARCHIVE_RATE);
+                    let src = &temp[..count as usize];
+                    let resampled: Vec<f32> = if src_rate > ARCHIVE_RATE {
+                        let ratio = src_rate as f64 / ARCHIVE_RATE as f64;
+                        let new_len = (src.len() as f64 / ratio) as usize;
+                        (0..new_len)
+                            .map(|i| {
+                                let pos = i as f64 * ratio;
+                                let idx = pos as usize;
+                                let frac = pos - idx as f64;
+                                let s0 = src[idx.min(src.len() - 1)];
+                                let s1 = src[(idx + 1).min(src.len() - 1)];
+                                s0 + (s1 - s0) * frac as f32
+                            })
+                            .collect()
+                    } else {
+                        src.to_vec()
+                    };
+                    if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
+                        if let Some(ref mut file) = *archive {
+                            for &s in &resampled {
+                                let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                                let _ = file.write_all(&sample.to_le_bytes());
+                            }
+                        }
+                    }
+                }
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     buf.extend_from_slice(&temp[..count as usize]);
                     if buf.len() > MIC_BUFFER_MAX_SAMPLES {
@@ -1966,7 +2005,11 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         }).collect()
     };
 
-    // Archive: write mono audio to temp file BEFORE overlap/VAD (continuous, no gaps)
+    // Archive: write mono audio to temp file BEFORE overlap/VAD (continuous, no gaps).
+    // On iOS the archive is written by the native poll thread instead (it keeps
+    // running when backgrounded, unlike this JS-timer-driven command) — skip here
+    // to avoid double-writing. See start_voice_recording_inner.
+    #[cfg(not(target_os = "ios"))]
     if !mono.is_empty() {
         use std::io::Write;
         const ARCHIVE_RATE: u32 = 16000;
