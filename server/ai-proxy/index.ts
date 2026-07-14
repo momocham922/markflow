@@ -14,6 +14,8 @@ const NANOBANANA_MODEL =
 const STT_LOCATION = process.env.STT_LOCATION || "asia-northeast1";
 const STT_MODEL = process.env.STT_MODEL || "chirp_3";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+const GCS_BUCKET =
+  process.env.GCS_BUCKET || "markflow-app-2026.firebasestorage.app";
 
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
@@ -112,6 +114,49 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("MarkFlow AI Proxy");
     return;
+  }
+
+  // --- Public: serve a published document (NO auth) ---
+  // markflow.jp/p/{docId} → nginx (markflow-site) reverse-proxies here. We read
+  // published/{docId}.html from the (private) Storage bucket with the proxy's
+  // service account and serve it as HTML. Published docs are public by design.
+  if (req.method === "GET" && req.url && req.url.startsWith("/p/")) {
+    try {
+      const docId = decodeURIComponent(req.url.slice(3).split(/[?#]/)[0]);
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
+        res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Invalid document id");
+        return;
+      }
+      const objectPath = `published/${docId}.html`;
+      const token = await getGcpAccessToken();
+      const objUrl = `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o/${encodeURIComponent(
+        objectPath,
+      )}?alt=media`;
+      const r = await fetch(objUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) {
+        res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(
+          '<!doctype html><meta charset="utf-8"><title>Not found</title><body style="font-family:-apple-system,sans-serif;padding:3rem;text-align:center;color:#555"><h1 style="font-size:1.2rem">このドキュメントは公開されていません</h1><p>リンクが失効したか、公開が停止された可能性があります。</p></body>',
+        );
+        return;
+      }
+      const html = await r.text();
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=300",
+      });
+      res.end(html);
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] serve /p error: ${msg}`);
+      res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Internal error");
+      return;
+    }
   }
 
   if (req.method !== "POST") {

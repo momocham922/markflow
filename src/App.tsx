@@ -709,12 +709,20 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
       if (!bucket)
         throw new Error("VITE_FIREBASE_STORAGE_BUCKET is not configured");
-      const url = await invoke<string>("upload_html_cloud", {
+      // Upload to Storage (published/{docId}.html). We ignore the raw
+      // firebasestorage URL it returns and expose a clean custom-domain URL
+      // (markflow.jp/p/{docId}) served by ai-proxy from the same object. Old
+      // firebasestorage links stay valid (object unchanged), so already-
+      // published docs don't break after the switch.
+      await invoke<string>("upload_html_cloud", {
         html,
         docId: doc.id,
         token,
         bucket,
       });
+      const publishBase =
+        import.meta.env.VITE_PUBLISH_BASE_URL || "https://markflow.jp";
+      const url = `${publishBase}/p/${doc.id}`;
 
       // Step 3: Set publish URL on the doc (merge — works for both existing and new)
       await fsSetDoc(
