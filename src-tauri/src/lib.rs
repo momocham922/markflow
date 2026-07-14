@@ -1107,9 +1107,24 @@ static VOICE_ARCHIVE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static VOICE_ARCHIVE_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(serde::Serialize)]
+struct VoiceArchiveChunk {
+    gcs_uri: String,
+    /// Global start time of this chunk within the full recording (seconds).
+    start_sec: f64,
+    /// Duration of this chunk (seconds), including overlap with neighbors.
+    duration_sec: f64,
+}
+
+#[derive(serde::Serialize)]
 struct VoiceArchiveResult {
+    /// First chunk — kept for back-compat ("has archive" / retry indicator).
     gcs_uri: String,
     download_url: String,
+    /// Ordered chunks. Recordings ≤58min produce a single chunk (no change).
+    /// Longer recordings are split into ≤55min parts with 20s overlap so each
+    /// stays under chirp_3 BatchRecognize's 60-minute hard limit; the server
+    /// dedups the overlap by word timestamp for lossless boundaries.
+    chunks: Vec<VoiceArchiveChunk>,
 }
 
 // ── App Nap prevention (macOS) ──
@@ -2065,9 +2080,113 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     }))
 }
 
-/// Upload the full-session voice archive to Firebase Storage as a WAV file.
+/// Build a 44-byte WAV header for 16 kHz mono 16-bit PCM of the given data size.
+fn build_wav_header(data_size: u32) -> Vec<u8> {
+    let sample_rate: u32 = 16000;
+    let channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let file_size = 36 + data_size;
+    let mut h = Vec::with_capacity(44);
+    h.extend_from_slice(b"RIFF");
+    h.extend_from_slice(&file_size.to_le_bytes());
+    h.extend_from_slice(b"WAVE");
+    h.extend_from_slice(b"fmt ");
+    h.extend_from_slice(&16u32.to_le_bytes());
+    h.extend_from_slice(&1u16.to_le_bytes());
+    h.extend_from_slice(&channels.to_le_bytes());
+    h.extend_from_slice(&sample_rate.to_le_bytes());
+    h.extend_from_slice(&byte_rate.to_le_bytes());
+    h.extend_from_slice(&block_align.to_le_bytes());
+    h.extend_from_slice(&bits_per_sample.to_le_bytes());
+    h.extend_from_slice(b"data");
+    h.extend_from_slice(&data_size.to_le_bytes());
+    h
+}
+
+/// Stream a byte range of the on-disk PCM archive to Firebase Storage as a WAV
+/// object (header + range). Memory-safe: seek + limited read, 64KB chunks.
+/// Returns (gcs_uri, download_url).
+async fn upload_wav_range(
+    client: &reqwest::Client,
+    bucket: &str,
+    token: &str,
+    object_path: &str,
+    src_path: &str,
+    start_byte: u64,
+    len_bytes: u64,
+) -> Result<(String, String), String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let header = build_wav_header(len_bytes as u32);
+    let mut f = tokio::fs::File::open(src_path)
+        .await
+        .map_err(|e| format!("Failed to open archive: {}", e))?;
+    if start_byte > 0 {
+        f.seek(std::io::SeekFrom::Start(start_byte))
+            .await
+            .map_err(|e| format!("Failed to seek archive: {}", e))?;
+    }
+    let limited = f.take(len_bytes);
+    let header_stream =
+        futures::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(header)) });
+    let file_stream = tokio_util::io::ReaderStream::with_capacity(limited, 65536);
+    let body_stream = header_stream.chain(file_stream);
+    let total_size = 44 + len_bytes;
+
+    let upload_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
+        bucket,
+        urlencoding::encode(object_path),
+    );
+
+    let resp = client
+        .post(&upload_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .header("Content-Type", "audio/wav")
+        .header("Content-Length", total_size.to_string())
+        .header("X-Goog-Upload-Protocol", "raw")
+        .header("X-Goog-Upload-Command", "upload, finalize")
+        .body(reqwest::Body::wrap_stream(body_stream))
+        .send()
+        .await
+        .map_err(|e| format!("Upload failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    let encoded_path = urlencoding::encode(object_path);
+    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
+                bucket, encoded_path, dl_token
+            )
+        } else {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+                bucket, encoded_path
+            )
+        }
+    } else {
+        format!(
+            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+            bucket, encoded_path
+        )
+    };
+    let gcs_uri = format!("gs://{}/{}", bucket, object_path);
+    Ok((gcs_uri, download_url))
+}
+
+/// Upload the full-session voice archive to Firebase Storage as WAV file(s).
 /// Accepts optional `archive_path` for Android (Kotlin archive) — falls back to Rust archive.
-/// Uses chunked reading to avoid loading entire file into memory (iOS OOM protection).
+/// Recordings >58min are split into ≤55min chunks (20s overlap) to stay under
+/// chirp_3 BatchRecognize's 60-minute limit. Uses streaming (seek + limited read)
+/// to avoid loading the whole file into memory (iOS/Android OOM protection).
 #[tauri::command]
 async fn upload_voice_archive(
     uid: String,
@@ -2091,99 +2210,81 @@ async fn upload_voice_archive(
         return Err("Voice archive is empty".into());
     }
 
-    // Build WAV header (44 bytes) — PCM data stays on disk
-    let data_size = pcm_size as u32;
-    let file_size = 36 + data_size;
-    let sample_rate: u32 = 16000;
-    let channels: u16 = 1;
-    let bits_per_sample: u16 = 16;
-    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
-    let block_align = channels * bits_per_sample / 8;
-
-    let mut wav_header = Vec::with_capacity(44);
-    wav_header.extend_from_slice(b"RIFF");
-    wav_header.extend_from_slice(&file_size.to_le_bytes());
-    wav_header.extend_from_slice(b"WAVE");
-    wav_header.extend_from_slice(b"fmt ");
-    wav_header.extend_from_slice(&16u32.to_le_bytes());
-    wav_header.extend_from_slice(&1u16.to_le_bytes());
-    wav_header.extend_from_slice(&channels.to_le_bytes());
-    wav_header.extend_from_slice(&sample_rate.to_le_bytes());
-    wav_header.extend_from_slice(&byte_rate.to_le_bytes());
-    wav_header.extend_from_slice(&block_align.to_le_bytes());
-    wav_header.extend_from_slice(&bits_per_sample.to_le_bytes());
-    wav_header.extend_from_slice(b"data");
-    wav_header.extend_from_slice(&data_size.to_le_bytes());
-
-    let duration_secs = pcm_size as f64 / (sample_rate as f64 * 2.0);
-    println!("[voice] Archive WAV: {} + {} bytes PCM, {:.1}s", wav_header.len(), pcm_size, duration_secs);
-
-    // Stream upload: WAV header + PCM file in 64KB chunks (avoids loading entire file into RAM)
-    let pcm_file = tokio::fs::File::open(&path).await
-        .map_err(|e| format!("Failed to open archive: {}", e))?;
-    let header_stream = futures::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(wav_header)) });
-    let file_stream = tokio_util::io::ReaderStream::with_capacity(pcm_file, 65536);
-    let body_stream = header_stream.chain(file_stream);
-    let total_size = 44 + pcm_size;
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let object_path = format!("audio/{}/{}.wav", uid, id);
-
-    let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
-        bucket,
-        urlencoding::encode(&object_path),
-    );
+    let bytes_per_sec: u64 = 16000 * 2; // 16kHz mono 16-bit
+    let duration_secs = pcm_size as f64 / bytes_per_sec as f64;
+    println!("[voice] Archive: {} bytes PCM, {:.1}s", pcm_size, duration_secs);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client
-        .post(&upload_url)
-        .header("Authorization", format!("Firebase {}", token))
-        .header("Content-Type", "audio/wav")
-        .header("Content-Length", total_size.to_string())
-        .header("X-Goog-Upload-Protocol", "raw")
-        .header("X-Goog-Upload-Command", "upload, finalize")
-        .body(reqwest::Body::wrap_stream(body_stream))
-        .send()
-        .await
-        .map_err(|e| format!("Upload failed: {}", e))?;
+    let id = uuid::Uuid::new_v4().to_string();
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    // chirp_3 BatchRecognize hard-caps a single file at 60 minutes. Split long
+    // recordings into ≤55min parts with 20s overlap so the server can dedup the
+    // overlap by word timestamp (lossless boundaries). ≤58min → single file.
+    const STEP_SECS: u64 = 55 * 60;
+    const OVERLAP_SECS: u64 = 20;
+    const SINGLE_MAX_SECS: f64 = 58.0 * 60.0;
+
+    let mut chunks: Vec<VoiceArchiveChunk> = Vec::new();
+    let mut first_download_url = String::new();
+
+    if duration_secs <= SINGLE_MAX_SECS {
+        let object_path = format!("audio/{}/{}.wav", uid, id);
+        let (gcs_uri, dl) =
+            upload_wav_range(&client, &bucket, &token, &object_path, &path, 0, pcm_size).await?;
+        first_download_url = dl;
+        chunks.push(VoiceArchiveChunk {
+            gcs_uri,
+            start_sec: 0.0,
+            duration_sec: duration_secs,
+        });
+    } else {
+        let step_bytes = STEP_SECS * bytes_per_sec;
+        let span_bytes = (STEP_SECS + OVERLAP_SECS) * bytes_per_sec;
+        let mut i: u64 = 0;
+        loop {
+            let start_byte = i * step_bytes;
+            if start_byte >= pcm_size {
+                break;
+            }
+            let len = std::cmp::min(span_bytes, pcm_size - start_byte);
+            let object_path = format!("audio/{}/{}-c{}.wav", uid, id, i);
+            let (gcs_uri, dl) =
+                upload_wav_range(&client, &bucket, &token, &object_path, &path, start_byte, len)
+                    .await?;
+            if i == 0 {
+                first_download_url = dl;
+            }
+            chunks.push(VoiceArchiveChunk {
+                gcs_uri,
+                start_sec: start_byte as f64 / bytes_per_sec as f64,
+                duration_sec: len as f64 / bytes_per_sec as f64,
+            });
+            i += 1;
+        }
+        println!(
+            "[voice] Archive split into {} chunks ({:.1}min recording)",
+            chunks.len(),
+            duration_secs / 60.0
+        );
     }
 
-    let body = resp.text().await.unwrap_or_default();
-    let encoded_path = urlencoding::encode(&object_path);
+    let first = chunks.first().ok_or("No chunks produced")?;
+    let gcs_uri = first.gcs_uri.clone();
+    println!(
+        "[voice] Archive uploaded: {} chunk(s), primary GCS: {}",
+        chunks.len(),
+        gcs_uri
+    );
 
-    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
-                bucket, encoded_path, dl_token
-            )
-        } else {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-                bucket, encoded_path
-            )
-        }
-    } else {
-        format!(
-            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-            bucket, encoded_path
-        )
-    };
-
-    let gcs_uri = format!("gs://{}/{}", bucket, object_path);
-    println!("[voice] Archive uploaded: {} (GCS: {})", download_url, gcs_uri);
-
-    Ok(VoiceArchiveResult { gcs_uri, download_url })
+    Ok(VoiceArchiveResult {
+        gcs_uri,
+        download_url: first_download_url,
+        chunks,
+    })
 }
 
 /// Check if a voice archive file exists (for restoring hasArchive after remount).

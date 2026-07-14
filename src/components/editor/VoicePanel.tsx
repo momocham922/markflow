@@ -112,6 +112,14 @@ export function VoicePanel({
   const [lastStructuredText, setLastStructuredText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const refineAbortRef = useRef<AbortController | null>(null);
+  // Chunks from the last archive upload this session. Lets a Refine retry skip
+  // re-uploading (and re-splitting) the audio. Long recordings (>58min) are
+  // split into ≤55min parts with 20s overlap to clear chirp_3's 60-min limit.
+  const uploadedChunksRef = useRef<Array<{
+    gcsUri: string;
+    startSec: number;
+    durationSec: number;
+  }> | null>(null);
 
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
@@ -188,6 +196,7 @@ export function VoicePanel({
   useEffect(() => {
     if (isRecording) {
       setHasArchive(true);
+      uploadedChunksRef.current = null;
       onVoiceDataChangeRef.current?.({
         voiceGcsUri: null,
         voiceRecordedAt: null,
@@ -464,13 +473,13 @@ export function VoicePanel({
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
       if (!bucket) throw new Error("Storage bucket not configured");
 
-      // Stage 1: Upload audio archive (skip if GCS URI already exists from prior attempt)
-      let gcsUri = savedVoiceGcsUriRef.current;
-
-      if (gcsUri) {
+      // Stage 1: Upload audio archive → chunks (skip if already uploaded this
+      // session). Recordings >58min are split into ≤55min parts (20s overlap).
+      let chunks = uploadedChunksRef.current;
+      if (chunks) {
         console.log(
-          "[voice] Reusing existing GCS URI for refine retry:",
-          gcsUri,
+          "[voice] Reusing uploaded chunks for refine retry:",
+          chunks.length,
         );
       } else {
         setRefineStage("upload");
@@ -490,24 +499,56 @@ export function VoicePanel({
           androidArchivePath = p;
         }
 
-        const archiveResult = await invoke<{
-          gcs_uri: string;
-          download_url: string;
-        }>("upload_voice_archive", {
-          uid,
-          token,
-          bucket,
-          archivePath: androidArchivePath,
-        });
-        gcsUri = archiveResult.gcs_uri;
-
-        onVoiceDataChangeRef.current?.({
-          voiceGcsUri: gcsUri,
-          voiceRecordedAt: Date.now(),
-        });
+        try {
+          const archiveResult = await invoke<{
+            gcs_uri: string;
+            download_url: string;
+            chunks: Array<{
+              gcs_uri: string;
+              start_sec: number;
+              duration_sec: number;
+            }>;
+          }>("upload_voice_archive", {
+            uid,
+            token,
+            bucket,
+            archivePath: androidArchivePath,
+          });
+          chunks = (archiveResult.chunks || []).map((c) => ({
+            gcsUri: c.gcs_uri,
+            startSec: c.start_sec,
+            durationSec: c.duration_sec,
+          }));
+          if (chunks.length === 0 && archiveResult.gcs_uri) {
+            chunks = [
+              { gcsUri: archiveResult.gcs_uri, startSec: 0, durationSec: 0 },
+            ];
+          }
+          uploadedChunksRef.current = chunks;
+          onVoiceDataChangeRef.current?.({
+            voiceGcsUri: chunks[0]?.gcsUri || null,
+            voiceRecordedAt: Date.now(),
+          });
+        } catch (e) {
+          // Archive gone (e.g. after reload) but a prior single-file URI was
+          // saved — fall back to it (correct for short recordings).
+          if (savedVoiceGcsUriRef.current) {
+            chunks = [
+              {
+                gcsUri: savedVoiceGcsUriRef.current,
+                startSec: 0,
+                durationSec: 0,
+              },
+            ];
+            uploadedChunksRef.current = chunks;
+          } else {
+            throw e;
+          }
+        }
       }
 
-      // Stage 2: Batch transcribe with full-session diarization
+      // Stage 2: Batch transcribe with full-session diarization (per-chunk,
+      // parallel server-side; overlap deduped by word timestamp).
       setRefineStage("transcribe");
       stageLabel = "文字起こし";
       const timeout = setTimeout(() => abortController.abort(), 15 * 60 * 1000);
@@ -520,7 +561,7 @@ export function VoicePanel({
             Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({
-            gcsUri,
+            chunks,
             language: "ja-JP",
           }),
           signal: abortController.signal,
@@ -548,7 +589,9 @@ export function VoicePanel({
       const speakerCount = batchData.speakerCount || 0;
 
       if (!diarizedTranscript.trim()) {
-        throw new Error("Batch transcription returned empty result");
+        throw new Error(
+          "文字起こし結果が空でした。録音に音声が入っていない可能性があります。",
+        );
       }
 
       // Stage 3: Claude refinement with diarized transcript + existing structure
@@ -563,7 +606,7 @@ export function VoicePanel({
 
       const refineSystemPrompt =
         "You are a document assistant performing a FINAL REFINEMENT. " +
-        "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session with globally consistent speaker labels, " +
+        "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session. It may contain '---' markers separating processing segments of a long recording; speaker labels are ONLY consistent WITHIN a segment (the same speaker may have a different number across '---') — use speech content to identify and unify the same speaker across segments, " +
         (existingDoc
           ? "and an EXISTING DOCUMENT (a preliminary structure created during recording). "
           : "") +
@@ -677,6 +720,7 @@ export function VoicePanel({
         }
       }
       setHasArchive(false);
+      uploadedChunksRef.current = null;
       onVoiceDataChangeRef.current?.({
         voiceTranscript: null,
         voiceGcsUri: null,
@@ -985,6 +1029,7 @@ export function VoicePanel({
             lastStructuredRef.current = "";
             setLastStructuredText("");
             sttVocabRef.current.clear();
+            uploadedChunksRef.current = null;
             setHasArchive(false);
             onVoiceDataChangeRef.current?.({
               voiceTranscript: null,

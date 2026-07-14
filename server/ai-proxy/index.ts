@@ -281,219 +281,255 @@ const server = http.createServer(async (req, res) => {
       const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
-      const gcsUri: string = parsed.gcsUri;
       const language: string = parsed.language || "ja-JP";
+      const OVERLAP_SECS = 20; // must match the client-side split overlap
 
-      if (!gcsUri) {
+      // Accept either `chunks` (ordered ≤55min parts of a long recording, each
+      // with 20s overlap) or a single `gcsUri` (short recording / back-compat).
+      type BatchChunk = {
+        gcsUri: string;
+        startSec: number;
+        durationSec: number;
+      };
+      let chunks: BatchChunk[] = [];
+      if (Array.isArray(parsed.chunks) && parsed.chunks.length > 0) {
+        chunks = parsed.chunks.map(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (c: any) => ({
+            gcsUri: String(c.gcsUri || ""),
+            startSec: Number(c.startSec) || 0,
+            durationSec: Number(c.durationSec) || 0,
+          }),
+        );
+      } else if (parsed.gcsUri) {
+        chunks = [
+          { gcsUri: String(parsed.gcsUri), startSec: 0, durationSec: 0 },
+        ];
+      }
+
+      if (chunks.length === 0 || chunks.some((c) => !c.gcsUri)) {
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "gcsUri is required" }));
+        res.end(JSON.stringify({ error: "gcsUri or chunks is required" }));
         return;
       }
 
       const expectedPrefix = `gs://markflow-app-2026.firebasestorage.app/audio/${uid}/`;
-      if (!gcsUri.startsWith(expectedPrefix)) {
+      if (chunks.some((c) => !c.gcsUri.startsWith(expectedPrefix))) {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Access denied: invalid audio path" }));
         return;
       }
+      const multi = chunks.length > 1;
 
-      const accessToken = await getGcpAccessToken();
       const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
 
-      const batchRes = await fetch(batchUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          config: {
-            model: STT_MODEL,
-            languageCodes: [language],
-            features: {
-              enableAutomaticPunctuation: true,
-              diarizationConfig: {
-                minSpeakerCount: 1,
-                maxSpeakerCount: 6,
+      // Transcribe one file: start the op, poll to completion, surface per-file
+      // errors, and return its SpeechRecognitionResult[] (word-level speaker
+      // labels + timestamps). Throws on any failure.
+      const transcribeFile = async (
+        uri: string,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ): Promise<any[]> => {
+        const startToken = await getGcpAccessToken();
+        const startRes = await fetch(batchUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${startToken}`,
+          },
+          body: JSON.stringify({
+            config: {
+              model: STT_MODEL,
+              languageCodes: [language],
+              features: {
+                enableAutomaticPunctuation: true,
+                diarizationConfig: { minSpeakerCount: 1, maxSpeakerCount: 6 },
               },
+              denoiserConfig: { denoiseAudio: true },
+              autoDecodingConfig: {},
             },
-            denoiserConfig: { denoiseAudio: true },
-            autoDecodingConfig: {},
-          },
-          files: [{ uri: gcsUri }],
-          recognitionOutputConfig: {
-            inlineResponseConfig: {},
-          },
-        }),
-      });
-
-      if (!batchRes.ok) {
-        const errText = await batchRes.text();
-        console.error(
-          `[batch] BatchRecognize start error: ${batchRes.status} | ${errText}`,
-        );
-        res.writeHead(batchRes.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: errText }));
-        return;
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const operation = (await batchRes.json()) as any;
-      const opName: string = operation.name;
-      console.log(`[batch] Operation started: ${opName}`);
-
-      // Poll for completion (max 14 minutes, every 5 seconds)
-      const maxPollMs = 14 * 60 * 1000;
-      const pollInterval = 5000;
-      const startTime = Date.now();
-      let consecutiveFailures = 0;
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let result: any = null;
-
-      while (Date.now() - startTime < maxPollMs) {
-        await new Promise((r) => setTimeout(r, pollInterval));
-
-        const freshToken = await getGcpAccessToken();
-        const pollUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/${opName}`;
-        const pollRes = await fetch(pollUrl, {
-          headers: { Authorization: `Bearer ${freshToken}` },
+            files: [{ uri }],
+            recognitionOutputConfig: { inlineResponseConfig: {} },
+          }),
         });
-
-        if (!pollRes.ok) {
-          consecutiveFailures++;
-          const errText = await pollRes.text();
-          console.error(
-            `[batch] Poll error (${consecutiveFailures}/5): ${pollRes.status} | ${errText}`,
+        if (!startRes.ok) {
+          const t = await startRes.text();
+          throw new Error(
+            `BatchRecognize start failed (${startRes.status}): ${t}`,
           );
-          if (consecutiveFailures >= 5) {
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const op = (await startRes.json()) as any;
+        const opName: string = op.name;
+        const shortName = uri.split("/").pop();
+        console.log(`[batch] Operation started: ${opName} (${shortName})`);
+
+        // Parallel across chunks → total ≈ slowest chunk; keep each poll under
+        // the Cloud Run 900s request timeout.
+        const maxPollMs = 12 * 60 * 1000;
+        const pollInterval = 5000;
+        const t0 = Date.now();
+        let fails = 0;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let result: any = null;
+        while (Date.now() - t0 < maxPollMs) {
+          await new Promise((r) => setTimeout(r, pollInterval));
+          const tok = await getGcpAccessToken();
+          const pollRes = await fetch(
+            `https://${STT_LOCATION}-speech.googleapis.com/v2/${opName}`,
+            { headers: { Authorization: `Bearer ${tok}` } },
+          );
+          if (!pollRes.ok) {
+            fails++;
+            const t = await pollRes.text();
             console.error(
-              `[batch] Circuit breaker: 5 consecutive poll failures`,
+              `[batch] Poll error (${fails}/5) ${shortName}: ${pollRes.status} | ${t}`,
             );
+            if (fails >= 5)
+              throw new Error(`Poll circuit breaker for ${shortName}`);
+            continue;
+          }
+          fails = 0;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const status = (await pollRes.json()) as any;
+          if (status.done) {
+            result = status;
             break;
           }
-          continue;
         }
-
-        consecutiveFailures = 0;
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const status = (await pollRes.json()) as any;
-        if (status.done) {
-          result = status;
-          break;
+        if (!result) throw new Error(`BatchRecognize timed out (${shortName})`);
+        if (result.error)
+          throw new Error(`STT op error: ${JSON.stringify(result.error)}`);
+        const fileResults = result.response?.results || {};
+        const fileKey = Object.keys(fileResults)[0];
+        if (!fileKey) {
+          console.error(
+            `[batch] No file results for ${shortName}: ${JSON.stringify(
+              result.response || {},
+            ).slice(0, 1500)}`,
+          );
+          throw new Error("BatchRecognize returned no file results");
         }
+        const fileError = fileResults[fileKey]?.error;
+        if (fileError) {
+          console.error(
+            `[batch] Per-file STT error ${shortName}: ${JSON.stringify(fileError)}`,
+          );
+          throw new Error(
+            `STT failed: ${fileError.message || JSON.stringify(fileError)}`,
+          );
+        }
+        return fileResults[fileKey]?.inlineResult?.transcript?.results || [];
+      };
 
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        console.log(`[batch] Polling... ${elapsed}s elapsed`);
-      }
+      // Duration string ("1.200s") → seconds.
+      const parseOffset = (v: unknown): number => {
+        if (v == null) return 0;
+        const n = parseFloat(String(v).replace(/s$/, ""));
+        return isNaN(n) ? 0 : n;
+      };
 
-      if (!result) {
-        res.writeHead(504, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "BatchRecognize timed out (14 min)" }));
-        return;
-      }
-
-      if (result.error) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: JSON.stringify(result.error) }));
-        return;
-      }
-
-      // Extract transcript with speaker labels from inline result
+      // Run all chunks in parallel (total ≈ slowest chunk).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const fileResults = result.response?.results || {};
-      const fileKey = Object.keys(fileResults)[0];
-
-      // Surface per-file failures instead of masking them as an "empty result".
-      // In BatchRecognize v2, a file that fails to process still completes with
-      // done:true and NO operation-level error — the failure is reported per
-      // file as results[<uri>].error (with no inlineResult). If we skip this
-      // check the transcript silently becomes "" and the client shows the
-      // generic "empty result" message, hiding the real cause (decode error,
-      // permission denied, unsupported config, etc.).
-      if (!fileKey) {
-        console.error(
-          `[batch] No file results. response=${JSON.stringify(
-            result.response || {},
-          ).slice(0, 2000)}`,
+      let chunkResults: any[][];
+      try {
+        chunkResults = await Promise.all(
+          chunks.map((c) => transcribeFile(c.gcsUri)),
         );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[batch] Transcription failed: ${msg}`);
         res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({ error: "BatchRecognize returned no file results" }),
-        );
-        return;
-      }
-      const fileError = fileResults[fileKey]?.error;
-      if (fileError) {
-        console.error(
-          `[batch] Per-file STT error for ${fileKey}: ${JSON.stringify(fileError)}`,
-        );
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            error: `STT failed: ${fileError.message || JSON.stringify(fileError)}`,
-          }),
-        );
+        res.end(JSON.stringify({ error: msg }));
         return;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const inlineResults: any[] | undefined =
-        fileResults[fileKey]?.inlineResult?.transcript?.results;
-      if (!inlineResults) {
-        console.error(
-          `[batch] No inline transcript for ${fileKey}. fileResult=${JSON.stringify(
-            fileResults[fileKey] || {},
-          ).slice(0, 2000)}`,
-        );
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const sttResults: any[] = inlineResults || [];
+      // Dedup the 20s overlap by word timestamp — split the overlap at its
+      // midpoint so each boundary word is emitted exactly once — then build a
+      // speaker-tagged transcript per chunk joined by "---" boundaries (labels
+      // are only consistent within a segment; Claude unifies across "---").
+      const allSpeakerLabels = new Set<string>();
+      const taggedSegments: string[] = [];
+      const plainSegments: string[] = [];
 
-      const transcript = sttResults
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((r: any) => r.alternatives?.[0]?.transcript || "")
-        .join("");
+      for (let i = 0; i < chunkResults.length; i++) {
+        const results = chunkResults[i];
+        const c = chunks[i];
+        const leadCut = i === 0 ? 0 : OVERLAP_SECS / 2;
+        const trailCut =
+          i === chunkResults.length - 1 || c.durationSec <= 0
+            ? Infinity
+            : c.durationSec - OVERLAP_SECS / 2;
 
-      // Build speaker-tagged transcript from word-level labels
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const words: Array<{ word: string; speakerLabel: string }> =
-        sttResults.flatMap(
+        const words: Array<{ word: string; speakerLabel: string }> = [];
+        let plain = "";
+        for (const r of results) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (r: any) => r.alternatives?.[0]?.words || [],
-        );
-
-      const speakerLabels = new Set(
-        words.map((w) => w.speakerLabel).filter(Boolean),
-      );
-
-      let taggedTranscript = transcript;
-      if (speakerLabels.size > 1) {
-        let currentSpeaker = "";
-        const parts: string[] = [];
-        for (const w of words) {
-          const label = w.speakerLabel || "";
-          if (label && label !== currentSpeaker) {
-            currentSpeaker = label;
-            parts.push(`\n[Speaker ${label}] `);
+          const alt = (r as any).alternatives?.[0];
+          if (!alt) continue;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const ws: any[] = alt.words || [];
+          if (multi && ws.length > 0) {
+            for (const w of ws) {
+              const t = parseOffset(w.startOffset);
+              if (t >= leadCut && t < trailCut) {
+                words.push({
+                  word: w.word || "",
+                  speakerLabel: w.speakerLabel || "",
+                });
+                plain += w.word || "";
+              }
+            }
+          } else {
+            for (const w of ws)
+              words.push({
+                word: w.word || "",
+                speakerLabel: w.speakerLabel || "",
+              });
+            plain += alt.transcript || "";
           }
-          parts.push(w.word);
         }
-        taggedTranscript = parts.join("").trim();
+
+        const labels = new Set(
+          words.map((w) => w.speakerLabel).filter(Boolean),
+        );
+        labels.forEach((l) => allSpeakerLabels.add(l));
+
+        let tagged = plain;
+        if (labels.size > 1 && words.length > 0) {
+          let cur = "";
+          const parts: string[] = [];
+          for (const w of words) {
+            const label = w.speakerLabel || "";
+            if (label && label !== cur) {
+              cur = label;
+              parts.push(`\n[Speaker ${label}] `);
+            }
+            parts.push(w.word);
+          }
+          tagged = parts.join("").trim();
+        }
+
+        if (plain.trim()) {
+          taggedSegments.push(tagged.trim());
+          plainSegments.push(plain.trim());
+        }
       }
+
+      const transcript = plainSegments.join("\n");
+      const taggedTranscript = taggedSegments.join("\n---\n");
+      const speakerCount = allSpeakerLabels.size;
 
       console.log(
-        `[batch] Done: ${transcript.length} chars, ${speakerLabels.size} speakers`,
+        `[batch] Done: ${chunks.length} chunk(s), ${transcript.length} chars, ${speakerCount} speakers`,
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
           transcript,
-          taggedTranscript:
-            speakerLabels.size > 1 ? taggedTranscript : transcript,
-          speakerCount: speakerLabels.size,
+          taggedTranscript: taggedTranscript || transcript,
+          speakerCount,
         }),
       );
     } catch (err) {
