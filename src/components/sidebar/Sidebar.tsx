@@ -1436,6 +1436,22 @@ export function Sidebar() {
         </div>
       </div>
 
+      {/* Mobile: prominent, easy-to-tap "new document" button */}
+      {isMobile && (
+        <div className="px-3 pb-2 pt-0.5">
+          <button
+            onClick={() => {
+              handleNew();
+              setMyDocsExpanded(true);
+            }}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2.5 text-sm font-medium text-primary-foreground shadow-sm transition-opacity active:opacity-90"
+          >
+            <Plus className="h-5 w-5" />
+            新規ドキュメント
+          </button>
+        </div>
+      )}
+
       {/* Tag filter */}
       {allTags.length > 0 && (
         <div className="px-3 pb-2 flex flex-wrap gap-1">

@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { isTauri } from "@/platform";
 import {
   enableShareLink,
   disableShareLink,
@@ -48,11 +49,24 @@ import {
 interface ShareDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Publish-to-web wiring (from App). Enables publishing from the dialog —
+   * important on mobile, where the command palette isn't reachable. */
+  onPublish?: () => void;
+  onUnpublish?: () => void;
+  publishUrl?: string | null;
+  publishing?: boolean;
 }
 
 type Tab = "link" | "people" | "notifications";
 
-export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
+export function ShareDialog({
+  open,
+  onOpenChange,
+  onPublish,
+  onUnpublish,
+  publishUrl,
+  publishing,
+}: ShareDialogProps) {
   const { activeDocId, documents } = useAppStore();
   const { user } = useAuthStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
@@ -81,7 +95,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
     events: { onEdit: true, onShare: true },
   });
   const [slackSaved, setSlackSaved] = useState(false);
-  const [slackTestStatus, setSlackTestStatus] = useState<"idle" | "sending" | "ok" | "fail">("idle");
+  const [slackTestStatus, setSlackTestStatus] = useState<
+    "idle" | "sending" | "ok" | "fail"
+  >("idle");
 
   // Load existing share data when dialog opens
   useEffect(() => {
@@ -100,18 +116,19 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       .catch(() => {});
 
     // Load collaborators (map → array)
-    getCollaborators(activeDocId).then(setCollaborators).catch(() => {});
+    getCollaborators(activeDocId)
+      .then(setCollaborators)
+      .catch(() => {});
 
     // Load Slack config for this document
-    loadSlackNotifyConfig(activeDocId).then(setSlackConfig).catch(() => {});
+    loadSlackNotifyConfig(activeDocId)
+      .then(setSlackConfig)
+      .catch(() => {});
   }, [open, activeDocId, user]);
 
-  const getShareUrl = useCallback(
-    (token: string) => {
-      return `https://markflow.jp/share/${token}`;
-    },
-    [],
-  );
+  const getShareUrl = useCallback((token: string) => {
+    return `https://markflow.jp/share/${token}`;
+  }, []);
 
   // ─── Share Link handlers ──────────────────────────────
 
@@ -178,7 +195,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       try {
         const link = await enableShareLink(activeDocId, perm);
         setShareLink(link);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
   };
 
@@ -193,8 +212,8 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       if (!exists) {
         const proceed = window.confirm(
           `「${inviteEmail.trim()}」はまだMarkFlowに登録されていません。\n\n` +
-          "招待を続行すると、相手がアプリをインストール・ログインした時点で共有が有効になります。\n" +
-          "招待を続行しますか？",
+            "招待を続行すると、相手がアプリをインストール・ログインした時点で共有が有効になります。\n" +
+            "招待を続行しますか？",
         );
         if (!proceed) {
           setInviting(false);
@@ -218,7 +237,12 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
       await addCollaborator(activeDocId, inviteEmail.trim(), inviteRole);
       setCollaborators((prev) => [
         ...prev,
-        { uid: "", email: inviteEmail.trim(), role: inviteRole, addedAt: Date.now() },
+        {
+          uid: "",
+          email: inviteEmail.trim(),
+          role: inviteRole,
+          addedAt: Date.now(),
+        },
       ]);
       setInviteEmail("");
 
@@ -331,13 +355,87 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
           ))}
         </div>
 
-        {error && (
-          <p className="text-xs text-destructive px-1">{error}</p>
-        )}
+        {error && <p className="text-xs text-destructive px-1">{error}</p>}
 
         {/* ─── Link tab ─── */}
         {tab === "link" && (
           <div className="space-y-4 py-2">
+            {/* Publish to Web (static HTML) — available on mobile too.
+                Requires Tauri (native invoke); hidden on the plain web build. */}
+            {onPublish && isTauri && (
+              <>
+                <div className="space-y-2">
+                  <Label className="text-xs flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-emerald-500" />
+                    Web公開（静的HTML）
+                  </Label>
+                  {publishUrl ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Input
+                          readOnly
+                          value={publishUrl}
+                          className="h-8 text-xs"
+                          onFocus={(e) => e.currentTarget.select()}
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 shrink-0"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(publishUrl);
+                            } catch {
+                              /* ignore */
+                            }
+                          }}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 flex-1 text-xs"
+                          onClick={onPublish}
+                          disabled={publishing}
+                        >
+                          再公開（内容を更新）
+                        </Button>
+                        {onUnpublish && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={onUnpublish}
+                            disabled={publishing}
+                          >
+                            公開停止
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="w-full gap-2"
+                      onClick={onPublish}
+                      disabled={publishing || !activeDoc}
+                    >
+                      <Globe className="h-3.5 w-3.5" />
+                      {publishing ? "公開中..." : "Webに公開"}
+                    </Button>
+                  )}
+                  <p className="text-[10px] text-muted-foreground">
+                    誰でも閲覧できる公開URLを生成します。
+                  </p>
+                </div>
+                <Separator />
+              </>
+            )}
+
             {/* Quick copy */}
             <div className="flex gap-2">
               <Button
@@ -369,7 +467,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   <select
                     className="rounded-md border border-input bg-background px-2 py-1 text-xs"
                     value={linkPermission}
-                    onChange={(e) => handlePermissionChange(e.target.value as "view" | "edit")}
+                    onChange={(e) =>
+                      handlePermissionChange(e.target.value as "view" | "edit")
+                    }
                   >
                     <option value="view">Can view</option>
                     <option value="edit">Can edit</option>
@@ -422,9 +522,14 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
 
               {shareLink?.enabled && (
                 <p className="text-[10px] text-muted-foreground">
-                  MarkFlowユーザーがこのリンクでドキュメントを{linkPermission === "edit" ? "編集" : "閲覧"}できます。
+                  MarkFlowユーザーがこのリンクでドキュメントを
+                  {linkPermission === "edit" ? "編集" : "閲覧"}できます。
                   {shareLink.expiresAt && (
-                    <> 有効期限: {new Date(shareLink.expiresAt).toLocaleDateString()}</>
+                    <>
+                      {" "}
+                      有効期限:{" "}
+                      {new Date(shareLink.expiresAt).toLocaleDateString()}
+                    </>
                   )}
                 </p>
               )}
@@ -449,12 +554,16 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   className="text-xs"
                   onCompositionStart={ime.onCompositionStart}
                   onCompositionEnd={ime.onCompositionEnd}
-                  onKeyDown={(e) => { if (!ime.isComposing() && e.key === "Enter") handleInvite(); }}
+                  onKeyDown={(e) => {
+                    if (!ime.isComposing() && e.key === "Enter") handleInvite();
+                  }}
                 />
                 <select
                   className="rounded-md border border-input bg-background px-2 py-1 text-xs"
                   value={inviteRole}
-                  onChange={(e) => setInviteRole(e.target.value as "editor" | "viewer")}
+                  onChange={(e) =>
+                    setInviteRole(e.target.value as "editor" | "viewer")
+                  }
                 >
                   <option value="viewer">Viewer</option>
                   <option value="editor">Editor</option>
@@ -529,7 +638,10 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   placeholder="Slack Webhook URL"
                   value={slackConfig.webhookUrl}
                   onChange={(e) =>
-                    setSlackConfig((c) => ({ ...c, webhookUrl: e.target.value }))
+                    setSlackConfig((c) => ({
+                      ...c,
+                      webhookUrl: e.target.value,
+                    }))
                   }
                   className="text-xs font-mono"
                   type="url"
@@ -545,7 +657,9 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
               </div>
 
               <div className="space-y-1.5">
-                <Label className="text-[10px] text-muted-foreground">Notify on:</Label>
+                <Label className="text-[10px] text-muted-foreground">
+                  Notify on:
+                </Label>
                 {(
                   [
                     { key: "onEdit", label: "Document edits" },
@@ -578,7 +692,10 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                     type="checkbox"
                     checked={slackConfig.enabled}
                     onChange={(e) =>
-                      setSlackConfig((c) => ({ ...c, enabled: e.target.checked }))
+                      setSlackConfig((c) => ({
+                        ...c,
+                        enabled: e.target.checked,
+                      }))
                     }
                     className="rounded"
                   />
@@ -609,19 +726,31 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   size="sm"
                   variant="outline"
                   className="gap-1.5"
-                  disabled={!slackConfig.webhookUrl || slackTestStatus === "sending"}
+                  disabled={
+                    !slackConfig.webhookUrl || slackTestStatus === "sending"
+                  }
                   onClick={async () => {
                     setSlackTestStatus("sending");
                     try {
                       const { invoke } = await import("@tauri-apps/api/core");
                       const body = JSON.stringify({
-                        blocks: [{
-                          type: "section",
-                          text: { type: "mrkdwn", text: ":white_check_mark: *MarkFlow* — テスト通知" },
-                        }],
-                        ...(slackConfig.channel ? { channel: slackConfig.channel } : {}),
+                        blocks: [
+                          {
+                            type: "section",
+                            text: {
+                              type: "mrkdwn",
+                              text: ":white_check_mark: *MarkFlow* — テスト通知",
+                            },
+                          },
+                        ],
+                        ...(slackConfig.channel
+                          ? { channel: slackConfig.channel }
+                          : {}),
                       });
-                      await invoke("send_slack_webhook", { webhookUrl: slackConfig.webhookUrl, body });
+                      await invoke("send_slack_webhook", {
+                        webhookUrl: slackConfig.webhookUrl,
+                        body,
+                      });
                       setSlackTestStatus("ok");
                     } catch {
                       setSlackTestStatus("fail");
@@ -630,7 +759,11 @@ export function ShareDialog({ open, onOpenChange }: ShareDialogProps) {
                   }}
                 >
                   <Send className="h-3 w-3" />
-                  {slackTestStatus === "ok" ? "OK!" : slackTestStatus === "fail" ? "Failed" : "Test"}
+                  {slackTestStatus === "ok"
+                    ? "OK!"
+                    : slackTestStatus === "fail"
+                      ? "Failed"
+                      : "Test"}
                 </Button>
               </div>
             </div>

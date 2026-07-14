@@ -1,10 +1,21 @@
-import { useEffect, useState, useCallback, useRef, lazy, Suspense, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  lazy,
+  Suspense,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { Editor } from "@/components/editor/Editor";
 import { StatusBar } from "@/components/StatusBar";
 import { UserMenu } from "@/components/UserMenu";
-import { VersionPanel, type DiffState } from "@/components/version/VersionPanel";
+import {
+  VersionPanel,
+  type DiffState,
+} from "@/components/version/VersionPanel";
 import { DiffView } from "@/components/version/DiffView";
 import { AiPanel } from "@/components/ai-panel/AiPanel";
 import { ShareDialog } from "@/components/ShareDialog";
@@ -13,7 +24,17 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { PanelLeft, History, PenLine, LayoutGrid, Bot, Share2, ArrowLeft, Upload, Network } from "lucide-react";
+import {
+  PanelLeft,
+  History,
+  PenLine,
+  LayoutGrid,
+  Bot,
+  Share2,
+  ArrowLeft,
+  Upload,
+  Network,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import TurndownService from "turndown";
@@ -72,15 +93,23 @@ function App() {
   }, [syncing]);
   const [rightPanel, setRightPanel] = useState<RightPanel>("none");
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
-  const [updateInfo, setUpdateInfo] = useState<{ version: string; update: unknown } | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<"idle" | "downloading" | "error">("idle");
+  const [updateInfo, setUpdateInfo] = useState<{
+    version: string;
+    update: unknown;
+  } | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<
+    "idle" | "downloading" | "error"
+  >("idle");
   const [updateError, setUpdateError] = useState("");
   const [closingSyncVisible, setClosingSyncVisible] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
   const { viewportHeight, keyboardVisible } = useIOSKeyboard();
-  const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(sidebarOpen, toggleSidebar);
+  const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(
+    sidebarOpen,
+    toggleSidebar,
+  );
   const [shareToken, setShareToken] = useState<string | null>(() => {
     const match = window.location.hash.match(/^#\/share\/(.+)$/);
     return match ? match[1] : null;
@@ -91,7 +120,8 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const [versionPanelWidth, setVersionPanelWidth] = useState(320);
   const [aiPanelWidth, setAiPanelWidth] = useState(420);
-  const rightPanelWidth = rightPanel === "ai" ? aiPanelWidth : versionPanelWidth;
+  const rightPanelWidth =
+    rightPanel === "ai" ? aiPanelWidth : versionPanelWidth;
   const resizingRef = useRef<"sidebar" | "right" | null>(null);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
@@ -101,7 +131,8 @@ function App() {
       e.preventDefault();
       resizingRef.current = panel;
       startXRef.current = e.clientX;
-      startWidthRef.current = panel === "sidebar" ? sidebarWidth : rightPanelWidth;
+      startWidthRef.current =
+        panel === "sidebar" ? sidebarWidth : rightPanelWidth;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
 
@@ -110,9 +141,14 @@ function App() {
       const handleMove = (ev: globalThis.PointerEvent) => {
         const delta = ev.clientX - startXRef.current;
         if (resizingRef.current === "sidebar") {
-          setSidebarWidth(Math.max(180, Math.min(480, startWidthRef.current + delta)));
+          setSidebarWidth(
+            Math.max(180, Math.min(480, startWidthRef.current + delta)),
+          );
         } else {
-          const newWidth = Math.max(240, Math.min(600, startWidthRef.current - delta));
+          const newWidth = Math.max(
+            240,
+            Math.min(600, startWidthRef.current - delta),
+          );
           if (currentRightPanel === "ai") {
             setAiPanelWidth(newWidth);
           } else {
@@ -153,12 +189,15 @@ function App() {
   }, []);
 
   /** Open a shared document by link/token */
-  const openShareLink = useCallback((input: string) => {
-    const token = parseShareToken(input);
-    if (token) {
-      setShareToken(token);
-    }
-  }, [parseShareToken]);
+  const openShareLink = useCallback(
+    (input: string) => {
+      const token = parseShareToken(input);
+      if (token) {
+        setShareToken(token);
+      }
+    },
+    [parseShareToken],
+  );
 
   // Listen for hash changes (share links)
   useEffect(() => {
@@ -173,26 +212,36 @@ function App() {
   // Listen for deep link events (markflow://share/{token})
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    import("@tauri-apps/plugin-deep-link").then(async ({ onOpenUrl, getCurrent }) => {
-      // Handle initial launch URL (app was opened via deep link while not running)
-      try {
-        const initialUrls = await getCurrent();
-        if (initialUrls && initialUrls.length > 0) {
-          for (const url of initialUrls) {
-            const token = parseShareToken(url);
-            if (token) { setShareToken(token); break; }
+    import("@tauri-apps/plugin-deep-link")
+      .then(async ({ onOpenUrl, getCurrent }) => {
+        // Handle initial launch URL (app was opened via deep link while not running)
+        try {
+          const initialUrls = await getCurrent();
+          if (initialUrls && initialUrls.length > 0) {
+            for (const url of initialUrls) {
+              const token = parseShareToken(url);
+              if (token) {
+                setShareToken(token);
+                break;
+              }
+            }
           }
-        }
-      } catch {}
-      // Listen for subsequent deep link events while app is running
-      unlisten = await onOpenUrl((urls) => {
-        for (const url of urls) {
-          const token = parseShareToken(url);
-          if (token) { setShareToken(token); break; }
-        }
-      });
-    }).catch(() => {});
-    return () => { unlisten?.(); };
+        } catch {}
+        // Listen for subsequent deep link events while app is running
+        unlisten = await onOpenUrl((urls) => {
+          for (const url of urls) {
+            const token = parseShareToken(url);
+            if (token) {
+              setShareToken(token);
+              break;
+            }
+          }
+        });
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
   }, [parseShareToken]);
 
   useEffect(() => {
@@ -227,7 +276,9 @@ function App() {
         }
       });
     })();
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   // ─── Debounced Slack edit notifications ───
@@ -251,20 +302,30 @@ function App() {
         docTitle: edited.title,
         authorName: user?.displayName || user?.email || undefined,
       });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   // Track edits — called from Editor onChange
-  const markDocEdited = useCallback((docId: string, title: string) => {
-    editedDocRef.current = { id: docId, title };
-    if (editTimerRef.current) clearTimeout(editTimerRef.current);
-    editTimerRef.current = setTimeout(flushEditNotification, EDIT_DEBOUNCE_MS);
-  }, [flushEditNotification]);
+  const markDocEdited = useCallback(
+    (docId: string, title: string) => {
+      editedDocRef.current = { id: docId, title };
+      if (editTimerRef.current) clearTimeout(editTimerRef.current);
+      editTimerRef.current = setTimeout(
+        flushEditNotification,
+        EDIT_DEBOUNCE_MS,
+      );
+    },
+    [flushEditNotification],
+  );
 
   // Flush on document switch
   useEffect(() => {
     // When activeDocId changes, flush notification for the previously edited doc
-    return () => { flushEditNotification(); };
+    return () => {
+      flushEditNotification();
+    };
   }, [activeDocId, flushEditNotification]);
 
   // Detect edits via store subscription (updateDocument triggers updatedAt change)
@@ -282,7 +343,9 @@ function App() {
 
   // Flush on app close (augment existing onWindowClose)
   useEffect(() => {
-    const handleBeforeUnload = () => { flushEditNotification(); };
+    const handleBeforeUnload = () => {
+      flushEditNotification();
+    };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [flushEditNotification]);
@@ -295,14 +358,20 @@ function App() {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("cancel_auto_update");
         // Send pending crash reports to Firestore
-        const reports = await invoke<string[]>("get_crash_reports").catch(() => [] as string[]);
+        const reports = await invoke<string[]>("get_crash_reports").catch(
+          () => [] as string[],
+        );
         if (reports.length > 0) {
           const { reportCrash } = await import("@/services/firebase");
           for (const raw of reports) {
-            try { await reportCrash(JSON.parse(raw)); } catch {}
+            try {
+              await reportCrash(JSON.parse(raw));
+            } catch {}
           }
           await invoke("clear_crash_reports").catch(() => {});
-          console.log(`[crash-report] Sent ${reports.length} pending crash report(s)`);
+          console.log(
+            `[crash-report] Sent ${reports.length} pending crash report(s)`,
+          );
         }
       } catch {}
     }, 5000);
@@ -316,7 +385,9 @@ function App() {
         reportCrash({
           type: "js_error",
           message: event.message,
-          stack: event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`,
+          stack:
+            event.error?.stack ||
+            `${event.filename}:${event.lineno}:${event.colno}`,
           appVersion: __APP_VERSION__,
           platform: navigator.platform,
         }).catch(() => {});
@@ -346,7 +417,8 @@ function App() {
     const checkUpdate = async () => {
       try {
         const { getSetting } = await import("@/services/database");
-        const channel = ((await getSetting("update_channel")) || "stable") as "stable" | "beta";
+        const channel = ((await getSetting("update_channel")) || "stable") as
+          "stable" | "beta";
         const platform = await getPlatform();
         const update = await platform.checkForUpdate(channel);
         if (update) {
@@ -358,7 +430,10 @@ function App() {
     };
     const startupTimer = setTimeout(checkUpdate, 3000);
     const interval = setInterval(checkUpdate, 30 * 60 * 1000);
-    return () => { clearTimeout(startupTimer); clearInterval(interval); };
+    return () => {
+      clearTimeout(startupTimer);
+      clearInterval(interval);
+    };
   }, []);
 
   const handleInstallUpdate = useCallback(async () => {
@@ -397,7 +472,9 @@ function App() {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) {
         document.body.style.opacity = "0.999";
-        requestAnimationFrame(() => { document.body.style.opacity = ""; });
+        requestAnimationFrame(() => {
+          document.body.style.opacity = "";
+        });
       }
     };
     document.addEventListener("selectionchange", handler);
@@ -427,7 +504,8 @@ function App() {
 
   // ─── Export functions ────────────────────────────────────
 
-  const escTitle = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escTitle = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   const exportHtml = useCallback(async () => {
     const doc = documents.find((d) => d.id === activeDocId);
@@ -445,7 +523,10 @@ table{border-collapse:collapse;width:100%;}
 th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
 </head><body>${htmlContent}</body></html>`;
     const platform = await getPlatform();
-    const path = await platform.showSaveDialog({ defaultPath: `${doc.title}.html`, filters: [{ name: "HTML", extensions: ["html"] }] });
+    const path = await platform.showSaveDialog({
+      defaultPath: `${doc.title}.html`,
+      filters: [{ name: "HTML", extensions: ["html"] }],
+    });
     if (path) await platform.writeTextFile(path, html);
   }, [activeDocId, documents]);
 
@@ -453,7 +534,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
     const doc = documents.find((d) => d.id === activeDocId);
     if (!doc) return;
     const platform = await getPlatform();
-    const path = await platform.showSaveDialog({ defaultPath: `${doc.title}.txt`, filters: [{ name: "Text", extensions: ["txt"] }] });
+    const path = await platform.showSaveDialog({
+      defaultPath: `${doc.title}.txt`,
+      filters: [{ name: "Text", extensions: ["txt"] }],
+    });
     if (path) await platform.writeTextFile(path, doc.content);
   }, [activeDocId, documents]);
 
@@ -465,7 +549,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
       md = turndown.turndown(md);
     }
     const platform = await getPlatform();
-    const path = await platform.showSaveDialog({ defaultPath: `${doc.title}.md`, filters: [{ name: "Markdown", extensions: ["md"] }] });
+    const path = await platform.showSaveDialog({
+      defaultPath: `${doc.title}.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
     if (path) await platform.writeTextFile(path, md);
   }, [activeDocId, documents]);
 
@@ -482,7 +569,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
       const reader = new FileReader();
       reader.onload = () => {
         const content = reader.result as string;
-        const title = file.name.replace(/\.md$/i, "").slice(0, 50) || "Imported";
+        const title =
+          file.name.replace(/\.md$/i, "").slice(0, 50) || "Imported";
         const authUser = useAuthStore.getState().user;
         const doc: Document = {
           id: crypto.randomUUID(),
@@ -498,18 +586,22 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}</style>
         setActiveDocId(doc.id);
         // Cloud-first: upload to Firestore immediately so reconciliation never deletes it
         if (authUser) {
-          import("@/services/firebase").then(({ saveDocumentToFirestore }) => {
-            saveDocumentToFirestore({
-              id: doc.id,
-              title: doc.title,
-              content: doc.content,
-              ownerId: authUser.uid,
-              ownerName: authUser.displayName || authUser.email || undefined,
-              folder: doc.folder,
-              tags: doc.tags,
-              updatedAt: doc.updatedAt,
-            }).catch((err) => console.error("[import] Cloud upload failed:", err));
-          }).catch(() => {});
+          import("@/services/firebase")
+            .then(({ saveDocumentToFirestore }) => {
+              saveDocumentToFirestore({
+                id: doc.id,
+                title: doc.title,
+                content: doc.content,
+                ownerId: authUser.uid,
+                ownerName: authUser.displayName || authUser.email || undefined,
+                folder: doc.folder,
+                tags: doc.tags,
+                updatedAt: doc.updatedAt,
+              }).catch((err) =>
+                console.error("[import] Cloud upload failed:", err),
+              );
+            })
+            .catch(() => {});
         }
       };
       reader.readAsText(file);
@@ -577,8 +669,13 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       });
 
       // Step 1: Ensure doc exists in Firestore (setDoc+merge, no transaction)
-      const { getDoc: fsGetDoc, setDoc: fsSetDoc, doc: fsDoc, collection: fsColl, serverTimestamp: fsSt } =
-        await import("firebase/firestore");
+      const {
+        getDoc: fsGetDoc,
+        setDoc: fsSetDoc,
+        doc: fsDoc,
+        collection: fsColl,
+        serverTimestamp: fsSt,
+      } = await import("firebase/firestore");
       const { firestore } = await import("@/services/firebase");
       const docRef = fsDoc(fsColl(firestore, "documents"), doc.id);
       const snap = await fsGetDoc(docRef);
@@ -610,7 +707,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       const { invoke } = await import("@tauri-apps/api/core");
       const token = await user.getIdToken();
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
-      if (!bucket) throw new Error("VITE_FIREBASE_STORAGE_BUCKET is not configured");
+      if (!bucket)
+        throw new Error("VITE_FIREBASE_STORAGE_BUCKET is not configured");
       const url = await invoke<string>("upload_html_cloud", {
         html,
         docId: doc.id,
@@ -619,13 +717,19 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       });
 
       // Step 3: Set publish URL on the doc (merge — works for both existing and new)
-      await fsSetDoc(docRef, {
-        publishUrl: url,
-        publishedAt: fsSt(),
-      }, { merge: true });
+      await fsSetDoc(
+        docRef,
+        {
+          publishUrl: url,
+          publishedAt: fsSt(),
+        },
+        { merge: true },
+      );
 
       setPublishUrl(url);
-      try { await navigator.clipboard.writeText(url); } catch {}
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {}
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Publish failed:", e);
@@ -666,7 +770,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
   if (!initialized) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background" data-tauri-drag-region>
+      <div
+        className="flex h-screen w-screen items-center justify-center bg-background"
+        data-tauri-drag-region
+      >
         <div className="text-sm text-muted-foreground">Loading...</div>
       </div>
     );
@@ -682,17 +789,22 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             !isMobile && "h-screen w-screen",
             isMobile && "safe-top",
           )}
-          style={isMobile ? {
-            position: "fixed",
-            top: 0, left: 0, right: 0,
-            ...(isIOS && keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
-          } : undefined}
+          style={
+            isMobile
+              ? {
+                  position: "fixed",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  ...(isIOS && keyboardVisible
+                    ? { bottom: "auto", height: viewportHeight }
+                    : { bottom: 0 }),
+                }
+              : undefined
+          }
         >
           {!isMobile && (
-            <div
-              className="h-7 w-full shrink-0"
-              data-tauri-drag-region
-            />
+            <div className="h-7 w-full shrink-0" data-tauri-drag-region />
           )}
           <div className="flex-1 overflow-hidden">
             <SharedDocView
@@ -716,33 +828,43 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           !isMobile && "h-screen w-screen",
           isMobile && "safe-top",
         )}
-        style={isMobile ? {
-          position: "fixed",
-          top: 0, left: 0, right: 0,
-          ...(isIOS && keyboardVisible ? { bottom: "auto", height: viewportHeight } : { bottom: 0 }),
-        } : undefined}
+        style={
+          isMobile
+            ? {
+                position: "fixed",
+                top: 0,
+                left: 0,
+                right: 0,
+                ...(isIOS && keyboardVisible
+                  ? { bottom: "auto", height: viewportHeight }
+                  : { bottom: 0 }),
+              }
+            : undefined
+        }
       >
         {/* Window drag region — desktop only (macOS title bar) */}
         {/* macOS overlay title bar drag region — Windows has its own title bar */}
         {isMac && (
-          <div
-            className="h-7 w-full shrink-0"
-            data-tauri-drag-region
-          />
+          <div className="h-7 w-full shrink-0" data-tauri-drag-region />
         )}
         {/* Update banner */}
         {updateInfo && (
           <div className="flex items-center justify-between gap-3 bg-primary px-4 py-1.5 text-primary-foreground text-xs shrink-0">
             <span>
-              {updateStatus === "downloading" ? "ダウンロード中..." :
-               updateStatus === "error" ? `更新失敗: ${updateError}` :
-               `MarkFlow v${updateInfo.version} が利用可能です`}
+              {updateStatus === "downloading"
+                ? "ダウンロード中..."
+                : updateStatus === "error"
+                  ? `更新失敗: ${updateError}`
+                  : `MarkFlow v${updateInfo.version} が利用可能です`}
             </span>
             <div className="flex items-center gap-2">
               {updateStatus !== "downloading" && (
                 <button
                   className="rounded-md bg-primary-foreground/20 px-3 py-0.5 hover:bg-primary-foreground/30 transition-colors"
-                  onClick={() => { setUpdateInfo(null); setUpdateStatus("idle"); }}
+                  onClick={() => {
+                    setUpdateInfo(null);
+                    setUpdateStatus("idle");
+                  }}
                 >
                   あとで
                 </button>
@@ -752,17 +874,23 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 onClick={handleInstallUpdate}
                 disabled={updateStatus === "downloading"}
               >
-                {updateStatus === "error" ? "再試行" : updateStatus === "downloading" ? "..." : "アップデート"}
+                {updateStatus === "error"
+                  ? "再試行"
+                  : updateStatus === "downloading"
+                    ? "..."
+                    : "アップデート"}
               </button>
             </div>
           </div>
         )}
         {/* Publish banner */}
         {(publishUrl || publishing || publishError) && (
-          <div className={cn(
-            "flex items-center justify-between gap-3 px-4 py-1.5 text-white text-xs shrink-0",
-            publishError ? "bg-red-600" : "bg-green-600",
-          )}>
+          <div
+            className={cn(
+              "flex items-center justify-between gap-3 px-4 py-1.5 text-white text-xs shrink-0",
+              publishError ? "bg-red-600" : "bg-green-600",
+            )}
+          >
             {publishing ? (
               <span>公開中...</span>
             ) : publishError ? (
@@ -778,13 +906,27 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             ) : (
               <>
                 <span className="truncate">
-                  公開URL: <a href={publishUrl!} target="_blank" rel="noopener noreferrer" className="underline">{publishUrl}</a>
-                  <span className="ml-2 opacity-70">(クリップボードにコピー済み)</span>
+                  公開URL:{" "}
+                  <a
+                    href={publishUrl!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline"
+                  >
+                    {publishUrl}
+                  </a>
+                  <span className="ml-2 opacity-70">
+                    (クリップボードにコピー済み)
+                  </span>
                 </span>
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors whitespace-nowrap"
-                    onClick={async () => { try { await navigator.clipboard.writeText(publishUrl!); } catch {} }}
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(publishUrl!);
+                      } catch {}
+                    }}
                   >
                     コピー
                   </button>
@@ -804,46 +946,51 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           {isMobile && (sidebarOpen || swiping) && (
             <div
               className="fixed inset-0 z-40"
-              style={{ backgroundColor: `rgba(0,0,0,${0.3 * backdropOpacity})` }}
+              style={{
+                backgroundColor: `rgba(0,0,0,${0.3 * backdropOpacity})`,
+              }}
               onClick={toggleSidebar}
             />
           )}
-          {isMobile ? (
-            (sidebarOpen || swiping) && (
-              <div
-                className="fixed inset-y-0 left-0 z-50 safe-top shadow-xl bg-background overflow-hidden"
-                style={{
-                  width: "min(320px, 85vw)",
-                  transform: `translateX(${sidebarTranslateX}px)`,
-                  transition: swiping ? "none" : "transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
-                  willChange: "transform",
-                }}
-              >
-                <Sidebar />
-              </div>
-            )
-          ) : (
-            sidebarOpen && (
-              <>
+          {isMobile
+            ? (sidebarOpen || swiping) && (
                 <div
-                  className="shrink-0 overflow-hidden"
-                  style={{ width: sidebarWidth }}
+                  className="fixed inset-y-0 left-0 z-50 safe-top shadow-xl bg-background overflow-hidden"
+                  style={{
+                    width: "min(320px, 85vw)",
+                    transform: `translateX(${sidebarTranslateX}px)`,
+                    transition: swiping
+                      ? "none"
+                      : "transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+                    willChange: "transform",
+                  }}
                 >
                   <Sidebar />
                 </div>
-                <div
-                  className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
-                  onPointerDown={(e) => handleResizeStart("sidebar", e)}
-                />
-              </>
-            )
-          )}
+              )
+            : sidebarOpen && (
+                <>
+                  <div
+                    className="shrink-0 overflow-hidden"
+                    style={{ width: sidebarWidth }}
+                  >
+                    <Sidebar />
+                  </div>
+                  <div
+                    className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
+                    onPointerDown={(e) => handleResizeStart("sidebar", e)}
+                  />
+                </>
+              )}
 
           {/* Main content */}
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* Top bar — draggable on desktop, normal on iOS */}
             <div
-              className={cn("flex items-center justify-between border-b border-border px-3 pb-1.5", isMobile && "pt-1 safe-left safe-right")}
+              className={cn(
+                "flex items-center justify-between border-b border-border px-3 pb-1.5",
+                isMobile && "pt-1 safe-left safe-right",
+              )}
               {...(!isMobile ? { "data-tauri-drag-region": true } : {})}
             >
               <div className="flex items-center gap-1">
@@ -864,12 +1011,30 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     size="icon"
                     className="h-11 w-11"
                     onClick={() => {
-                      const modes: ViewMode[] = ["editor", "canvas", "visualization"];
-                      setViewMode(modes[(modes.indexOf(viewMode) + 1) % modes.length]);
+                      const modes: ViewMode[] = [
+                        "editor",
+                        "canvas",
+                        "visualization",
+                      ];
+                      setViewMode(
+                        modes[(modes.indexOf(viewMode) + 1) % modes.length],
+                      );
                     }}
-                    title={viewMode === "editor" ? "Editor" : viewMode === "canvas" ? "Canvas" : "Visualization"}
+                    title={
+                      viewMode === "editor"
+                        ? "Editor"
+                        : viewMode === "canvas"
+                          ? "Canvas"
+                          : "Visualization"
+                    }
                   >
-                    {viewMode === "editor" ? <PenLine className="h-5 w-5" /> : viewMode === "canvas" ? <LayoutGrid className="h-5 w-5" /> : <Network className="h-5 w-5" />}
+                    {viewMode === "editor" ? (
+                      <PenLine className="h-5 w-5" />
+                    ) : viewMode === "canvas" ? (
+                      <LayoutGrid className="h-5 w-5" />
+                    ) : (
+                      <Network className="h-5 w-5" />
+                    )}
                   </Button>
                 ) : (
                   <div className="flex items-center rounded-md border border-border p-0.5">
@@ -892,7 +1057,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                       <LayoutGrid className="h-3.5 w-3.5" />
                     </Button>
                     <Button
-                      variant={viewMode === "visualization" ? "secondary" : "ghost"}
+                      variant={
+                        viewMode === "visualization" ? "secondary" : "ghost"
+                      }
                       size="icon"
                       className="h-6 w-6"
                       onClick={() => setViewMode("visualization")}
@@ -924,7 +1091,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", "disabled:opacity-40 disabled:pointer-events-none")}
+                  className={cn(
+                    isMobile ? "h-11 w-11" : "h-7 w-7",
+                    "disabled:opacity-40 disabled:pointer-events-none",
+                  )}
                   onClick={() => setShareOpen(true)}
                   disabled={!activeDocId}
                   title="Share"
@@ -936,7 +1106,11 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "ai" && "bg-accent", "disabled:opacity-40 disabled:pointer-events-none")}
+                      className={cn(
+                        isMobile ? "h-11 w-11" : "h-7 w-7",
+                        rightPanel === "ai" && "bg-accent",
+                        "disabled:opacity-40 disabled:pointer-events-none",
+                      )}
                       onClick={() => togglePanel("ai")}
                       disabled={!activeDocId}
                       title="Claude AI"
@@ -946,7 +1120,11 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={cn(isMobile ? "h-11 w-11" : "h-7 w-7", rightPanel === "versions" && "bg-accent", "disabled:opacity-40 disabled:pointer-events-none")}
+                      className={cn(
+                        isMobile ? "h-11 w-11" : "h-7 w-7",
+                        rightPanel === "versions" && "bg-accent",
+                        "disabled:opacity-40 disabled:pointer-events-none",
+                      )}
                       onClick={() => togglePanel("versions")}
                       disabled={!activeDocId}
                       title="Version history"
@@ -973,11 +1151,19 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                         Back to editor
                       </Button>
                       <div className="h-4 w-px bg-border" />
-                      <span className="text-sm font-medium">{diffState.title}</span>
-                      <span className="text-xs text-muted-foreground">{diffState.time}</span>
+                      <span className="text-sm font-medium">
+                        {diffState.title}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {diffState.time}
+                      </span>
                     </div>
                     <div className="flex-1 overflow-auto px-6 py-4">
-                      <DiffView oldText={diffState.oldText} newText={diffState.newText} fullPage />
+                      <DiffView
+                        oldText={diffState.oldText}
+                        newText={diffState.newText}
+                        fullPage
+                      />
                     </div>
                   </div>
                 ) : viewMode === "editor" ? (
@@ -1011,7 +1197,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
                     onPointerDown={(e) => handleResizeStart("right", e)}
                   />
-                  <div className="shrink-0 overflow-hidden" style={{ width: rightPanelWidth }}>
+                  <div
+                    className="shrink-0 overflow-hidden"
+                    style={{ width: rightPanelWidth }}
+                  >
                     {rightPanel === "versions" && (
                       <VersionPanel
                         onClose={() => setRightPanel("none")}
@@ -1034,7 +1223,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           <div
             className="fixed z-40 flex flex-col safe-top bg-background"
             style={{
-              top: 0, left: 0, right: 0,
+              top: 0,
+              left: 0,
+              right: 0,
               ...(keyboardVisible
                 ? { bottom: "auto", height: viewportHeight }
                 : { bottom: 0 }),
@@ -1055,7 +1246,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
 
         {/* Syncing overlay — initial sync or closing sync */}
         {(closingSyncVisible || (syncing && !initialSyncDoneRef.current)) && (
-          <div className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]" data-tauri-drag-region>
+          <div
+            className="fixed inset-0 z-100 flex items-center justify-center bg-background/60 backdrop-blur-[2px]"
+            data-tauri-drag-region
+          >
             <div className="flex items-center gap-3 rounded-lg bg-card border border-border px-5 py-3 shadow-lg">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
               <span className="text-sm text-foreground">
@@ -1065,8 +1259,18 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         )}
         {!(isMobile && keyboardVisible) && <StatusBar />}
-        <ShareDialog open={shareOpen} onOpenChange={setShareOpen} />
-        <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+        <ShareDialog
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          onPublish={handlePublish}
+          onUnpublish={handleUnpublish}
+          publishUrl={publishUrl}
+          publishing={publishing}
+        />
+        <KeyboardShortcutsDialog
+          open={shortcutsOpen}
+          onOpenChange={setShortcutsOpen}
+        />
         <CommandPalette
           onViewChange={setViewMode}
           onTogglePanel={togglePanel}

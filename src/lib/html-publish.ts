@@ -113,6 +113,23 @@ export function generatePublishHtml(opts: PublishOptions): string {
   const tocHtml = buildTocHtml(headings);
   const hasToc = headings.length > 0;
 
+  // Mobile floating TOC: a bottom-right FAB that expands a tappable outline.
+  const tocMobileHtml = hasToc
+    ? `<button class="toc-fab" id="toc-fab" aria-label="目次" aria-expanded="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div class="toc-backdrop" id="toc-backdrop"></div>
+  <nav class="toc-mobile" id="toc-mobile">
+    <div class="toc-title">Table of Contents</div>
+    ${headings
+      .map(
+        (h) =>
+          `<a href="#${h.id}" class="toc-item toc-h${h.level}" data-target="${h.id}">${h.text}</a>`,
+      )
+      .join("\n    ")}
+  </nav>`
+    : "";
+
   // Resolve theme
   const preset =
     previewThemes[themeId] ??
@@ -518,10 +535,62 @@ html.dark .prose .mermaid svg .cluster text { fill: #c9d1d9 !important; }
 /* Task list checkboxes */
 .prose input[type="checkbox"] { margin-right: 0.4em; }
 
+/* Mobile floating TOC (hidden on desktop) */
+.toc-fab {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--prose-headings);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 200;
+  box-shadow: 0 4px 16px oklch(0 0 0 / 0.18);
+}
+.toc-fab svg { width: 22px; height: 22px; }
+.toc-mobile {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  max-height: 60vh;
+  width: min(78vw, 320px);
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 8px;
+  z-index: 200;
+  box-shadow: 0 8px 28px oklch(0 0 0 / 0.22);
+  -webkit-overflow-scrolling: touch;
+}
+.toc-mobile.open { display: block; }
+.toc-mobile .toc-title { padding: 0 8px; margin-bottom: 0.75em; }
+.toc-mobile .toc-item { padding: 8px 10px; font-size: 0.85rem; border-left: none; border-radius: 6px; }
+.toc-mobile .toc-item:hover, .toc-mobile .toc-item.active { background: oklch(0.5 0 0 / 0.08); color: var(--prose-links); }
+.toc-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 199;
+  background: transparent;
+}
+.toc-backdrop.open { display: block; }
+
 /* Responsive */
 @media (max-width: 900px) {
   .toc-sidebar { display: none; }
-  .main-content { padding: 1.5em 1em 3em; }
+  .main-content { padding: 1.25em 1em 4em; }
+  .page-header { padding: 0.6em 1em; }
+  .branding { display: none; }
+  .prose h1 { font-size: 1.45em; padding-bottom: 0.25em; margin-top: 1em; }
+  .toc-fab { display: flex; }
 }
 @media print {
   .page-header, .toc-sidebar { display: none; }
@@ -547,10 +616,33 @@ ${customPreviewCss || ""}
 ${bodyHtml}
     </article>
   </div>
+  ${hasToc ? tocMobileHtml : ""}
   ${
     hasToc
       ? `<script>
 (function() {
+  // Mobile TOC toggle (FAB → panel; close on backdrop or item tap)
+  var fab = document.getElementById('toc-fab');
+  var panel = document.getElementById('toc-mobile');
+  var backdrop = document.getElementById('toc-backdrop');
+  function closeToc() {
+    if (!panel) return;
+    panel.classList.remove('open');
+    if (backdrop) backdrop.classList.remove('open');
+    if (fab) fab.setAttribute('aria-expanded', 'false');
+  }
+  if (fab && panel) {
+    fab.addEventListener('click', function() {
+      var open = panel.classList.toggle('open');
+      if (backdrop) backdrop.classList.toggle('open', open);
+      fab.setAttribute('aria-expanded', String(open));
+    });
+    panel.addEventListener('click', function(e) {
+      if (e.target && e.target.closest('.toc-item')) closeToc();
+    });
+    if (backdrop) backdrop.addEventListener('click', closeToc);
+  }
+
   var items = document.querySelectorAll('.toc-item');
   var targets = [];
   items.forEach(function(item) {
