@@ -60,6 +60,9 @@ export function useResearchPipeline({
   // recording — a live session owns the card list). Runs on all platforms so
   // mobile users can view research gathered earlier on desktop, read-only.
   useEffect(() => {
+    // Research is a desktop-only surface — don't hydrate/show it on mobile
+    // (the panel would clutter the small screen when Voice opens).
+    if (isMobile) return;
     if (!activeDocId) return;
     if (useResearchStore.getState().sessionActive) return;
     const user = useAuthStore.getState().user;

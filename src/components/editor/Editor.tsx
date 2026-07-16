@@ -1124,7 +1124,7 @@ export function Editor() {
 
   return (
     <div className="relative flex h-full flex-col">
-      {voiceOpen && <ResearchPanel />}
+      {voiceOpen && !isMobile && <ResearchPanel />}
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}

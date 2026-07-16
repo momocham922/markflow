@@ -161,6 +161,25 @@ export function useResearchWindowManager(): void {
       if (disposed) return;
       emitFn = emit;
 
+      // Close the floating research window when the MAIN window closes —
+      // otherwise it orphans / stays open after the main window is gone.
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        const unClose = await getCurrentWindow().onCloseRequested(async () => {
+          try {
+            const rw = await WebviewWindow.getByLabel(RESEARCH_WINDOW_LABEL);
+            if (rw) await rw.close();
+          } catch {
+            /* ignore */
+          }
+        });
+        if (disposed) unClose();
+        else unlisteners.push(unClose);
+      } catch {
+        /* ignore */
+      }
+
       // Floating window asks for initial state on mount.
       unlisteners.push(
         await listen("research:ready", () => {

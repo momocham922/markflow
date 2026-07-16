@@ -1436,22 +1436,6 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Mobile: prominent, easy-to-tap "new document" button */}
-      {isMobile && (
-        <div className="px-3 pb-2 pt-0.5">
-          <button
-            onClick={() => {
-              handleNew();
-              setMyDocsExpanded(true);
-            }}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2.5 text-sm font-medium text-primary-foreground shadow-sm transition-opacity active:opacity-90"
-          >
-            <Plus className="h-5 w-5" />
-            新規ドキュメント
-          </button>
-        </div>
-      )}
-
       {/* Tag filter */}
       {allTags.length > 0 && (
         <div className="px-3 pb-2 flex flex-wrap gap-1">
@@ -1515,9 +1499,16 @@ export function Sidebar() {
                     {personalDocs.length}
                   </span>
                 </button>
-                <div className="flex gap-0.5 pr-2">
+                <div
+                  className={cn("flex pr-2", isMobile ? "gap-1" : "gap-0.5")}
+                >
                   <span
                     title="New document"
+                    className={
+                      isMobile
+                        ? "flex items-center justify-center rounded-md p-1.5 -my-1 active:bg-accent"
+                        : ""
+                    }
                     onClick={() => {
                       handleNew();
                       setMyDocsExpanded(true);
@@ -1526,7 +1517,7 @@ export function Sidebar() {
                     <Plus
                       className={cn(
                         "text-muted-foreground hover:text-foreground cursor-pointer",
-                        isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
+                        isMobile ? "h-5 w-5" : "h-3.5 w-3.5",
                       )}
                     />
                   </span>
@@ -1541,17 +1532,26 @@ export function Sidebar() {
                       <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
                     </span>
                   )}
-                  <FolderPlus
-                    className={cn(
-                      "text-muted-foreground hover:text-foreground cursor-pointer",
-                      isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
-                    )}
+                  <span
+                    title="New folder"
+                    className={
+                      isMobile
+                        ? "flex items-center justify-center rounded-md p-1.5 -my-1 active:bg-accent"
+                        : ""
+                    }
                     onClick={() => {
                       setCreatingFolderIn("/");
                       setNewFolderName("");
                       setMyDocsExpanded(true);
                     }}
-                  />
+                  >
+                    <FolderPlus
+                      className={cn(
+                        "text-muted-foreground hover:text-foreground cursor-pointer",
+                        isMobile ? "h-5 w-5" : "h-3.5 w-3.5",
+                      )}
+                    />
+                  </span>
                 </div>
               </div>
               {myDocsExpanded && (
@@ -1875,16 +1875,24 @@ export function Sidebar() {
             const onDelete = isTeam
               ? (id: string) => handleDeleteTeamDoc(id, teamDoc.team)
               : (id: string) => deleteDocument(id);
-            // Clamp position to viewport
+            // Clamp position to viewport. The menu can be taller than the
+            // screen (long folder list), so open it toward whichever side has
+            // more room and cap its height there — the body scrolls if needed.
             const menuW = 180;
-            const menuH = 200;
+            const margin = 8;
             const vw = window.innerWidth;
             const vh = window.innerHeight;
-            const x = Math.min(contextMenu.x, vw - menuW - 8);
-            const y =
-              contextMenu.y + menuH > vh
-                ? Math.max(8, contextMenu.y - menuH)
-                : contextMenu.y;
+            const x = Math.max(
+              margin,
+              Math.min(contextMenu.x, vw - menuW - margin),
+            );
+            const spaceBelow = vh - contextMenu.y - margin;
+            const spaceAbove = contextMenu.y - margin;
+            const openUp = spaceBelow < 220 && spaceAbove > spaceBelow;
+            const maxMenuH = Math.max(160, openUp ? spaceAbove : spaceBelow);
+            const y = openUp
+              ? Math.max(margin, contextMenu.y - maxMenuH)
+              : contextMenu.y;
             return (
               <>
                 <div
@@ -1900,6 +1908,10 @@ export function Sidebar() {
                     top: y,
                     zIndex: 9999,
                     minWidth: menuW,
+                    maxHeight: maxMenuH,
+                    overflowY: "auto",
+                    overscrollBehavior: "contain",
+                    WebkitOverflowScrolling: "touch",
                     background: isDark ? "#262626" : "#fff",
                     border: `1px solid ${isDark ? "#404040" : "#e5e5e5"}`,
                     borderRadius: 8,
