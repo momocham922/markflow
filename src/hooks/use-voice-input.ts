@@ -527,6 +527,21 @@ export function useVoiceInput({
     setInterimText("");
   }, []);
 
+  // Follow the host's saved transcript when it swaps to a different one — e.g.
+  // switching documents. The panel is normally remounted (keyed by doc id), but
+  // this guarantees the transcript stays tied to the active document even if the
+  // instance is reused: never show one document's transcript on another. Never
+  // clobber a live recording in progress.
+  const lastInitialRef = useRef(initialTranscript);
+  useEffect(() => {
+    if (initialTranscript === lastInitialRef.current) return;
+    lastInitialRef.current = initialTranscript;
+    if (isRecording) return;
+    transcriptRef.current = initialTranscript || "";
+    setFullTranscript(initialTranscript || "");
+    setInterimText("");
+  }, [initialTranscript, isRecording]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {

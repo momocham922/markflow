@@ -56,20 +56,28 @@ export function useResearchPipeline({
   const sessionStartRef = useRef<number>(0);
   const sessionIdRef = useRef<string>("");
 
-  // Hydrate persisted research when a document opens/switches (not while
-  // recording — a live session owns the card list). Runs on all platforms so
-  // mobile users can view research gathered earlier on desktop, read-only.
+  // Reset + hydrate research whenever the active document changes. Research is
+  // a GLOBAL store (not per-doc), so without a hard reset here the previous
+  // document's cards linger when you switch docs or start the next meeting.
   useEffect(() => {
     // Research is a desktop-only surface — don't hydrate/show it on mobile
     // (the panel would clutter the small screen when Voice opens).
     if (isMobile) return;
     if (!activeDocId) return;
-    if (useResearchStore.getState().sessionActive) return;
+
+    // Reset synchronously and up-front so the previous document's cards are
+    // NEVER shown on — or saved to — the newly opened document, even if the
+    // async hydrate below finds nothing, errors, or the user isn't signed in.
+    // (This effect runs before the recording effect below, so when its
+    // stop-branch reads the card list on a doc switch it sees an empty list
+    // and won't persist the old doc's cards under the new doc's id.)
+    const store = useResearchStore.getState();
+    if (store.sessionActive) store.endSession();
+    store.clearCards();
+
     const user = useAuthStore.getState().user;
-    if (!user) {
-      useResearchStore.getState().hydrateCards([]);
-      return;
-    }
+    if (!user) return; // already cleared above
+
     let cancelled = false;
     fetchResearchSessions(activeDocId)
       .then((sessions) => {
@@ -83,7 +91,9 @@ export function useResearchPipeline({
             loading: false,
           })),
         );
-        useResearchStore.getState().hydrateCards(cards);
+        // Guard against a live session that may have started while fetching.
+        if (useResearchStore.getState().sessionActive) return;
+        if (cards.length > 0) useResearchStore.getState().hydrateCards(cards);
       })
       .catch((err) =>
         console.error("[research] Failed to hydrate sessions:", err),

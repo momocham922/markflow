@@ -432,6 +432,15 @@ export function Editor() {
     collabActive: isCollabReady,
   });
 
+  // Reset the mirrored transcript to the newly-opened document's saved value
+  // when switching docs, so the research pipeline never sees the previous
+  // document's transcript. (VoicePanel is remounted per doc, but this keeps the
+  // Editor-level mirror document-scoped too.)
+  useEffect(() => {
+    setVoiceTranscript(activeDoc?.voiceTranscript || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDocId]);
+
   useResearchPipeline({
     isRecording: voiceRecording,
     fullTranscript: voiceTranscript,
