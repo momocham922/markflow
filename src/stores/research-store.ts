@@ -23,7 +23,13 @@ export interface ResearchCard {
   timestamp: number;
   trigger: string;
   query: string;
-  type: "topic" | "fact-check" | "financial" | "explicit-request" | "internal";
+  type:
+    | "topic"
+    | "fact-check"
+    | "financial"
+    | "explicit-request"
+    | "internal"
+    | "question";
   summary: string;
   sources: ResearchSource[];
   credibility: "academic" | "official" | "news" | "general";

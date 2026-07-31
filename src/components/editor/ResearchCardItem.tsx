@@ -44,6 +44,10 @@ const TYPE_STYLES: Record<
     label: "Internal",
     className: "bg-teal-500/10 text-teal-600 dark:text-teal-400",
   },
+  question: {
+    label: "質問",
+    className: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400",
+  },
 };
 
 const CRED_CONFIG: Record<
@@ -99,6 +103,10 @@ export function ResearchCardItem({
   const [retrying, setRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
   const typeStyle = TYPE_STYLES[card.type];
+  const hasSources = card.sources.length > 0;
+  // Question cards carry no sources — only show the toggle when there is
+  // something to reveal (sources, or a summary long enough to be truncated).
+  const showToggle = hasSources || card.summary.length > 150;
 
   const handleRetry = async () => {
     setRetrying(true);
@@ -361,21 +369,27 @@ export function ResearchCardItem({
             </div>
           )}
 
-          <button
-            onClick={onToggle}
-            className="mt-1 flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-          >
-            {expanded ? (
-              <>
-                <ChevronUp className="h-3 w-3" /> Less
-              </>
-            ) : (
-              <>
-                <ChevronDown className="h-3 w-3" /> Sources (
-                {card.sources.length})
-              </>
-            )}
-          </button>
+          {showToggle && (
+            <button
+              onClick={onToggle}
+              className="mt-1 flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp className="h-3 w-3" /> Less
+                </>
+              ) : hasSources ? (
+                <>
+                  <ChevronDown className="h-3 w-3" /> Sources (
+                  {card.sources.length})
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="h-3 w-3" /> More
+                </>
+              )}
+            </button>
+          )}
         </>
       )}
     </div>

@@ -15,11 +15,33 @@ import { isAndroid, isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { useResearchStore } from "@/stores/research-store";
+import type { ResearchCard } from "@/stores/research-store";
 import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
 import { extractHints } from "@/lib/text-utils";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
+
+/**
+ * Build the "Questions Context" block for Structure/Refine. Speaker-questions
+ * are prompts the user may ASK — NOT facts and NOT meeting speech — so they go
+ * into their own trailing '## 確認したいこと' section, kept separate from the
+ * web-research '## 補足情報（Web調査）' section and never woven into the body.
+ */
+function buildQuestionsContext(questionCards: ResearchCard[]): string {
+  return (
+    "\n\n## Questions Context (follow-up questions to ASK — NOT meeting content)\n" +
+    "These are candidate questions the user may want to ASK the other participants. " +
+    "They are NOT facts and NOT anything anyone said. Follow the SEPARATION RULE: " +
+    "collect them under a SINGLE trailing section titled '## 確認したいこと' " +
+    "(translate the title to match the document's language), placed AFTER any " +
+    "'## 補足情報（Web調査）' section and clearly separate from it. Render as a " +
+    "bulleted checklist of the questions themselves; you MAY drop any ' — *intent*' " +
+    "annotation and merge duplicate/near-identical questions. Do NOT weave them " +
+    "into the minutes body. Omit the section entirely if none are meaningful.\n\n" +
+    questionCards.map((c) => c.summary).join("\n")
+  );
+}
 
 export interface VoiceDataUpdate {
   voiceTranscript?: string | null;
@@ -303,6 +325,7 @@ export function VoicePanel({
         "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
         "SEPARATION RULE: If web-search supplementary information is provided in the input (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end of the document, titled '## 補足情報（Web調査）' (translate the title to match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact, figure, or conclusion that already appears in the body. Keep each supplement concise (a sentence or two) and, where useful, note which meeting topic it supplements. Do NOT create this section if no research information was provided. " +
+        "If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), placed after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
         "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate. " +
         'FINALLY, after the document, append a single line: <!--VOCAB:["term1","term2",...]-->  containing up to 50 key proper nouns, person names, technical terms, project names, and specialized vocabulary that appeared in or were corrected from the transcript. Include the CORRECT spelling. This line will be stripped and used to improve future speech recognition — it is NOT part of the document.';
 
@@ -336,12 +359,16 @@ export function VoicePanel({
       // queued specific cards ("組み込む") for the next run. Individual queued
       // cards are honored even if the global toggle is off.
       const includeAll = useResearchStore.getState().includeInStructure;
-      const researchCards = useResearchStore
+      const includedCards = useResearchStore
         .getState()
         .cards.filter(
           (c) =>
             !c.integrated && c.summary && (includeAll || c.queuedForStructure),
         );
+      // Web-research (facts) and speaker-questions (prompts to ask) are woven
+      // into SEPARATE trailing sections — never mixed into the minutes body.
+      const researchCards = includedCards.filter((c) => c.type !== "question");
+      const questionCards = includedCards.filter((c) => c.type === "question");
       if (researchCards.length > 0) {
         userContent +=
           "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
@@ -356,6 +383,9 @@ export function VoicePanel({
               return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
             })
             .join("\n\n");
+      }
+      if (questionCards.length > 0) {
+        userContent += buildQuestionsContext(questionCards);
       }
 
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
@@ -446,10 +476,11 @@ export function VoicePanel({
         lastStructuredRef.current = transcript;
         setLastStructuredText(transcript);
         // Mark only the cards we actually wove in (clears their queued flag);
-        // don't touch cards that weren't included this run.
-        if (researchCards.length > 0) {
+        // don't touch cards that weren't included this run. Covers both
+        // research and question cards.
+        if (includedCards.length > 0) {
           const store = useResearchStore.getState();
-          for (const c of researchCards) store.markIntegrated(c.id);
+          for (const c of includedCards) store.markIntegrated(c.id);
         }
       }
     } catch (err) {
@@ -627,7 +658,7 @@ export function VoicePanel({
         "4) Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
         "5) CONSOLIDATION (CRITICAL — non-redundant): Each distinct topic, decision, fact, definition, number, or conclusion must appear EXACTLY ONCE, in the single most relevant section. The conversation circles back to topics — do NOT create a new section or restate a point each time it recurs; gather everything about a topic into its one section. Never repeat the same conclusion/figure/definition/action item across sections; refer to it in one short phrase if needed elsewhere. Before finalizing, scan your output and merge sections/bullets covering the same subject. Prefer a tight, consolidated document over a long, repetitive one. " +
         "6) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
-        "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. " +
+        "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
         "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
@@ -640,7 +671,7 @@ export function VoicePanel({
       // Weave research when the global toggle is on OR specific cards were
       // queued for the next run ("組み込む").
       const includeAllRefine = getResearchStore.getState().includeInStructure;
-      const refineResearchCards = getResearchStore
+      const refineIncludedCards = getResearchStore
         .getState()
         .cards.filter(
           (c) =>
@@ -648,6 +679,12 @@ export function VoicePanel({
             c.summary &&
             (includeAllRefine || c.queuedForStructure),
         );
+      const refineResearchCards = refineIncludedCards.filter(
+        (c) => c.type !== "question",
+      );
+      const refineQuestionCards = refineIncludedCards.filter(
+        (c) => c.type === "question",
+      );
       if (refineResearchCards.length > 0) {
         refineUserContent +=
           "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
@@ -662,6 +699,9 @@ export function VoicePanel({
               return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
             })
             .join("\n\n");
+      }
+      if (refineQuestionCards.length > 0) {
+        refineUserContent += buildQuestionsContext(refineQuestionCards);
       }
 
       const refineRes = await fetch(`${AI_PROXY_URL}/v1/chat`, {
@@ -730,9 +770,10 @@ export function VoicePanel({
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
         // Mark only the cards actually woven in (clears their queued flag).
-        if (refineResearchCards.length > 0) {
+        // Covers both research and question cards.
+        if (refineIncludedCards.length > 0) {
           const store = getResearchStore.getState();
-          for (const c of refineResearchCards) store.markIntegrated(c.id);
+          for (const c of refineIncludedCards) store.markIntegrated(c.id);
         }
       }
       setHasArchive(false);

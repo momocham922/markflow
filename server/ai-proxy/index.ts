@@ -715,6 +715,24 @@ const server = http.createServer(async (req, res) => {
 - 検索しても有用な情報が得られない曖昧な話題
 
 0〜3件のsearchesを返してください。検索価値がなければ空配列。
+
+## スピーカーへの質問（questions）の設計
+相手（自分以外の話者）が実質的な内容を**まとまって話した**直後に、こちらが次に投げるべき
+鋭い質問を設計します。これは会議参加者が「いざ質問しようとすると引き出しが少ない」場面を
+支える機能です。Web検索は不要で、発言そのものへの深い読み込みから設計します。
+
+- 直近の発言に対して、**狙いの異なる質問を3〜4問**用意する。狙いは分散させること:
+  - 数値・事実を引き出す（「具体的に何%／いつ／いくら？」）
+  - 前提・根拠を掘る（「その判断の前提は？なぜそう言える？」）
+  - 具体化を促す（「具体例を1つ挙げると？」）
+  - リスク・反例を突く（「未達／失敗時は？逆のケースは？」）
+  - 次アクションを確定させる（「誰が・いつまでに？」）
+- 会議の言語で、**そのまま口に出せる簡潔な問い**にする。長い前置き禁止。
+- 以下では questions を出さない（空にする）:
+  - 挨拶・雑談・相槌・自分（記録者）側の発言
+  - 掘り下げる価値のない断片的な発言
+  - 直近の質問候補と実質同じ問い
+
 必ずJSON形式のみで出力してください。
 
 出力フォーマット:
@@ -727,8 +745,16 @@ const server = http.createServer(async (req, res) => {
       "desiredOutput": "最も有用な出力の形式と内容。具体的に指示",
       "claim": "(fact-checkのみ) 検証対象の元の発言をそのまま引用"
     }
-  ]
-}`;
+  ],
+  "questions": {
+    "topic": "質問群の見出し（例: 新規事業のKPI）。相手の発言テーマを短く",
+    "items": [
+      { "question": "現在の達成率は具体的に何%ですか？", "intent": "数値を引き出す" }
+    ]
+  }
+}
+
+questions は掘り下げ価値がある時のみ。無ければ "questions": { "items": [] } とすること。`;
 
       let userPrompt = `## 新しいトランスクリプト（音声認識 — 誤認識を含む可能性あり）\n${transcriptDiff.slice(0, 3000)}`;
       if (fullContext) {
@@ -747,7 +773,7 @@ const server = http.createServer(async (req, res) => {
         },
         body: JSON.stringify({
           anthropic_version: "vertex-2023-10-16",
-          max_tokens: 2048,
+          max_tokens: 3072,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
           stream: false,
@@ -772,7 +798,7 @@ const server = http.createServer(async (req, res) => {
       if (!text) {
         console.log("[research] analyze: empty response from Claude");
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ searches: [] }));
+        res.end(JSON.stringify({ searches: [], questions: null }));
         return;
       }
 
@@ -780,17 +806,30 @@ const server = http.createServer(async (req, res) => {
       if (!jsonMatch) {
         console.error("[research] analyze: no JSON found in response");
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ searches: [] }));
+        res.end(JSON.stringify({ searches: [], questions: null }));
         return;
       }
 
       const result = JSON.parse(jsonMatch[0]);
       const searches = Array.isArray(result.searches) ? result.searches : [];
+      // Questions are follow-up prompts the user can ASK — no web search needed.
+      // Only surface them when the director produced a non-empty item list.
+      const rawQuestions = result.questions;
+      const questionItems = Array.isArray(rawQuestions?.items)
+        ? rawQuestions.items.filter(
+            (q: { question?: string }) =>
+              q && typeof q.question === "string" && q.question.trim(),
+          )
+        : [];
+      const questions =
+        questionItems.length > 0
+          ? { topic: rawQuestions.topic || "", items: questionItems }
+          : null;
       console.log(
-        `[research] analyze: ${searches.length} searches — ${searches.map((s: { query: string }) => s.query).join(" | ")}`,
+        `[research] analyze: ${searches.length} searches, ${questionItems.length} questions — ${searches.map((s: { query: string }) => s.query).join(" | ")}`,
       );
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ searches }));
+      res.end(JSON.stringify({ searches, questions }));
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";

@@ -35,12 +35,26 @@ export interface AnalyzeSearch {
   claim?: string;
 }
 
+/** A candidate follow-up question the user can ASK the speaker (no web search). */
+export interface AnalyzeQuestionItem {
+  question: string;
+  intent?: string;
+}
+
+export interface AnalyzeQuestions {
+  topic?: string;
+  items: AnalyzeQuestionItem[];
+}
+
 export async function analyzeTranscript(params: {
   transcriptDiff: string;
   fullContext: string;
   documentContext: string;
   searchedTopics: string[];
-}): Promise<{ searches: AnalyzeSearch[] }> {
+}): Promise<{
+  searches: AnalyzeSearch[];
+  questions?: AnalyzeQuestions | null;
+}> {
   const token = await getToken();
   const res = await fetchWithTimeout(`${AI_PROXY_URL}/v1/research/analyze`, {
     method: "POST",

@@ -125,7 +125,7 @@ export function useResearchPipeline({
         try {
           const searchedTopics = useResearchStore.getState().searchedTopics;
 
-          const { searches } = await analyzeTranscript({
+          const { searches, questions } = await analyzeTranscript({
             transcriptDiff: diff.slice(0, 3000),
             fullContext: transcript.slice(-4000),
             documentContext: documentContentRef.current.slice(0, 2000),
@@ -135,6 +135,31 @@ export function useResearchPipeline({
           });
 
           lastAnalyzedLengthRef.current = transcript.length;
+
+          // Speaker-question cards need no web search — the director already
+          // wrote them. Surface immediately as a finished "drawer" of 3–4
+          // candidate questions the user can ask. Added before the searches
+          // early-return so questions still appear when no search is warranted.
+          if (questions && questions.items && questions.items.length > 0) {
+            const topic = questions.topic?.trim() || "スピーカーへの質問";
+            addCard({
+              id: crypto.randomUUID(),
+              timestamp: Date.now(),
+              trigger: topic,
+              query: topic,
+              type: "question",
+              summary: questions.items
+                .map(
+                  (q) => `- ${q.question}${q.intent ? ` — *${q.intent}*` : ""}`,
+                )
+                .join("\n"),
+              sources: [],
+              credibility: "general",
+              integrated: false,
+              expandable: true,
+              loading: false,
+            });
+          }
 
           if (!searches || searches.length === 0) return;
 
