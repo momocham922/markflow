@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useResearchStore } from "@/stores/research-store";
 import type { ResearchCard, ResearchSource } from "@/stores/research-store";
 import { useAppStore } from "@/stores/app-store";
@@ -35,7 +34,17 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
   }
 
   return (
-    <ScrollArea className="research-scroll min-h-0 flex-1">
+    // Native scroll container — Radix ScrollArea does not touch-scroll
+    // reliably in iOS WKWebView. Matches the codebase's mobile-scroll idiom
+    // (Sidebar context menu): overflow-y-auto + momentum + contained overscroll.
+    // Works identically on desktop (native scrollbar).
+    <div
+      className="min-h-0 flex-1 overflow-y-auto"
+      style={{
+        WebkitOverflowScrolling: "touch",
+        overscrollBehavior: "contain",
+      }}
+    >
       <div className="flex flex-col gap-1.5 p-2">
         {cards.map((card) => (
           <ResearchCardItem
@@ -73,6 +82,6 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
           />
         ))}
       </div>
-    </ScrollArea>
+    </div>
   );
 }

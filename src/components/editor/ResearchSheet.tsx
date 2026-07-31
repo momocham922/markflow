@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Search, X, Loader2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useResearchStore } from "@/stores/research-store";
@@ -37,6 +37,59 @@ export function ResearchSheet({
     (document.activeElement as HTMLElement | null)?.blur?.();
   }, []);
 
+  // Swipe-down-to-close via pointer drag on the grab handle. Pointer events
+  // (not HTML5 drag / touch) per this codebase's WKWebView constraints.
+  const [dragY, setDragY] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const dragStartRef = useRef(0);
+  const draggingRef = useRef(false);
+  const pointerIdRef = useRef<number | null>(null);
+
+  const onDragStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    // Ignore a second finger landing mid-drag — it would clobber dragStartRef
+    // and make the sheet jump.
+    if (draggingRef.current) return;
+    draggingRef.current = true;
+    pointerIdRef.current = e.pointerId;
+    dragStartRef.current = e.clientY;
+    setDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const onDragMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current || e.pointerId !== pointerIdRef.current) return;
+    // Downward drags only — clamp negatives so the sheet can't be lifted above
+    // its docked position.
+    setDragY(Math.max(0, e.clientY - dragStartRef.current));
+  }, []);
+
+  const onDragEnd = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingRef.current || e.pointerId !== pointerIdRef.current) return;
+      draggingRef.current = false;
+      pointerIdRef.current = null;
+      // Read the release position directly from the up event (reliable), rather
+      // than via a state updater — decouples dismiss logic from render timing.
+      const y = Math.max(0, e.clientY - dragStartRef.current);
+      setDragging(false);
+      setDragY(0);
+      // Past the threshold → dismiss; otherwise snap back (transition handles
+      // the animation once `dragging` is false).
+      if (y > 110) setMobileSheetOpen(false);
+    },
+    [setMobileSheetOpen],
+  );
+
+  // pointercancel is an OS interruption (banner, palm, capture loss) — always
+  // snap back, never dismiss, even if the finger had passed the threshold.
+  const onDragCancel = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current || e.pointerId !== pointerIdRef.current) return;
+    draggingRef.current = false;
+    pointerIdRef.current = null;
+    setDragging(false);
+    setDragY(0);
+  }, []);
+
   // Sit the sheet on top of the keyboard when it's up; otherwise flush to the
   // bottom (safe-area padding handles the home indicator).
   const bottom = keyboardVisible
@@ -54,10 +107,22 @@ export function ResearchSheet({
       />
       <div
         className="fixed left-0 right-0 z-50 flex flex-col rounded-t-2xl border-t border-border bg-background shadow-2xl safe-bottom"
-        style={{ bottom, maxHeight }}
+        style={{
+          bottom,
+          maxHeight,
+          transform: dragY ? `translateY(${dragY}px)` : undefined,
+          transition: dragging ? "none" : "transform 0.2s ease-out",
+        }}
       >
-        {/* Grab handle */}
-        <div className="flex shrink-0 justify-center pt-2 pb-1">
+        {/* Grab handle — drag down to dismiss */}
+        <div
+          className="flex shrink-0 cursor-grab justify-center pt-3 pb-2 active:cursor-grabbing"
+          style={{ touchAction: "none" }}
+          onPointerDown={onDragStart}
+          onPointerMove={onDragMove}
+          onPointerUp={onDragEnd}
+          onPointerCancel={onDragCancel}
+        >
           <div className="h-1 w-10 rounded-full bg-muted-foreground/30" />
         </div>
 

@@ -110,9 +110,10 @@ function App() {
   const [diffState, setDiffState] = useState<DiffState | null>(null);
   // Research bottom sheet (mobile). The sheet lives here so it shares this
   // component's single useIOSKeyboard instance.
-  const researchCardCount = useResearchStore((s) => s.cards.length);
   const mobileSheetOpen = useResearchStore((s) => s.mobileSheetOpen);
+  const researchCardCount = useResearchStore((s) => s.cards.length);
   const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
+  const researchAnalyzing = useResearchStore((s) => s.analyzing);
   const { viewportHeight, keyboardVisible } = useIOSKeyboard();
   const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(
     sidebarOpen,
@@ -1123,12 +1124,19 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="relative h-11 w-11"
+                        className={cn(
+                          "relative h-11 w-11",
+                          mobileSheetOpen && "bg-accent",
+                        )}
                         onClick={() => setMobileSheetOpen(true)}
                         title="リサーチ"
                       >
-                        <Search className="h-5 w-5" />
-                        <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 text-[9px] font-semibold text-white">
+                        {researchAnalyzing ? (
+                          <Search className="h-5 w-5 animate-pulse text-blue-500" />
+                        ) : (
+                          <Search className="h-5 w-5" />
+                        )}
+                        <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">
                           {researchCardCount}
                         </span>
                       </Button>
