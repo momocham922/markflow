@@ -60,9 +60,10 @@ export function useResearchPipeline({
   // a GLOBAL store (not per-doc), so without a hard reset here the previous
   // document's cards linger when you switch docs or start the next meeting.
   useEffect(() => {
-    // Research is a desktop-only surface — don't hydrate/show it on mobile
-    // (the panel would clutter the small screen when Voice opens).
-    if (isMobile) return;
+    // Switching documents must never show the previous doc's research over the
+    // new one — close the mobile sheet up-front (the desktop panel/floating
+    // window react to the card reset below on their own).
+    useResearchStore.getState().setMobileSheetOpen(false);
     if (!activeDocId) return;
 
     // Reset synchronously and up-front so the previous document's cards are
@@ -104,7 +105,6 @@ export function useResearchPipeline({
   }, [activeDocId]);
 
   useEffect(() => {
-    if (isMobile) return;
     if (isRecording) {
       startSession();
       lastAnalyzedLengthRef.current = 0;
@@ -119,6 +119,18 @@ export function useResearchPipeline({
         const diff = transcript.slice(lastAnalyzedLengthRef.current);
         if (!manual && diff.length < MIN_DIFF_CHARS) return;
         if (manual && diff.length < 30) return;
+
+        // Mobile: automatic research is opt-in (battery/data). Manual "今すぐ
+        // 解析" always runs; automatic ticks are skipped unless the user turned
+        // it on. This MUST return before pendingRef/analyzing are set below —
+        // those flags live outside the try/finally and would leak permanently
+        // (killing all future analysis and pinning the spinner) if set first.
+        if (
+          !manual &&
+          isMobile &&
+          !useResearchStore.getState().mobileLiveResearch
+        )
+          return;
 
         pendingRef.current = true;
         useResearchStore.getState().setAnalyzing(true);

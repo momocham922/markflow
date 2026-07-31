@@ -1,10 +1,19 @@
 import { create } from "zustand";
 
 const INCLUDE_KEY = "markflow:research:includeInStructure";
+const MOBILE_LIVE_KEY = "markflow:research:mobileLiveResearch";
 
 function loadIncludeInStructure(): boolean {
   try {
     return localStorage.getItem(INCLUDE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function loadMobileLiveResearch(): boolean {
+  try {
+    return localStorage.getItem(MOBILE_LIVE_KEY) === "true";
   } catch {
     return false;
   }
@@ -54,6 +63,13 @@ interface ResearchState {
   poppedOut: boolean;
   /** User choice: weave research findings into the structured document. */
   includeInStructure: boolean;
+  /** Mobile: bottom-sheet open/close (transient — not persisted). */
+  mobileSheetOpen: boolean;
+  /**
+   * Mobile: opt-in to automatic live research while recording. Off by default
+   * to protect battery/data; persisted. Manual "今すぐ解析" always works.
+   */
+  mobileLiveResearch: boolean;
 
   startSession: () => void;
   endSession: () => void;
@@ -76,6 +92,8 @@ interface ResearchState {
   setAnalyzing: (v: boolean) => void;
   setPoppedOut: (v: boolean) => void;
   setIncludeInStructure: (v: boolean) => void;
+  setMobileSheetOpen: (v: boolean) => void;
+  setMobileLiveResearch: (v: boolean) => void;
 }
 
 export const useResearchStore = create<ResearchState>((set) => ({
@@ -86,6 +104,8 @@ export const useResearchStore = create<ResearchState>((set) => ({
   analyzing: false,
   poppedOut: false,
   includeInStructure: loadIncludeInStructure(),
+  mobileSheetOpen: false,
+  mobileLiveResearch: loadMobileLiveResearch(),
 
   startSession: () =>
     set({
@@ -136,5 +156,14 @@ export const useResearchStore = create<ResearchState>((set) => ({
       /* ignore */
     }
     set({ includeInStructure: v });
+  },
+  setMobileSheetOpen: (v) => set({ mobileSheetOpen: v }),
+  setMobileLiveResearch: (v) => {
+    try {
+      localStorage.setItem(MOBILE_LIVE_KEY, String(v));
+    } catch {
+      /* ignore */
+    }
+    set({ mobileLiveResearch: v });
   },
 }));

@@ -24,6 +24,8 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { useResearchStore } from "@/stores/research-store";
+import { ResearchSheet } from "@/components/editor/ResearchSheet";
 import {
   PanelLeft,
   History,
@@ -34,6 +36,7 @@ import {
   ArrowLeft,
   Upload,
   Network,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -105,6 +108,11 @@ function App() {
   const [shareOpen, setShareOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [diffState, setDiffState] = useState<DiffState | null>(null);
+  // Research bottom sheet (mobile). The sheet lives here so it shares this
+  // component's single useIOSKeyboard instance.
+  const researchCardCount = useResearchStore((s) => s.cards.length);
+  const mobileSheetOpen = useResearchStore((s) => s.mobileSheetOpen);
+  const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
   const { viewportHeight, keyboardVisible } = useIOSKeyboard();
   const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(
     sidebarOpen,
@@ -1111,6 +1119,20 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 </Button>
                 {viewMode === "editor" && (
                   <>
+                    {isMobile && researchCardCount > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="relative h-11 w-11"
+                        onClick={() => setMobileSheetOpen(true)}
+                        title="リサーチ"
+                      >
+                        <Search className="h-5 w-5" />
+                        <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 text-[9px] font-semibold text-white">
+                          {researchCardCount}
+                        </span>
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="icon"
@@ -1250,6 +1272,14 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               <AiPanel onClose={() => setRightPanel("none")} />
             )}
           </div>
+        )}
+
+        {/* Research bottom sheet — mobile only */}
+        {isMobile && mobileSheetOpen && viewMode === "editor" && (
+          <ResearchSheet
+            viewportHeight={viewportHeight}
+            keyboardVisible={keyboardVisible}
+          />
         )}
 
         {/* Syncing overlay — initial sync or closing sync */}

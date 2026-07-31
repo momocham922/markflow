@@ -8,30 +8,17 @@ import {
   PictureInPicture2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { useResearchStore } from "@/stores/research-store";
-import type { ResearchSource } from "@/stores/research-store";
-import { useAppStore } from "@/stores/app-store";
-import { groundedSearch } from "@/services/research";
-import { getPlatform, isTauri, isMobile } from "@/platform";
-import {
-  openResearchWindow,
-  insertResearchCard,
-} from "@/hooks/use-research-window";
-import { ResearchCardItem } from "./ResearchCardItem";
+import { isTauri, isMobile } from "@/platform";
+import { openResearchWindow } from "@/hooks/use-research-window";
+import { ResearchCardList } from "./ResearchCardList";
 
 const canPopOut = isTauri && !isMobile;
-
-function openExternal(url: string) {
-  getPlatform()
-    .then((p) => p.openExternal(url))
-    .catch((e) => console.error("[research] openExternal failed", e));
-}
 
 /**
  * Desktop: a minimal presence indicator. The actual reading experience is the
@@ -82,13 +69,9 @@ export function ResearchPanel() {
     poppedOut,
     includeInStructure,
     togglePanel,
-    removeCard,
-    updateCard,
     clearCards,
     setIncludeInStructure,
   } = useResearchStore();
-  const setActiveDocId = useAppStore((s) => s.setActiveDocId);
-  const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const isDraggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0, ox: 0, oy: 0 });
@@ -220,46 +203,7 @@ export function ResearchPanel() {
         </div>
       </div>
 
-      <ScrollArea className="research-scroll min-h-0 flex-1">
-        <div className="flex flex-col gap-1.5 p-2">
-          {activeCards.map((card) => (
-            <ResearchCardItem
-              key={card.id}
-              card={card}
-              expanded={expandedCardId === card.id}
-              onToggle={() =>
-                setExpandedCardId(expandedCardId === card.id ? null : card.id)
-              }
-              onDismiss={() => removeCard(card.id)}
-              onInsert={() => insertResearchCard(card)}
-              onRetry={async () => {
-                try {
-                  const result = await groundedSearch(
-                    card.query,
-                    card.type,
-                    card.trigger,
-                    "",
-                  );
-                  updateCard(card.id, {
-                    summary: result.summary,
-                    sources: result.sources.map((s) => ({
-                      ...s,
-                      credibility:
-                        s.credibility as ResearchSource["credibility"],
-                    })),
-                    loading: false,
-                    error: undefined,
-                  });
-                } catch {
-                  updateCard(card.id, { error: "Retry failed" });
-                }
-              }}
-              onOpenInternal={(docId) => setActiveDocId(docId)}
-              onOpenExternal={openExternal}
-            />
-          ))}
-        </div>
-      </ScrollArea>
+      <ResearchCardList cards={activeCards} />
     </div>
   );
 }

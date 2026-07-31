@@ -80,6 +80,37 @@ function ResearchTriggerButton() {
   );
 }
 
+/**
+ * Mobile entry point to the research bottom sheet. The sheet (not this button)
+ * holds the toggles + manual "今すぐ解析", so this stays a compact icon that
+ * never crowds the transcription controls row. Shows a live card count badge.
+ */
+function MobileResearchButton() {
+  const count = useResearchStore((s) => s.cards.length);
+  const analyzing = useResearchStore((s) => s.analyzing);
+  const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="relative h-8 w-8 shrink-0"
+      onClick={() => setMobileSheetOpen(true)}
+      title="リサーチ"
+    >
+      {analyzing ? (
+        <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+      ) : (
+        <Search className="h-4 w-4" />
+      )}
+      {count > 0 && (
+        <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-500 px-1 text-[9px] font-semibold text-white">
+          {count}
+        </span>
+      )}
+    </Button>
+  );
+}
+
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -935,7 +966,7 @@ export function VoicePanel({
 
       {/* Controls */}
       <div
-        className={`flex items-center border-t border-border/50 ${isMobile ? "gap-1.5 px-2 py-2" : "gap-2 px-3 py-2"}`}
+        className={`flex items-center border-t border-border/50 ${isMobile ? "gap-1.5 px-2 py-2 overflow-x-auto" : "gap-2 px-3 py-2"}`}
       >
         <Button
           variant={isRecording ? "destructive" : "default"}
@@ -1038,7 +1069,8 @@ export function VoicePanel({
           <option value={300}>5min</option>
         </select>
 
-        {isRecording && <ResearchTriggerButton />}
+        {isRecording && !isMobile && <ResearchTriggerButton />}
+        {isMobile && <MobileResearchButton />}
 
         <Button
           variant="outline"
