@@ -130,7 +130,17 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       });
     } catch (err) {
       console.error("[entitlement] fetch failed:", err);
-      set({ loading: false });
+      // If a PRIOR fetch already confirmed this user is NOT the owner, drop any
+      // lingering viewAs so we stop sending a pointless (server-ignored)
+      // X-View-As header while offline. An owner's preview (loaded && isOwner)
+      // and the pre-first-fetch state (loaded === false) are left untouched.
+      const s = get();
+      if (s.loaded && !s.isOwner && s.viewAs) {
+        persistViewAs(null);
+        set({ viewAs: null, loading: false });
+      } else {
+        set({ loading: false });
+      }
     }
   },
 

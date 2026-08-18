@@ -517,6 +517,24 @@ export function VoicePanel({
       }
     } catch (err) {
       console.error("[voice] Structuring failed:", err);
+      // Surface the failure so a manual "Structure" click never fails silently
+      // (the user would otherwise stare at an unchanged document). Auto-runs
+      // stay quiet — they retry on the next interval, and quota 429s already
+      // raise the global banner via reportIfQuota().
+      if (manual) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isNetwork =
+          /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
+            msg,
+          );
+        setVoiceError(
+          isNetwork
+            ? "構造化中に通信エラーが発生しました。もう一度「Structure」を押して再試行してください。"
+            : `構造化に失敗しました: ${msg}`,
+        );
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+      }
     } finally {
       setStructuring(false);
       structuringRef.current = false;

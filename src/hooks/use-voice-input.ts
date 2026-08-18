@@ -260,9 +260,16 @@ export function useVoiceInput({
             continue;
           }
           console.error("[voice] Transcription error:", err);
-          if (!isAbort) {
-            onErrorRef.current?.(`Transcription error: ${err}`);
-          }
+          // Retries are exhausted. The AbortController here is fired ONLY by the
+          // 60s timeout above (there is no external/intentional abort of this
+          // fetch), so an abort at this point means this live segment was lost —
+          // surface it instead of dropping it silently, so the user knows a
+          // portion may be missing (Refine re-transcribes the full audio later).
+          onErrorRef.current?.(
+            isAbort
+              ? "音声区間の文字起こしがタイムアウトしました。この区間は取り込めていない可能性があります（録音停止後の「Refine」で全体を再文字起こしできます）。"
+              : `Transcription error: ${err}`,
+          );
           return;
         }
       }

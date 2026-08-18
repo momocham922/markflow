@@ -22,13 +22,33 @@ function openExternal(url: string) {
 export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
   const removeCard = useResearchStore((s) => s.removeCard);
   const updateCard = useResearchStore((s) => s.updateCard);
+  const analysisError = useResearchStore((s) => s.analysisError);
+  const setAnalysisError = useResearchStore((s) => s.setAnalysisError);
   const setActiveDocId = useAppStore((s) => s.setActiveDocId);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
+  // Dismissible inline banner for a manual-analyze failure (network/server).
+  // Rendered above both the empty state and the list so it always surfaces.
+  const errorBanner = analysisError ? (
+    <div className="m-2 flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+      <span className="min-w-0 break-words">{analysisError}</span>
+      <button
+        className="shrink-0 rounded px-1 font-medium hover:bg-destructive/20"
+        onClick={() => setAnalysisError(null)}
+        title="閉じる"
+      >
+        ✕
+      </button>
+    </div>
+  ) : null;
+
   if (cards.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6 text-center text-xs text-muted-foreground">
-        録音すると、会議内容に関するリサーチがここに表示されます。
+      <div className="flex flex-1 flex-col">
+        {errorBanner}
+        <div className="flex flex-1 items-center justify-center p-6 text-center text-xs text-muted-foreground">
+          録音すると、会議内容に関するリサーチがここに表示されます。
+        </div>
       </div>
     );
   }
@@ -45,6 +65,7 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
         overscrollBehavior: "contain",
       }}
     >
+      {errorBanner}
       <div className="flex flex-col gap-1.5 p-2">
         {cards.map((card) => (
           <ResearchCardItem

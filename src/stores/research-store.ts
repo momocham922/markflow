@@ -60,6 +60,12 @@ interface ResearchState {
   searchedTopics: string[];
   panelVisible: boolean;
   analyzing: boolean;
+  /**
+   * Last non-quota analysis failure surfaced to the user (e.g. a manual
+   * "今すぐ解析" that hit a network/server error). Quota (429) errors are shown
+   * by the global upsell banner instead. null = no error. Dismissible.
+   */
+  analysisError: string | null;
   poppedOut: boolean;
   /** User choice: weave research findings into the structured document. */
   includeInStructure: boolean;
@@ -90,6 +96,7 @@ interface ResearchState {
   togglePanel: () => void;
   clearCards: () => void;
   setAnalyzing: (v: boolean) => void;
+  setAnalysisError: (v: string | null) => void;
   setPoppedOut: (v: boolean) => void;
   setIncludeInStructure: (v: boolean) => void;
   setMobileSheetOpen: (v: boolean) => void;
@@ -102,6 +109,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
   searchedTopics: [],
   panelVisible: true,
   analyzing: false,
+  analysisError: null,
   poppedOut: false,
   includeInStructure: loadIncludeInStructure(),
   mobileSheetOpen: false,
@@ -113,6 +121,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
       cards: [],
       searchedTopics: [],
       analyzing: false,
+      analysisError: null,
     }),
   endSession: () => set({ sessionActive: false }),
   hydrateCards: (cards) => set({ cards }),
@@ -146,8 +155,9 @@ export const useResearchStore = create<ResearchState>((set) => ({
   addSearchedTopic: (topic) =>
     set((s) => ({ searchedTopics: [...s.searchedTopics, topic] })),
   togglePanel: () => set((s) => ({ panelVisible: !s.panelVisible })),
-  clearCards: () => set({ cards: [], searchedTopics: [] }),
+  clearCards: () => set({ cards: [], searchedTopics: [], analysisError: null }),
   setAnalyzing: (v) => set({ analyzing: v }),
+  setAnalysisError: (v) => set({ analysisError: v }),
   setPoppedOut: (v) => set({ poppedOut: v }),
   setIncludeInStructure: (v) => {
     try {

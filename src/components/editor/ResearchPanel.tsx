@@ -66,6 +66,7 @@ export function ResearchPanel() {
     cards,
     panelVisible,
     analyzing,
+    analysisError,
     poppedOut,
     includeInStructure,
     togglePanel,
@@ -136,8 +137,11 @@ export function ResearchPanel() {
     );
   }
 
-  // Web fallback (no detach available): full in-app panel.
-  if (!panelVisible || activeCards.length === 0) return null;
+  // Web fallback (no detach available): full in-app panel. Stay mounted when a
+  // (dismissible) analysis error is present so a manual-analyze failure with no
+  // cards yet still surfaces instead of the panel silently vanishing.
+  if (!panelVisible || (activeCards.length === 0 && !analysisError))
+    return null;
 
   return (
     <div

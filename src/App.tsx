@@ -92,6 +92,10 @@ function App() {
   const syncing = useAuthStore((s) => s.syncing);
   // Monetization: owner view-as preview + quota upsell banners
   const viewAsPlan = useEntitlementStore((s) => s.viewAs);
+  // Server-confirmed owner flag — gates the view-as preview banner so a stale
+  // persisted viewAs (localStorage) can never surface the banner for a
+  // non-owner or before the first entitlement fetch reconciles it.
+  const isOwner = useEntitlementStore((s) => s.isOwner);
   const setViewAs = useEntitlementStore((s) => s.setViewAs);
   const resetPreviewUsage = useEntitlementStore((s) => s.resetPreviewUsage);
   const lastQuotaError = useEntitlementStore((s) => s.lastQuotaError);
@@ -912,7 +916,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           </div>
         )}
         {/* Owner view-as preview banner (三田遼平 only; shown while previewing) */}
-        {viewAsPlan && (
+        {viewAsPlan && isOwner && (
           <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-500 px-4 py-1.5 text-black text-xs shrink-0">
             <span className="font-medium">
               プレビュー中: 一般ユーザー（{planLabel(viewAsPlan)}

@@ -47,11 +47,28 @@ export interface AnalyzeQuestions {
   items: AnalyzeQuestionItem[];
 }
 
+/**
+ * Thrown when the server blocks a research call by plan capability (not quota).
+ * Currently only automatic live research on Free (MONETIZATION.md §1.3). The
+ * pipeline treats this as "silently stop auto research" rather than an error.
+ */
+export class FeatureGatedError extends Error {
+  feature: string;
+  constructor(feature: string) {
+    super(`feature_gated: ${feature}`);
+    this.name = "FeatureGatedError";
+    this.feature = feature;
+  }
+}
+
 export async function analyzeTranscript(params: {
   transcriptDiff: string;
   fullContext: string;
   documentContext: string;
   searchedTopics: string[];
+  /** True for automatic (interval) runs; false/omitted for a manual trigger.
+   * The server gates automatic research to Pro+ (Free is manual-only). */
+  auto?: boolean;
 }): Promise<{
   searches: AnalyzeSearch[];
   questions?: AnalyzeQuestions | null;
@@ -63,7 +80,17 @@ export async function analyzeTranscript(params: {
     body: JSON.stringify(params),
   });
   if (!res.ok) {
-    reportIfQuota(res.status, await res.text().catch(() => ""));
+    const bodyText = await res.text().catch(() => "");
+    reportIfQuota(res.status, bodyText);
+    if (res.status === 403 && bodyText.includes("feature_gated")) {
+      let feature = "autoResearch";
+      try {
+        feature = JSON.parse(bodyText).feature || feature;
+      } catch {
+        /* keep default */
+      }
+      throw new FeatureGatedError(feature);
+    }
     throw new Error(`Research analyze failed: ${res.status}`);
   }
   return res.json();

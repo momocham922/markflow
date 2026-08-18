@@ -1,7 +1,12 @@
 import { useRef, useEffect } from "react";
 import { useResearchStore } from "@/stores/research-store";
-import { analyzeTranscript, groundedSearch } from "@/services/research";
+import {
+  analyzeTranscript,
+  groundedSearch,
+  FeatureGatedError,
+} from "@/services/research";
 import { useAuthStore } from "@/stores/auth-store";
+import { useEntitlementStore } from "@/stores/entitlement-store";
 import {
   saveResearchSession,
   fetchResearchSessions,
@@ -132,8 +137,17 @@ export function useResearchPipeline({
         )
           return;
 
+        // Capability gate (MONETIZATION.md §1.3): Free is manual-only for live
+        // research — automatic (interval) runs are Pro+. Skip auto ticks for
+        // Free up-front so we never fire a request the server will 403 every
+        // 45s. Manual triggers fall through (they hit the aiCalls quota for all
+        // plans). The server enforces this too; this just avoids the spam.
+        if (!manual && useEntitlementStore.getState().effectivePlan === "free")
+          return;
+
         pendingRef.current = true;
         useResearchStore.getState().setAnalyzing(true);
+        useResearchStore.getState().setAnalysisError(null);
         try {
           const searchedTopics = useResearchStore.getState().searchedTopics;
 
@@ -144,6 +158,8 @@ export function useResearchPipeline({
             // Cap to the most recent topics — an unbounded list bloats the
             // prompt over long sessions and makes the director return nothing.
             searchedTopics: searchedTopics.slice(-40),
+            // Lets the server apply the §1.3 auto-research capability gate.
+            auto: !manual,
           });
 
           lastAnalyzedLengthRef.current = transcript.length;
@@ -251,7 +267,28 @@ export function useResearchPipeline({
             }
           }
         } catch (err) {
+          // A capability gate (Free + auto research) is expected, not an error:
+          // the client already skips Free auto runs, so this only fires for a
+          // tampered client. Swallow it silently — never surface or log noise.
+          if (err instanceof FeatureGatedError) return;
           console.error("[research] Pipeline error:", err);
+          // Surface a MANUAL "今すぐ解析" failure so the button press never fails
+          // silently. Auto ticks stay quiet (the next interval retries), and
+          // quota 429s already raise the global upsell banner via reportIfQuota.
+          if (manual) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const isNetwork =
+              /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
+                msg,
+              );
+            useResearchStore
+              .getState()
+              .setAnalysisError(
+                isNetwork
+                  ? "リサーチ解析中に通信エラーが発生しました。もう一度お試しください。"
+                  : `リサーチ解析に失敗しました: ${msg}`,
+              );
+          }
         } finally {
           pendingRef.current = false;
           useResearchStore.getState().setAnalyzing(false);
