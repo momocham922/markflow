@@ -126,5 +126,27 @@ service cloud.firestore {
       allow create: if request.auth != null;
       allow read: if request.auth != null;
     }
+
+    // Entitlements: server-write-only source of truth for paid plan status.
+    // Written exclusively by the ai-proxy / billing webhooks via the Admin SDK
+    // (which bypasses these rules). Clients may read their own to render UI
+    // (current plan, upsell), but MUST NOT write — otherwise a user could
+    // grant themselves Pro from devtools.
+    match /entitlements/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // Usage counters: server-write-only monthly metering (usage/{uid}/months/{yyyy-mm}).
+    // Clients may read their own to show remaining quota; only the server writes.
+    match /usage/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+
+      match /months/{period} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+    }
   }
 }

@@ -1,6 +1,7 @@
 import http from "http";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
@@ -98,6 +99,140 @@ async function verifyFirebaseToken(
   return decoded.uid;
 }
 
+// =====================================================================
+// Entitlement & usage metering (monetization P0)
+// ---------------------------------------------------------------------
+// Source of truth: Firestore `entitlements/{uid}` — SERVER-WRITE-ONLY (see
+// firebase/firestore.rules; clients can read their own but never write).
+// Usage counters live at `usage/{uid}/months/{yyyy-mm}` (also server-only).
+//
+// Internal staff (plan "internal") bypass all metering — MarkFlow is currently
+// an internal tool and staff cost is intentionally unbounded. Free/Pro/Team are
+// metered per calendar month (UTC) and blocked with HTTP 429 when over limit.
+// Enforcement lives here at the proxy boundary because it is the only
+// tamper-proof gate (client gates are bypassable via devtools + ID token).
+// =====================================================================
+type Plan = "free" | "pro" | "team" | "internal";
+type Feature = "aiCalls" | "sttCalls" | "batchMin" | "images";
+
+// Per-plan monthly limits. -1 (or a missing key) = unlimited for that feature.
+// NOTE: launch placeholders — tune against real COGS before public launch.
+const PLAN_LIMITS: Record<
+  Exclude<Plan, "internal">,
+  Record<Feature, number>
+> = {
+  free: { aiCalls: 30, sttCalls: 100, batchMin: 60, images: 5 },
+  pro: { aiCalls: 2000, sttCalls: 6000, batchMin: 3000, images: 500 },
+  team: { aiCalls: 4000, sttCalls: 12000, batchMin: 6000, images: 1000 },
+};
+
+// Operational fail-safe: uids listed here are always treated as internal even
+// if their entitlement doc is unreadable. Set via Cloud Run env INTERNAL_UIDS
+// (comma-separated) so staff can never be blocked by a Firestore blip.
+const INTERNAL_UIDS = new Set(
+  (process.env.INTERNAL_UIDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
+const entCache = new Map<string, { plan: Plan; at: number }>();
+const ENT_TTL_MS = 60_000;
+
+async function loadEntitlement(uid: string): Promise<Plan> {
+  const cached = entCache.get(uid);
+  const now = Date.now();
+  if (cached && now - cached.at < ENT_TTL_MS) return cached.plan;
+  try {
+    const snap = await getFirestore().collection("entitlements").doc(uid).get();
+    let plan: Plan = "free";
+    if (snap.exists) {
+      const data = snap.data() || {};
+      const p = String(data.plan || "free") as Plan;
+      const status = String(data.status || "active");
+      // Only active/grace entitlements grant paid access; else fall back to free.
+      const paidOk = status === "active" || status === "grace";
+      plan =
+        p === "internal"
+          ? "internal"
+          : paidOk && (p === "pro" || p === "team")
+            ? p
+            : "free";
+    }
+    entCache.set(uid, { plan, at: now });
+    return plan;
+  } catch (err) {
+    // Fail to "free" (NOT unlimited) so a Firestore blip can neither break the
+    // product nor leak unlimited cost. Logged explicitly — never silent.
+    console.error(`loadEntitlement failed for ${uid}:`, err);
+    return "free";
+  }
+}
+
+function periodKey(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+/**
+ * Atomically check + consume `cost` units of `feature` for `uid`.
+ * Returns true if the request may proceed. If over limit, writes a 429
+ * response and returns false — the caller MUST `return` immediately.
+ * Internal staff bypass metering entirely (no Firestore cost).
+ */
+async function guard(
+  res: http.ServerResponse,
+  uid: string,
+  feature: Feature,
+  cost = 1,
+): Promise<boolean> {
+  if (INTERNAL_UIDS.has(uid)) return true;
+  const plan = await loadEntitlement(uid);
+  if (plan === "internal") return true;
+  const limit = PLAN_LIMITS[plan]?.[feature] ?? -1;
+  if (limit < 0) return true; // unlimited for this feature/plan
+  const ym = periodKey(new Date());
+  const db = getFirestore();
+  const ref = db.collection("usage").doc(uid).collection("months").doc(ym);
+  try {
+    const result = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const used = snap.exists ? Number(snap.data()?.[feature] || 0) || 0 : 0;
+      if (used + cost > limit) return { blocked: true, used };
+      tx.set(
+        ref,
+        {
+          [feature]: FieldValue.increment(cost),
+          plan,
+          period: ym,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return { blocked: false, used };
+    });
+    if (result.blocked) {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "quota_exceeded",
+          feature,
+          plan,
+          limit,
+          used: result.used,
+        }),
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    // Fail-open on metering-infra error: don't break AI for a DB blip. Logged.
+    console.error(`guard tx failed for ${uid}/${feature}:`, err);
+    return true;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -177,7 +312,7 @@ const server = http.createServer(async (req, res) => {
   // --- /v1/voice/transcribe ---
   if (req.url === "/v1/voice/transcribe") {
     try {
-      await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
       const audio: string = parsed.audio; // base64-encoded audio
@@ -188,6 +323,8 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "audio is required" }));
         return;
       }
+
+      if (!(await guard(res, uid, "sttCalls", 1))) return;
 
       const accessToken = await getGcpAccessToken();
       const sttUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`;
@@ -364,6 +501,13 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "Access denied: invalid audio path" }));
         return;
       }
+
+      const batchMin = Math.max(
+        1,
+        Math.ceil(chunks.reduce((s, c) => s + (c.durationSec || 0), 0) / 60),
+      );
+      if (!(await guard(res, uid, "batchMin", batchMin))) return;
+
       const multi = chunks.length > 1;
 
       const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
@@ -590,7 +734,7 @@ const server = http.createServer(async (req, res) => {
   // --- /v1/image/generate ---
   if (req.url === "/v1/image/generate") {
     try {
-      await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
       const prompt: string = parsed.prompt;
@@ -599,6 +743,8 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "prompt is required" }));
         return;
       }
+
+      if (!(await guard(res, uid, "images", 1))) return;
 
       const accessToken = await getGcpAccessToken();
       const geminiRes = await fetch(getNanoBananaUrl(), {
@@ -666,7 +812,7 @@ const server = http.createServer(async (req, res) => {
   // --- /v1/research/analyze (Research Director — Claude Opus) ---
   if (req.url === "/v1/research/analyze") {
     try {
-      await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
       const transcriptDiff: string = parsed.transcriptDiff || "";
@@ -679,6 +825,8 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "transcriptDiff is required" }));
         return;
       }
+
+      if (!(await guard(res, uid, "aiCalls", 1))) return;
 
       const accessToken = await getGcpAccessToken();
 
@@ -843,7 +991,7 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
   // --- /v1/research/grounded-search ---
   if (req.url === "/v1/research/grounded-search") {
     try {
-      await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
       const parsed = JSON.parse(body);
       const query: string = parsed.query || "";
@@ -856,6 +1004,8 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         res.end(JSON.stringify({ error: "query is required" }));
         return;
       }
+
+      if (!(await guard(res, uid, "aiCalls", 1))) return;
 
       const accessToken = await getGcpAccessToken();
 
@@ -960,11 +1110,13 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
   try {
     // Verify Firebase auth
-    await verifyFirebaseToken(req.headers.authorization);
+    const uid = await verifyFirebaseToken(req.headers.authorization);
 
     const body = await readBody();
     const parsed = JSON.parse(body);
     const isStream = parsed.stream === true;
+
+    if (!(await guard(res, uid, "aiCalls", 1))) return;
 
     // Build Vertex AI request (model is in URL, not body)
     const vertexBody: Record<string, unknown> = {
