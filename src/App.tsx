@@ -45,6 +45,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { onLocalEdit } from "@/lib/local-edit-signal";
 import TurndownService from "turndown";
 import { marked } from "marked";
 import { getPlatform, isIOS, isMobile, isMac } from "@/platform";
@@ -352,17 +353,12 @@ function App() {
     };
   }, [activeDocId, flushEditNotification]);
 
-  // Detect edits via store subscription (updateDocument triggers updatedAt change)
-  const lastUpdatedAtRef = useRef<number>(0);
+  // Detect *local* user edits only. A store-wide updatedAt watcher would also
+  // fire for remote collaborator edits synced from Firestore/Yjs, title
+  // auto-derive, and folder moves — all mis-attributed to the current user.
+  // The editor emits a local-edit signal that already excludes remote sync.
   useEffect(() => {
-    const unsub = useAppStore.subscribe((state) => {
-      const doc = state.documents.find((d) => d.id === state.activeDocId);
-      if (doc && doc.updatedAt > lastUpdatedAtRef.current) {
-        lastUpdatedAtRef.current = doc.updatedAt;
-        markDocEdited(doc.id, doc.title);
-      }
-    });
-    return unsub;
+    return onLocalEdit(({ docId, title }) => markDocEdited(docId, title));
   }, [markDocEdited]);
 
   // Flush on app close (augment existing onWindowClose)

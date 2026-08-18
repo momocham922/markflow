@@ -130,12 +130,25 @@ export async function signInWithGoogle(): Promise<User | null> {
     // Wait for the OAuth callback event from Rust
     const authCode = await new Promise<string>((resolve, reject) => {
       let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        clearTimeout(timeoutId);
+      };
+      // Route launch failures through the same settle+cleanup path so a
+      // failed browser open doesn't leak the 300s timer and event listeners.
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
 
       const unlistenOk = listen<string>("oauth-callback", (event) => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           resolve(event.payload);
         }
       });
@@ -143,17 +156,15 @@ export async function signInWithGoogle(): Promise<User | null> {
       const unlistenErr = listen<string>("oauth-error", (event) => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           reject(new Error(event.payload));
         }
       });
 
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           invoke("dismiss_safari_vc").catch(() => {});
           reject(new Error("Authentication timed out"));
         }
@@ -163,12 +174,12 @@ export async function signInWithGoogle(): Promise<User | null> {
       import("@/platform")
         .then(({ isIOS: isIOSPlatform }) => {
           if (isIOSPlatform) {
-            invoke("open_safari_vc", { url: authUrl }).catch(reject);
+            invoke("open_safari_vc", { url: authUrl }).catch(fail);
           } else {
-            invoke("open_external_url", { url: authUrl }).catch(reject);
+            invoke("open_external_url", { url: authUrl }).catch(fail);
           }
         })
-        .catch(reject);
+        .catch(fail);
     });
 
     // Exchange code for tokens
@@ -213,12 +224,25 @@ export async function signInWithGoogle(): Promise<User | null> {
 
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      unlistenOk.then((fn) => fn());
+      unlistenErr.then((fn) => fn());
+      clearTimeout(timeoutId);
+    };
+    // Route launch failures through the same settle+cleanup path so a
+    // failed browser open doesn't leak the 300s timer and event listeners.
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
 
     const unlistenOk = platform.onOAuthCallback((code) => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         resolve(code);
       }
     });
@@ -226,22 +250,20 @@ export async function signInWithGoogle(): Promise<User | null> {
     const unlistenErr = platform.onOAuthError((error) => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         reject(new Error(error));
       }
     });
 
-    setTimeout(() => {
+    timeoutId = setTimeout(() => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         reject(new Error("Authentication timed out"));
       }
     }, 300000);
 
-    platform.openExternal(authUrl).catch(reject);
+    platform.openExternal(authUrl).catch(fail);
   });
 
   const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
@@ -297,27 +319,38 @@ export async function signInWithGitHub(): Promise<User | null> {
 
     const authCode = await new Promise<string>((resolve, reject) => {
       let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        clearTimeout(timeoutId);
+      };
+      // Route launch failures through the same settle+cleanup path so a
+      // failed browser open doesn't leak the 300s timer and event listeners.
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
       const unlistenOk = listen<string>("oauth-callback", (event) => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           resolve(event.payload);
         }
       });
       const unlistenErr = listen<string>("oauth-error", (event) => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           reject(new Error(event.payload));
         }
       });
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           invoke("dismiss_safari_vc").catch(() => {});
           reject(new Error("Authentication timed out"));
         }
@@ -325,12 +358,12 @@ export async function signInWithGitHub(): Promise<User | null> {
       import("@/platform")
         .then(({ isIOS: isIOSPlatform }) => {
           if (isIOSPlatform) {
-            invoke("open_safari_vc", { url: authUrl }).catch(reject);
+            invoke("open_safari_vc", { url: authUrl }).catch(fail);
           } else {
-            invoke("open_external_url", { url: authUrl }).catch(reject);
+            invoke("open_external_url", { url: authUrl }).catch(fail);
           }
         })
-        .catch(reject);
+        .catch(fail);
     });
 
     const tokenResponse = await fetch(
@@ -375,31 +408,42 @@ export async function signInWithGitHub(): Promise<User | null> {
 
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      unlistenOk.then((fn) => fn());
+      unlistenErr.then((fn) => fn());
+      clearTimeout(timeoutId);
+    };
+    // Route launch failures through the same settle+cleanup path so a
+    // failed browser open doesn't leak the 300s timer and event listeners.
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
     const unlistenOk = platform.onOAuthCallback((code) => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         resolve(code);
       }
     });
     const unlistenErr = platform.onOAuthError((error) => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         reject(new Error(error));
       }
     });
-    setTimeout(() => {
+    timeoutId = setTimeout(() => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         reject(new Error("Authentication timed out"));
       }
     }, 300000);
-    platform.openExternal(authUrl).catch(reject);
+    platform.openExternal(authUrl).catch(fail);
   });
 
   const tokenResponse = await fetch(

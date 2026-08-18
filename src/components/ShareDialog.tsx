@@ -149,6 +149,9 @@ export function ShareDialog({
           folder: activeDoc.folder,
           tags: activeDoc.tags,
           titlePinned: activeDoc.titlePinned,
+          // Keep the staleness guard active so a stale local copy can't
+          // clobber a newer remote edit (a non-existent doc still creates).
+          updatedAt: activeDoc.updatedAt,
         });
       }
       const link = await enableShareLink(activeDocId, linkPermission);
@@ -232,6 +235,9 @@ export function ShareDialog({
           folder: activeDoc.folder,
           tags: activeDoc.tags,
           titlePinned: activeDoc.titlePinned,
+          // Keep the staleness guard active so a stale local copy can't
+          // clobber a newer remote edit (a non-existent doc still creates).
+          updatedAt: activeDoc.updatedAt,
         });
       }
       await addCollaborator(activeDocId, inviteEmail.trim(), inviteRole);
@@ -274,6 +280,24 @@ export function ShareDialog({
   const handleSaveSlackConfig = async () => {
     if (!activeDocId) return;
     try {
+      // slackConfig is merged into the Firestore doc; a personal doc that was
+      // never synced would otherwise be rejected (partial create, no ownerId).
+      if (activeDoc && user) {
+        const { saveDocumentToFirestore } = await import("@/services/firebase");
+        await saveDocumentToFirestore({
+          id: activeDoc.id,
+          title: activeDoc.title,
+          content: activeDoc.content,
+          ownerId: user.uid,
+          ownerName: user.displayName || user.email || undefined,
+          folder: activeDoc.folder,
+          tags: activeDoc.tags,
+          titlePinned: activeDoc.titlePinned,
+          // Keep the staleness guard active so a stale local copy can't
+          // clobber a newer remote edit (a non-existent doc still creates).
+          updatedAt: activeDoc.updatedAt,
+        });
+      }
       await saveSlackNotifyConfig(activeDocId, slackConfig);
       setSlackSaved(true);
       setTimeout(() => setSlackSaved(false), 2000);

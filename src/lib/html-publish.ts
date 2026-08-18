@@ -80,6 +80,11 @@ export function generatePublishHtml(opts: PublishOptions): string {
 
   // Configure marked with heading IDs
   const renderer = new marked.Renderer();
+  // Dedup identical heading slugs (GitHub-style -1/-2) so TOC anchors don't all
+  // resolve to the first heading of a given title. Track the fully-resolved ids
+  // (not just base counts): a generated "foo-1" must not collide with an
+  // explicit heading whose own slug is already "foo-1".
+  const usedIds = new Set<string>();
   renderer.heading = function ({
     text,
     depth,
@@ -87,7 +92,14 @@ export function generatePublishHtml(opts: PublishOptions): string {
     text: string;
     depth: number;
   }) {
-    const id = slugify(text);
+    const base = slugify(text) || "section";
+    let id = base;
+    let n = 1;
+    while (usedIds.has(id)) {
+      id = `${base}-${n}`;
+      n++;
+    }
+    usedIds.add(id);
     return `<h${depth} id="${id}">${text}</h${depth}>`;
   };
   renderer.code = function ({ text, lang }: { text: string; lang?: string }) {

@@ -36,6 +36,43 @@ const GCS_BUCKET =
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
 
+// Safely send a JSON error. If headers were already sent (a stream started, or the
+// client disconnected mid-response), writing a status throws ERR_HTTP_HEADERS_SENT,
+// which would surface as an unhandled rejection and crash the instance — so just
+// close the socket instead.
+function sendJsonError(
+  res: http.ServerResponse,
+  status: number,
+  message: string,
+): void {
+  if (res.headersSent) {
+    if (!res.writableEnded) res.end();
+    return;
+  }
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: message }));
+}
+
+/**
+ * A thrown error is an auth failure when it comes from token verification.
+ * Every endpoint should surface these as 401 (not 500) so the client can drive
+ * a re-auth / token-refresh flow instead of treating it as a server outage.
+ *
+ * INVARIANT: this substring test is only safe because the ONLY errors reaching
+ * the outer catches are our own token-verification throws — every endpoint
+ * writes upstream (Vertex/GCP) failures via their own `!res.ok` status and never
+ * `throw`s the upstream body up. If you ever re-throw an upstream error body
+ * into an outer catch, a GCP 401/403 whose text contains "Authorization" would
+ * be mis-reported to the client as an auth failure, masking a real 5xx outage.
+ */
+function isAuthErrorMessage(message: string): boolean {
+  return (
+    message.includes("Authorization") ||
+    message.includes("Firebase ID token") ||
+    message.includes("Decoding Firebase ID token")
+  );
+}
+
 function getVertexAiUrl(): string {
   // The global endpoint host has no region prefix.
   const host =
@@ -427,14 +464,7 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
-      const isAuthError =
-        message.includes("Authorization") ||
-        message.includes("Firebase ID token") ||
-        message.includes("Decoding Firebase ID token");
-      res.writeHead(isAuthError ? 401 : 500, {
-        "Content-Type": "application/json",
-      });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
       return;
     }
   }
@@ -463,14 +493,7 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
-      const isAuthError =
-        message.includes("Authorization") ||
-        message.includes("Firebase ID token") ||
-        message.includes("Decoding Firebase ID token");
-      res.writeHead(isAuthError ? 401 : 500, {
-        "Content-Type": "application/json",
-      });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
       return;
     }
   }
@@ -621,8 +644,7 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
     } finally {
       // Refund the reserved sttCall if the upstream STT failed / threw.
       await refundIfUncommitted(g, committed);
@@ -912,8 +934,7 @@ const server = http.createServer(async (req, res) => {
       const message =
         err instanceof Error ? err.message : "Internal server error";
       console.error(`[batch] Error: ${message}`);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
     } finally {
       // On any non-success path (transcription 502, timeout, throw) refund the
       // full reserve so a failed batch never costs the user minutes.
@@ -998,8 +1019,7 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
     } finally {
       // Refund the reserved image credit if generation failed / threw.
       await refundIfUncommitted(g, committed);
@@ -1207,8 +1227,7 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
       const message =
         err instanceof Error ? err.message : "Internal server error";
       console.error(`[research] analyze error: ${message}`);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
     } finally {
       // Refund the reserved aiCall if the upstream Vertex call failed / threw.
       await refundIfUncommitted(g, committed);
@@ -1327,8 +1346,7 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
       const message =
         err instanceof Error ? err.message : "Internal server error";
       console.error(`[research] grounded-search error: ${message}`);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
     } finally {
       // Refund the reserved aiCall if the upstream Gemini call failed / threw.
       await refundIfUncommitted(g, committed);
@@ -1420,18 +1438,30 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Internal server error";
-    const isAuthError =
-      message.includes("Authorization") ||
-      message.includes("Firebase ID token") ||
-      message.includes("Decoding Firebase ID token");
-    res.writeHead(isAuthError ? 401 : 500, {
-      "Content-Type": "application/json",
-    });
-    res.end(JSON.stringify({ error: message }));
+    // If the SSE stream already started, headers are sent — we cannot write an
+    // error status. Writing one throws ERR_HTTP_HEADERS_SENT which would surface
+    // as an unhandled rejection and crash the instance. Just close the socket.
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+    } else {
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
+    }
   } finally {
     // Refund the reserved aiCall if /v1/chat failed before Vertex accepted it.
     await refundIfUncommitted(g, committed);
   }
+});
+
+// Backstop: never let a stray async error tear down the whole instance and drop
+// every in-flight request. Per-request handlers already catch their own errors;
+// these catch anything that slips through (e.g. a socket write after the client
+// vanished, or a timer callback that rejects). Log and keep serving — Cloud Run
+// will recycle the instance if it becomes genuinely unhealthy.
+process.on("unhandledRejection", (reason) => {
+  console.error("[proxy] Unhandled promise rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[proxy] Uncaught exception:", err);
 });
 
 server.listen(PORT, "0.0.0.0", () => {

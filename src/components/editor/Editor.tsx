@@ -25,6 +25,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
+import { emitLocalEdit } from "@/lib/local-edit-signal";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import { imagePaste, processImagePath } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
@@ -803,11 +804,18 @@ export function Editor() {
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
+      // Non-collab (personal) docs edit through this controlled onChange path.
+      // Collab docs are handled in onUpdate (isUserEvent-gated) to exclude
+      // remote yCollab sync — don't double-emit here.
+      if (!isCollabReadyRef.current) {
+        emitLocalEdit(activeDocId, updates.title ?? activeDoc?.title ?? "");
+      }
     },
     [
       activeDocId,
       activeDoc?.titlePinned,
       activeDoc?.ownerId,
+      activeDoc?.title,
       user?.uid,
       updateDocument,
     ],
@@ -846,7 +854,14 @@ export function Editor() {
               tr.isUserEvent("redo") ||
               tr.isUserEvent("move")),
         );
-        if (hasLocal) markLocalEditRef.current();
+        if (hasLocal) {
+          markLocalEditRef.current();
+          // Attribute Slack edit-notifications to the current user only.
+          // Read the active doc fresh so title/id are never stale.
+          const st = useAppStore.getState();
+          const d = st.documents.find((x) => x.id === st.activeDocId);
+          if (d) emitLocalEdit(d.id, d.title);
+        }
       }
     },
     [setView],
@@ -861,8 +876,16 @@ export function Editor() {
       if (isCollabReady) {
         collabReplaceContent(content);
       }
+      // Restoring is a genuine local edit but bypasses onChange/onUpdate.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
-    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
+    [
+      activeDocId,
+      activeDoc?.title,
+      updateDocument,
+      isCollabReady,
+      collabReplaceContent,
+    ],
   );
 
   // Watch for pending restore from VersionPanel (store-based bridge)
@@ -1036,8 +1059,10 @@ export function Editor() {
     (content: string) => {
       if (!activeDocId) return;
       updateDocument(activeDocId, { content, updatedAt: Date.now() });
+      // Direct updateDocument bypasses onChange, so emit the local-edit signal.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
-    [activeDocId, updateDocument],
+    [activeDocId, activeDoc?.title, updateDocument],
   );
   const handleMindMapTitleChange = useCallback(
     (title: string) => {
@@ -1062,10 +1087,14 @@ export function Editor() {
       if (isCollabReady) {
         collabReplaceContent(newContent);
       }
+      // Neither onChange (ExternalChange) nor onUpdate (programmatic collab
+      // dispatch lacks userEvent) fires here — emit the local-edit signal.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
     [
       activeDocId,
       activeDoc?.content,
+      activeDoc?.title,
       updateDocument,
       isCollabReady,
       collabReplaceContent,
@@ -1088,8 +1117,17 @@ export function Editor() {
       if (isCollabReady) {
         collabReplaceContent(newContent);
       }
+      // Direct updateDocument / programmatic collab dispatch bypass the
+      // onChange/onUpdate emit paths — signal this genuine local edit.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
-    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
+    [
+      activeDocId,
+      activeDoc?.title,
+      updateDocument,
+      isCollabReady,
+      collabReplaceContent,
+    ],
   );
 
   const handleVoiceDataChange = useCallback(
@@ -1272,7 +1310,14 @@ export function Editor() {
                     const lines = content.split("\n");
                     let cbCount = 0;
                     for (let i = 0; i < lines.length; i++) {
-                      const match = lines[i].match(/^(\s*[-*+]\s*)\[([ xX])\]/);
+                      // Must match every list item marked renders as a task
+                      // checkbox — including ORDERED items (`1. [ ]`), which marked
+                      // also turns into checkboxes. Counting only `[-*+]` here while
+                      // the preview counts all of them shifts the index and toggles
+                      // the wrong line.
+                      const match = lines[i].match(
+                        /^(\s*(?:[-*+]|\d+[.)])\s+)\[([ xX])\]/,
+                      );
                       if (match) {
                         if (cbCount === idx) {
                           const isChecked = match[2] !== " ";
@@ -1280,10 +1325,20 @@ export function Editor() {
                             /\[([ xX])\]/,
                             isChecked ? "[ ]" : "[x]",
                           );
+                          const toggled = lines.join("\n");
                           updateDocument(activeDocId, {
-                            content: lines.join("\n"),
+                            content: toggled,
                             updatedAt: Date.now(),
                           });
+                          // Collab docs: Y.Doc is the source of truth. Without
+                          // this the toggle updates only the local store/preview
+                          // and is reverted on the next sync (never reaching
+                          // peers). Mirror the other content handlers.
+                          if (isCollabReady) collabReplaceContent(toggled);
+                          // Direct updateDocument bypasses onChange/onUpdate
+                          // (applied as an ExternalChange), so signal this
+                          // genuine local edit for the Slack edit-notification.
+                          emitLocalEdit(activeDocId, activeDoc?.title ?? "");
                           break;
                         }
                         cbCount++;
