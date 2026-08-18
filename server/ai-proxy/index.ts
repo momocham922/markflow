@@ -9,7 +9,7 @@ const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 // endpoint, not us-east5 regional. GCP_REGION is used ONLY for the Claude
 // endpoint below (Gemini/image/STT have their own locations).
 const GCP_REGION = process.env.GCP_REGION || "global";
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-8";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-5";
 const NANOBANANA_MODEL =
   process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
 const STT_LOCATION = process.env.STT_LOCATION || "asia-northeast1";

@@ -426,7 +426,7 @@ export function VoicePanel({
         body: JSON.stringify({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
-          // Opus 4.8 supports up to 128K output tokens (streaming). 64K gives
+          // Opus 5 supports up to 128K output tokens (streaming). 64K gives
           // long meetings headroom while keeping cost/latency reasonable.
           max_tokens: 64000,
           stream: true,
@@ -740,7 +740,7 @@ export function VoicePanel({
         body: JSON.stringify({
           system: refineSystemPrompt,
           messages: [{ role: "user", content: refineUserContent }],
-          // Opus 4.8 supports up to 128K output tokens (streaming). 64K gives
+          // Opus 5 supports up to 128K output tokens (streaming). 64K gives
           // long meetings headroom while keeping cost/latency reasonable.
           max_tokens: 64000,
           stream: true,

@@ -925,7 +925,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
         <div className="flex flex-1 flex-col items-center justify-center p-4 space-y-3">
           <Bot className="h-10 w-10 text-muted-foreground" />
           <p className="text-xs text-muted-foreground text-center">
-            Sign in with Google to use AI features powered by Claude Opus 4.6
+            Sign in with Google to use AI features powered by Claude Opus 5
             via Vertex AI.
           </p>
           <Button
