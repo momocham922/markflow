@@ -18,6 +18,7 @@ import { useResearchStore } from "@/stores/research-store";
 import type { ResearchCard } from "@/stores/research-store";
 import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
+import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
 import { extractHints } from "@/lib/text-utils";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
@@ -421,10 +422,7 @@ export function VoicePanel({
 
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: aiProxyHeaders(token),
         body: JSON.stringify({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
@@ -435,7 +433,10 @@ export function VoicePanel({
         }),
       });
 
-      if (!res.ok) throw new Error(`Structure failed: ${res.status}`);
+      if (!res.ok) {
+        reportIfQuota(res.status, await res.text().catch(() => ""));
+        throw new Error(`Structure failed: ${res.status}`);
+      }
 
       const structReader = res.body?.getReader();
       if (!structReader) throw new Error("No response body");
@@ -625,10 +626,7 @@ export function VoicePanel({
         `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers: aiProxyHeaders(token),
           body: JSON.stringify({
             chunks,
             language: "ja-JP",
@@ -640,6 +638,7 @@ export function VoicePanel({
 
       if (!batchRes.ok) {
         const errText = await batchRes.text();
+        reportIfQuota(batchRes.status, errText);
         // BatchRecognize (chirp_3) rejects files longer than 60 minutes. Turn
         // the raw STT error into a clear, actionable message for the user.
         if (/too long|60 ?minutes|60\s*分/i.test(errText)) {
@@ -737,10 +736,7 @@ export function VoicePanel({
 
       const refineRes = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: aiProxyHeaders(token),
         body: JSON.stringify({
           system: refineSystemPrompt,
           messages: [{ role: "user", content: refineUserContent }],
@@ -754,6 +750,7 @@ export function VoicePanel({
 
       if (!refineRes.ok) {
         const errBody = await refineRes.text().catch(() => "");
+        reportIfQuota(refineRes.status, errBody);
         throw new Error(
           `Refine structuring failed: ${refineRes.status} ${errBody}`.trim(),
         );

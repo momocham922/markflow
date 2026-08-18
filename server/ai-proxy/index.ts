@@ -136,6 +136,50 @@ const INTERNAL_UIDS = new Set(
     .filter(Boolean),
 );
 
+// Owner "view-as" preview: uids allowed to fully impersonate a general-user
+// plan (free/pro/team) for previewing gated UX AND real server-side metering
+// (429s). Set via Cloud Run env OWNER_UIDS (comma-separated). SECURITY: the
+// X-View-As header is honored ONLY for these uids — a non-owner's header is
+// ignored. The owner is always "internal" (max), so any override is a
+// downgrade/lateral move; it can never escalate privileges, and it only ever
+// affects the owner's own usage document.
+const OWNER_UIDS = new Set(
+  (process.env.OWNER_UIDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
+const ALL_PLANS = new Set<Plan>(["free", "pro", "team", "internal"]);
+
+/**
+ * Read the owner-only X-View-As override from a request. Returns a valid Plan
+ * only when the caller is an owner and the header names a known plan; otherwise
+ * null (no override).
+ */
+function resolveViewAs(req: http.IncomingMessage, uid: string): Plan | null {
+  const raw = req.headers["x-view-as"];
+  const v = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!v) return null;
+  if (!OWNER_UIDS.has(uid)) return null; // owner-only; ignore for everyone else
+  return ALL_PLANS.has(v as Plan) ? (v as Plan) : null;
+}
+
+/**
+ * Resolve the effective plan for a request: real plan (internal allowlist or
+ * entitlement doc), then apply the owner-only view-as override if present.
+ */
+async function resolvePlan(
+  req: http.IncomingMessage,
+  uid: string,
+): Promise<{ realPlan: Plan; plan: Plan; viewAs: Plan | null }> {
+  const realPlan: Plan = INTERNAL_UIDS.has(uid)
+    ? "internal"
+    : await loadEntitlement(uid);
+  const viewAs = resolveViewAs(req, uid);
+  return { realPlan, plan: viewAs ?? realPlan, viewAs };
+}
+
 const entCache = new Map<string, { plan: Plan; at: number }>();
 const ENT_TTL_MS = 60_000;
 
@@ -182,13 +226,13 @@ function periodKey(d: Date): string {
  * Internal staff bypass metering entirely (no Firestore cost).
  */
 async function guard(
+  req: http.IncomingMessage,
   res: http.ServerResponse,
   uid: string,
   feature: Feature,
   cost = 1,
 ): Promise<boolean> {
-  if (INTERNAL_UIDS.has(uid)) return true;
-  const plan = await loadEntitlement(uid);
+  const { plan } = await resolvePlan(req, uid);
   if (plan === "internal") return true;
   const limit = PLAN_LIMITS[plan]?.[feature] ?? -1;
   if (limit < 0) return true; // unlimited for this feature/plan
@@ -237,7 +281,10 @@ const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-View-As",
+  );
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -309,6 +356,101 @@ const server = http.createServer(async (req, res) => {
       req.on("error", reject);
     });
 
+  // --- /v1/me/entitlement (client: effective plan + limits + usage) ---
+  // Single source for UI gating. Honors the owner-only X-View-As header so the
+  // owner's UI matches what the server will actually enforce this request.
+  if (req.url === "/v1/me/entitlement") {
+    try {
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const { realPlan, plan, viewAs } = await resolvePlan(req, uid);
+      const isOwner = OWNER_UIDS.has(uid);
+      const ym = periodKey(new Date());
+      let usage: Record<string, number> = {};
+      try {
+        const snap = await getFirestore()
+          .collection("usage")
+          .doc(uid)
+          .collection("months")
+          .doc(ym)
+          .get();
+        if (snap.exists) {
+          const d = snap.data() || {};
+          usage = {
+            aiCalls: Number(d.aiCalls || 0),
+            sttCalls: Number(d.sttCalls || 0),
+            batchMin: Number(d.batchMin || 0),
+            images: Number(d.images || 0),
+          };
+        }
+      } catch (e) {
+        console.error(`me/entitlement usage read failed for ${uid}:`, e);
+      }
+      const limits = plan === "internal" ? null : PLAN_LIMITS[plan];
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          uid,
+          realPlan,
+          effectivePlan: plan,
+          viewAs: viewAs ?? null,
+          isOwner,
+          period: ym,
+          limits,
+          usage,
+        }),
+      );
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      const isAuthError =
+        message.includes("Authorization") ||
+        message.includes("Firebase ID token") ||
+        message.includes("Decoding Firebase ID token");
+      res.writeHead(isAuthError ? 401 : 500, {
+        "Content-Type": "application/json",
+      });
+      res.end(JSON.stringify({ error: message }));
+      return;
+    }
+  }
+
+  // --- /v1/dev/reset-usage (OWNER-ONLY: zero current-month usage) ---
+  // Lets the owner re-test hitting free/pro limits while in view-as mode.
+  // Only ever touches the owner's OWN usage doc.
+  if (req.url === "/v1/dev/reset-usage") {
+    try {
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      if (!OWNER_UIDS.has(uid)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "owner only" }));
+        return;
+      }
+      const ym = periodKey(new Date());
+      await getFirestore()
+        .collection("usage")
+        .doc(uid)
+        .collection("months")
+        .doc(ym)
+        .delete();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, period: ym }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      const isAuthError =
+        message.includes("Authorization") ||
+        message.includes("Firebase ID token") ||
+        message.includes("Decoding Firebase ID token");
+      res.writeHead(isAuthError ? 401 : 500, {
+        "Content-Type": "application/json",
+      });
+      res.end(JSON.stringify({ error: message }));
+      return;
+    }
+  }
+
   // --- /v1/voice/transcribe ---
   if (req.url === "/v1/voice/transcribe") {
     try {
@@ -324,7 +466,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      if (!(await guard(res, uid, "sttCalls", 1))) return;
+      if (!(await guard(req, res, uid, "sttCalls", 1))) return;
 
       const accessToken = await getGcpAccessToken();
       const sttUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`;
@@ -506,7 +648,7 @@ const server = http.createServer(async (req, res) => {
         1,
         Math.ceil(chunks.reduce((s, c) => s + (c.durationSec || 0), 0) / 60),
       );
-      if (!(await guard(res, uid, "batchMin", batchMin))) return;
+      if (!(await guard(req, res, uid, "batchMin", batchMin))) return;
 
       const multi = chunks.length > 1;
 
@@ -744,7 +886,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      if (!(await guard(res, uid, "images", 1))) return;
+      if (!(await guard(req, res, uid, "images", 1))) return;
 
       const accessToken = await getGcpAccessToken();
       const geminiRes = await fetch(getNanoBananaUrl(), {
@@ -826,7 +968,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      if (!(await guard(res, uid, "aiCalls", 1))) return;
+      if (!(await guard(req, res, uid, "aiCalls", 1))) return;
 
       const accessToken = await getGcpAccessToken();
 
@@ -1005,7 +1147,7 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         return;
       }
 
-      if (!(await guard(res, uid, "aiCalls", 1))) return;
+      if (!(await guard(req, res, uid, "aiCalls", 1))) return;
 
       const accessToken = await getGcpAccessToken();
 
@@ -1116,7 +1258,7 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
     const parsed = JSON.parse(body);
     const isStream = parsed.stream === true;
 
-    if (!(await guard(res, uid, "aiCalls", 1))) return;
+    if (!(await guard(req, res, uid, "aiCalls", 1))) return;
 
     // Build Vertex AI request (model is in URL, not body)
     const vertexBody: Record<string, unknown> = {

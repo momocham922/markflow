@@ -20,6 +20,7 @@ import {
   fetchTeamDocuments,
 } from "@/services/sharing";
 import { useAppStore, type Document, type DocType } from "./app-store";
+import { useEntitlementStore } from "./entitlement-store";
 import { getDeletedDocIds, clearDeletedDoc } from "@/services/database";
 
 // --- One-time backfill: upload local SQLite versions to Firestore ---
@@ -163,6 +164,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           email: user.email || "",
           displayName: user.displayName,
         }).catch(() => {});
+        // Load plan/entitlement (drives quota UI + owner view-as switcher).
+        useEntitlementStore
+          .getState()
+          .fetchEntitlement()
+          .catch(() => {});
         // Wait for loadDocuments to complete before syncing from cloud.
         // Without this, syncFromCloud may see default themeSettings and
         // overwrite correct SQLite values with stale cloud values.
@@ -268,6 +274,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       await signOut();
       set({ user: null });
+      useEntitlementStore.getState().reset();
     } catch (error) {
       console.error("Logout failed:", error);
     }

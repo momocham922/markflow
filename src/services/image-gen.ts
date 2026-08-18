@@ -5,9 +5,11 @@
  */
 
 import { auth } from "./firebase";
+import { aiProxyHeaders, reportIfQuota } from "./ai-proxy";
 import { getPlatform } from "@/platform";
 
-const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
+const AI_PROXY_URL =
+  import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
 const STORAGE_BUCKET = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "";
 
 async function getFirebaseToken(): Promise<string> {
@@ -39,15 +41,13 @@ export async function generateImage(
   // Call AI proxy image generation endpoint
   const response = await fetch(`${AI_PROXY_URL}/v1/image/generate`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
+    headers: aiProxyHeaders(token),
     body: JSON.stringify({ prompt }),
   });
 
   if (!response.ok) {
     const error = await response.text();
+    reportIfQuota(response.status, error);
     throw new Error(`Image generation failed: ${response.status} ${error}`);
   }
 

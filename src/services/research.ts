@@ -1,4 +1,5 @@
 import { auth } from "./firebase";
+import { aiProxyHeaders, reportIfQuota } from "./ai-proxy";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -58,13 +59,13 @@ export async function analyzeTranscript(params: {
   const token = await getToken();
   const res = await fetchWithTimeout(`${AI_PROXY_URL}/v1/research/analyze`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
+    headers: aiProxyHeaders(token),
     body: JSON.stringify(params),
   });
-  if (!res.ok) throw new Error(`Research analyze failed: ${res.status}`);
+  if (!res.ok) {
+    reportIfQuota(res.status, await res.text().catch(() => ""));
+    throw new Error(`Research analyze failed: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -89,10 +90,7 @@ export async function groundedSearch(
     `${AI_PROXY_URL}/v1/research/grounded-search`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers: aiProxyHeaders(token),
       body: JSON.stringify({
         query,
         type,
@@ -102,7 +100,10 @@ export async function groundedSearch(
       }),
     },
   );
-  if (!res.ok) throw new Error(`Grounded search failed: ${res.status}`);
+  if (!res.ok) {
+    reportIfQuota(res.status, await res.text().catch(() => ""));
+    throw new Error(`Grounded search failed: ${res.status}`);
+  }
   return res.json();
 }
 

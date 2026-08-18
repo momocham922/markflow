@@ -9,14 +9,14 @@
 
 ## 実装ステータス（P0 基盤）
 
-| 項目                                                          | 状態                                           |
-| ------------------------------------------------------------- | ---------------------------------------------- |
-| `entitlements/{uid}` / `usage/**` firestore.rules（書込禁止） | ✅ 実装済（未 deploy）                         |
-| ai-proxy 全6エンドポイントに entitlement+usage ゲート挿入     | ✅ 実装済（esbuild bundle 検証 OK・未 deploy） |
-| 既存12スタッフを `plan:"internal"` でシード                   | ✅ **本番反映済**（12/12 確認）                |
-| ai-proxy 本番デプロイ（Cloud Run）+ ライブ検証                | ⏳ 未（gated: 本番配信は要 GO）                |
-| firestore.rules deploy                                        | ⏳ 未（gated）                                 |
-| フロント entitlement fetch + UIゲート                         | ⏳ 未（P0残・次段）                            |
+| 項目                                                          | 状態                                                    |
+| ------------------------------------------------------------- | ------------------------------------------------------- |
+| `entitlements/{uid}` / `usage/**` firestore.rules（書込禁止） | ✅ **本番 deploy 済**（live ruleset 確認）              |
+| ai-proxy 全6エンドポイントに entitlement+usage ゲート挿入     | ✅ **本番 deploy 済**（rev 00035-4sf @100%）            |
+| 既存12スタッフを `plan:"internal"` でシード                   | ✅ **本番反映済**（12/12 確認）                         |
+| ai-proxy 本番デプロイ（Cloud Run）+ ライブ検証                | ✅ **完了**（rev 00035-4sf・timeout 900・env 検証済）   |
+| オーナー view-as（`X-View-As` / `/v1/me/entitlement`）        | ✅ **本番 deploy 済**（`OWNER_UIDS` 2件・401 probe OK） |
+| フロント entitlement fetch + view-as UI + quota upsell        | ✅ 実装済（tsc/build/unit 通過・アプリ配信は要 GO）     |
 
 ## 0. 現状（コード実測サマリ）
 
@@ -177,13 +177,16 @@ teams/{teamId}               # 既存のチーム構造を拡張
 
 ### P0 — 止血 + entitlement基盤（収益化の土台）
 
-1. ✅ `entitlements/{uid}` / `usage/{uid}/months/{ym}` スキーマ + **firestore.rules（クライアント書込禁止）**（実装済・deploy 待ち）
-2. ✅ ai-proxy に entitlement+usage 照合レイヤー（`verifyFirebaseToken` 直後）→ 429（実装済・deploy 待ち）
+1. ✅ `entitlements/{uid}` / `usage/{uid}/months/{ym}` スキーマ + **firestore.rules（クライアント書込禁止）**（本番 deploy 済）
+2. ✅ ai-proxy に entitlement+usage 照合レイヤー（`verifyFirebaseToken` 直後）→ 429（本番 deploy 済・rev 00035-4sf）
 3. ✅ 全6AIエンドポイントに使用量メータリング（sttCalls / batchMin / images / aiCalls）
 4. ✅ 既存12スタッフを `plan:"internal"` でシード（本番反映済）
-5. ⏳ **deploy**: firestore.rules + ai-proxy を本番反映 → リビジョン確認 + curl ライブ検証（gated: 要 GO）
-6. ⏳ クライアント: entitlement をログイン時 fetch（`auth-store` へ）+ SQLiteミラー
-7. ⏳ UIゲート: [AiPanel.tsx](src/components/ai-panel/AiPanel.tsx) の `if(!user)` ウォール隣に upsell、VoicePanel/ResearchSheet 同型
+5. ✅ **deploy 完了**: firestore.rules（live 確認）+ ai-proxy（rev 00035-4sf @100%・timeout 900・`OWNER_UIDS`/`INTERNAL_UIDS` env 検証）+ 401 probe でライブ検証
+6. ✅ クライアント: entitlement をログイン時 fetch（`auth-store` → `/v1/me/entitlement`）。UIの単一ソース＝サーバ endpoint（Firestore 直読みしない）
+7. ✅ UIゲート/upsell: 429 `quota_exceeded` を全AI呼び出しで捕捉 → App レベルの赤バナー（upsell）+ StatusBar プラン表示
+8. ✅ **オーナー view-as**: `X-View-As` を全8 ai-proxy 呼び出しに注入（[ai-proxy.ts](src/services/ai-proxy.ts)）。StatusBar にオーナー限定スイッチャ（内部/Free/Pro/Team）+ App にプレビュー用琥珀バナー（利用量リセット/元に戻す）。`isOwner` はサーバ `OWNER_UIDS` 由来で三田遼平のみ
+9. ⏳ SQLiteミラー（オフライン時のプラン表示）— 任意の後続改善（現状はオンライン endpoint 依存でフェイルソフト）
+10. ⏳ アプリ本番配信（version bump + release scripts）— **gated: 要 GO**（テスターへの outward-facing）
 
 ### P1 — Stripe（Desktop + Web）
 
@@ -210,8 +213,8 @@ teams/{teamId}               # 既存のチーム構造を拡張
 
 コード変更と**同一リリースで完結**させる：
 
-- [x] `firestore.rules`: `entitlements`/`usage` 追加ルール（実装済）→ **deploy 未**（`firebase deploy --only firestore:rules --project markflow-app-2026`）
-- [x] ai-proxy: entitlement+usage ゲート（実装済・esbuild bundle OK）→ **Cloud Run 再デプロイ 未** + リビジョン100%確認 + curl でライブ検証（INTERNAL_UIDS env も併せ設定）
+- [x] `firestore.rules`: `entitlements`/`usage` 追加ルール → **本番 deploy 済**（live ruleset に entitlements/usage ブロック確認）
+- [x] ai-proxy: entitlement+usage ゲート + view-as → **Cloud Run 本番デプロイ済**（rev 00035-4sf @100%・timeout 900・`INTERNAL_UIDS`(12)/`OWNER_UIDS`(2) env 設定・401 probe 検証）
 - [ ] Cloud Run 新エンドポイント: Stripe Webhook / App Store Notifications v2 / Play RTDN(Pub/Sub subscription)
 - [ ] Pub/Sub トピック + サブスク作成（Play RTDN 用）+ IAM
 - [ ] GCP: Play Developer API 有効化 + サービスアカウント権限（既存 `play-api-key.json` 拡張 or 新規）

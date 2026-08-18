@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useAuthStore } from "@/stores/auth-store";
+import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 25000; // 25 second chunks: longer context = better accuracy
@@ -158,10 +159,7 @@ export function useVoiceInput({
           const timeout = setTimeout(() => controller.abort(), 60_000);
           const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`,
-            },
+            headers: aiProxyHeaders(token),
             body: requestBody,
             signal: controller.signal,
           });
@@ -170,6 +168,7 @@ export function useVoiceInput({
           if (!res.ok) {
             const errText = await res.text();
             console.error("[voice] Transcription failed:", res.status, errText);
+            reportIfQuota(res.status, errText);
             if (res.status >= 500 && attempt < MAX_SEND_RETRIES) {
               console.log(
                 `[voice] Retrying (${attempt + 1}/${MAX_SEND_RETRIES})...`,

@@ -53,9 +53,13 @@ globs:
 
 1. Cloud Run に再デプロイ:
    ```bash
-   cd server/ai-proxy && gcloud run deploy markflow-ai-proxy \
-     --source . --project markflow-app-2026 --region asia-northeast1 \
-     --allow-unauthenticated --memory 512Mi --timeout 600 \
+   # 注意: --timeout は必ず 900。batch-transcribe が最大14分同期ポーリングするため
+   # 600 だと長尺文字起こしで "load failed" 回帰する（rev 00034 で実際に回帰）。
+   # env は --update-env-vars でマージ上書き（INTERNAL_UIDS/OWNER_UIDS を消さない）。
+   gcloud run deploy markflow-ai-proxy \
+     --source server/ai-proxy --project markflow-app-2026 --region asia-northeast1 \
+     --account ga.crossmedia@gmail.com \
+     --allow-unauthenticated --memory 512Mi --timeout 900 \
      --min-instances 0 --max-instances 3
    ```
 2. 新リビジョンがトラフィック 100% であることを確認:

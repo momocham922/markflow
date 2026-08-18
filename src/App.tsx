@@ -24,6 +24,11 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  useEntitlementStore,
+  planLabel,
+  featureLabel,
+} from "@/stores/entitlement-store";
 import { useResearchStore } from "@/stores/research-store";
 import { ResearchSheet } from "@/components/editor/ResearchSheet";
 import {
@@ -85,6 +90,12 @@ function App() {
   } = useAppStore();
   const initAuth = useAuthStore((s) => s.init);
   const syncing = useAuthStore((s) => s.syncing);
+  // Monetization: owner view-as preview + quota upsell banners
+  const viewAsPlan = useEntitlementStore((s) => s.viewAs);
+  const setViewAs = useEntitlementStore((s) => s.setViewAs);
+  const resetPreviewUsage = useEntitlementStore((s) => s.resetPreviewUsage);
+  const lastQuotaError = useEntitlementStore((s) => s.lastQuotaError);
+  const clearQuota = useEntitlementStore((s) => s.clearQuota);
   // Only show blocking overlay for the very first sync (login/startup)
   const prevSyncingRef = useRef(false);
   const initialSyncDoneRef = useRef(false);
@@ -898,6 +909,62 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     : "アップデート"}
               </button>
             </div>
+          </div>
+        )}
+        {/* Owner view-as preview banner (三田遼平 only; shown while previewing) */}
+        {viewAsPlan && (
+          <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-500 px-4 py-1.5 text-black text-xs shrink-0">
+            <span className="font-medium">
+              プレビュー中: 一般ユーザー（{planLabel(viewAsPlan)}
+              プラン）として表示・課金上限を適用しています
+            </span>
+            <div className="flex items-center gap-1.5">
+              {(["free", "pro", "team"] as const).map((p) => (
+                <button
+                  key={p}
+                  className={cn(
+                    "rounded-md px-2 py-0.5 font-medium transition-colors",
+                    viewAsPlan === p
+                      ? "bg-black text-amber-400"
+                      : "bg-black/15 hover:bg-black/25",
+                  )}
+                  onClick={() => setViewAs(p)}
+                >
+                  {planLabel(p)}
+                </button>
+              ))}
+              <button
+                className="rounded-md bg-black/15 px-2 py-0.5 hover:bg-black/25 transition-colors"
+                onClick={() => resetPreviewUsage()}
+                title="このプレビューの今月の利用量をリセット（オーナーの自分の利用量のみ）"
+              >
+                利用量リセット
+              </button>
+              <button
+                className="rounded-md bg-black px-3 py-0.5 font-medium text-amber-400 hover:opacity-90 transition-opacity"
+                onClick={() => setViewAs(null)}
+              >
+                元に戻す
+              </button>
+            </div>
+          </div>
+        )}
+        {/* Quota exceeded banner (general users + owner-in-preview) */}
+        {lastQuotaError && (
+          <div className="flex flex-wrap items-center justify-between gap-2 bg-red-600 px-4 py-1.5 text-white text-xs shrink-0">
+            <span>
+              「{featureLabel(lastQuotaError.feature)}
+              」が今月の上限に達しました（
+              {planLabel(lastQuotaError.plan)}プラン: {lastQuotaError.used}/
+              {lastQuotaError.limit}
+              ）。アップグレードで上限を大きく緩和できます。
+            </span>
+            <button
+              className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+              onClick={clearQuota}
+            >
+              閉じる
+            </button>
           </div>
         )}
         {/* Publish banner */}
