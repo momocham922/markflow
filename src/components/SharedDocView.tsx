@@ -12,6 +12,7 @@ import { fetchDocumentByToken } from "@/services/sharing";
 import { Marked } from "marked";
 import hljs from "highlight.js";
 import mermaid from "mermaid";
+import DOMPurify from "dompurify";
 import { useAppStore } from "@/stores/app-store";
 
 function escapeHtml(s: string): string {
@@ -231,9 +232,16 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
     if (!doc) return "";
     const content = editing ? editContent : doc.content;
     try {
-      return sharedMarked.parse(content) as string;
+      const raw = sharedMarked.parse(content) as string;
+      // This HTML is injected via dangerouslySetInnerHTML into a PUBLIC share view.
+      // marked does not sanitize, so raw <script>/<img onerror>/<iframe> in the
+      // document body would execute (stored XSS). Sanitize before rendering, while
+      // preserving link targets and the mermaid placeholder's data-source attr.
+      return DOMPurify.sanitize(raw, {
+        ADD_ATTR: ["target", "data-mermaid-source"],
+      });
     } catch {
-      return content;
+      return escapeHtml(content);
     }
   }, [doc, editing, editContent]);
 
@@ -292,6 +300,11 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   const handleSave = useCallback(async () => {
     if (!doc) return;
     setSaveError(null);
+    // Never let an accidental blank overwrite a non-empty shared document.
+    if (!editContent.trim() && doc.content.trim()) {
+      setSaveError("空の内容では保存できません。");
+      return;
+    }
     try {
       const { updateDoc, doc: firestoreDoc } =
         await import("firebase/firestore");

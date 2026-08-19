@@ -35,7 +35,11 @@ async function uploadFromPath(uid: string, path: string): Promise<string> {
 /**
  * Upload image from raw bytes — base64 encode to avoid JSON array overhead.
  */
-async function uploadFromBytes(uid: string, data: Uint8Array, ext: string): Promise<string> {
+async function uploadFromBytes(
+  uid: string,
+  data: Uint8Array,
+  ext: string,
+): Promise<string> {
   const token = await getFirebaseToken();
   let binary = "";
   for (let i = 0; i < data.length; i++) {
@@ -43,7 +47,13 @@ async function uploadFromBytes(uid: string, data: Uint8Array, ext: string): Prom
   }
   const base64Data = btoa(binary);
   const platform = await getPlatform();
-  return platform.uploadImageFromBase64(base64Data, ext, uid, token, STORAGE_BUCKET);
+  return platform.uploadImageFromBase64(
+    base64Data,
+    ext,
+    uid,
+    token,
+    STORAGE_BUCKET,
+  );
 }
 
 /**
@@ -69,13 +79,47 @@ export async function processImageFile(file: File): Promise<string> {
  * Everything happens in Rust — no byte transfer over IPC.
  */
 export async function processImagePath(path: string): Promise<string> {
-  const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "image";
+  const name =
+    path
+      .split("/")
+      .pop()
+      ?.replace(/\.[^.]+$/, "") || "image";
 
   const user = useAuthStore.getState().user;
   if (!user) throw new Error("ログインが必要です");
 
   const cloudUrl = await uploadFromPath(user.uid, path);
   return `![${name}](${cloudUrl})`;
+}
+
+/**
+ * Build a placeholder whose token is embedded in the (unused) URL so the
+ * alt-text stays clean while `indexOf()` still matches THIS placeholder even
+ * when several uploads run concurrently or the document already contains an
+ * identical "Uploading..." literal. Without the unique token, indexOf would
+ * match the first occurrence and swap the wrong image in.
+ */
+export function makeUploadPlaceholder(label = "Uploading image..."): string {
+  return `![${label}](uploading:${crypto.randomUUID()})`;
+}
+
+/**
+ * Replace a previously-inserted placeholder with final text, re-reading the
+ * live doc so concurrent edits/uploads don't desync positions. Returns false
+ * when the placeholder is no longer present (user deleted it mid-upload).
+ */
+export function replaceUploadPlaceholder(
+  view: EditorView,
+  placeholder: string,
+  insert: string,
+): boolean {
+  const doc = view.state.doc.toString();
+  const idx = doc.indexOf(placeholder);
+  if (idx < 0) return false;
+  view.dispatch({
+    changes: { from: idx, to: idx + placeholder.length, insert },
+  });
+  return true;
 }
 
 /**
@@ -93,30 +137,18 @@ export const imagePaste = EditorView.domEventHandlers({
         if (!file) return true;
 
         const pos = view.state.selection.main.head;
-        const placeholder = "![Uploading...]()";
+        const placeholder = makeUploadPlaceholder("Uploading...");
         view.dispatch({
           changes: { from: pos, insert: placeholder },
         });
 
         processImageFile(file)
           .then((md) => {
-            const doc = view.state.doc.toString();
-            const idx = doc.indexOf(placeholder);
-            if (idx >= 0) {
-              view.dispatch({
-                changes: { from: idx, to: idx + placeholder.length, insert: md },
-              });
-            }
+            replaceUploadPlaceholder(view, placeholder, md);
           })
           .catch((err) => {
-            const doc = view.state.doc.toString();
-            const idx = doc.indexOf(placeholder);
-            if (idx >= 0) {
-              const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-              view.dispatch({
-                changes: { from: idx, to: idx + placeholder.length, insert: errMsg },
-              });
-            }
+            const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
+            replaceUploadPlaceholder(view, placeholder, errMsg);
           });
 
         return true;
@@ -135,16 +167,25 @@ export const imagePaste = EditorView.domEventHandlers({
     if (imageFiles.length === 0) return false;
 
     event.preventDefault();
-    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+    const pos =
+      view.posAtCoords({ x: event.clientX, y: event.clientY }) ??
+      view.state.selection.main.head;
+
+    // Insert a placeholder so a slow/failed upload is visible instead of
+    // silently doing nothing (empty catch previously swallowed all errors).
+    const placeholder = makeUploadPlaceholder();
+    view.dispatch({
+      changes: { from: pos, insert: placeholder + "\n" },
+    });
 
     Promise.all(imageFiles.map(processImageFile))
       .then((markdowns) => {
-        const insert = markdowns.join("\n");
-        view.dispatch({
-          changes: { from: pos, insert: insert + "\n" },
-        });
+        replaceUploadPlaceholder(view, placeholder, markdowns.join("\n"));
       })
-      .catch(() => {});
+      .catch((err) => {
+        const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
+        replaceUploadPlaceholder(view, placeholder, errMsg);
+      });
 
     return true;
   },

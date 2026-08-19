@@ -5,7 +5,6 @@ import {
   getDoc,
   getDocs,
   setDoc,
-  updateDoc,
   deleteDoc,
   deleteField,
   runTransaction,
@@ -52,20 +51,24 @@ export async function enableShareLink(
     expiresAt: expiresInMs ? Date.now() + expiresInMs : null,
   };
 
-  await updateDoc(ref, { shareLink });
+  await setDoc(ref, { shareLink }, { merge: true });
   return shareLink;
 }
 
 /** Disable a share link (keeps the token so re-enabling gives the same URL) */
 export async function disableShareLink(docId: string): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  await updateDoc(ref, { "shareLink.enabled": false });
+  // Deep-merge into the shareLink map so token/permission/expiresAt survive.
+  await setDoc(ref, { shareLink: { enabled: false } }, { merge: true });
 }
 
 /** Fetch a document by share token (for viewers without login) */
-export async function fetchDocumentByToken(
-  token: string,
-): Promise<{ id: string; title: string; content: string; permission: "view" | "edit" } | null> {
+export async function fetchDocumentByToken(token: string): Promise<{
+  id: string;
+  title: string;
+  content: string;
+  permission: "view" | "edit";
+} | null> {
   const q = query(
     collection(firestore, "documents"),
     where("shareLink.enabled", "==", true),
@@ -152,7 +155,8 @@ export async function removeCollaborator(
   docId: string,
   collaborator: Collaborator,
 ): Promise<void> {
-  const key = collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
+  const key =
+    collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
   const ref = doc(firestore, "documents", docId);
 
   await runTransaction(firestore, async (transaction) => {
@@ -176,9 +180,12 @@ export async function updateCollaboratorRole(
   newRole: "editor" | "viewer",
 ): Promise<void> {
   const key = oldCollab.uid || oldCollab.email.replace(/[.#$/\[\]]/g, "_");
-  await updateDoc(doc(firestore, "documents", docId), {
-    [`collaborators.${key}.role`]: newRole,
-  });
+  // Deep-merge preserves the collaborator's email/addedAt fields.
+  await setDoc(
+    doc(firestore, "documents", docId),
+    { collaborators: { [key]: { role: newRole } } },
+    { merge: true },
+  );
 }
 
 /** Get collaborators for a document (returns array for UI compatibility) */
@@ -188,7 +195,10 @@ export async function getCollaborators(docId: string): Promise<Collaborator[]> {
   const data = snap.data();
   if (!data?.collaborators) return [];
 
-  const collabMap = data.collaborators as Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
+  const collabMap = data.collaborators as Record<
+    string,
+    { email: string; role: "editor" | "viewer"; addedAt: number }
+  >;
   return Object.entries(collabMap).map(([uid, val]) => ({
     uid,
     email: val.email,
@@ -206,21 +216,23 @@ export async function fetchSharedWithMe(
     where("collaboratorUids", "array-contains", uid),
   );
 
-  try {
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => {
-      const data = d.data();
-      const collabData = data.collaborators?.[uid] as { role: "editor" | "viewer" } | undefined;
-      return {
-        id: d.id,
-        title: data.title,
-        role: collabData?.role ?? "viewer",
-      };
-    });
-  } catch (err) {
-    console.warn("fetchSharedWithMe query failed:", err);
-    return [];
-  }
+  // Intentionally NOT catching here: a transient getDocs failure must REJECT so
+  // callers can distinguish "no shared docs" from "fetch failed". syncFromCloud
+  // (auth-store) relies on this to flip sharedOk=false and skip deletion
+  // reconciliation — swallowing the error here would tombstone valid shared docs
+  // for up to 30 days on a network blip. All other callers already guard with
+  // their own catch (Sidebar.tsx, firebase.ts debug helper).
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => {
+    const data = d.data();
+    const collabData = data.collaborators?.[uid] as
+      { role: "editor" | "viewer" } | undefined;
+    return {
+      id: d.id,
+      title: data.title,
+      role: collabData?.role ?? "viewer",
+    };
+  });
 }
 
 // ─── Teams ─────────────────────────────────────────────────────
@@ -254,7 +266,12 @@ export async function createTeam(
     ownerId: owner.uid,
     memberUids: [owner.uid],
     members: [
-      { uid: owner.uid, email: owner.email, role: "owner", joinedAt: Date.now() },
+      {
+        uid: owner.uid,
+        email: owner.email,
+        role: "owner",
+        joinedAt: Date.now(),
+      },
     ],
     createdAt: serverTimestamp(),
   });
@@ -359,15 +376,21 @@ export async function getTeamFolders(teamId: string): Promise<string[]> {
 }
 
 /** Save team-level folders list */
-export async function setTeamFolders(teamId: string, folders: string[]): Promise<void> {
+export async function setTeamFolders(
+  teamId: string,
+  folders: string[],
+): Promise<void> {
   const ref = doc(firestore, TEAMS_COLLECTION, teamId);
-  await updateDoc(ref, { folders });
+  await setDoc(ref, { folders }, { merge: true });
 }
 
 /** Move a team document to a different folder */
-export async function moveTeamDocument(docId: string, folder: string): Promise<void> {
+export async function moveTeamDocument(
+  docId: string,
+  folder: string,
+): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  await updateDoc(ref, { folder });
+  await setDoc(ref, { folder }, { merge: true });
 }
 
 /** Create a document within a team */
@@ -421,7 +444,11 @@ export async function copyTeamDocToPersonal(
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  return { id: newId, title: data.title || "Untitled", content: data.content || "" };
+  return {
+    id: newId,
+    title: data.title || "Untitled",
+    content: data.content || "",
+  };
 }
 
 /** Move a personal document into a team */
@@ -431,7 +458,8 @@ export async function moveDocToTeam(
   folder: string = "/",
 ): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  await updateDoc(ref, { teamId, folder });
+  // Merge (not update) so the caller can create-then-move a freshly synced doc.
+  await setDoc(ref, { teamId, folder }, { merge: true });
 }
 
 // ─── User Profile (for looking up users by email) ──────────────

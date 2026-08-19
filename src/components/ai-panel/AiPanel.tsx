@@ -109,7 +109,9 @@ function RulesEditor({
   onSave: (rules: string) => void;
 }) {
   const [draft, setDraft] = useState(rules);
-  useEffect(() => { if (open) setDraft(rules); }, [open, rules]);
+  useEffect(() => {
+    if (open) setDraft(rules);
+  }, [open, rules]);
 
   if (!open) return null;
 
@@ -117,13 +119,20 @@ function RulesEditor({
     <div className="absolute inset-0 z-50 flex flex-col bg-background">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <span className="text-sm font-medium">AI Custom Rules</span>
-        <Button variant="ghost" size="icon" className="h-6 w-6 cursor-pointer" onClick={onClose}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 cursor-pointer"
+          onClick={onClose}
+        >
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
       <div className="flex-1 p-3 flex flex-col gap-2 min-h-0">
         <p className="text-[10px] text-muted-foreground">
-          Custom instructions that are always included in the system prompt. Example: "Always respond in Japanese." or "Use bullet points for all answers."
+          Custom instructions that are always included in the system prompt.
+          Example: "Always respond in Japanese." or "Use bullet points for all
+          answers."
         </p>
         <textarea
           value={draft}
@@ -132,10 +141,22 @@ function RulesEditor({
           className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring resize-none select-text"
         />
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" size="sm" className="text-xs cursor-pointer" onClick={onClose}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs cursor-pointer"
+            onClick={onClose}
+          >
             Cancel
           </Button>
-          <Button size="sm" className="text-xs cursor-pointer" onClick={() => { onSave(draft); onClose(); }}>
+          <Button
+            size="sm"
+            className="text-xs cursor-pointer"
+            onClick={() => {
+              onSave(draft);
+              onClose();
+            }}
+          >
             Save
           </Button>
         </div>
@@ -148,7 +169,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const { activeDocId, documents } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const { getSelectedText, replaceSelection, appendToDoc, insertAtCursor, setPendingInsert } = useEditorStore();
+  const {
+    getSelectedText,
+    replaceSelection,
+    appendToDoc,
+    insertAtCursor,
+    setPendingInsert,
+  } = useEditorStore();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [apiMessages, setApiMessages] = useState<ClaudeMessage[]>([]);
@@ -162,7 +189,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const [webSearch, setWebSearch] = useState(false);
   const [customRules, setCustomRules] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
-  const [attachedImages, setAttachedImages] = useState<{ data: string; mediaType: string; preview: string }[]>([]);
+  const [attachedImages, setAttachedImages] = useState<
+    { data: string; mediaType: string; preview: string }[]
+  >([]);
   const [mcpEnabled, setMcpEnabled] = useState(false);
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
   const [mcpSettingsOpen, setMcpSettingsOpen] = useState(false);
@@ -176,27 +205,31 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   // Load custom rules from DB on mount
   useEffect(() => {
-    db.getSetting("ai_custom_rules").then((val) => {
-      if (val) setCustomRules(val);
-    }).catch(() => {});
+    db.getSetting("ai_custom_rules")
+      .then((val) => {
+        if (val) setCustomRules(val);
+      })
+      .catch(() => {});
   }, []);
 
   // Auto-connect MCP servers on mount
   useEffect(() => {
-    loadMcpConfigs().then(async (configs) => {
-      const enabled = configs.filter((c) => c.enabled);
-      const connected = getConnectedServerIds();
-      for (const config of enabled) {
-        if (!connected.includes(config.id)) {
-          try {
-            await connectServer(config);
-          } catch {
-            // Silently skip servers that fail to connect on startup
+    loadMcpConfigs()
+      .then(async (configs) => {
+        const enabled = configs.filter((c) => c.enabled);
+        const connected = getConnectedServerIds();
+        for (const config of enabled) {
+          if (!connected.includes(config.id)) {
+            try {
+              await connectServer(config);
+            } catch {
+              // Silently skip servers that fail to connect on startup
+            }
           }
         }
-      }
-      setMcpTools(getAllTools());
-    }).catch(() => {});
+        setMcpTools(getAllTools());
+      })
+      .catch(() => {});
   }, []);
 
   const refreshMcpTools = useCallback(() => {
@@ -210,7 +243,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
     const uid = useAuthStore.getState().user?.uid;
     if (uid) {
       import("@/services/firebase").then(({ saveUserSettingsToFirestore }) => {
-        saveUserSettingsToFirestore(uid, { ai_custom_rules: rules }).catch(() => {});
+        saveUserSettingsToFirestore(uid, { ai_custom_rules: rules }).catch(
+          () => {},
+        );
       });
     }
   }, []);
@@ -218,121 +253,190 @@ export function AiPanel({ onClose }: AiPanelProps) {
   // ─── Thread-based chat persistence ─────────────────────────
 
   /** Save thread list metadata (local + cloud) */
-  const saveThreadList = useCallback((docId: string, threadList: ChatThread[]) => {
-    db.setSetting(`ai_chat_threads_${docId}`, JSON.stringify(threadList)).catch(() => {});
-    const uid = useAuthStore.getState().user?.uid;
-    if (uid) saveAiThreadsToCloud(uid, docId, threadList).catch(() => {});
-  }, []);
+  const saveThreadList = useCallback(
+    (docId: string, threadList: ChatThread[]) => {
+      db.setSetting(
+        `ai_chat_threads_${docId}`,
+        JSON.stringify(threadList),
+      ).catch(() => {});
+      const uid = useAuthStore.getState().user?.uid;
+      if (uid) saveAiThreadsToCloud(uid, docId, threadList).catch(() => {});
+    },
+    [],
+  );
 
   /** Save chat content for a specific thread (local + cloud) */
-  const saveChatHistory = useCallback((docId: string, threadId: string, msgs: ChatMessage[], apiMsgs: ClaudeMessage[]) => {
-    if (!docId || !threadId || msgs.length === 0) return;
-    const toSave = { messages: msgs, apiMessages: apiMsgs };
-    const key = `ai_chat_${docId}_${threadId}`;
-    db.setSetting(key, JSON.stringify(toSave)).catch(() => {});
-    const uid = useAuthStore.getState().user?.uid;
-    if (uid) saveAiChatToCloud(uid, `${docId}__${threadId}`, toSave).catch(() => {});
-  }, []);
+  const saveChatHistory = useCallback(
+    (
+      docId: string,
+      threadId: string,
+      msgs: ChatMessage[],
+      apiMsgs: ClaudeMessage[],
+    ) => {
+      if (!docId || !threadId || msgs.length === 0) return;
+      const toSave = { messages: msgs, apiMessages: apiMsgs };
+      const key = `ai_chat_${docId}_${threadId}`;
+      db.setSetting(key, JSON.stringify(toSave)).catch(() => {});
+      const uid = useAuthStore.getState().user?.uid;
+      if (uid)
+        saveAiChatToCloud(uid, `${docId}__${threadId}`, toSave).catch(() => {});
+    },
+    [],
+  );
 
   /** Load thread content (cloud-first, local fallback) */
-  const loadThreadContent = useCallback(async (docId: string, threadId: string) => {
-    const uid = useAuthStore.getState().user?.uid;
-    // Cloud first
-    if (uid) {
-      try {
-        const cloudData = await fetchAiChatFromCloud(uid, `${docId}__${threadId}`);
-        if (cloudData && Array.isArray(cloudData.messages) && cloudData.messages.length > 0) {
-          setMessages(cloudData.messages as ChatMessage[]);
-          setApiMessages((cloudData.apiMessages || []) as ClaudeMessage[]);
-          return;
-        }
-      } catch { /* cloud unavailable */ }
-    }
-    // Local fallback
-    try {
-      const raw = await db.getSetting(`ai_chat_${docId}_${threadId}`);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setMessages(parsed.messages || []);
-        setApiMessages(parsed.apiMessages || []);
-        return;
-      }
-    } catch { /* ignore */ }
-    setMessages([]);
-    setApiMessages([]);
-  }, []);
-
-  /** Load all threads for a document (with backward compat migration) */
-  const loadDocThreads = useCallback(async (docId: string) => {
-    let threadList: ChatThread[] = [];
-
-    // Try cloud first for thread metadata
-    const uid = useAuthStore.getState().user?.uid;
-    if (uid) {
-      try {
-        const cloudThreads = await fetchAiThreadsFromCloud(uid, docId);
-        if (cloudThreads && cloudThreads.length > 0) {
-          threadList = cloudThreads;
-        }
-      } catch { /* cloud unavailable */ }
-    }
-
-    // Local fallback
-    if (threadList.length === 0) {
-      try {
-        const raw = await db.getSetting(`ai_chat_threads_${docId}`);
-        if (raw) threadList = JSON.parse(raw);
-      } catch { /* ignore */ }
-    }
-
-    // Backward compatibility: migrate old single-thread data
-    if (threadList.length === 0) {
-      let hasOldData = false;
+  const loadThreadContent = useCallback(
+    async (docId: string, threadId: string) => {
+      const uid = useAuthStore.getState().user?.uid;
+      // Cloud first
       if (uid) {
         try {
-          const oldCloud = await fetchAiChatFromCloud(uid, docId);
-          if (oldCloud && Array.isArray(oldCloud.messages) && oldCloud.messages.length > 0) {
-            hasOldData = true;
-            // Migrate to new format
-            const defaultId = "default";
-            const firstMsg = (oldCloud.messages[0] as ChatMessage)?.content || "Chat";
-            threadList = [{ id: defaultId, title: firstMsg.slice(0, 40), createdAt: Date.now() }];
-            // Save migrated data under new key
-            saveChatHistory(docId, defaultId, oldCloud.messages as ChatMessage[], (oldCloud.apiMessages || []) as ClaudeMessage[]);
-            saveThreadList(docId, threadList);
-            // Delete old format
-            deleteAiChatFromCloud(uid, docId).catch(() => {});
+          const cloudData = await fetchAiChatFromCloud(
+            uid,
+            `${docId}__${threadId}`,
+          );
+          if (
+            cloudData &&
+            Array.isArray(cloudData.messages) &&
+            cloudData.messages.length > 0
+          ) {
+            setMessages(cloudData.messages as ChatMessage[]);
+            setApiMessages((cloudData.apiMessages || []) as ClaudeMessage[]);
+            return;
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* cloud unavailable */
+        }
       }
-      if (!hasOldData) {
-        try {
-          const oldLocal = await db.getSetting(`ai_chat_${docId}`);
-          if (oldLocal) {
-            const parsed = JSON.parse(oldLocal);
-            if (parsed.messages?.length > 0) {
-              const defaultId = "default";
-              const firstMsg = (parsed.messages[0] as ChatMessage)?.content || "Chat";
-              threadList = [{ id: defaultId, title: firstMsg.slice(0, 40), createdAt: Date.now() }];
-              saveChatHistory(docId, defaultId, parsed.messages, parsed.apiMessages || []);
-              saveThreadList(docId, threadList);
-              db.setSetting(`ai_chat_${docId}`, "").catch(() => {}); // Clear old
-            }
-          }
-        } catch { /* ignore */ }
+      // Local fallback
+      try {
+        const raw = await db.getSetting(`ai_chat_${docId}_${threadId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          setMessages(parsed.messages || []);
+          setApiMessages(parsed.apiMessages || []);
+          return;
+        }
+      } catch {
+        /* ignore */
       }
-    }
-
-    setThreads(threadList);
-    const latestId = threadList.length > 0 ? threadList[threadList.length - 1].id : null;
-    setActiveThreadId(latestId);
-    if (latestId && docId) {
-      await loadThreadContent(docId, latestId);
-    } else {
       setMessages([]);
       setApiMessages([]);
-    }
-  }, [saveChatHistory, saveThreadList, loadThreadContent]);
+    },
+    [],
+  );
+
+  /** Load all threads for a document (with backward compat migration) */
+  const loadDocThreads = useCallback(
+    async (docId: string) => {
+      let threadList: ChatThread[] = [];
+
+      // Try cloud first for thread metadata
+      const uid = useAuthStore.getState().user?.uid;
+      if (uid) {
+        try {
+          const cloudThreads = await fetchAiThreadsFromCloud(uid, docId);
+          if (cloudThreads && cloudThreads.length > 0) {
+            threadList = cloudThreads;
+          }
+        } catch {
+          /* cloud unavailable */
+        }
+      }
+
+      // Local fallback
+      if (threadList.length === 0) {
+        try {
+          const raw = await db.getSetting(`ai_chat_threads_${docId}`);
+          if (raw) threadList = JSON.parse(raw);
+        } catch {
+          /* ignore */
+        }
+      }
+
+      // Backward compatibility: migrate old single-thread data
+      if (threadList.length === 0) {
+        let hasOldData = false;
+        if (uid) {
+          try {
+            const oldCloud = await fetchAiChatFromCloud(uid, docId);
+            if (
+              oldCloud &&
+              Array.isArray(oldCloud.messages) &&
+              oldCloud.messages.length > 0
+            ) {
+              hasOldData = true;
+              // Migrate to new format
+              const defaultId = "default";
+              const firstMsg =
+                (oldCloud.messages[0] as ChatMessage)?.content || "Chat";
+              threadList = [
+                {
+                  id: defaultId,
+                  title: firstMsg.slice(0, 40),
+                  createdAt: Date.now(),
+                },
+              ];
+              // Save migrated data under new key
+              saveChatHistory(
+                docId,
+                defaultId,
+                oldCloud.messages as ChatMessage[],
+                (oldCloud.apiMessages || []) as ClaudeMessage[],
+              );
+              saveThreadList(docId, threadList);
+              // Delete old format
+              deleteAiChatFromCloud(uid, docId).catch(() => {});
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        if (!hasOldData) {
+          try {
+            const oldLocal = await db.getSetting(`ai_chat_${docId}`);
+            if (oldLocal) {
+              const parsed = JSON.parse(oldLocal);
+              if (parsed.messages?.length > 0) {
+                const defaultId = "default";
+                const firstMsg =
+                  (parsed.messages[0] as ChatMessage)?.content || "Chat";
+                threadList = [
+                  {
+                    id: defaultId,
+                    title: firstMsg.slice(0, 40),
+                    createdAt: Date.now(),
+                  },
+                ];
+                saveChatHistory(
+                  docId,
+                  defaultId,
+                  parsed.messages,
+                  parsed.apiMessages || [],
+                );
+                saveThreadList(docId, threadList);
+                db.setSetting(`ai_chat_${docId}`, "").catch(() => {}); // Clear old
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      setThreads(threadList);
+      const latestId =
+        threadList.length > 0 ? threadList[threadList.length - 1].id : null;
+      setActiveThreadId(latestId);
+      if (latestId && docId) {
+        await loadThreadContent(docId, latestId);
+      } else {
+        setMessages([]);
+        setApiMessages([]);
+      }
+    },
+    [saveChatHistory, saveThreadList, loadThreadContent],
+  );
 
   /** Create a new thread */
   const createNewThread = useCallback(() => {
@@ -353,60 +457,98 @@ export function AiPanel({ onClose }: AiPanelProps) {
     setApiMessages([]);
     setStreamingText("");
     saveThreadList(activeDocId, newList);
-  }, [activeDocId, activeThreadId, messages, apiMessages, threads, saveChatHistory, saveThreadList]);
+  }, [
+    activeDocId,
+    activeThreadId,
+    messages,
+    apiMessages,
+    threads,
+    saveChatHistory,
+    saveThreadList,
+  ]);
 
   /** Switch to a thread */
-  const switchThread = useCallback(async (threadId: string) => {
-    if (!activeDocId || threadId === activeThreadId) return;
-    // Save current
-    if (activeThreadId && messages.length > 0) {
-      saveChatHistory(activeDocId, activeThreadId, messages, apiMessages);
-    }
-    setActiveThreadId(threadId);
-    setStreamingText("");
-    setThreadListOpen(false);
-    await loadThreadContent(activeDocId, threadId);
-  }, [activeDocId, activeThreadId, messages, apiMessages, saveChatHistory, loadThreadContent]);
+  const switchThread = useCallback(
+    async (threadId: string) => {
+      if (!activeDocId || threadId === activeThreadId) return;
+      // Save current
+      if (activeThreadId && messages.length > 0) {
+        saveChatHistory(activeDocId, activeThreadId, messages, apiMessages);
+      }
+      setActiveThreadId(threadId);
+      setStreamingText("");
+      setThreadListOpen(false);
+      await loadThreadContent(activeDocId, threadId);
+    },
+    [
+      activeDocId,
+      activeThreadId,
+      messages,
+      apiMessages,
+      saveChatHistory,
+      loadThreadContent,
+    ],
+  );
 
   /** Delete a thread */
-  const deleteThread = useCallback(async (threadId: string) => {
-    if (!activeDocId) return;
-    const newList = threads.filter((t) => t.id !== threadId);
-    setThreads(newList);
-    saveThreadList(activeDocId, newList);
-    // Delete data
-    const key = `ai_chat_${activeDocId}_${threadId}`;
-    db.setSetting(key, "").catch(() => {});
-    const uid = useAuthStore.getState().user?.uid;
-    if (uid) deleteAiChatFromCloud(uid, `${activeDocId}__${threadId}`).catch(() => {});
-    // Switch if needed
-    if (activeThreadId === threadId) {
-      if (newList.length > 0) {
-        const nextId = newList[newList.length - 1].id;
-        setActiveThreadId(nextId);
-        await loadThreadContent(activeDocId, nextId);
-      } else {
-        setActiveThreadId(null);
-        setMessages([]);
-        setApiMessages([]);
+  const deleteThread = useCallback(
+    async (threadId: string) => {
+      if (!activeDocId) return;
+      const newList = threads.filter((t) => t.id !== threadId);
+      setThreads(newList);
+      saveThreadList(activeDocId, newList);
+      // Delete data
+      const key = `ai_chat_${activeDocId}_${threadId}`;
+      db.setSetting(key, "").catch(() => {});
+      const uid = useAuthStore.getState().user?.uid;
+      if (uid)
+        deleteAiChatFromCloud(uid, `${activeDocId}__${threadId}`).catch(
+          () => {},
+        );
+      // Switch if needed
+      if (activeThreadId === threadId) {
+        if (newList.length > 0) {
+          const nextId = newList[newList.length - 1].id;
+          setActiveThreadId(nextId);
+          await loadThreadContent(activeDocId, nextId);
+        } else {
+          setActiveThreadId(null);
+          setMessages([]);
+          setApiMessages([]);
+        }
       }
-    }
-  }, [activeDocId, activeThreadId, threads, saveThreadList, loadThreadContent]);
+    },
+    [activeDocId, activeThreadId, threads, saveThreadList, loadThreadContent],
+  );
 
   // Save/restore on document switch
   useEffect(() => {
-    if (
-      prevDocIdRef.current !== null &&
-      prevDocIdRef.current !== activeDocId
-    ) {
+    if (prevDocIdRef.current !== null && prevDocIdRef.current !== activeDocId) {
       // Save previous thread
       if (prevDocIdRef.current && activeThreadId && messages.length > 0) {
-        saveChatHistory(prevDocIdRef.current, activeThreadId, messages, apiMessages);
+        saveChatHistory(
+          prevDocIdRef.current,
+          activeThreadId,
+          messages,
+          apiMessages,
+        );
       }
       setStreamingText("");
       setThreadListOpen(false);
+      // Reset thread/messages synchronously BEFORE loading the new doc's
+      // threads. During the async load there is otherwise a window where
+      // activeDocId is already the new doc but activeThreadId/messages still
+      // belong to the previous one; the debounced auto-save would then persist
+      // the old messages under the new doc. Legacy docs share the hardcoded
+      // "default" thread id, so the id-equality guard cannot catch that alias.
+      // Clearing activeThreadId to null also makes the subsequent
+      // setActiveThreadId("default") a real transition (not a no-op bailout),
+      // so the pending stale save timer is reliably cleared.
+      setActiveThreadId(null);
+      setMessages([]);
+      setApiMessages([]);
       if (activeDocId) loadDocThreads(activeDocId);
-      else { setThreads([]); setActiveThreadId(null); setMessages([]); setApiMessages([]); }
+      else setThreads([]);
     } else if (prevDocIdRef.current === null && activeDocId) {
       loadDocThreads(activeDocId);
     }
@@ -415,32 +557,64 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   // Auto-save chat history on message changes (debounced)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // "Latest value" refs: during a document switch there is a render where
+  // activeDocId has already advanced to the new doc but activeThreadId/messages
+  // still belong to the previous doc (loadDocThreads is async). This guard
+  // rejects a stale save whose doc/thread no longer matches the live values.
+  // NOTE: thread ids are NOT globally unique — legacy docs share the hardcoded
+  // "default" id — so this comparison alone cannot catch a same-id cross-doc
+  // alias. The synchronous reset in the document-switch effect above is the
+  // primary defense; this ref check is defense-in-depth.
+  const activeDocIdRef = useRef(activeDocId);
+  activeDocIdRef.current = activeDocId;
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
   useEffect(() => {
     if (!activeDocId || !activeThreadId || messages.length === 0) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     const docId = activeDocId;
     const threadId = activeThreadId;
     saveTimerRef.current = setTimeout(() => {
+      // Skip if the active doc/thread changed since this save was scheduled.
+      if (
+        activeDocIdRef.current !== docId ||
+        activeThreadIdRef.current !== threadId
+      )
+        return;
       saveChatHistory(docId, threadId, messages, apiMessages);
       // Auto-update thread title from first user message
       const firstUserMsg = messages.find((m) => m.role === "user");
       if (firstUserMsg) {
         const title = firstUserMsg.content.slice(0, 40);
         setThreads((prev) => {
-          const updated = prev.map((t) => t.id === threadId ? { ...t, title } : t);
+          const updated = prev.map((t) =>
+            t.id === threadId ? { ...t, title } : t,
+          );
           saveThreadList(docId, updated);
           return updated;
         });
       }
     }, 1000);
-    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
-  }, [messages, apiMessages, activeDocId, activeThreadId, saveChatHistory, saveThreadList]);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [
+    messages,
+    apiMessages,
+    activeDocId,
+    activeThreadId,
+    saveChatHistory,
+    saveThreadList,
+  ]);
 
   // Close thread dropdown on outside click
   useEffect(() => {
     if (!threadListOpen) return;
     const handler = (e: MouseEvent) => {
-      if (threadListRef.current && !threadListRef.current.contains(e.target as Node)) {
+      if (
+        threadListRef.current &&
+        !threadListRef.current.contains(e.target as Node)
+      ) {
         setThreadListOpen(false);
       }
     };
@@ -469,7 +643,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
   };
 
   // Cache for document summaries (avoids re-summarizing unchanged docs)
-  const docSummaryCache = useRef<Map<string, { hash: number; summary: string }>>(new Map());
+  const docSummaryCache = useRef<
+    Map<string, { hash: number; summary: string }>
+  >(new Map());
 
   const hashContent = (s: string): number => {
     let h = 0;
@@ -483,7 +659,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
     else if (doc.isShared) flags.push("shared");
     else flags.push("personal");
     if (doc.docType === "mindmap") flags.push("mindmap");
-    const date = new Date(doc.updatedAt).toISOString().slice(0, 16).replace("T", " ");
+    const date = new Date(doc.updatedAt)
+      .toISOString()
+      .slice(0, 16)
+      .replace("T", " ");
     return `[${flags.join(",")}] folder="${doc.folder || "/"}" tags=[${(doc.tags || []).join(",")}] updated=${date}`;
   };
 
@@ -513,7 +692,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
       // Current doc: always full content + full meta
       if (activeDoc) {
         const text = stripHtml(activeDoc.content);
-        parts.push(`\n--- ${activeDoc.title} (CURRENT) ---\n${buildDocMeta(activeDoc)}\n\n${text}`);
+        parts.push(
+          `\n--- ${activeDoc.title} (CURRENT) ---\n${buildDocMeta(activeDoc)}\n\n${text}`,
+        );
         usedChars += text.length;
       }
 
@@ -545,14 +726,18 @@ export function AiPanel({ onClose }: AiPanelProps) {
           usedChars += summary.length;
         } else {
           // Over budget: metadata only
-          parts.push(`\n--- ${doc.title} ---\n${meta}\n\n[Content omitted — over context budget]`);
+          parts.push(
+            `\n--- ${doc.title} ---\n${meta}\n\n[Content omitted — over context budget]`,
+          );
         }
       }
 
       parts.push("\n=== End of Documents ===\n");
     } else if (activeDoc) {
       const text = stripHtml(activeDoc.content);
-      parts.push(`Current document "${activeDoc.title}":\n${buildDocMeta(activeDoc)}\n\n${text}`);
+      parts.push(
+        `Current document "${activeDoc.title}":\n${buildDocMeta(activeDoc)}\n\n${text}`,
+      );
     }
 
     const selected = getSelectedText();
@@ -614,21 +799,47 @@ export function AiPanel({ onClose }: AiPanelProps) {
     }
   };
 
-  const handleMcpToolCall = useCallback(async (toolName: string, input: Record<string, unknown>): Promise<unknown> => {
-    const parsed = parseClaudeToolName(toolName);
-    if (!parsed) throw new Error(`Unknown tool: ${toolName}`);
-    return await callTool(parsed.serverId, parsed.toolName, input);
-  }, []);
+  const handleMcpToolCall = useCallback(
+    async (
+      toolName: string,
+      input: Record<string, unknown>,
+    ): Promise<unknown> => {
+      const parsed = parseClaudeToolName(toolName);
+      if (!parsed) throw new Error(`Unknown tool: ${toolName}`);
+      return await callTool(parsed.serverId, parsed.toolName, input);
+    },
+    [],
+  );
 
   const handleImageGen = async () => {
     if (!user || !input.trim()) return;
     const prompt = input.trim();
+
+    // Auto-create thread if none exists — otherwise the generated-image
+    // messages are never persisted (auto-save requires an activeThreadId),
+    // matching handleChat / handleAction.
+    if (!activeThreadId && activeDocId) {
+      const newThread: ChatThread = {
+        id: crypto.randomUUID().slice(0, 8),
+        title: prompt.slice(0, 40) || "Image",
+        createdAt: Date.now(),
+      };
+      const newList = [...threads, newThread];
+      setThreads(newList);
+      setActiveThreadId(newThread.id);
+      saveThreadList(activeDocId, newList);
+    }
+
     setInput("");
     setGeneratingImage(true);
 
     setMessages((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), role: "user", content: `🎨 Generate image: ${prompt}` },
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: `🎨 Generate image: ${prompt}`,
+      },
     ]);
 
     try {
@@ -639,7 +850,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
         const docContext = await buildContextPrefix();
         const contextMessages: ClaudeMessage[] = [
           ...(docContext
-            ? [{ role: "user" as const, content: docContext }, { role: "assistant" as const, content: "I've read the document context." }]
+            ? [
+                { role: "user" as const, content: docContext },
+                {
+                  role: "assistant" as const,
+                  content: "I've read the document context.",
+                },
+              ]
             : []),
           ...apiMessages.slice(-10),
           {
@@ -662,7 +879,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
       }
 
       setToolStatus("Generating image...");
-      const result = await generateImage(imagePrompt, (status) => setToolStatus(status));
+      const result = await generateImage(imagePrompt, (status) =>
+        setToolStatus(status),
+      );
       setToolStatus(null);
 
       setMessages((prev) => [
@@ -725,7 +944,8 @@ export function AiPanel({ onClose }: AiPanelProps) {
     setStreamingText("");
 
     try {
-      const claudeTools = mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
+      const claudeTools =
+        mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
       let result: string;
 
       if (claudeTools && claudeTools.length > 0) {
@@ -798,7 +1018,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
         id: crypto.randomUUID(),
         role: "user",
         content: userInput || "(image)",
-        images: images.length > 0 ? images.map((i) => ({ data: i.data, mediaType: i.mediaType })) : undefined,
+        images:
+          images.length > 0
+            ? images.map((i) => ({ data: i.data, mediaType: i.mediaType }))
+            : undefined,
       },
     ]);
     setStreaming(true);
@@ -835,7 +1058,8 @@ export function AiPanel({ onClose }: AiPanelProps) {
         },
       ].slice(-20);
 
-      const claudeTools = mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
+      const claudeTools =
+        mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
       let result: string;
 
       if (claudeTools && claudeTools.length > 0) {
@@ -907,7 +1131,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   if (!user) {
     return (
-      <div className={`flex h-full w-full flex-col bg-background ${isMobile ? "" : "border-l border-border"}`}>
+      <div
+        className={`flex h-full w-full flex-col bg-background ${isMobile ? "" : "border-l border-border"}`}
+      >
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <div className="flex items-center gap-2">
             <Bot className="h-4 w-4" />
@@ -916,7 +1142,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"}
+            className={
+              isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"
+            }
             onClick={onClose}
           >
             <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
@@ -925,8 +1153,8 @@ export function AiPanel({ onClose }: AiPanelProps) {
         <div className="flex flex-1 flex-col items-center justify-center p-4 space-y-3">
           <Bot className="h-10 w-10 text-muted-foreground" />
           <p className="text-xs text-muted-foreground text-center">
-            Sign in with Google to use AI features powered by Claude Opus 5
-            via Vertex AI.
+            Sign in with Google to use AI features powered by Claude Opus 5 via
+            Vertex AI.
           </p>
           <Button
             size="sm"
@@ -972,7 +1200,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
           );
         },
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        p: ({ node, ...props }) => <p className="mb-1.5 last:mb-0" {...props} />,
+        p: ({ node, ...props }) => (
+          <p className="mb-1.5 last:mb-0" {...props} />
+        ),
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         ul: ({ node, ...props }) => (
           <ul className="list-disc pl-4 mb-1.5" {...props} />
@@ -1007,7 +1237,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
   );
 
   return (
-    <div className={`relative flex h-full w-full flex-col bg-background ${isMobile ? "" : "border-l border-border"}`}>
+    <div
+      className={`relative flex h-full w-full flex-col bg-background ${isMobile ? "" : "border-l border-border"}`}
+    >
       {/* Custom Rules Editor (overlay) */}
       <RulesEditor
         open={rulesOpen}
@@ -1062,10 +1294,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
                 setMcpSettingsOpen(true);
               }
             }}
-            onContextMenu={(e) => { e.preventDefault(); setMcpSettingsOpen(true); }}
-            title={mcpEnabled && mcpTools.length > 0
-              ? `MCP active (${mcpTools.length} tools) — right-click to configure`
-              : "MCP tools — click to configure"}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMcpSettingsOpen(true);
+            }}
+            title={
+              mcpEnabled && mcpTools.length > 0
+                ? `MCP active (${mcpTools.length} tools) — right-click to configure`
+                : "MCP tools — click to configure"
+            }
           >
             <Wrench className="h-3.5 w-3.5" />
           </Button>
@@ -1074,7 +1311,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
             size="icon"
             className="h-6 w-6 cursor-pointer"
             onClick={() => setRulesOpen(true)}
-            title={customRules.trim() ? "Custom rules active" : "Set custom AI rules"}
+            title={
+              customRules.trim() ? "Custom rules active" : "Set custom AI rules"
+            }
           >
             <Settings className="h-3.5 w-3.5" />
           </Button>
@@ -1092,7 +1331,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
               variant="ghost"
               size="icon"
               className="h-6 w-6 cursor-pointer"
-              onClick={() => { if (activeThreadId) deleteThread(activeThreadId); }}
+              onClick={() => {
+                if (activeThreadId) deleteThread(activeThreadId);
+              }}
               title="Delete this topic"
             >
               <Trash2 className="h-3.5 w-3.5" />
@@ -1101,7 +1342,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"}
+            className={
+              isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"
+            }
             onClick={onClose}
           >
             <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
@@ -1118,10 +1361,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
           >
             <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
             <span className="flex-1 truncate font-medium">
-              {threads.find((t) => t.id === activeThreadId)?.title || "Select topic"}
+              {threads.find((t) => t.id === activeThreadId)?.title ||
+                "Select topic"}
             </span>
-            <span className="text-[9px] text-muted-foreground">{threads.length}</span>
-            <ChevronDown className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${threadListOpen ? "rotate-180" : ""}`} />
+            <span className="text-[9px] text-muted-foreground">
+              {threads.length}
+            </span>
+            <ChevronDown
+              className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${threadListOpen ? "rotate-180" : ""}`}
+            />
           </button>
           {threadListOpen && (
             <div className="absolute inset-x-0 top-full z-30 bg-popover border border-border rounded-b-md shadow-lg max-h-48 overflow-y-auto">
@@ -1136,11 +1384,17 @@ export function AiPanel({ onClose }: AiPanelProps) {
                   <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
                   <span className="flex-1 truncate">{t.title}</span>
                   <span className="text-[9px] text-muted-foreground">
-                    {new Date(t.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                    {new Date(t.createdAt).toLocaleDateString(undefined, {
+                      month: "short",
+                      day: "numeric",
+                    })}
                   </span>
                   <button
                     className="opacity-0 group-hover:opacity-60 hover:opacity-100! p-0.5 transition-opacity"
-                    onClick={(e) => { e.stopPropagation(); deleteThread(t.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteThread(t.id);
+                    }}
                     title="Delete topic"
                   >
                     <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
@@ -1155,8 +1409,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
       {/* Quick actions */}
       <div className="p-2 space-y-1">
         <p className="px-1 text-[10px] text-muted-foreground uppercase tracking-wider">
-          Quick Actions{" "}
-          {hasSelection ? "(on selection)" : "(on document)"}
+          Quick Actions {hasSelection ? "(on selection)" : "(on document)"}
         </p>
         <div className="grid grid-cols-2 gap-1">
           {AI_ACTIONS.map((action) => {
@@ -1181,7 +1434,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
       <Separator />
 
       {/* Status indicators */}
-      {(allDocsContext || webSearch || (mcpEnabled && mcpTools.length > 0) || toolStatus) && (
+      {(allDocsContext ||
+        webSearch ||
+        (mcpEnabled && mcpTools.length > 0) ||
+        toolStatus) && (
         <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-2 flex-wrap">
           {allDocsContext && (
             <span className="flex items-center gap-1">
@@ -1210,7 +1466,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
       )}
 
       {/* Messages */}
-      <ScrollArea ref={scrollAreaRef} className="ai-panel-scroll flex-1 min-h-0 p-3">
+      <ScrollArea
+        ref={scrollAreaRef}
+        className="ai-panel-scroll flex-1 min-h-0 p-3"
+      >
         <div className="space-y-3">
           {messages.length === 0 && !streaming && (
             <p className="text-xs text-muted-foreground text-center py-8">
@@ -1223,9 +1482,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
             <div
               key={msg.id}
               className={`text-xs ${
-                msg.role === "user"
-                  ? "text-right"
-                  : "bg-muted rounded-md p-2"
+                msg.role === "user" ? "text-right" : "bg-muted rounded-md p-2"
               }`}
             >
               {msg.role === "assistant" && (
@@ -1239,7 +1496,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() =>
-                        navigator.clipboard.writeText(msg.generatedImage?.markdown || msg.content)
+                        navigator.clipboard.writeText(
+                          msg.generatedImage?.markdown || msg.content,
+                        )
                       }
                       title="Copy raw text"
                     >
@@ -1250,15 +1509,22 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
-                        const text = msg.generatedImage?.markdown || msg.content;
+                        const text =
+                          msg.generatedImage?.markdown || msg.content;
                         if (isIOS) {
                           setPendingInsert({ text, mode: "replace" });
                           onClose();
                         } else if (!replaceSelection(text)) {
-                          alert("エディタが利用できません。エディタ表示に切り替えてください。");
+                          alert(
+                            "エディタが利用できません。エディタ表示に切り替えてください。",
+                          );
                         }
                       }}
-                      title={isIOS ? "Insert and return to editor" : "Replace selection / Insert at cursor"}
+                      title={
+                        isIOS
+                          ? "Insert and return to editor"
+                          : "Replace selection / Insert at cursor"
+                      }
                     >
                       <Replace className="h-2.5 w-2.5" />
                     </Button>
@@ -1267,15 +1533,22 @@ export function AiPanel({ onClose }: AiPanelProps) {
                       size="icon"
                       className="h-5 w-5 cursor-pointer"
                       onClick={() => {
-                        const text = msg.generatedImage?.markdown || msg.content;
+                        const text =
+                          msg.generatedImage?.markdown || msg.content;
                         if (isIOS) {
                           setPendingInsert({ text, mode: "append" });
                           onClose();
                         } else if (!appendToDoc(text)) {
-                          alert("エディタが利用できません。エディタ表示に切り替えてください。");
+                          alert(
+                            "エディタが利用できません。エディタ表示に切り替えてください。",
+                          );
                         }
                       }}
-                      title={isIOS ? "Append and return to editor" : "Append to document"}
+                      title={
+                        isIOS
+                          ? "Append and return to editor"
+                          : "Append to document"
+                      }
                     >
                       <CornerDownLeft className="h-2.5 w-2.5" />
                     </Button>
@@ -1318,9 +1591,14 @@ export function AiPanel({ onClose }: AiPanelProps) {
                             className="text-[10px] h-6 gap-1 cursor-pointer"
                             onClick={() => {
                               if (isIOS) {
-                                setPendingInsert({ text: msg.generatedImage!.markdown, mode: "replace" });
+                                setPendingInsert({
+                                  text: msg.generatedImage!.markdown,
+                                  mode: "replace",
+                                });
                                 onClose();
-                              } else if (!insertAtCursor(msg.generatedImage!.markdown)) {
+                              } else if (
+                                !insertAtCursor(msg.generatedImage!.markdown)
+                              ) {
                                 appendToDoc(msg.generatedImage!.markdown);
                               }
                             }}
@@ -1332,7 +1610,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
                             variant="ghost"
                             size="sm"
                             className="text-[10px] h-6 gap-1 cursor-pointer"
-                            onClick={() => navigator.clipboard.writeText(msg.generatedImage!.markdown)}
+                            onClick={() =>
+                              navigator.clipboard.writeText(
+                                msg.generatedImage!.markdown,
+                              )
+                            }
                           >
                             <Copy className="h-2.5 w-2.5" />
                             Copy markdown
@@ -1355,16 +1637,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
                   <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
                 </div>
                 <span className="text-[10px] text-muted-foreground">
-                  {toolStatus || (generatingImage ? "Generating image..." : "Thinking...")}
+                  {toolStatus ||
+                    (generatingImage ? "Generating image..." : "Thinking...")}
                 </span>
               </div>
             </div>
           )}
           {streaming && streamingText && (
             <div className="text-xs bg-muted rounded-md p-2">
-              <span className="text-[10px] text-muted-foreground">
-                Claude
-              </span>
+              <span className="text-[10px] text-muted-foreground">Claude</span>
               <div className="leading-relaxed mt-1 prose ai-markdown select-text">
                 {renderMarkdown(streamingText)}
                 <span className="animate-pulse">|</span>
@@ -1386,7 +1667,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
               />
               <button
                 className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center text-[8px] opacity-0 group-hover:opacity-100 transition-opacity"
-                onClick={() => setAttachedImages((prev) => prev.filter((_, j) => j !== i))}
+                onClick={() =>
+                  setAttachedImages((prev) => prev.filter((_, j) => j !== i))
+                }
               >
                 x
               </button>
@@ -1409,12 +1692,18 @@ export function AiPanel({ onClose }: AiPanelProps) {
       />
 
       {/* Input — textarea, Cmd+Enter to send */}
-      <div className={`border-t border-border ${isIOS ? "pt-2 pb-7 px-5" : "p-2"}`}>
+      <div
+        className={`border-t border-border ${isIOS ? "pt-2 pb-7 px-5" : "p-2"}`}
+      >
         <div className="flex gap-1 items-end">
           <Button
             variant="ghost"
             size="icon"
-            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
+            className={
+              isMobile
+                ? "h-11 w-11 shrink-0 cursor-pointer"
+                : "h-7 w-7 shrink-0 cursor-pointer"
+            }
             onClick={handleImageAttach}
             disabled={streaming || generatingImage}
             title="Attach image"
@@ -1424,7 +1713,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
+            className={
+              isMobile
+                ? "h-11 w-11 shrink-0 cursor-pointer"
+                : "h-7 w-7 shrink-0 cursor-pointer"
+            }
             onClick={handleImageGen}
             disabled={streaming || generatingImage || !input.trim()}
             title="Generate image from prompt"
@@ -1449,9 +1742,17 @@ export function AiPanel({ onClose }: AiPanelProps) {
           />
           <Button
             size="icon"
-            className={isMobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-7 w-7 shrink-0 cursor-pointer"}
+            className={
+              isMobile
+                ? "h-11 w-11 shrink-0 cursor-pointer"
+                : "h-7 w-7 shrink-0 cursor-pointer"
+            }
             onClick={handleChat}
-            disabled={streaming || generatingImage || (!input.trim() && attachedImages.length === 0)}
+            disabled={
+              streaming ||
+              generatingImage ||
+              (!input.trim() && attachedImages.length === 0)
+            }
           >
             <Send className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>

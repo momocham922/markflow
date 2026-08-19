@@ -144,7 +144,7 @@ interface AuthState {
   syncToCloud: () => Promise<boolean>;
   syncFromCloud: () => Promise<void>;
   deleteFromCloud: (docId: string) => Promise<void>;
-  resetCloudAndReSync: () => Promise<void>;
+  resetCloudAndReSync: () => Promise<{ ok: boolean; failed: number }>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -295,16 +295,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           deletedDocIds = new Set();
         }
 
-        // Parallel fetch: user docs, shared docs, teams, and user settings
+        // Parallel fetch: user docs, shared docs, teams, and user settings.
+        // Track per-source success: a transient fetch failure returns [] and must
+        // NOT be mistaken for "the owner removed every shared/team doc" during
+        // deletion reconciliation (that would tombstone-delete valid docs).
+        let sharedOk = true;
+        let teamsOk = true;
         const [cloudDocs, sharedDocs, teams, cloudSettings] = await Promise.all(
           [
             fetchUserDocuments(user.uid),
             fetchSharedWithMe(user.uid).catch((err) => {
               console.error("Fetch shared docs failed:", err);
+              sharedOk = false;
               return [] as Awaited<ReturnType<typeof fetchSharedWithMe>>;
             }),
             fetchUserTeams(user.uid).catch((err) => {
               console.error("Fetch teams failed:", err);
+              teamsOk = false;
               return [] as Awaited<ReturnType<typeof fetchUserTeams>>;
             }),
             fetchUserSettings(user.uid).catch(() => null),
@@ -592,7 +599,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           teams.map((team) =>
             fetchTeamDocuments(team.id)
               .then((docs) => docs.map((d) => ({ ...d, teamId: team.id })))
-              .catch(() => [] as { id: string; teamId: string }[]),
+              .catch(() => {
+                // A single team's doc fetch failing must also suppress deletion
+                // reconciliation — otherwise that team's docs get tombstoned.
+                teamsOk = false;
+                return [] as { id: string; teamId: string }[];
+              }),
           ),
         );
         const teamDocsToFetch: {
@@ -746,7 +758,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               // Firestore check failed (network?) — err on the side of keeping the doc
             }
           } else if (local.isShared || local.teamId) {
-            // Non-owned shared/team doc not in cloud → removed by owner
+            // Non-owned shared/team doc not in cloud → removed by owner.
+            // Only reconcile when the relevant source list actually loaded.
+            // If the fetch failed (returned [] via .catch), we cannot tell
+            // "removed by owner" from "transient network error" — deleting here
+            // writes a 30-day tombstone that blocks re-sync, so skip instead.
+            // fetchDocument re-check is NOT usable here: getDoc throws
+            // permission-denied for both deleted AND access-revoked non-owned
+            // docs, so it can't distinguish the cases.
+            const isTeamDoc = !!local.teamId;
+            if (isTeamDoc && !teamsOk) continue;
+            if (!isTeamDoc && !sharedOk) continue;
             console.warn(
               `[sync] Removing non-owned doc ${local.id} (deleted from cloud)`,
             );
@@ -783,10 +805,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   // Run this on the device with the CORRECT document list.
   resetCloudAndReSync: async () => {
     const { user, isOnline } = get();
-    if (!user || !isOnline) return;
+    if (!user || !isOnline) return { ok: false, failed: 0 };
 
-    await withSyncLock(async () => {
+    const result = await withSyncLock(async () => {
       set({ syncing: true });
+      // Count per-doc delete/upload failures that we swallow to keep going.
+      // A non-zero count means the cloud does NOT fully match this device, so we
+      // must NOT report unconditional success (サイレントフォールバック禁止).
+      let failed = 0;
       try {
         // 1. Fetch all own docs from cloud
         const cloudDocs = await fetchUserDocuments(user.uid);
@@ -805,6 +831,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               await deleteDocumentFromFirestore(cd.id);
               deleted++;
             } catch (e) {
+              failed++;
               console.error(`[resetCloud] Failed to delete ${cd.id}:`, e);
             }
           }
@@ -829,6 +856,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               titlePinned: d.titlePinned,
             });
           } catch (e) {
+            failed++;
             console.error(`[resetCloud] Failed to upload ${d.id}:`, e);
           }
         }
@@ -852,14 +880,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
 
         console.warn(
-          "[resetCloud] Cloud reset complete. Cloud now matches this device.",
+          `[resetCloud] Cloud reset complete (${failed} per-doc failures).`,
         );
+        return { ok: failed === 0, failed };
       } catch (error) {
         console.error("[resetCloud] Failed:", error);
+        return { ok: false, failed };
       } finally {
         set({ syncing: false });
       }
     });
+    // withSyncLock returns undefined if another sync held the lock (skipped).
+    return result ?? { ok: false, failed: 0 };
   },
 
   syncToCloud: async () => {

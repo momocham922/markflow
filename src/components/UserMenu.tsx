@@ -69,16 +69,29 @@ export function UserMenu() {
   const handleResetCloud = useCallback(async () => {
     setSyncMenuOpen(false);
     setMobileMenuOpen(false);
+    if (!isOnline) {
+      window.alert(
+        "オフラインです。オンラインに接続してから再実行してください。",
+      );
+      return;
+    }
     const ok = window.confirm(
       "クラウドをリセットして、このデバイスのドキュメントで上書きします。\n\n" +
         "正しいドキュメントがあるデバイスで実行してください。\n本当に実行しますか？",
     );
     if (!ok) return;
-    await resetCloudAndReSync();
+    // resetCloudAndReSync reports per-doc failures via { ok, failed }. Do NOT
+    // claim success while individual upload/delete errors were swallowed — a
+    // false "完了" alert let cloud/local diverge silently before.
+    const { ok: resetOk, failed } = await resetCloudAndReSync();
     window.alert(
-      "クラウドリセット完了。他のデバイスを再起動すると同期されます。",
+      resetOk
+        ? "クラウドリセット完了。他のデバイスを再起動すると同期されます。"
+        : failed > 0
+          ? `一部のドキュメント（${failed}件）の同期に失敗しました。クラウドはこのデバイスと完全には一致していません。ネットワーク接続を確認して再度お試しください。`
+          : "クラウドリセットに失敗しました。ネットワーク接続を確認して再度お試しください。",
     );
-  }, [resetCloudAndReSync]);
+  }, [resetCloudAndReSync, isOnline]);
 
   useEffect(() => {
     if (!syncMenuOpen) return;
@@ -272,9 +285,10 @@ export function UserMenu() {
             <div className="my-1 border-t border-border" />
             <button
               className={cn(
-                "flex w-full items-center gap-2 rounded-sm px-3 hover:bg-accent text-left text-destructive",
+                "flex w-full items-center gap-2 rounded-sm px-3 hover:bg-accent text-left text-destructive disabled:opacity-50",
                 isMobile ? "py-2.5 text-sm" : "py-1.5 text-xs",
               )}
+              disabled={syncing || !isOnline}
               onClick={handleResetCloud}
             >
               <DatabaseZap className="h-3 w-3" />

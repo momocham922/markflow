@@ -25,9 +25,15 @@ import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
+import { buildThemeVarLines } from "@/lib/theme-css";
 import { emitLocalEdit } from "@/lib/local-edit-signal";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
-import { imagePaste, processImagePath } from "@/extensions/image-paste";
+import {
+  imagePaste,
+  processImagePath,
+  makeUploadPlaceholder,
+  replaceUploadPlaceholder,
+} from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
 import { ResearchPanel } from "./ResearchPanel";
@@ -779,9 +785,9 @@ export function Editor() {
     if (theme === "dark" && preset.dark) {
       Object.assign(vars, preset.dark);
     }
-    const entries = Object.entries(vars)
-      .map(([k, v]) => `  ${k}: ${v};`)
-      .join("\n");
+    // Sanitize: custom (imported) themes are untrusted and go straight into a
+    // <style> tag — an unfiltered value can break out and inject arbitrary CSS.
+    const entries = buildThemeVarLines(vars);
     return `:root {\n${entries}\n}`;
   }, [themeSettings.previewTheme, theme, customPreviewThemes]);
 
@@ -1003,7 +1009,7 @@ export function Editor() {
             const pos =
               view.posAtCoords({ x: position.x, y: position.y }) ??
               view.state.selection.main.head;
-            const placeholder = "![Uploading image...]()";
+            const placeholder = makeUploadPlaceholder();
             view.dispatch({
               changes: { from: pos, insert: placeholder + "\n" },
             });
@@ -1013,34 +1019,13 @@ export function Editor() {
                 imagePaths.map((p) => processImagePath(p)),
               );
               const v = viewRef.current;
-              if (v) {
-                const doc = v.state.doc.toString();
-                const idx = doc.indexOf(placeholder);
-                if (idx >= 0) {
-                  v.dispatch({
-                    changes: {
-                      from: idx,
-                      to: idx + placeholder.length,
-                      insert: markdowns.join("\n"),
-                    },
-                  });
-                }
-              }
+              if (v)
+                replaceUploadPlaceholder(v, placeholder, markdowns.join("\n"));
             } catch (err: unknown) {
               const v = viewRef.current;
               if (v) {
-                const doc = v.state.doc.toString();
-                const idx = doc.indexOf(placeholder);
-                if (idx >= 0) {
-                  const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-                  v.dispatch({
-                    changes: {
-                      from: idx,
-                      to: idx + placeholder.length,
-                      insert: errMsg,
-                    },
-                  });
-                }
+                const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
+                replaceUploadPlaceholder(v, placeholder, errMsg);
               }
             }
           })) ?? undefined;

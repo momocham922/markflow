@@ -528,6 +528,25 @@ export function Sidebar() {
     folder: string,
   ) => {
     try {
+      // The doc may be a personal doc that was never synced to Firestore.
+      // moveDocToTeam merges {teamId,folder}, but Firestore rules reject a
+      // partial create with no ownerId — so ensure the full doc exists first.
+      const localDocToMove = documents.find((d) => d.id === docId);
+      const authUser = useAuthStore.getState().user;
+      if (localDocToMove && authUser) {
+        const { saveDocumentToFirestore } = await import("@/services/firebase");
+        await saveDocumentToFirestore({
+          id: localDocToMove.id,
+          title: localDocToMove.title,
+          content: localDocToMove.content,
+          ownerId: authUser.uid,
+          ownerName: authUser.displayName || authUser.email || undefined,
+          folder,
+          tags: localDocToMove.tags,
+          titlePinned: localDocToMove.titlePinned,
+          updatedAt: localDocToMove.updatedAt,
+        });
+      }
       await moveDocToTeam(docId, teamId, folder);
       // Update local store
       updateDocument(docId, {
@@ -558,6 +577,9 @@ export function Sidebar() {
       );
     } catch (err) {
       console.error("Failed to move doc to team:", err);
+      window.alert(
+        `チームへの移動に失敗しました。ネットワーク接続を確認してください。\n${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   };
   crossMoveToTeamRef.current = handleMoveDocToTeam;
@@ -1376,11 +1398,23 @@ export function Sidebar() {
       setDragOverTeamFolder(null);
     };
 
+    // pointercancel fires instead of pointerup on OS interruption — ABORT the
+    // drag (reset state only, never perform the drop) so a canceled gesture
+    // doesn't leave a stuck drag indicator or fire an unintended move.
+    const handleCancel = () => {
+      dragRef.current = null;
+      setDragIndicator(null);
+      setDragOverFolder(null);
+      setDragOverTeamFolder(null);
+    };
+
     document.addEventListener("pointermove", handleMove);
     document.addEventListener("pointerup", handleUp);
+    document.addEventListener("pointercancel", handleCancel);
     return () => {
       document.removeEventListener("pointermove", handleMove);
       document.removeEventListener("pointerup", handleUp);
+      document.removeEventListener("pointercancel", handleCancel);
     };
   }, []);
 

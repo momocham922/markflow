@@ -15,6 +15,25 @@ export function extractYouTubeId(url: string): string | null {
   return null;
 }
 
+// CJK ranges (hiragana, katakana, halfwidth katakana, CJK ideographs +
+// extension A + compatibility, hangul). These scripts don't separate words
+// with spaces, so each character is counted as one word.
+const CJK_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿ｦ-ﾟ]/g;
+
+/**
+ * Count words in a way that's meaningful for both space-delimited scripts
+ * (Latin, etc.) and CJK. Latin words are counted by whitespace splitting;
+ * each CJK character counts as one word. `"日本語 test"` → 3 + 1 = 4.
+ */
+export function countWords(text: string): number {
+  const t = text.trim();
+  if (!t) return 0;
+  const cjk = t.match(CJK_RE)?.length ?? 0;
+  const rest = t.replace(CJK_RE, " ").trim();
+  const latin = rest ? rest.split(/\s+/).length : 0;
+  return cjk + latin;
+}
+
 /** Escape HTML special characters to prevent XSS */
 export function escapeHtml(s: string): string {
   return s

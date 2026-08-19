@@ -12,6 +12,7 @@ import { previewThemeList } from "@/styles/preview-themes";
 import { editorThemeList } from "@/styles/editor-themes";
 import { Check, Upload, Download, X } from "lucide-react";
 import { getPlatform } from "@/platform";
+import { isValidThemeVarMap } from "@/lib/theme-css";
 
 type Tab = "presets" | "custom";
 
@@ -24,12 +25,22 @@ interface ThemeCustomizerProps {
 function validateThemeFile(obj: unknown): obj is CustomPreviewTheme {
   if (!obj || typeof obj !== "object") return false;
   const t = obj as Record<string, unknown>;
-  return typeof t.id === "string" && typeof t.name === "string"
-    && typeof t.variables === "object" && t.variables !== null;
+  if (typeof t.id !== "string" || typeof t.name !== "string") return false;
+  // variables/dark are injected into a <style> tag — every entry must be a
+  // string keyed by a valid CSS custom property (blocks CSS-injection payloads).
+  if (!isValidThemeVarMap(t.variables)) return false;
+  if (t.dark !== undefined && !isValidThemeVarMap(t.dark)) return false;
+  return true;
 }
 
 export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
-  const { themeSettings, setThemeSettings, customPreviewThemes, addCustomPreviewTheme, removeCustomPreviewTheme } = useAppStore();
+  const {
+    themeSettings,
+    setThemeSettings,
+    customPreviewThemes,
+    addCustomPreviewTheme,
+    removeCustomPreviewTheme,
+  } = useAppStore();
   const [tab, setTab] = useState<Tab>("presets");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -39,27 +50,32 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
     fileInputRef.current?.click();
   }, []);
 
-  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string);
-        if (!validateThemeFile(parsed)) {
-          setImportError("無効なテーマファイル: id, name, variables が必要です");
-          return;
+  const handleFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(reader.result as string);
+          if (!validateThemeFile(parsed)) {
+            setImportError(
+              "無効なテーマファイル: id, name, variables が必要です",
+            );
+            return;
+          }
+          addCustomPreviewTheme(parsed);
+          setThemeSettings({ previewTheme: parsed.id });
+          setImportError(null);
+        } catch {
+          setImportError("JSONの解析に失敗しました");
         }
-        addCustomPreviewTheme(parsed);
-        setThemeSettings({ previewTheme: parsed.id });
-        setImportError(null);
-      } catch {
-        setImportError("JSONの解析に失敗しました");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
-  }, [addCustomPreviewTheme, setThemeSettings]);
+      };
+      reader.readAsText(file);
+      e.target.value = "";
+    },
+    [addCustomPreviewTheme, setThemeSettings],
+  );
 
   const handleExportTheme = useCallback(async (theme: CustomPreviewTheme) => {
     const json = JSON.stringify(theme, null, 2);
@@ -146,11 +162,21 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
                   プレビューテーマ
                 </label>
                 <div className="flex gap-1">
-                  <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleDownloadTemplate}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1 text-xs"
+                    onClick={handleDownloadTemplate}
+                  >
                     <Download className="h-3 w-3" />
                     テンプレート
                   </Button>
-                  <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleImportTheme}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1 text-xs"
+                    onClick={handleImportTheme}
+                  >
                     <Upload className="h-3 w-3" />
                     インポート
                   </Button>
@@ -195,14 +221,20 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
                       <button
                         className="flex h-4 w-4 items-center justify-center rounded-full bg-muted text-muted-foreground hover:text-foreground"
                         title="エクスポート"
-                        onClick={(e) => { e.stopPropagation(); handleExportTheme(t); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleExportTheme(t);
+                        }}
                       >
                         <Download className="h-2.5 w-2.5" />
                       </button>
                       <button
                         className="flex h-4 w-4 items-center justify-center rounded-full bg-muted text-muted-foreground hover:text-destructive"
                         title="削除"
-                        onClick={(e) => { e.stopPropagation(); removeCustomPreviewTheme(t.id); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeCustomPreviewTheme(t.id);
+                        }}
                       >
                         <X className="h-2.5 w-2.5" />
                       </button>

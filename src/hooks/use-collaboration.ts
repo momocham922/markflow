@@ -93,10 +93,15 @@ export function useCollaboration(
       const params: Record<string, string> = {};
       if (token) params.token = token;
 
-      const provider = new WebsocketProvider(WS_URL, `markflow-${docId}`, ydoc, {
-        connect: false,
-        params,
-      });
+      const provider = new WebsocketProvider(
+        WS_URL,
+        `markflow-${docId}`,
+        ydoc,
+        {
+          connect: false,
+          params,
+        },
+      );
       providerRef.current = provider;
 
       // Awareness (cursor/presence)
@@ -170,12 +175,16 @@ export function useCollaboration(
       const wsTimeout = setTimeout(() => {
         if (!wsSynced && !cancelled && !finalized) {
           if (idbSynced) {
-            console.warn("[collab] WS sync timeout — activating with local state");
+            console.warn(
+              "[collab] WS sync timeout — activating with local state",
+            );
             wsSynced = true;
             tryFinalize();
           } else {
             // IDB also hasn't synced — give up and show editor without collab
-            console.warn("[collab] WS+IDB timeout — fallback to non-collab mode");
+            console.warn(
+              "[collab] WS+IDB timeout — fallback to non-collab mode",
+            );
             setWsTimedOut(true);
           }
         }
@@ -234,15 +243,21 @@ export function useCollaboration(
       return () => {
         clearTimeout(wsTimeout);
         if (throttleTimer) clearTimeout(throttleTimer);
-        // Flush any pending update on cleanup
-        if (pendingText !== null) {
+        // Flush any pending update on cleanup — but ONLY if this teardown is not a
+        // doc switch/unmount (cancelled). During a doc switch, onContentChangeRef
+        // has already been reassigned to the NEW document's handler, so flushing the
+        // old doc's pendingText here would write it into the wrong document. The Y.Doc
+        // state is persisted to IndexedDB below, so the throttled tail is never lost.
+        if (pendingText !== null && !cancelled) {
           onContentChangeRef.current(pendingText);
         }
       };
     };
 
     let cleanupTimeout: (() => void) | undefined;
-    setup().then((fn) => { cleanupTimeout = fn; });
+    setup().then((fn) => {
+      cleanupTimeout = fn;
+    });
 
     return () => {
       cancelled = true;
@@ -265,7 +280,9 @@ export function useCollaboration(
           const update = Y.encodeStateAsUpdate(ydoc);
           // Apply the update back to trigger IDB write, then destroy after a tick
           Y.applyUpdate(ydoc, update);
-        } catch { /* best effort */ }
+        } catch {
+          /* best effort */
+        }
         // Small delay to let IDB flush the final write
         setTimeout(() => {
           idb.destroy();
@@ -298,5 +315,13 @@ export function useCollaboration(
     });
   }, []);
 
-  return { extension, connected, peers, docId: collabDocId, enabled, wsTimedOut, replaceContent };
+  return {
+    extension,
+    connected,
+    peers,
+    docId: collabDocId,
+    enabled,
+    wsTimedOut,
+    replaceContent,
+  };
 }

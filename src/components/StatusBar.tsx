@@ -9,6 +9,7 @@ import {
 } from "@/stores/entitlement-store";
 import { isIOS, isMobile, isTauri } from "@/platform";
 import { cn } from "@/lib/utils";
+import { countWords } from "@/lib/editor-utils";
 import * as db from "@/services/database";
 
 export function StatusBar() {
@@ -183,10 +184,8 @@ export function StatusBar() {
         )}
         {activeDoc && (
           <span>
-            {(activeDoc.content || "").trim()
-              ? (activeDoc.content || "").trim().split(/\s+/).length
-              : 0}{" "}
-            words / {(activeDoc.content || "").length} chars
+            {countWords(activeDoc.content || "")} words /{" "}
+            {(activeDoc.content || "").length} chars
           </span>
         )}
         <button

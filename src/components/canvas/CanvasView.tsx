@@ -32,22 +32,39 @@ const STORAGE_KEY = "markflow-canvas-state";
 interface CanvasState {
   positions: Record<string, { x: number; y: number }>;
   edges: { id: string; source: string; target: string }[];
-  stickyNotes: { id: string; text: string; colorIndex: number; x: number; y: number }[];
-  groups: { id: string; label: string; x: number; y: number; width: number; height: number }[];
+  stickyNotes: {
+    id: string;
+    text: string;
+    colorIndex: number;
+    x: number;
+    y: number;
+  }[];
+  groups: {
+    id: string;
+    label: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }[];
 }
 
 function loadCanvasState(): CanvasState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return { positions: {}, edges: [], stickyNotes: [], groups: [] };
 }
 
 function saveCanvasState(state: CanvasState) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 export function CanvasView() {
@@ -68,15 +85,18 @@ export function CanvasView() {
     );
   }, []);
 
-  const handleGroupLabelChange = useCallback((nodeId: string, label: string) => {
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === nodeId && n.type === "group"
-          ? { ...n, data: { ...n.data, label } }
-          : n,
-      ),
-    );
-  }, []);
+  const handleGroupLabelChange = useCallback(
+    (nodeId: string, label: string) => {
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === nodeId && n.type === "group"
+            ? { ...n, data: { ...n.data, label } }
+            : n,
+        ),
+      );
+    },
+    [],
+  );
 
   const initialNodes: Node[] = useMemo(() => {
     const nodes: Node[] = [];
@@ -131,21 +151,69 @@ export function CanvasView() {
   }, [documents, savedState, handleStickyTextChange, handleGroupLabelChange]);
 
   const initialEdges: Edge[] = useMemo(
-    () => (savedState.edges || [])
-      .filter((e) => {
-        const allNodeIds = new Set([
-          ...documents.map((d) => d.id),
-          ...(savedState.stickyNotes || []).map((s) => s.id),
-          ...(savedState.groups || []).map((g) => g.id),
-        ]);
-        return allNodeIds.has(e.source) && allNodeIds.has(e.target);
-      })
-      .map((e) => ({ ...e, id: e.id || `${e.source}-${e.target}` })),
+    () =>
+      (savedState.edges || [])
+        .filter((e) => {
+          const allNodeIds = new Set([
+            ...documents.map((d) => d.id),
+            ...(savedState.stickyNotes || []).map((s) => s.id),
+            ...(savedState.groups || []).map((g) => g.id),
+          ]);
+          return allNodeIds.has(e.source) && allNodeIds.has(e.target);
+        })
+        .map((e) => ({ ...e, id: e.id || `${e.source}-${e.target}` })),
     [savedState, documents],
   );
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(initialEdges);
+
+  // Keep document nodes in sync as docs are created/deleted/renamed/edited,
+  // WITHOUT resetting user-placed positions, sticky notes, or groups. A blind
+  // setNodes(initialNodes) would revert live drag positions to the mount-time
+  // localStorage snapshot, so reconcile only the document nodes here.
+  useEffect(() => {
+    setNodes((prev) => {
+      const docIds = new Set(documents.map((d) => d.id));
+      const existingDocNodeIds = new Set(
+        prev.filter((n) => n.type === "document").map((n) => n.id),
+      );
+      // Drop document nodes whose doc was deleted (keep sticky/group nodes).
+      let next = prev.filter((n) => n.type !== "document" || docIds.has(n.id));
+      // Refresh label/preview for surviving document nodes.
+      next = next.map((n) => {
+        if (n.type !== "document") return n;
+        const doc = documents.find((d) => d.id === n.id);
+        if (!doc) return n;
+        const data = n.data as unknown as DocumentNodeData;
+        const preview = doc.content.slice(0, 120);
+        if (data.label === doc.title && data.preview === preview) return n;
+        return { ...n, data: { ...data, label: doc.title, preview } };
+      });
+      // Append nodes for newly created documents.
+      const newDocs = documents.filter((d) => !existingDocNodeIds.has(d.id));
+      if (newDocs.length) {
+        const offset = next.filter((n) => n.type === "document").length;
+        newDocs.forEach((doc, k) => {
+          const i = offset + k;
+          next.push({
+            id: doc.id,
+            type: "document",
+            position: savedState.positions[doc.id] ?? {
+              x: (i % 4) * 280 + 50,
+              y: Math.floor(i / 4) * 200 + 50,
+            },
+            data: {
+              label: doc.title,
+              preview: doc.content.slice(0, 120),
+              docId: doc.id,
+            } satisfies DocumentNodeData,
+          });
+        });
+      }
+      return next;
+    });
+  }, [documents, setNodes, savedState]);
 
   // Debounced save
   const scheduleSave = useCallback(() => {
@@ -169,7 +237,8 @@ export function CanvasView() {
           });
         } else if (node.type === "group") {
           const d = node.data as unknown as GroupNodeData;
-          const style = node.style as { width?: number; height?: number } | undefined;
+          const style = node.style as
+            { width?: number; height?: number } | undefined;
           groups.push({
             id: node.id,
             label: d.label,
@@ -183,7 +252,11 @@ export function CanvasView() {
 
       saveCanvasState({
         positions,
-        edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+        edges: edges.map((e) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+        })),
         stickyNotes,
         groups,
       });
@@ -232,7 +305,10 @@ export function CanvasView() {
       {
         id,
         type: "sticky",
-        position: { x: 200 + Math.random() * 200, y: 200 + Math.random() * 200 },
+        position: {
+          x: 200 + Math.random() * 200,
+          y: 200 + Math.random() * 200,
+        },
         data: {
           text: "",
           colorIndex,
@@ -248,7 +324,10 @@ export function CanvasView() {
       {
         id,
         type: "group",
-        position: { x: 100 + Math.random() * 100, y: 100 + Math.random() * 100 },
+        position: {
+          x: 100 + Math.random() * 100,
+          y: 100 + Math.random() * 100,
+        },
         style: { width: 300, height: 200 },
         data: {
           label: "New Group",
@@ -264,7 +343,8 @@ export function CanvasView() {
     setEdges((eds) => eds.filter((e) => !e.selected));
   }, [setNodes, setEdges]);
 
-  const hasSelection = nodes.some((n) => n.selected && n.type !== "document") ||
+  const hasSelection =
+    nodes.some((n) => n.selected && n.type !== "document") ||
     edges.some((e) => e.selected);
 
   return (
@@ -322,7 +402,12 @@ export function CanvasView() {
           deleteKeyCode={null}
         >
           <Controls className="!bg-card !border-border !shadow-sm [&>button]:!bg-card [&>button]:!border-border [&>button]:!text-foreground" />
-          <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--border)" />
+          <Background
+            variant={BackgroundVariant.Dots}
+            gap={20}
+            size={1}
+            color="var(--border)"
+          />
           <MiniMap
             className="!bg-card !border-border"
             nodeColor={(node) => {

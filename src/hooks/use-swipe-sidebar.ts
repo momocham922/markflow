@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { isMobile } from "@/platform";
 
 const SIDEBAR_WIDTH = 280;
 const EDGE_THRESHOLD = 30; // px from left edge to start open gesture
@@ -12,10 +13,7 @@ interface SwipeSidebarState {
   swiping: boolean;
 }
 
-export function useSwipeSidebar(
-  isOpen: boolean,
-  toggle: () => void,
-) {
+export function useSwipeSidebar(isOpen: boolean, toggle: () => void) {
   const [state, setState] = useState<SwipeSidebarState>({
     offset: isOpen ? SIDEBAR_WIDTH : 0,
     swiping: false,
@@ -62,37 +60,34 @@ export function useSwipeSidebar(
     [isOpen],
   );
 
-  const onTouchMove = useCallback(
-    (e: TouchEvent) => {
-      const t = touchRef.current;
-      if (!t.tracking) return;
-      const touch = e.touches[0];
-      if (!touch) return;
+  const onTouchMove = useCallback((e: TouchEvent) => {
+    const t = touchRef.current;
+    if (!t.tracking) return;
+    const touch = e.touches[0];
+    if (!touch) return;
 
-      const dx = touch.clientX - t.startX;
-      const dy = touch.clientY - t.startY;
+    const dx = touch.clientX - t.startX;
+    const dy = touch.clientY - t.startY;
 
-      // Lock direction after first significant movement
-      if (!t.directionLocked) {
-        if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
-        t.directionLocked = true;
-        t.isHorizontal = Math.abs(dx) > Math.abs(dy);
-        if (!t.isHorizontal) {
-          t.tracking = false;
-          return;
-        }
+    // Lock direction after first significant movement
+    if (!t.directionLocked) {
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      t.directionLocked = true;
+      t.isHorizontal = Math.abs(dx) > Math.abs(dy);
+      if (!t.isHorizontal) {
+        t.tracking = false;
+        return;
       }
+    }
 
-      if (!t.isHorizontal) return;
+    if (!t.isHorizontal) return;
 
-      // Prevent vertical scroll while swiping horizontally
-      e.preventDefault();
+    // Prevent vertical scroll while swiping horizontally
+    e.preventDefault();
 
-      const newOffset = Math.max(0, Math.min(SIDEBAR_WIDTH, t.startOffset + dx));
-      setState({ offset: newOffset, swiping: true });
-    },
-    [],
-  );
+    const newOffset = Math.max(0, Math.min(SIDEBAR_WIDTH, t.startOffset + dx));
+    setState({ offset: newOffset, swiping: true });
+  }, []);
 
   const onTouchEnd = useCallback(
     (e: TouchEvent) => {
@@ -109,9 +104,10 @@ export function useSwipeSidebar(
       const elapsed = Date.now() - t.startTime;
       const velocity = Math.abs(dx) / Math.max(1, elapsed);
 
-      const shouldOpen = velocity > VELOCITY_THRESHOLD
-        ? dx > 0
-        : (t.startOffset + dx) > SWIPE_THRESHOLD;
+      const shouldOpen =
+        velocity > VELOCITY_THRESHOLD
+          ? dx > 0
+          : t.startOffset + dx > SWIPE_THRESHOLD;
 
       setState({ offset: shouldOpen ? SIDEBAR_WIDTH : 0, swiping: false });
 
@@ -122,16 +118,34 @@ export function useSwipeSidebar(
     [isOpen, toggle],
   );
 
+  const onTouchCancel = useCallback(() => {
+    // OS gesture interruption (control-center pull, incoming call, palm
+    // rejection) fires touchcancel INSTEAD of touchend, so onTouchEnd never
+    // runs. Without this the sidebar stays frozen mid-swipe and its full-screen
+    // backdrop keeps intercepting taps. Snap back to the resting state.
+    const t = touchRef.current;
+    t.tracking = false;
+    t.directionLocked = false;
+    t.isHorizontal = false;
+    setState({ offset: isOpen ? SIDEBAR_WIDTH : 0, swiping: false });
+  }, [isOpen]);
+
   useEffect(() => {
+    // Only the mobile layout renders the sidebar as a swipeable overlay. On
+    // desktop / touch-capable laptops these global listeners (with a
+    // preventDefault on touchmove) would hijack horizontal touch gestures.
+    if (!isMobile) return;
     document.addEventListener("touchstart", onTouchStart, { passive: true });
     document.addEventListener("touchmove", onTouchMove, { passive: false });
     document.addEventListener("touchend", onTouchEnd, { passive: true });
+    document.addEventListener("touchcancel", onTouchCancel, { passive: true });
     return () => {
       document.removeEventListener("touchstart", onTouchStart);
       document.removeEventListener("touchmove", onTouchMove);
       document.removeEventListener("touchend", onTouchEnd);
+      document.removeEventListener("touchcancel", onTouchCancel);
     };
-  }, [onTouchStart, onTouchMove, onTouchEnd]);
+  }, [onTouchStart, onTouchMove, onTouchEnd, onTouchCancel]);
 
   return {
     sidebarTranslateX: state.offset - SIDEBAR_WIDTH, // -280 = hidden, 0 = visible

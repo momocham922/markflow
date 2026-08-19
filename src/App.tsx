@@ -188,10 +188,15 @@ function App() {
         document.body.style.userSelect = "";
         document.removeEventListener("pointermove", handleMove);
         document.removeEventListener("pointerup", handleUp);
+        document.removeEventListener("pointercancel", handleUp);
       };
 
       document.addEventListener("pointermove", handleMove);
       document.addEventListener("pointerup", handleUp);
+      // pointercancel (OS gesture interruption / palm rejection / capture loss)
+      // fires *instead* of pointerup — without this the move listener and the
+      // stuck body cursor/userSelect would leak and stack across resizes.
+      document.addEventListener("pointercancel", handleUp);
     },
     [sidebarWidth, rightPanelWidth, rightPanel],
   );

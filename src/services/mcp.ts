@@ -37,31 +37,47 @@ interface McpConnection {
   pid: number;
   write: (data: string) => Promise<void>;
   kill: () => Promise<void>;
-  pendingRequests: Map<number, {
-    resolve: (value: unknown) => void;
-    reject: (reason: Error) => void;
-  }>;
+  pendingRequests: Map<
+    number,
+    {
+      resolve: (value: unknown) => void;
+      reject: (reason: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >;
   nextId: number;
   tools: McpTool[];
 }
 
 const connections = new Map<string, McpConnection>();
 
-async function sendRequest(conn: McpConnection, method: string, params?: Record<string, unknown>): Promise<unknown> {
+async function sendRequest(
+  conn: McpConnection,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<unknown> {
   const id = conn.nextId++;
   const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
   const message = JSON.stringify(request) + "\n";
 
   return new Promise((resolve, reject) => {
-    conn.pendingRequests.set(id, { resolve, reject });
-    conn.write(message).catch(reject);
     // Timeout after 30 seconds
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       if (conn.pendingRequests.has(id)) {
         conn.pendingRequests.delete(id);
         reject(new Error(`MCP request timed out: ${method}`));
       }
     }, 30000);
+    conn.pendingRequests.set(id, { resolve, reject, timer });
+    conn.write(message).catch((err) => {
+      // Write failed: clear the timer and drop the pending entry so it
+      // doesn't linger for 30s or leak once we reject here.
+      if (conn.pendingRequests.has(id)) {
+        clearTimeout(timer);
+        conn.pendingRequests.delete(id);
+        reject(err);
+      }
+    });
   });
 }
 
@@ -70,7 +86,8 @@ function handleStdoutLine(conn: McpConnection, line: string) {
   try {
     const response: JsonRpcResponse = JSON.parse(line);
     if (response.id != null && conn.pendingRequests.has(response.id)) {
-      const { resolve, reject } = conn.pendingRequests.get(response.id)!;
+      const { resolve, reject, timer } = conn.pendingRequests.get(response.id)!;
+      clearTimeout(timer);
       conn.pendingRequests.delete(response.id);
       if (response.error) {
         reject(new Error(response.error.message));
@@ -83,7 +100,9 @@ function handleStdoutLine(conn: McpConnection, line: string) {
   }
 }
 
-export async function connectServer(config: McpServerConfig): Promise<McpTool[]> {
+export async function connectServer(
+  config: McpServerConfig,
+): Promise<McpTool[]> {
   if (connections.has(config.id)) {
     await disconnectServer(config.id);
   }
@@ -133,11 +152,19 @@ export async function connectServer(config: McpServerConfig): Promise<McpTool[]>
     });
 
     // Send initialized notification (no response expected)
-    const notif = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
+    const notif =
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) +
+      "\n";
     await conn.write(notif);
 
     // List available tools
-    const result = await sendRequest(conn, "tools/list") as { tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> };
+    const result = (await sendRequest(conn, "tools/list")) as {
+      tools: Array<{
+        name: string;
+        description: string;
+        inputSchema: Record<string, unknown>;
+      }>;
+    };
     conn.tools = (result.tools || []).map((t) => ({
       name: t.name,
       description: t.description || "",
@@ -156,6 +183,16 @@ export async function disconnectServer(serverId: string): Promise<void> {
   const conn = connections.get(serverId);
   if (!conn) return;
 
+  // Fail any in-flight requests immediately instead of letting them hang
+  // until their 30s timeout after the process is gone.
+  if (conn.pendingRequests.size > 0) {
+    for (const { reject, timer } of conn.pendingRequests.values()) {
+      clearTimeout(timer);
+      reject(new Error(`MCP server disconnected: ${serverId}`));
+    }
+    conn.pendingRequests.clear();
+  }
+
   try {
     await conn.kill();
   } catch {
@@ -164,11 +201,18 @@ export async function disconnectServer(serverId: string): Promise<void> {
   connections.delete(serverId);
 }
 
-export async function callTool(serverId: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+export async function callTool(
+  serverId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
   const conn = connections.get(serverId);
   if (!conn) throw new Error(`MCP server not connected: ${serverId}`);
 
-  const result = await sendRequest(conn, "tools/call", { name: toolName, arguments: args });
+  const result = await sendRequest(conn, "tools/call", {
+    name: toolName,
+    arguments: args,
+  });
   return result;
 }
 
@@ -204,7 +248,9 @@ export function toClaudeTools(tools: McpTool[]): Array<{
 }
 
 /** Parse a Claude tool_use name back to serverId + toolName */
-export function parseClaudeToolName(name: string): { serverId: string; toolName: string } | null {
+export function parseClaudeToolName(
+  name: string,
+): { serverId: string; toolName: string } | null {
   const match = name.match(/^mcp_([^_]+)_(.+)$/);
   if (!match) return null;
   return { serverId: match[1], toolName: match[2] };

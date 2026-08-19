@@ -5,7 +5,9 @@
 
 import { marked } from "marked";
 import hljs from "highlight.js";
+import DOMPurify from "dompurify";
 import { previewThemes, type PreviewTheme } from "@/styles/preview-themes";
+import { buildThemeVarLines } from "@/lib/theme-css";
 
 interface PublishOptions {
   title: string;
@@ -42,13 +44,11 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-/** Build theme CSS variables string */
+/** Build theme CSS variables string (sanitized — themes may be untrusted imports) */
 function buildThemeVars(theme: PreviewTheme, isDark: boolean): string {
   const vars = { ...theme.variables };
   if (isDark && theme.dark) Object.assign(vars, theme.dark);
-  return Object.entries(vars)
-    .map(([k, v]) => `  ${k}: ${v};`)
-    .join("\n");
+  return buildThemeVarLines(vars);
 }
 
 /** Generate TOC HTML from headings */
@@ -118,7 +118,23 @@ export function generatePublishHtml(opts: PublishOptions): string {
   };
 
   marked.setOptions({ gfm: true, breaks: true });
-  const bodyHtml = marked.parse(content, { renderer }) as string;
+  // marked (v17) does NOT sanitize HTML — raw <script>/<img onerror=…> in the
+  // markdown would become stored XSS on the published page. Sanitize the body
+  // while preserving heading ids (the TOC anchors depend on them) and the
+  // mermaid/hljs class hooks used by the runtime scripts and styles.
+  const rawBody = marked.parse(content, { renderer }) as string;
+  const bodyHtml = DOMPurify.sanitize(rawBody, {
+    ADD_ATTR: ["target", "id", "class"],
+  })
+    // Body content (raw HTML embedded in the document) may carry ids that
+    // collide with the runtime TOC controls emitted after it (toc-fab /
+    // toc-mobile / toc-backdrop). getElementById returns the FIRST match in
+    // tree order, so a body element appearing before the real control would
+    // shadow it and silently break the mobile TOC FAB. Strip only these
+    // reserved control ids from body content — heading anchor ids (referenced
+    // by TOC item clicks) are outside this set and stay intact. DOMPurify
+    // serializes via the DOM, so ids are always double-quoted here.
+    .replace(/\bid="(?:toc-fab|toc-mobile|toc-backdrop)"/g, "");
 
   // Extract headings for TOC
   const headings = extractHeadings(bodyHtml);
