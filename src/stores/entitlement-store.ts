@@ -145,8 +145,15 @@ interface EntitlementState {
     plan: ViewAsPlan,
     interval?: BillingInterval,
   ) => Promise<void>;
-  /** Open the Stripe customer portal (manage/cancel an existing subscription). */
-  openBillingPortal: () => Promise<void>;
+  /**
+   * Open the Stripe customer portal (manage/cancel an existing subscription).
+   * Returns the outcome so a caller OUTSIDE the paywall dialog (e.g. the
+   * UserMenu "契約を管理" entry) can surface the failure itself — billingError is
+   * only rendered inside PaywallDialog, so a portal failure there would be a
+   * silent dead button (a user trying to CANCEL must never be left with no
+   * feedback). The dialog path keeps using the inline billingError.
+   */
+  openBillingPortal: () => Promise<{ ok: boolean; error?: string }>;
   /**
    * Poll `/v1/me/entitlement` until the plan changes or the budget is spent —
    * used after returning from Checkout, since the webhook write + the endpoint's
@@ -318,11 +325,12 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   openBillingPortal: async () => {
-    if (!BILLING_ENABLED) return;
+    if (!BILLING_ENABLED) return { ok: false, error: "決済は現在準備中です。" };
     const user = auth.currentUser;
     if (!user) {
-      set({ billingError: "サインインが必要です。" });
-      return;
+      const msg = "サインインが必要です。";
+      set({ billingError: msg });
+      return { ok: false, error: msg };
     }
     set({ billingBusy: true, billingError: null });
     try {
@@ -345,10 +353,13 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       const data = (await res.json()) as { url?: string };
       if (!data.url) throw new Error("no_portal_url");
       await openBillingUrl(data.url);
+      return { ok: true };
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
       console.error("[billing] portal failed:", raw);
-      set({ billingError: billingErrorMessage(raw) });
+      const msg = billingErrorMessage(raw);
+      set({ billingError: msg });
+      return { ok: false, error: msg };
     } finally {
       set({ billingBusy: false });
     }

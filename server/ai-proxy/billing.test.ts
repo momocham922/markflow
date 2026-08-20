@@ -184,6 +184,7 @@ describe("decideEntitlementWrite", () => {
       source: "stripe",
       eventId: "evt_1",
       eventCreated: 2000,
+      terminal: false,
       stripeCustomerId: "cus_1",
       stripeSubscriptionId: "sub_1",
       currentPeriodEnd: 9999,
@@ -295,6 +296,120 @@ describe("decideEntitlementWrite", () => {
     });
   });
 
+  // Terminal-revoke tie-break: a customer.subscription.deleted is final. It has no
+  // live re-fetch and no follow-up event, and there is no reconcile job, so it must
+  // win a same-second tie for its OWN subscription (otherwise a canceled user keeps
+  // paid access forever) and, once recorded, must never be resurrected by a
+  // same-second sibling.
+  it("lets a TERMINAL delete win a same-second tie over an active grant (same sub)", () => {
+    const existingActive = {
+      plan: "pro",
+      status: "active",
+      source: "stripe",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_1",
+    };
+    const del: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    const d = decideEntitlementWrite(existingActive, del);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(derivePlan(d.fields)).toBe("free"); // revoked
+    expect(d.fields.terminal).toBe(true);
+  });
+
+  it("never resurrects a TERMINAL state on a same-second active sibling", () => {
+    // deleted@2000 already applied (terminal); a same-second updated@active@2000
+    // (the intent fixture, sub_1) must NOT bring the canceled user back to pro.
+    const existingTerminal = {
+      plan: "free",
+      status: "canceled",
+      source: "stripe",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    expect(decideEntitlementWrite(existingTerminal, intent)).toEqual({
+      apply: false,
+      reason: "stale_event",
+    });
+  });
+
+  it("ignores a same-second TERMINAL delete for a DIFFERENT subscription (swap safety)", () => {
+    // Current doc tracks the NEW active sub_2; a same-second delete of the OLD
+    // sub_1 must not revoke the new subscription.
+    const existingNew = {
+      plan: "pro",
+      status: "active",
+      source: "stripe",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_2",
+    };
+    const delOld: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del_old",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    expect(decideEntitlementWrite(existingNew, delOld)).toEqual({
+      apply: false,
+      reason: "stale_event",
+    });
+  });
+
+  it("lets a strictly-newer re-subscribe apply after a terminal delete and CLEARS terminal", () => {
+    const existingTerminal = {
+      plan: "free",
+      status: "canceled",
+      source: "stripe",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    const resub: EntitlementIntent = {
+      plan: "pro",
+      status: "active",
+      eventId: "evt_resub",
+      eventCreated: 5000,
+      stripeSubscriptionId: "sub_9",
+    };
+    const d = decideEntitlementWrite(existingTerminal, resub);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(derivePlan(d.fields)).toBe("pro");
+    expect(d.fields.terminal).toBe(false); // stale terminal marker cleared
+  });
+
+  it("drops a strictly-OLDER terminal delete (cannot revoke a newer subscription)", () => {
+    const existingNew = {
+      plan: "pro",
+      status: "active",
+      source: "stripe",
+      eventCreated: 5000,
+      stripeSubscriptionId: "sub_2",
+    };
+    const delOld: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del_old",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    expect(decideEntitlementWrite(existingNew, delOld)).toEqual({
+      apply: false,
+      reason: "stale_event",
+    });
+  });
+
   it("omits optional fields that were not provided (partial intent)", () => {
     const minimal: EntitlementIntent = {
       plan: "free",
@@ -313,6 +428,7 @@ describe("decideEntitlementWrite", () => {
       source: "stripe",
       eventId: "evt_del",
       eventCreated: 5000,
+      terminal: false,
     });
     // Crucially, status is ALWAYS present so derivePlan can't default-grant.
     expect(d.fields.status).toBe("canceled");

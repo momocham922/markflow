@@ -347,6 +347,10 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         status: "canceled",
         eventId: event.id,
         eventCreated,
+        // Terminal: a deletion is final, has no live re-fetch and no follow-up
+        // event, so it must win a same-second tie against the preceding
+        // updated@active (otherwise the canceled user keeps paid access forever).
+        terminal: true,
         stripeCustomerId: stripeCustomerId(sub.customer),
         stripeSubscriptionId: sub.id,
         cancelAtPeriodEnd: false,

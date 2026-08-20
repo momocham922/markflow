@@ -107,6 +107,16 @@ export function UserMenu() {
     );
   }, [resetCloudAndReSync, isOnline]);
 
+  // Manage/cancel an existing subscription. openBillingPortal sets billingError
+  // in the store, but that is only rendered inside PaywallDialog (closed here),
+  // so we surface the failure ourselves — otherwise the button looks dead and a
+  // user trying to CANCEL gets no feedback (silent failure).
+  const handleManageSubscription = useCallback(async () => {
+    setMobileMenuOpen(false);
+    const res = await openBillingPortal();
+    if (!res.ok && res.error) window.alert(res.error);
+  }, [openBillingPortal]);
+
   useEffect(() => {
     if (!syncMenuOpen) return;
     const handler = (e: MouseEvent) => {
@@ -225,13 +235,7 @@ export function UserMenu() {
               </button>
             )}
             {showManage && (
-              <button
-                className={menuItem}
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  openBillingPortal();
-                }}
-              >
+              <button className={menuItem} onClick={handleManageSubscription}>
                 <CreditCard className="h-4 w-4" />
                 契約を管理
               </button>
@@ -295,7 +299,7 @@ export function UserMenu() {
           variant="ghost"
           size="icon"
           className={btnSize}
-          onClick={() => openBillingPortal()}
+          onClick={handleManageSubscription}
           title="契約を管理"
         >
           <CreditCard className={iconSize} />

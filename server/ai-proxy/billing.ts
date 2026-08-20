@@ -137,6 +137,10 @@ export interface ExistingEntitlement {
   source?: unknown;
   status?: unknown;
   eventCreated?: unknown;
+  /** True when the last write came from a customer.subscription.deleted (final). */
+  terminal?: unknown;
+  /** The subscription id the current state belongs to (scopes a terminal revoke). */
+  stripeSubscriptionId?: unknown;
 }
 
 /**
@@ -165,6 +169,15 @@ export interface EntitlementIntent {
   status: OurStatus;
   eventId: string;
   eventCreated: number;
+  /**
+   * True ONLY for a customer.subscription.deleted event. A terminal revoke is
+   * final: it has no live re-fetch and no follow-up event, so it must win a
+   * same-second tie for its own subscription and, once recorded, can never be
+   * resurrected by a same-second sibling. Set from the event TYPE, never from
+   * the mapped "canceled" status (a created@incomplete also maps to canceled but
+   * is NOT terminal — it can still activate).
+   */
+  terminal?: boolean;
   stripeCustomerId?: string;
   stripeSubscriptionId?: string;
   currentPeriodEnd?: number;
@@ -204,20 +217,41 @@ export function decideEntitlementWrite(
     return { apply: false, reason: "internal_untouchable" };
   if (existingSource && existingSource !== "stripe")
     return { apply: false, reason: `owned_by_${existingSource}` };
+
+  const incomingTerminal = intent.terminal === true;
   if (!isEventNewer(intent.eventCreated, Number(existing?.eventCreated))) {
-    // Same-second sibling tie-break. Stripe can emit e.g.
-    // customer.subscription.created (status incomplete → canceled → free) and
-    // .updated (active → pro) with the SAME `created` epoch second; strict-newer
-    // would drop whichever loses the processing-order race and could strand a
-    // payer on free. On an EXACT timestamp tie, let the higher access status win
-    // deterministically (active > grace > on_hold > canceled) so the best-known
-    // state that second is applied regardless of arrival order. A strictly OLDER
-    // event is still rejected as stale (no resurrection).
+    // Same-second sibling tie-break. Stripe emits related lifecycle events within
+    // one second, out of order, and `event.created` is only second-granular.
+    //  1. ACTIVATION: customer.subscription.created (incomplete → canceled → free)
+    //     and .updated (active → pro) can share a second; strict-newer would drop
+    //     whichever loses the processing-order race and strand a payer on free.
+    //     Resolve by ACCESS RANK — the higher-access status wins deterministically
+    //     (active > grace > on_hold > canceled) regardless of arrival order.
+    //  2. CANCELLATION: a customer.subscription.deleted (terminal) can share a
+    //     second with the .updated@active that preceded it. A delete has NO live
+    //     re-fetch and NO follow-up event, and there is no reconcile job — so if
+    //     it lost the access-rank tie it would strand a CANCELED user on a paid
+    //     plan forever. A terminal revoke therefore ALWAYS wins the tie for its
+    //     OWN subscription, and once terminal is recorded a same-second sibling
+    //     can NEVER resurrect it. (A genuine later re-subscribe is strictly newer
+    //     and still applies via isEventNewer, clearing terminal.)
     const stored = Number(existing?.eventCreated) || 0;
     const tie = stored > 0 && intent.eventCreated === stored;
-    const grantsHigher =
-      statusRank(intent.status) > statusRank(existing?.status);
-    if (!(tie && grantsHigher)) return { apply: false, reason: "stale_event" };
+    const existingTerminal = existing?.terminal === true;
+    const existingSub = String(
+      (existing?.stripeSubscriptionId ?? "") as unknown,
+    );
+    const sameSub =
+      !existingSub ||
+      !intent.stripeSubscriptionId ||
+      existingSub === intent.stripeSubscriptionId;
+    let applyOnTie: boolean;
+    if (existingTerminal)
+      applyOnTie = false; // terminal state is final — never overridden on a tie
+    else if (incomingTerminal)
+      applyOnTie = sameSub; // a delete of the CURRENT sub wins; of another sub, ignore
+    else applyOnTie = statusRank(intent.status) > statusRank(existing?.status);
+    if (!(tie && applyOnTie)) return { apply: false, reason: "stale_event" };
   }
 
   const fields: Record<string, unknown> = {
@@ -226,6 +260,9 @@ export function decideEntitlementWrite(
     source: "stripe",
     eventId: intent.eventId,
     eventCreated: intent.eventCreated,
+    // Always write terminal explicitly (true for a delete, false otherwise) so a
+    // later re-subscribe CLEARS a stale terminal marker instead of merge-keeping it.
+    terminal: incomingTerminal,
   };
   if (intent.stripeCustomerId)
     fields.stripeCustomerId = intent.stripeCustomerId;
