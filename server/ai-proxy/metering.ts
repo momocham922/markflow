@@ -52,12 +52,17 @@ export interface BatchLockDoc {
 }
 
 /**
- * The minimal Firestore surface metering uses: the `usage/{uid}/months/{ym}`
+ * The minimal Firestore surface metering uses: the `usage/{key}/months/{ym}`
  * document, the `batchLocks/{uid}` in-flight lock, and a transaction runner.
  * index.ts adapts the real Firestore to this.
+ *
+ * `key` is the METER KEY — the uid for free/pro/internal (a per-user pool) or the
+ * teamId for team members (a single shared pool). The batch lock stays per-UID
+ * (it is a DoS brake on one caller's parallelism, not the billing pool), so
+ * batchLockDoc keeps its uid argument even when usage meters under a teamId.
  */
 export interface MeteringStore {
-  usageDoc(uid: string, ym: string): UsageDoc;
+  usageDoc(key: string, ym: string): UsageDoc;
   batchLockDoc(uid: string): BatchLockDoc;
   runTransaction<T>(fn: (tx: UsageTxn) => Promise<T>): Promise<T>;
 }
@@ -74,17 +79,18 @@ export interface MeteringStore {
 export async function reserveUsage(
   store: MeteringStore,
   sv: ServerValues,
-  uid: string,
+  key: string,
   feature: Feature,
   cost: number,
   plan: Plan,
   ym: string,
+  seats = 1,
 ): Promise<{ blocked: boolean; used: number }> {
-  const ref = store.usageDoc(uid, ym);
+  const ref = store.usageDoc(key, ym);
   return store.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const used = snap.exists ? Number(snap.data()?.[feature] || 0) || 0 : 0;
-    const c = checkQuota(plan, feature, used, cost);
+    const c = checkQuota(plan, feature, used, cost, seats);
     // Never meter an unlimited plan/feature (defense in depth; index.ts already
     // short-circuits these before calling reserveUsage).
     if (c.unlimited) return { blocked: false, used };
@@ -112,14 +118,14 @@ export async function reserveUsage(
 export async function adjustUsage(
   store: MeteringStore,
   sv: ServerValues,
-  uid: string,
+  key: string,
   feature: Feature,
   delta: number,
   plan: Plan,
   ym: string,
 ): Promise<void> {
   if (!delta) return;
-  const ref = store.usageDoc(uid, ym);
+  const ref = store.usageDoc(key, ym);
   await ref.set(
     {
       [feature]: sv.increment(delta),

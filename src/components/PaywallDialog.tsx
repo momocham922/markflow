@@ -16,23 +16,7 @@ import {
   type BillingInterval,
   type ViewAsPlan,
 } from "@/stores/entitlement-store";
-
-// =====================================================================
-// Displayed pricing (JPY, tax-inclusive). These MUST equal the amounts on
-// the corresponding Stripe Prices — the server resolves the priceId and
-// Stripe charges its OWN configured amount, so any mismatch here is only a
-// display bug, never an overcharge. Keep in sync with the Stripe dashboard
-// (see MONETIZATION.md → owner runbook).
-// =====================================================================
-const PRICING: Record<
-  Exclude<ViewAsPlan, "free">,
-  { month: number; year: number }
-> = {
-  pro: { month: 1280, year: 11760 },
-  team: { month: 1980, year: 19800 },
-};
-
-const yen = (n: number) => `¥${n.toLocaleString("ja-JP")}`;
+import { PRICING, yen } from "@/lib/pricing";
 
 interface PlanFeature {
   label: string;
@@ -67,16 +51,16 @@ const PLAN_INFO: Record<
     name: "Team",
     tagline: "チームでの共同編集と共有に",
     icon: Users,
-    // Checkout currently bills a flat quantity:1 (single subscription), so the
-    // price is NOT per-seat. Show no "／人" unit to avoid over-charging
-    // expectations. Per-seat billing is a deferred product decision.
-    unit: "",
+    // Per-seat billing: the price below is for ONE seat and the shared AI pool
+    // scales with the seat count (base × seats). The metered allowances shown
+    // here are PER SEAT.
+    unit: "／席",
     features: [
       { label: "Proのすべての機能" },
-      { label: "AIリクエスト 月4,000回" },
-      { label: "音声認識 月12,000回" },
-      { label: "文字起こし 月6,000分" },
-      { label: "画像生成 月1,000枚" },
+      { label: "AIリクエスト 月4,000回／席" },
+      { label: "音声認識 月12,000回／席" },
+      { label: "文字起こし 月6,000分／席" },
+      { label: "画像生成 月1,000枚／席" },
       { label: "チーム共有フォルダ・共同編集" },
     ],
   },
@@ -90,6 +74,9 @@ function PlanCard({
   onSubscribe,
   onManage,
   purchasable,
+  ctaLabel,
+  manageLabel = "契約を管理",
+  ctaShowsExternal = true,
 }: {
   plan: Exclude<ViewAsPlan, "free">;
   interval: BillingInterval;
@@ -98,10 +85,17 @@ function PlanCard({
   onSubscribe: (plan: Exclude<ViewAsPlan, "free">) => void;
   onManage: () => void;
   purchasable: boolean;
+  /** Primary CTA label; defaults to "{name}にアップグレード". */
+  ctaLabel?: string;
+  /** Manage-button label (shown when this is the current plan). */
+  manageLabel?: string;
+  /** Whether the CTA shows the external-link glyph (false for in-app routing). */
+  ctaShowsExternal?: boolean;
 }) {
   const info = PLAN_INFO[plan];
   const Icon = info.icon;
   const price = PRICING[plan][interval];
+  const perSeat = plan === "team";
   const isCurrent = currentPlan === plan;
   // year list price = month × 12; show the saving vs paying monthly.
   const monthlyEquivalent = PRICING[plan].month * 12;
@@ -137,18 +131,23 @@ function PlanCard({
           {yen(interval === "year" ? Math.round(price / 12) : price)}
         </span>
         <span className="text-xs text-muted-foreground">
-          /月{info.unit}
+          {perSeat ? "/席・月" : "/月"}
           {interval === "year" && "（年払い）"}
         </span>
       </div>
       {interval === "year" ? (
         <p className="mt-0.5 text-[11px] text-emerald-600">
-          年額 {yen(price)}
-          {info.unit} — {yen(yearSaving)}お得
+          {perSeat ? "1席あたり年額 " : "年額 "}
+          {yen(price)} — {yen(yearSaving)}お得
         </p>
       ) : (
         <p className="mt-0.5 text-[11px] text-muted-foreground">
-          年払いなら {yen(yearSaving)}お得
+          年払いなら{perSeat ? "1席あたり" : ""} {yen(yearSaving)}お得
+        </p>
+      )}
+      {perSeat && (
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          席数分のお支払い（合計 = 席単価 × 席数）
         </p>
       )}
 
@@ -169,7 +168,7 @@ function PlanCard({
             disabled={busy || !purchasable}
             onClick={onManage}
           >
-            契約を管理
+            {manageLabel}
           </Button>
         ) : purchasable ? (
           <Button
@@ -182,8 +181,8 @@ function PlanCard({
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <>
-                {info.name}にアップグレード
-                <ExternalLink className="h-3.5 w-3.5" />
+                {ctaLabel ?? `${info.name}にアップグレード`}
+                {ctaShowsExternal && <ExternalLink className="h-3.5 w-3.5" />}
               </>
             )}
           </Button>
@@ -205,10 +204,16 @@ export function PaywallDialog() {
     effectivePlan,
     startCheckout,
     openBillingPortal,
+    openTeamManage,
     billingBusy,
     billingError,
   } = useEntitlementStore();
   const [interval, setInterval] = useState<BillingInterval>("month");
+
+  // Team billing needs a concrete team (teamId) + seat count, which this generic
+  // paywall has no context for. Route the Team card into team management, where
+  // the buyer picks the team + seats and drives the seat-aware checkout.
+  const goToTeamManage = () => openTeamManage();
 
   // Anti-steering: Apple/Google forbid routing IN-APP users to an external
   // web purchase. On mobile we show the plans for information only (IAP is a
@@ -270,9 +275,13 @@ export function PaywallDialog() {
             interval={interval}
             currentPlan={effectivePlan}
             busy={billingBusy}
-            onSubscribe={(p) => startCheckout(p, interval)}
-            onManage={openBillingPortal}
+            // Team purchase + seat management both live in the team dialog.
+            onSubscribe={goToTeamManage}
+            onManage={goToTeamManage}
             purchasable={purchasable}
+            ctaLabel="チームを設定して購入"
+            manageLabel="チーム席を管理"
+            ctaShowsExternal={false}
           />
         </div>
 

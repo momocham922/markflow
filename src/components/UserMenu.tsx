@@ -17,7 +17,6 @@ import {
   useEntitlementStore,
   BILLING_ENABLED,
 } from "@/stores/entitlement-store";
-import { TeamManageDialog } from "@/components/TeamManageDialog";
 import { isMobile } from "@/platform";
 
 function UserAvatar({
@@ -69,6 +68,7 @@ export function UserMenu() {
   const effectivePlan = useEntitlementStore((s) => s.effectivePlan);
   const openPaywall = useEntitlementStore((s) => s.openPaywall);
   const openBillingPortal = useEntitlementStore((s) => s.openBillingPortal);
+  const openTeamManage = useEntitlementStore((s) => s.openTeamManage);
   // Show the upgrade entry to Free users; the manage entry to paying users.
   // internal (staff/owner real plan) sees neither — they don't buy.
   const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
@@ -80,7 +80,6 @@ export function UserMenu() {
     BILLING_ENABLED &&
     !isMobile &&
     (effectivePlan === "pro" || effectivePlan === "team");
-  const [teamOpen, setTeamOpen] = useState(false);
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const syncMenuRef = useRef<HTMLDivElement>(null);
@@ -222,7 +221,7 @@ export function UserMenu() {
               className={menuItem}
               onClick={() => {
                 setMobileMenuOpen(false);
-                setTeamOpen(true);
+                openTeamManage();
               }}
             >
               <Users className="h-4 w-4" />
@@ -282,7 +281,6 @@ export function UserMenu() {
             </button>
           </div>
         )}
-        <TeamManageDialog open={teamOpen} onOpenChange={setTeamOpen} />
       </div>
     );
   }
@@ -315,8 +313,8 @@ export function UserMenu() {
         variant="ghost"
         size="icon"
         className={btnSize}
-        onClick={() => setTeamOpen(true)}
-        title="Manage Teams"
+        onClick={() => openTeamManage()}
+        title="チーム管理"
       >
         <Users className={iconSize} />
       </Button>
@@ -384,7 +382,6 @@ export function UserMenu() {
       >
         <LogOut className={iconSize} />
       </Button>
-      <TeamManageDialog open={teamOpen} onOpenChange={setTeamOpen} />
     </div>
   );
 }

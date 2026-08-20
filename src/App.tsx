@@ -33,6 +33,7 @@ import {
 import { useResearchStore } from "@/stores/research-store";
 import { ResearchSheet } from "@/components/editor/ResearchSheet";
 import { PaywallDialog } from "@/components/PaywallDialog";
+import { TeamManageDialog } from "@/components/TeamManageDialog";
 import {
   PanelLeft,
   History,
@@ -1476,8 +1477,28 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         />
         {/* Upgrade/paywall (self-gated behind BILLING_ENABLED via openPaywall) */}
         <PaywallDialog />
+        {/* Team management + seat billing (global; opened from UserMenu/Paywall) */}
+        <GlobalTeamManageDialog />
       </div>
     </TooltipProvider>
+  );
+}
+
+/**
+ * Global mount of the team-management dialog, driven by the entitlement store's
+ * teamManageOpen flag. Mounted once here (not inside UserMenu) so it can be
+ * opened from anywhere — the UserMenu entry AND the Paywall's Team card both
+ * route to it via openTeamManage(), and there is exactly one instance.
+ */
+function GlobalTeamManageDialog() {
+  const open = useEntitlementStore((s) => s.teamManageOpen);
+  const openTeamManage = useEntitlementStore((s) => s.openTeamManage);
+  const closeTeamManage = useEntitlementStore((s) => s.closeTeamManage);
+  return (
+    <TeamManageDialog
+      open={open}
+      onOpenChange={(o) => (o ? openTeamManage() : closeTeamManage())}
+    />
   );
 }
 

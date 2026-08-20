@@ -244,12 +244,66 @@ export interface TeamMember {
   joinedAt: number;
 }
 
+/**
+ * Team subscription state — written ONLY by the ai-proxy webhook via the Admin
+ * SDK (firestore.rules freezes it from all client writes). Members may READ it
+ * (they can read the whole team doc), so the UI renders plan/seat state from it;
+ * clients must never set it. `status` mirrors the entitlement status vocabulary
+ * (active|grace|trialing grant access; on_hold|canceled|revoked do not).
+ */
+export interface TeamBilling {
+  status?: string;
+  seats?: number;
+  ownerUid?: string;
+  currentPeriodEnd?: number;
+  priceId?: string;
+}
+
 export interface Team {
   id: string;
   name: string;
   ownerId: string;
   members: TeamMember[];
   createdAt: Timestamp | null;
+  /** Denormalized uid list (Firestore array-contains queries + rules). */
+  memberUids?: string[];
+  /** Team-level folder list (see get/setTeamFolders). */
+  folders?: string[];
+  /** Server-written subscription state (see TeamBilling). Read-only for clients. */
+  billing?: TeamBilling;
+  /**
+   * Ordered uid list of who holds a paid seat — server-written (seat-assign
+   * endpoint) and frozen from client writes. The first `billing.seats` uids get
+   * the shared AI pool (assignment order is the capacity fence). Read-only here.
+   */
+  seatAssignments?: string[];
+}
+
+/**
+ * True when a team subscription grants access. Mirrors the server spend gate
+ * `deriveSeatAccess` (gating.ts), which admits ONLY `active` and `grace` — NOT
+ * `trialing`. The webhook normalizes `trialing → active` before writing team
+ * billing (billing.ts `mapStripeStatus`), so a real doc never carries `trialing`;
+ * we keep the two predicates identical so the UI can never show a team as active
+ * while the server denies its members the pool.
+ */
+export function isTeamBillingActive(billing?: TeamBilling | null): boolean {
+  const s = String(billing?.status ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "active" || s === "grace";
+}
+
+/** True when `uid` is the owner or an admin of `team` (seat-management rights). */
+export function isTeamManager(
+  team: Team,
+  uid: string | null | undefined,
+): boolean {
+  if (!uid) return false;
+  if (team.ownerId === uid) return true;
+  return team.members.some(
+    (m) => m.uid === uid && (m.role === "owner" || m.role === "admin"),
+  );
 }
 
 const TEAMS_COLLECTION = "teams";

@@ -8,6 +8,7 @@ COPY index.ts index.ts
 COPY gating.ts gating.ts
 COPY metering.ts metering.ts
 COPY billing.ts billing.ts
+COPY iap.ts iap.ts
 
 # Transpile TypeScript to JavaScript at build time (esbuild bundles the local
 # ./gating, ./metering, ./billing imports into server.js; firebase-admin, the

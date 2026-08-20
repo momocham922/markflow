@@ -83,6 +83,21 @@ function billingErrorMessage(code: string): string {
     case "no_checkout_url":
     case "no_portal_url":
       return "決済ページを開けませんでした。時間をおいて再度お試しください。";
+    // --- Team seat billing ---
+    case "team_id_required":
+      return "対象のチームを選択してください。";
+    case "team_not_found":
+      return "チームが見つかりません。";
+    case "not_team_manager":
+      return "席の管理はチームのオーナーまたは管理者のみ行えます。";
+    case "invalid_seats":
+      return "席数が正しくありません。1以上の人数を指定してください。";
+    case "no_active_subscription":
+      return "このチームには有効なTeamプランがありません。先にご購入ください。";
+    case "seat_assignments_required":
+      return "割り当てるメンバーを指定してください。";
+    case "not_team_member":
+      return "チームに参加していないユーザーには席を割り当てられません。";
     default:
       return "決済の処理に失敗しました。時間をおいて再度お試しください。";
   }
@@ -152,6 +167,12 @@ interface EntitlementState {
   /** Monthly limits for effectivePlan; null = unlimited (internal). */
   limits: Record<Feature, number> | null;
   usage: Record<Feature, number>;
+  /**
+   * Paid seat count of the POOL the server is metering this user against. For a
+   * Team owner/member this is the team's funded seat count (limits already scaled
+   * by it); for free/pro/internal it is 1. Purely informational for the UI.
+   */
+  seats: number;
   period: string | null;
   loading: boolean;
   loaded: boolean;
@@ -166,6 +187,13 @@ interface EntitlementState {
   /** Which metered feature triggered the paywall (for contextual copy). */
   paywallReason: Feature | null;
   /**
+   * Whether the global team-management dialog is open. Team billing (buying seats,
+   * changing the count, assigning members) lives there — the Paywall's Team card
+   * routes here because a Team purchase needs a concrete team context (teamId),
+   * which the generic paywall has none of.
+   */
+  teamManageOpen: boolean;
+  /**
    * The plan the user is currently checking out (set when the Checkout browser
    * opens, cleared once the entitlement reaches it). The billing-return handler
    * passes this as pollEntitlement's `target` so the poll waits for the PURCHASED
@@ -178,11 +206,34 @@ interface EntitlementState {
   resetPreviewUsage: () => Promise<void>;
   reportQuota: (e: Omit<QuotaError, "at">) => void;
   clearQuota: () => void;
-  /** Begin a Stripe Checkout for `plan` and open it in the system browser. */
+  /**
+   * Begin a Stripe Checkout for `plan` and open it in the system browser. Team
+   * checkout REQUIRES `opts.teamId` (the funded team) and `opts.seats` (item
+   * quantity = paid seat count); Pro ignores both.
+   */
   startCheckout: (
     plan: ViewAsPlan,
     interval?: BillingInterval,
+    opts?: { teamId?: string; seats?: number },
   ) => Promise<void>;
+  /**
+   * Change the PAID seat count of a team's live subscription (owner/admin only).
+   * Drives Stripe; the webhook reconciles teams/{teamId}.billing.seats. Returns
+   * the outcome so the caller (TeamManageDialog) can surface failures inline.
+   */
+  changeTeamSeats: (
+    teamId: string,
+    seats: number,
+  ) => Promise<{ ok: boolean; error?: string; seats?: number }>;
+  /**
+   * Replace WHO holds the team's seats — an ORDERED uid list; the first `seats`
+   * get the shared pool (owner/admin only). Pure Firestore, no money. Returns the
+   * server-normalized list so the caller can reconcile its local view.
+   */
+  assignTeamSeats: (
+    teamId: string,
+    seatAssignments: string[],
+  ) => Promise<{ ok: boolean; error?: string; seatAssignments?: string[] }>;
   /** Clear the pending-checkout target (store + persisted copy). */
   clearPendingCheckout: () => void;
   /**
@@ -212,6 +263,10 @@ interface EntitlementState {
   openPaywall: (reason?: Feature | null) => void;
   /** Close the upgrade dialog. */
   closePaywall: () => void;
+  /** Open the global team-management dialog (closes the paywall if open). */
+  openTeamManage: () => void;
+  /** Close the global team-management dialog. */
+  closeTeamManage: () => void;
   reset: () => void;
 }
 
@@ -222,6 +277,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   isOwner: false,
   limits: null,
   usage: { ...ZERO_USAGE },
+  seats: 1,
   period: null,
   loading: false,
   loaded: false,
@@ -230,6 +286,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   billingError: null,
   paywallOpen: false,
   paywallReason: null,
+  teamManageOpen: false,
   // Seed from localStorage so a checkout target survives a cold relaunch (the
   // process can be OS-killed while the external Checkout browser is foreground).
   pendingCheckoutPlan: loadPendingCheckout(),
@@ -266,6 +323,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
         isOwner: !!d.isOwner,
         limits: d.limits ?? null,
         usage: d.usage ? { ...ZERO_USAGE, ...d.usage } : { ...ZERO_USAGE },
+        seats: Math.max(1, Math.floor(Number(d.seats) || 1)),
         period: d.period ?? null,
         loaded: true,
         loading: false,
@@ -337,7 +395,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     set({ pendingCheckoutPlan: null });
   },
 
-  startCheckout: async (plan, interval = "month") => {
+  startCheckout: async (plan, interval = "month", opts) => {
     if (!BILLING_ENABLED) return;
     const user = auth.currentUser;
     if (!user) {
@@ -346,16 +404,32 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     }
     // free/internal are not purchasable; guard here too (server also rejects).
     if (plan !== "pro" && plan !== "team") return;
+    // Team checkout needs a concrete team context (the funded team) and a seat
+    // count; the server rejects a team checkout without them. Guard client-side
+    // so we fail loudly with a clear message instead of a raw server error.
+    if (plan === "team") {
+      const teamId = String(opts?.teamId ?? "").trim();
+      if (!teamId) {
+        set({ billingError: billingErrorMessage("team_id_required") });
+        return;
+      }
+    }
     set({ billingBusy: true, billingError: null });
     try {
       const token = await user.getIdToken();
+      const teamId = String(opts?.teamId ?? "").trim();
+      const seats = Math.max(1, Math.floor(Number(opts?.seats) || 1));
       const res = await fetch(`${AI_PROXY_URL}/v1/billing/checkout`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ plan, interval }),
+        body: JSON.stringify(
+          plan === "team"
+            ? { plan, interval, teamId, seats }
+            : { plan, interval },
+        ),
       });
       if (!res.ok) {
         const body = await res
@@ -425,7 +499,12 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       }
       const data = (await res.json()) as { url?: string };
       if (!data.url) throw new Error("no_portal_url");
-      await openBillingUrl(data.url);
+      // Mirror startCheckout: a failed browser open (popup blocked / lost
+      // user-activation) is a failure, never a silent success. Otherwise a user
+      // trying to manage/cancel would be told the page is opening when nothing did
+      // (サイレントフォールバック禁止).
+      const opened = await openBillingUrl(data.url);
+      if (!opened) throw new Error("no_portal_url");
       return { ok: true };
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
@@ -433,6 +512,86 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       const msg = billingErrorMessage(raw);
       set({ billingError: msg });
       return { ok: false, error: msg };
+    } finally {
+      set({ billingBusy: false });
+    }
+  },
+
+  changeTeamSeats: async (teamId, seats) => {
+    if (!BILLING_ENABLED) return { ok: false, error: "決済は現在準備中です。" };
+    const user = auth.currentUser;
+    if (!user) {
+      const msg = "サインインが必要です。";
+      return { ok: false, error: msg };
+    }
+    const tid = String(teamId ?? "").trim();
+    const n = Math.max(1, Math.floor(Number(seats) || 0));
+    if (!tid)
+      return { ok: false, error: billingErrorMessage("team_id_required") };
+    set({ billingBusy: true });
+    try {
+      const token = await user.getIdToken();
+      const res = await fetch(`${AI_PROXY_URL}/v1/billing/team/seats`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ teamId: tid, seats: n }),
+      });
+      if (!res.ok) {
+        const body = await res
+          .json()
+          .catch(() => ({}) as Record<string, unknown>);
+        const code =
+          typeof body.error === "string" ? body.error : `http_${res.status}`;
+        throw new Error(code);
+      }
+      const data = (await res.json()) as { seats?: number };
+      return { ok: true, seats: data.seats };
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      console.error("[billing] team/seats failed:", raw);
+      return { ok: false, error: billingErrorMessage(raw) };
+    } finally {
+      set({ billingBusy: false });
+    }
+  },
+
+  assignTeamSeats: async (teamId, seatAssignments) => {
+    const user = auth.currentUser;
+    if (!user) return { ok: false, error: "サインインが必要です。" };
+    const tid = String(teamId ?? "").trim();
+    if (!tid)
+      return { ok: false, error: billingErrorMessage("team_id_required") };
+    const list = Array.isArray(seatAssignments)
+      ? seatAssignments.map((u) => String(u ?? "").trim()).filter(Boolean)
+      : [];
+    set({ billingBusy: true });
+    try {
+      const token = await user.getIdToken();
+      const res = await fetch(`${AI_PROXY_URL}/v1/billing/team/assign`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ teamId: tid, seatAssignments: list }),
+      });
+      if (!res.ok) {
+        const body = await res
+          .json()
+          .catch(() => ({}) as Record<string, unknown>);
+        const code =
+          typeof body.error === "string" ? body.error : `http_${res.status}`;
+        throw new Error(code);
+      }
+      const data = (await res.json()) as { seatAssignments?: string[] };
+      return { ok: true, seatAssignments: data.seatAssignments };
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      console.error("[billing] team/assign failed:", raw);
+      return { ok: false, error: billingErrorMessage(raw) };
     } finally {
       set({ billingBusy: false });
     }
@@ -490,6 +649,9 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     set({ paywallOpen: true, paywallReason: reason, billingError: null });
   },
   closePaywall: () => set({ paywallOpen: false, paywallReason: null }),
+  openTeamManage: () =>
+    set({ teamManageOpen: true, paywallOpen: false, paywallReason: null }),
+  closeTeamManage: () => set({ teamManageOpen: false }),
 
   reset: () =>
     set({
@@ -498,6 +660,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       isOwner: false,
       limits: null,
       usage: { ...ZERO_USAGE },
+      seats: 1,
       period: null,
       loaded: false,
       loading: false,
@@ -506,6 +669,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       billingError: null,
       paywallOpen: false,
       paywallReason: null,
+      teamManageOpen: false,
       // viewAs is intentionally kept (persisted); it is owner-only and gets
       // reconciled to null on the next fetch if the next user is not the owner.
     }),

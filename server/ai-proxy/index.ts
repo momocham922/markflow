@@ -17,6 +17,7 @@ import {
   measuredBatchMinutes,
   reconcileBatchDelta,
   shouldRefund,
+  deriveSeatAccess,
   type Plan,
   type Feature,
 } from "./gating";
@@ -35,9 +36,13 @@ import {
   resolveCheckoutPriceId,
   decideEntitlementWrite,
   decideSubscriptionApply,
+  decideTeamBillingWrite,
+  clampSeats,
   pickUid,
   toEpochSeconds,
   type EntitlementIntent,
+  type TeamBillingIntent,
+  type ExistingTeamBilling,
 } from "./billing";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -92,6 +97,46 @@ const PORTAL_RETURN_URL =
 function billingConfigured(): boolean {
   return Boolean(STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET);
 }
+
+// --- In-App Purchase config (monetization ③, Phase 0 DARK) -----------------
+// The Apple/Play verify + server-notification endpoints stay DARK (503
+// iap_not_configured) until the store credentials exist — exactly like the Stripe
+// routes. Purely additive: no existing route is affected. The PURE mapping from a
+// verified purchase to an entitlement lives in ./iap.ts (unit-tested); index.ts
+// will wire the JWS/Play-API verification in Phase 1 once credentials are set.
+const APPLE_BUNDLE_ID = process.env.APPLE_BUNDLE_ID || "";
+const APP_STORE_ISSUER_ID = process.env.APP_STORE_ISSUER_ID || "";
+const APP_STORE_KEY_ID = process.env.APP_STORE_KEY_ID || "";
+const APP_STORE_PRIVATE_KEY = process.env.APP_STORE_PRIVATE_KEY || "";
+const PLAY_PACKAGE_NAME = process.env.PLAY_PACKAGE_NAME || "";
+const PLAY_SERVICE_ACCOUNT = process.env.PLAY_SERVICE_ACCOUNT_JSON || "";
+
+/** Apple IAP verification is configured (all App Store Server API creds present). */
+function appleIapConfigured(): boolean {
+  return Boolean(
+    APPLE_BUNDLE_ID &&
+    APP_STORE_ISSUER_ID &&
+    APP_STORE_KEY_ID &&
+    APP_STORE_PRIVATE_KEY,
+  );
+}
+/** Play IAP verification is configured (package + service account present). */
+function playIapConfigured(): boolean {
+  return Boolean(PLAY_PACKAGE_NAME && PLAY_SERVICE_ACCOUNT);
+}
+/** True when EITHER IAP rail is configured (the /iap/verify entry gate). */
+function iapConfigured(): boolean {
+  return appleIapConfigured() || playIapConfigured();
+}
+
+// Upper bound on Team subscription seats (checkout quantity + seat assignment).
+// A sanity cap, not a business limit — clampSeats rejects anything outside
+// [1, MAX_TEAM_SEATS] so a malformed/absurd seat count can never size the pool
+// or the Stripe quantity. Overridable via env for a genuinely larger org.
+const MAX_TEAM_SEATS = Math.max(
+  1,
+  Math.floor(Number(process.env.MAX_TEAM_SEATS) || 100),
+);
 
 let _stripe: Stripe | null = null;
 /** Lazily construct the Stripe client. Throws if the secret key is unset. */
@@ -233,6 +278,86 @@ async function writeEntitlementFromIntent(
   );
 }
 
+/**
+ * Whether `uid` may MANAGE a team's billing/seats (buy seats, change seat count,
+ * assign/unassign members). Owner + admin only — the seat-management permission
+ * the owner chose. ownerId is the definitive owner; members[] carries per-member
+ * roles ("owner"|"admin"|"member"). A member with no explicit role is a plain
+ * member. Never trusts client input — teamData is read server-side from Firestore.
+ */
+function isTeamManager(
+  teamData: Record<string, unknown> | null | undefined,
+  uid: string,
+): boolean {
+  if (!teamData || !uid) return false;
+  if (String(teamData.ownerId || "").trim() === uid) return true;
+  const members = Array.isArray(teamData.members)
+    ? (teamData.members as Array<{ uid?: unknown; role?: unknown }>)
+    : [];
+  return members.some(
+    (m) =>
+      String(m?.uid || "").trim() === uid &&
+      ["owner", "admin"].includes(
+        String(m?.role || "")
+          .trim()
+          .toLowerCase(),
+      ),
+  );
+}
+
+/**
+ * Apply a decided team-billing intent to teams/{teamId}.billing (setDoc merge, so
+ * name/members/folders/seatAssignments survive). Enforces the monotonic-ordering
+ * + terminal-scoping invariants via decideTeamBillingWrite inside a transaction
+ * (same reasoning as writeEntitlementFromIntent: out-of-order/concurrent webhooks
+ * must serialize per doc). Busts the entitlement cache for the owner AND every
+ * currently-assigned member so a seat-count / status change is visible at once on
+ * this instance (other instances self-heal on the 15s TTL). The team must already
+ * exist (created by the collaboration layer) — a billing event never fabricates a
+ * team; it logs team_not_found and skips.
+ */
+async function writeTeamBillingFromIntent(
+  teamId: string,
+  intent: TeamBillingIntent,
+): Promise<void> {
+  if (!teamId) return;
+  const db = getFirestore();
+  const ref = db.collection("teams").doc(teamId);
+  let affected: string[] = [];
+  const decision = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists)
+      return { apply: false, reason: "team_not_found" } as const;
+    const data = snap.data() as Record<string, unknown>;
+    const existing = (data.billing ?? null) as ExistingTeamBilling | null;
+    const d = decideTeamBillingWrite(existing, intent);
+    if (d.apply) {
+      tx.set(
+        ref,
+        {
+          billing: { ...d.fields, updatedAt: FieldValue.serverTimestamp() },
+        },
+        { merge: true },
+      );
+      affected = Array.isArray(data.seatAssignments)
+        ? (data.seatAssignments as string[])
+        : [];
+    }
+    return d;
+  });
+  if (!decision.apply) {
+    console.log(
+      `[stripe] team billing skip team=${teamId} reason=${decision.reason} evt=${intent.eventId}`,
+    );
+    return;
+  }
+  entCache.delete(intent.ownerUid);
+  for (const memberUid of affected) entCache.delete(memberUid);
+  console.log(
+    `[stripe] team billing set team=${teamId} status=${decision.fields.status} seats=${decision.fields.seats} evt=${intent.eventId}`,
+  );
+}
+
 /** Build+apply the entitlement intent from an authoritative Subscription. */
 async function applySubscription(
   uid: string,
@@ -244,6 +369,11 @@ async function applySubscription(
   const item = sub.items?.data?.[0];
   const priceId = item?.price?.id;
   const plan = mapPriceToPlan(priceId, PRICE_MAP);
+  // Team subscriptions carry the funded team id in metadata and the seat count in
+  // the item quantity. Resolved here so both the grant and revoke paths can write
+  // teams/{teamId}.billing alongside the owner's entitlement doc.
+  const subTeamId = String(sub.metadata?.teamId || "").trim();
+  const subSeats = Math.max(1, Math.floor(Number(item?.quantity) || 1));
   // The grant/revoke/skip decision (unknown status, unmapped price, fail-closed
   // on grant but fail-safe on revoke) is a pure function so it has a regression
   // net (billing.test.ts) — index.ts itself is not unit-tested.
@@ -277,6 +407,21 @@ async function applySubscription(
         stripeSubscriptionId: sub.id,
         cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
       });
+      // If this revoked sub funded a team, propagate the revoked status to the
+      // team billing doc so assigned members lose the shared pool (deriveSeatAccess
+      // denies on non-active/grace). Not terminal — only a delete event is.
+      if (subTeamId) {
+        await writeTeamBillingFromIntent(subTeamId, {
+          status: ourStatus as "on_hold" | "canceled",
+          seats: subSeats,
+          ownerUid: uid,
+          eventId,
+          eventCreated,
+          stripeCustomerId: stripeCustomerId(sub.customer),
+          stripeSubscriptionId: sub.id,
+          stripeSubscriptionItemId: item?.id,
+        });
+      }
       return;
     case "grant": {
       // current_period_end moved to the item level as of API Basil (2025-03-31).
@@ -284,6 +429,10 @@ async function applySubscription(
         (item as unknown as { current_period_end?: number })
           ?.current_period_end,
       );
+      const isTeam = action.plan === "team";
+      // For a team grant the pool is metered under the funded team id (falling back
+      // to the owner's uid if metadata is somehow absent), sized by the seat count.
+      const teamId = isTeam ? subTeamId || uid : "";
       await writeEntitlementFromIntent(uid, {
         plan: action.plan,
         // ourStatus is non-null on the grant path (decideSubscriptionApply
@@ -296,7 +445,24 @@ async function applySubscription(
         currentPeriodEnd: periodEnd || undefined,
         cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
         priceId: priceId || undefined,
+        // Team-only: seats sizes the shared pool; teamId keys it. Both invisible to
+        // the gate (derivePlan reads {plan,status} only) but read by computeEntitlement.
+        ...(isTeam ? { seats: subSeats, teamId } : {}),
       });
+      if (isTeam) {
+        await writeTeamBillingFromIntent(teamId, {
+          status: ourStatus as "active" | "grace" | "on_hold" | "canceled",
+          seats: subSeats,
+          ownerUid: uid,
+          eventId,
+          eventCreated,
+          stripeCustomerId: stripeCustomerId(sub.customer),
+          stripeSubscriptionId: sub.id,
+          stripeSubscriptionItemId: item?.id,
+          currentPeriodEnd: periodEnd || undefined,
+          priceId: priceId || undefined,
+        });
+      }
       return;
     }
   }
@@ -387,6 +553,22 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         stripeSubscriptionId: sub.id,
         cancelAtPeriodEnd: false,
       });
+      // If this sub funded a team, terminally revoke the team billing doc too
+      // (seats:0, terminal) so every assigned member loses the shared pool and a
+      // same-second sibling can never resurrect it.
+      const delTeamId = String(sub.metadata?.teamId || "").trim();
+      if (delTeamId) {
+        await writeTeamBillingFromIntent(delTeamId, {
+          status: "canceled",
+          seats: 0,
+          ownerUid: uid,
+          eventId: event.id,
+          eventCreated,
+          terminal: true,
+          stripeCustomerId: stripeCustomerId(sub.customer),
+          stripeSubscriptionId: sub.id,
+        });
+      }
       return;
     }
     default:
@@ -581,40 +763,127 @@ const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
 async function resolvePlan(
   req: http.IncomingMessage,
   uid: string,
-): Promise<{ realPlan: Plan; plan: Plan; viewAs: Plan | null }> {
-  const realPlan: Plan = INTERNAL_UIDS.has(uid)
-    ? "internal"
-    : await loadEntitlement(uid);
+): Promise<{
+  realPlan: Plan;
+  plan: Plan;
+  viewAs: Plan | null;
+  meterKey: string;
+  seats: number;
+}> {
+  let real: ResolvedEntitlement;
+  if (INTERNAL_UIDS.has(uid)) {
+    // Internal allowlist is unmetered — meter under the uid (never consulted).
+    real = { realPlan: "internal", meterKey: uid, seats: 1 };
+  } else {
+    real = await loadEntitlement(uid);
+  }
   const viewAs = resolveViewAs(req.headers["x-view-as"], uid, OWNER_UIDS);
-  return { realPlan, plan: viewAs ?? realPlan, viewAs };
+  // view-as overrides only the EFFECTIVE plan (limits/gating preview for owners);
+  // metering stays keyed/sized by the REAL entitlement so a preview never charges
+  // the wrong pool.
+  return {
+    realPlan: real.realPlan,
+    plan: viewAs ?? real.realPlan,
+    viewAs,
+    meterKey: real.meterKey,
+    seats: real.seats,
+  };
 }
 
-const entCache = new Map<string, { plan: Plan; at: number }>();
-// Short TTL so a plan change (cancel / upgrade) written by the webhook becomes
-// visible quickly. The webhook busts THIS instance's cache immediately
-// (entCache.delete on write), but Cloud Run runs multiple instances and a
-// webhook only mutates the one it lands on — so OTHER instances serve the cached
-// plan until their entry expires. 15s bounds that cross-instance staleness to a
-// brief window (residual, LOW: a just-canceled user keeps access for ≤15s on
-// instances that didn't receive the webhook; a just-upgraded user may see the
-// old lower plan for ≤15s — self-heals on expiry, and the client re-polls).
+/**
+ * The metered identity of a uid: its real plan, the POOL key usage is metered
+ * under (uid for free/pro/internal; teamId for a Team owner or assigned member —
+ * a single shared pool), and the seat count that sizes a team pool (1 otherwise).
+ */
+interface ResolvedEntitlement {
+  realPlan: Plan;
+  meterKey: string;
+  seats: number;
+}
+
+const entCache = new Map<string, ResolvedEntitlement & { at: number }>();
+// Short TTL so a plan change (cancel / upgrade / seat (un)assignment) written by
+// the webhook or a seat endpoint becomes visible quickly. The writer busts THIS
+// instance's cache immediately (entCache.delete on write), but Cloud Run runs
+// multiple instances and a write only mutates the one it lands on — so OTHER
+// instances serve the cached value until their entry expires. 15s bounds that
+// cross-instance staleness to a brief window (residual, LOW: a just-canceled or
+// just-unassigned user keeps access for ≤15s on instances that didn't receive
+// the write; self-heals on expiry, and the client re-polls).
 const ENT_TTL_MS = 15_000;
 
-async function loadEntitlement(uid: string): Promise<Plan> {
+async function loadEntitlement(uid: string): Promise<ResolvedEntitlement> {
   const cached = entCache.get(uid);
   const now = Date.now();
-  if (cached && now - cached.at < ENT_TTL_MS) return cached.plan;
+  if (cached && now - cached.at < ENT_TTL_MS) return cached;
+  const resolved = await computeEntitlement(uid);
+  entCache.set(uid, { ...resolved, at: now });
+  return resolved;
+}
+
+/**
+ * Resolve a uid's metered identity from Firestore (no cache). Order of precedence:
+ *  1. Own entitlement is a paid Team subscription → meter under the funded team
+ *     pool (teamId), sized by the subscription's seat count. This is the OWNER
+ *     (or a self-funded team account); their entitlement doc carries teamId+seats.
+ *  2. Own entitlement is pro/internal → a per-uid pool, 1 seat.
+ *  3. Own entitlement is free → the uid may still be an ASSIGNED member of another
+ *     team: consult the teamSeats/{uid} reverse index, then the team doc, and
+ *     grant the shared team pool ONLY when deriveSeatAccess confirms an active,
+ *     in-capacity seat. Otherwise free.
+ * Fails to a per-uid FREE pool (never unlimited) on any Firestore error.
+ */
+async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
   try {
-    const snap = await getFirestore().collection("entitlements").doc(uid).get();
-    const plan: Plan = snap.exists ? derivePlan(snap.data()) : "free";
-    entCache.set(uid, { plan, at: now });
-    return plan;
+    const db = getFirestore();
+    const snap = await db.collection("entitlements").doc(uid).get();
+    const data = snap.exists ? (snap.data() as Record<string, unknown>) : null;
+    const plan = data ? derivePlan(data) : "free";
+    if (plan === "team") {
+      const teamId = String(data?.teamId || "").trim() || uid;
+      const seats = Math.max(1, Math.floor(Number(data?.seats) || 1));
+      return { realPlan: "team", meterKey: teamId, seats };
+    }
+    if (plan === "pro" || plan === "internal") {
+      return { realPlan: plan, meterKey: uid, seats: 1 };
+    }
+    // free own-entitlement → maybe an assigned member of a paid team.
+    const seat = await resolveTeamSeat(db, uid);
+    if (seat)
+      return { realPlan: "team", meterKey: seat.teamId, seats: seat.seats };
+    return { realPlan: "free", meterKey: uid, seats: 1 };
   } catch (err) {
-    // Fail to "free" (NOT unlimited) so a Firestore blip can neither break the
-    // product nor leak unlimited cost. Logged explicitly — never silent.
+    // Fail to per-uid "free" (NOT unlimited) so a Firestore blip can neither
+    // break the product nor leak unlimited cost. Logged explicitly — never silent.
     console.error(`loadEntitlement failed for ${uid}:`, err);
-    return "free";
+    return { realPlan: "free", meterKey: uid, seats: 1 };
   }
+}
+
+/**
+ * Resolve a uid's Team seat via the teamSeats/{uid} reverse index → team doc.
+ * Returns the funded team pool ONLY when the team's billing is active/grace AND
+ * the uid holds an in-capacity assigned seat (deriveSeatAccess); else null.
+ */
+async function resolveTeamSeat(
+  db: FirebaseFirestore.Firestore,
+  uid: string,
+): Promise<{ teamId: string; seats: number } | null> {
+  const idx = await db.collection("teamSeats").doc(uid).get();
+  if (!idx.exists) return null;
+  const teamId = String(idx.data()?.teamId || "").trim();
+  if (!teamId) return null;
+  const teamSnap = await db.collection("teams").doc(teamId).get();
+  if (!teamSnap.exists) return null;
+  const t = teamSnap.data() as Record<string, unknown>;
+  const billing = t?.billing as
+    { status?: unknown; seats?: unknown } | undefined;
+  const assignments = Array.isArray(t?.seatAssignments)
+    ? (t.seatAssignments as string[])
+    : [];
+  if (!deriveSeatAccess(billing, assignments, uid).access) return null;
+  const seats = Math.max(1, Math.floor(Number(billing?.seats) || 1));
+  return { teamId, seats };
 }
 
 // Result of a guard() call. `ok:false` means a 429 was already written and the
@@ -626,6 +895,8 @@ type GuardResult =
       ok: true;
       charged: boolean;
       uid: string;
+      /** The usage pool this charge landed in (uid, or teamId for a team pool). */
+      meterKey: string;
       plan: Plan;
       feature: Feature;
       cost: number;
@@ -646,21 +917,24 @@ async function guard(
   feature: Feature,
   cost = 1,
 ): Promise<GuardResult> {
-  const { plan } = await resolvePlan(req, uid);
+  const { plan, meterKey, seats } = await resolvePlan(req, uid);
   const ym = periodKey(new Date());
-  const precheck = checkQuota(plan, feature, 0, cost);
+  const precheck = checkQuota(plan, feature, 0, cost, seats);
   if (precheck.unlimited) {
-    return { ok: true, charged: false, uid, plan, feature, cost, ym };
+    return { ok: true, charged: false, uid, meterKey, plan, feature, cost, ym };
   }
   try {
+    // Meter under meterKey (the shared team pool for a Team member/owner; the uid
+    // otherwise) and size the ceiling by seat count (1 for non-team).
     const result = await reserveUsage(
       meteringStore,
       serverValues,
-      uid,
+      meterKey,
       feature,
       cost,
       plan,
       ym,
+      seats,
     );
     if (result.blocked) {
       res.writeHead(429, { "Content-Type": "application/json" });
@@ -675,12 +949,12 @@ async function guard(
       );
       return { ok: false };
     }
-    return { ok: true, charged: true, uid, plan, feature, cost, ym };
+    return { ok: true, charged: true, uid, meterKey, plan, feature, cost, ym };
   } catch (err) {
     // Fail-open on metering-infra error: don't break AI for a DB blip. Logged.
     // charged:false — the increment never persisted, so never refund it.
     console.error(`guard tx failed for ${uid}/${feature}:`, err);
-    return { ok: true, charged: false, uid, plan, feature, cost, ym };
+    return { ok: true, charged: false, uid, meterKey, plan, feature, cost, ym };
   }
 }
 
@@ -691,7 +965,7 @@ async function guard(
  * never thrown (a failed refund must not turn a successful request into a 500).
  */
 async function adjustUsage(
-  uid: string,
+  key: string,
   feature: Feature,
   delta: number,
   plan: Plan,
@@ -701,14 +975,14 @@ async function adjustUsage(
     await meterAdjustUsage(
       meteringStore,
       serverValues,
-      uid,
+      key,
       feature,
       delta,
       plan,
       ym,
     );
   } catch (err) {
-    console.error(`adjustUsage(${delta}) failed for ${uid}/${feature}:`, err);
+    console.error(`adjustUsage(${delta}) failed for ${key}/${feature}:`, err);
   }
 }
 
@@ -726,7 +1000,7 @@ async function refundIfUncommitted(
   // accessible after the pure check passes.
   if (!shouldRefund(g && g.ok ? g : null, committed)) return;
   if (!g || !g.ok) return;
-  await adjustUsage(g.uid, g.feature, -g.cost, g.plan, g.ym);
+  await adjustUsage(g.meterKey, g.feature, -g.cost, g.plan, g.ym);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -905,14 +1179,21 @@ const server = http.createServer(async (req, res) => {
   if (req.url === "/v1/me/entitlement") {
     try {
       const uid = await verifyFirebaseToken(req.headers.authorization);
-      const { realPlan, plan, viewAs } = await resolvePlan(req, uid);
+      const { realPlan, plan, viewAs, meterKey, seats } = await resolvePlan(
+        req,
+        uid,
+      );
       const isOwner = OWNER_UIDS.has(uid);
       const ym = periodKey(new Date());
       let usage: Record<string, number> = {};
       try {
+        // Usage is metered under the POOL key (meterKey): the teamId for a Team
+        // owner/member (a single shared counter), the uid otherwise. Reading under
+        // uid here would show a team member zero usage while their spend actually
+        // lands in the shared pool.
         const snap = await getFirestore()
           .collection("usage")
-          .doc(uid)
+          .doc(meterKey)
           .collection("months")
           .doc(ym)
           .get();
@@ -928,7 +1209,19 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         console.error(`me/entitlement usage read failed for ${uid}:`, e);
       }
-      const limits = plan === "internal" ? null : PLAN_LIMITS[plan];
+      // Effective limits: team's shared pool ceiling is per-plan base × seats, so
+      // the UI shows the true team-wide allowance (mirrors checkQuota's scaling).
+      let limits: Record<Feature, number> | null =
+        plan === "internal" ? null : PLAN_LIMITS[plan];
+      if (limits && plan === "team") {
+        const s = Math.max(1, Math.floor(seats));
+        limits = {
+          aiCalls: limits.aiCalls * s,
+          sttCalls: limits.sttCalls * s,
+          batchMin: limits.batchMin * s,
+          images: limits.images * s,
+        };
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
@@ -938,6 +1231,7 @@ const server = http.createServer(async (req, res) => {
           viewAs: viewAs ?? null,
           isOwner,
           period: ym,
+          seats,
           limits,
           usage,
         }),
@@ -1004,6 +1298,62 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "invalid_plan" }));
         return;
+      }
+      // Team checkout: validate seats + team, and authorize the buyer. A team sub
+      // is one Stripe subscription whose ITEM QUANTITY is the seat count; the
+      // funded team id rides in metadata so the webhook can size + key the shared
+      // pool. Pro checkout skips all of this (seats stays 1, no teamId).
+      const planNorm = String(parsed.plan ?? "")
+        .trim()
+        .toLowerCase();
+      const isTeamCheckout = planNorm === "team";
+      let seatCount = 1;
+      let checkoutTeamId = "";
+      if (isTeamCheckout) {
+        const clamped = clampSeats(parsed.seats, "team", MAX_TEAM_SEATS);
+        if (clamped == null) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({ error: "invalid_seats", max: MAX_TEAM_SEATS }),
+          );
+          return;
+        }
+        seatCount = clamped;
+        checkoutTeamId = String(parsed.teamId ?? "").trim();
+        if (!checkoutTeamId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "team_id_required" }));
+          return;
+        }
+        const teamSnap = await getFirestore()
+          .collection("teams")
+          .doc(checkoutTeamId)
+          .get();
+        if (!teamSnap.exists) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "team_not_found" }));
+          return;
+        }
+        const teamData = teamSnap.data() as Record<string, unknown>;
+        // Owner + admin only (the chosen seat-management permission).
+        if (!isTeamManager(teamData, uid)) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "not_team_manager" }));
+          return;
+        }
+        // Never fund a team that already has live billing — a second admin opening
+        // checkout would create a duplicate team subscription (double charge).
+        const existingBilling = (teamData.billing ?? null) as {
+          status?: unknown;
+        } | null;
+        const bStatus = String(existingBilling?.status ?? "")
+          .trim()
+          .toLowerCase();
+        if (["active", "grace", "trialing"].includes(bStatus)) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "already_subscribed" }));
+          return;
+        }
       }
       // Refuse to open a SECOND subscription for someone who already has access.
       // Stripe Checkout does not dedupe per-customer, so a stale client / double
@@ -1100,10 +1450,34 @@ const server = http.createServer(async (req, res) => {
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         customer: customerId,
-        line_items: [{ price: priceId, quantity: 1 }],
+        line_items: [
+          {
+            price: priceId,
+            quantity: seatCount,
+            // Let a team buyer tweak the seat count on the Stripe checkout page;
+            // the webhook reads the final item quantity as the source of truth.
+            ...(isTeamCheckout
+              ? {
+                  adjustable_quantity: {
+                    enabled: true,
+                    minimum: 1,
+                    maximum: MAX_TEAM_SEATS,
+                  },
+                }
+              : {}),
+          },
+        ],
         client_reference_id: uid,
-        metadata: { firebaseUid: uid },
-        subscription_data: { metadata: { firebaseUid: uid } },
+        metadata: {
+          firebaseUid: uid,
+          ...(isTeamCheckout ? { teamId: checkoutTeamId } : {}),
+        },
+        subscription_data: {
+          metadata: {
+            firebaseUid: uid,
+            ...(isTeamCheckout ? { teamId: checkoutTeamId } : {}),
+          },
+        },
         success_url: CHECKOUT_SUCCESS_URL,
         cancel_url: CHECKOUT_CANCEL_URL,
         allow_promotion_codes: true,
@@ -1150,6 +1524,285 @@ const server = http.createServer(async (req, res) => {
       sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
       return;
     }
+  }
+
+  // --- /v1/billing/team/seats (owner+admin: change the paid seat COUNT) ---
+  // Changes the Stripe subscription item quantity (money). The webhook
+  // (customer.subscription.updated) is the source of truth that reconciles
+  // teams/{teamId}.billing.seats + the owner's entitlement seats — this endpoint
+  // only drives Stripe, then the client re-polls me/entitlement.
+  if (req.url === "/v1/billing/team/seats") {
+    try {
+      if (!billingConfigured()) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "billing_not_configured" }));
+        return;
+      }
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = body ? JSON.parse(body) : {};
+      const teamId = String(parsed.teamId ?? "").trim();
+      const seats = clampSeats(parsed.seats, "team", MAX_TEAM_SEATS);
+      if (!teamId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "team_id_required" }));
+        return;
+      }
+      if (seats == null) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ error: "invalid_seats", max: MAX_TEAM_SEATS }),
+        );
+        return;
+      }
+      const teamSnap = await getFirestore()
+        .collection("teams")
+        .doc(teamId)
+        .get();
+      if (!teamSnap.exists) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "team_not_found" }));
+        return;
+      }
+      const teamData = teamSnap.data() as Record<string, unknown>;
+      if (!isTeamManager(teamData, uid)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_team_manager" }));
+        return;
+      }
+      const billing = (teamData.billing ?? null) as {
+        stripeSubscriptionId?: unknown;
+        status?: unknown;
+      } | null;
+      const subId = String(billing?.stripeSubscriptionId ?? "").trim();
+      const bStatus = String(billing?.status ?? "")
+        .trim()
+        .toLowerCase();
+      if (!subId || !["active", "grace", "trialing"].includes(bStatus)) {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "no_active_subscription" }));
+        return;
+      }
+      const stripe = getStripe();
+      // Retrieve the live subscription so we update the AUTHORITATIVE item id
+      // (never a possibly-stale stored one). Quantity change prorates by default.
+      const sub = await stripe.subscriptions.retrieve(subId);
+      const itemId = sub.items?.data?.[0]?.id;
+      if (!itemId) {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "no_active_subscription" }));
+        return;
+      }
+      await stripe.subscriptions.update(subId, {
+        items: [{ id: itemId, quantity: seats }],
+        proration_behavior: "create_prorations",
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, seats }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[stripe] team/seats failed: ${message}`);
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
+      return;
+    }
+  }
+
+  // --- /v1/billing/team/assign (owner+admin: set WHO holds the seats) ---
+  // Replaces teams/{teamId}.seatAssignments with an ORDERED uid list (order is the
+  // capacity fence: the first `seats` uids get the shared pool — see
+  // deriveSeatAccess). Pure Firestore, NO Stripe/money. Also maintains the
+  // teamSeats/{uid} reverse index (resolveTeamSeat reads it) and busts the
+  // entitlement cache for every affected uid. Requires ONLY seat-holders be actual
+  // team members (server-authoritative) — an unknown uid fails loudly (no silent
+  // drop). Does NOT require billingConfigured (assignment is free to manage even
+  // while Stripe keys are dark), but access still needs active billing at spend time.
+  if (req.url === "/v1/billing/team/assign") {
+    try {
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = body ? JSON.parse(body) : {};
+      const teamId = String(parsed.teamId ?? "").trim();
+      if (!teamId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "team_id_required" }));
+        return;
+      }
+      const rawList = Array.isArray(parsed.seatAssignments)
+        ? parsed.seatAssignments
+        : null;
+      if (!rawList) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "seat_assignments_required" }));
+        return;
+      }
+      const db = getFirestore();
+      const teamRef = db.collection("teams").doc(teamId);
+      const teamSnap = await teamRef.get();
+      if (!teamSnap.exists) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "team_not_found" }));
+        return;
+      }
+      const teamData = teamSnap.data() as Record<string, unknown>;
+      if (!isTeamManager(teamData, uid)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_team_manager" }));
+        return;
+      }
+      // Normalize the requested list: strings only, trimmed, de-duplicated while
+      // PRESERVING ORDER (order is the capacity fence). Cap at MAX_TEAM_SEATS so a
+      // pathological array can't bloat the doc.
+      const memberUids = new Set(
+        (Array.isArray(teamData.memberUids)
+          ? (teamData.memberUids as unknown[])
+          : []
+        )
+          .map((u) => String(u ?? "").trim())
+          .filter(Boolean),
+      );
+      const seen = new Set<string>();
+      const newAssignments: string[] = [];
+      const unknownMembers: string[] = [];
+      for (const raw of rawList) {
+        const u = String(raw ?? "").trim();
+        if (!u || seen.has(u)) continue;
+        seen.add(u);
+        if (!memberUids.has(u)) {
+          unknownMembers.push(u);
+          continue;
+        }
+        newAssignments.push(u);
+        if (newAssignments.length >= MAX_TEAM_SEATS) break;
+      }
+      // A seat may only be assigned to an actual team member — fail loudly rather
+      // than silently drop, so the caller knows the request was not fully honored.
+      if (unknownMembers.length) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ error: "not_team_member", uids: unknownMembers }),
+        );
+        return;
+      }
+      const oldAssignments = (
+        Array.isArray(teamData.seatAssignments)
+          ? (teamData.seatAssignments as unknown[])
+          : []
+      )
+        .map((u) => String(u ?? "").trim())
+        .filter(Boolean);
+      // Persist the new ordered assignment list (merge preserves billing/members).
+      await teamRef.set(
+        {
+          seatAssignments: newAssignments,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      // Maintain the teamSeats/{uid} reverse index for the delta. Added → point at
+      // this team; removed → delete ONLY if it still points here (never clobber a
+      // seat the uid holds in a DIFFERENT team).
+      const newSet = new Set(newAssignments);
+      const oldSet = new Set(oldAssignments);
+      const added = newAssignments.filter((u) => !oldSet.has(u));
+      const removed = oldAssignments.filter((u) => !newSet.has(u));
+      await Promise.all([
+        ...added.map((u) =>
+          db
+            .collection("teamSeats")
+            .doc(u)
+            .set(
+              { teamId, updatedAt: FieldValue.serverTimestamp() },
+              { merge: true },
+            ),
+        ),
+        ...removed.map(async (u) => {
+          const ref = db.collection("teamSeats").doc(u);
+          const snap = await ref.get();
+          if (
+            snap.exists &&
+            String(snap.data()?.teamId || "").trim() === teamId
+          )
+            await ref.delete();
+        }),
+      ]);
+      // Bust the entitlement cache for every uid whose access may have changed.
+      for (const u of new Set([...added, ...removed])) entCache.delete(u);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, seatAssignments: newAssignments }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[stripe] team/assign failed: ${message}`);
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
+      return;
+    }
+  }
+
+  // --- /v1/billing/iap/verify (authed: verify a mobile IAP → entitlement) ---
+  // Phase 0 DARK: returns 503 iap_not_configured until store credentials exist.
+  // Phase 1 will decode+verify the Apple JWS / call the Play API, feed the facts
+  // into iap.buildAppleIntent / buildPlayIntent, and apply the result through the
+  // SAME writeEntitlementFromIntent pipeline Stripe uses (cross-rail safe). The
+  // uid is the VERIFIED Firebase uid (never the client-asserted account token).
+  if (req.url === "/v1/billing/iap/verify") {
+    try {
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      if (!iapConfigured()) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "iap_not_configured" }));
+        return;
+      }
+      // Configured but verification not yet wired (Phase 1). Fail LOUDLY — never
+      // silently grant an entitlement for an unverified purchase.
+      console.warn(
+        `[iap] verify called (configured) uid=${uid} — not yet wired`,
+      );
+      res.writeHead(501, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "iap_verification_not_implemented" }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
+      return;
+    }
+  }
+
+  // --- /v1/billing/appstore/notifications (Apple Server Notifications V2) ---
+  // NO Firebase auth — Apple posts a signed JWS. Phase 0 DARK: 503 until creds
+  // exist. Phase 1 verifies the JWS chain, decodes the transaction/renewal info,
+  // and applies via writeEntitlementFromIntent.
+  if (req.url === "/v1/billing/appstore/notifications") {
+    if (!appleIapConfigured()) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "iap_not_configured" }));
+      return;
+    }
+    console.warn(
+      "[iap] appstore notification received (configured) — not yet wired",
+    );
+    res.writeHead(501, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "iap_verification_not_implemented" }));
+    return;
+  }
+
+  // --- /v1/billing/play/rtdn (Google Play Real-time Developer Notifications) ---
+  // NO Firebase auth — Play pushes via Pub/Sub. Phase 0 DARK: 503 until creds
+  // exist. Phase 1 validates the push, calls the Play Developer API for the
+  // authoritative subscription, and applies via writeEntitlementFromIntent.
+  if (req.url === "/v1/billing/play/rtdn") {
+    if (!playIapConfigured()) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "iap_not_configured" }));
+      return;
+    }
+    console.warn("[iap] play RTDN received (configured) — not yet wired");
+    res.writeHead(501, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "iap_verification_not_implemented" }));
+    return;
   }
 
   // --- /v1/voice/transcribe ---
@@ -1600,7 +2253,7 @@ const server = http.createServer(async (req, res) => {
       const measuredMin = measuredBatchMinutes(chunkResults, OVERLAP_SECS);
       if (g.ok && g.charged) {
         await adjustUsage(
-          g.uid,
+          g.meterKey,
           "batchMin",
           reconcileBatchDelta(measuredMin, reserveMin),
           g.plan,

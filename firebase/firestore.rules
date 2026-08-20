@@ -91,13 +91,27 @@ service cloud.firestore {
       }
     }
 
-    // Teams: members can read/update, owner can delete
+    // Teams: members can read/update, owner can delete.
+    //
+    // SERVER-ONLY billing fields: `billing` (subscription status/seats/ownerUid)
+    // and `seatAssignments` (who may spend the shared AI pool) are written ONLY by
+    // the ai-proxy via the Admin SDK (which bypasses these rules). A team member is
+    // allowed to update the doc (rename, add/remove members via sharing.ts), but
+    // MUST NOT be able to touch billing/seatAssignments — otherwise an assigned
+    // member could forge `billing.status:"active"`, inflate `billing.seats`, or
+    // re-add themselves to `seatAssignments` to keep spending the team pool after
+    // being removed. The equality guards freeze both fields on every client update
+    // (unchanged-or-absent), and create forbids seeding them at all.
     match /teams/{teamId} {
-      allow create: if request.auth != null;
+      allow create: if request.auth != null
+        && !('billing' in request.resource.data)
+        && !('seatAssignments' in request.resource.data);
       allow read: if request.auth != null &&
         request.auth.uid in resource.data.memberUids;
-      allow update: if request.auth != null &&
-        request.auth.uid in resource.data.memberUids;
+      allow update: if request.auth != null
+        && request.auth.uid in resource.data.memberUids
+        && request.resource.data.get('billing', null) == resource.data.get('billing', null)
+        && request.resource.data.get('seatAssignments', null) == resource.data.get('seatAssignments', null);
       allow delete: if request.auth != null &&
         resource.data.ownerId == request.auth.uid;
     }
@@ -164,6 +178,26 @@ service cloud.firestore {
     // Admin SDK (bypasses these rules). Caps a user to one in-flight batch job;
     // no client ever reads or writes them.
     match /batchLocks/{userId} {
+      allow read, write: if false;
+    }
+
+    // Team seat reverse index (teamSeats/{uid} → {teamId}): written ONLY by the
+    // ai-proxy seat-assign endpoint via the Admin SDK. It is the authoritative
+    // "which funded team does this uid draw from" lookup the metering path trusts,
+    // so a client must NEVER read or write it (a forged entry would grant the
+    // shared team pool). Fully server-only.
+    match /teamSeats/{userId} {
+      allow read, write: if false;
+    }
+
+    // In-App Purchase internals (Apple/Play): written ONLY by the ai-proxy IAP
+    // endpoints via the Admin SDK. iapEvents/{eventId} is the notification
+    // idempotency log; iapCustomers/{key} maps a store transaction/purchase token
+    // to a uid for server notifications. No client ever reads or writes them.
+    match /iapEvents/{eventId} {
+      allow read, write: if false;
+    }
+    match /iapCustomers/{key} {
       allow read, write: if false;
     }
   }

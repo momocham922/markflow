@@ -14,6 +14,7 @@ import {
   measuredBatchMinutes,
   reconcileBatchDelta,
   shouldRefund,
+  deriveSeatAccess,
   type Plan,
   type Feature,
 } from "./gating";
@@ -117,6 +118,123 @@ describe("checkQuota", () => {
     expect(checkQuota("free", "aiCalls", 30, 1).blocked).toBe(true);
     expect(checkQuota("pro", "aiCalls", 30, 1).blocked).toBe(false);
     expect(checkQuota("team", "aiCalls", 30, 1).blocked).toBe(false);
+  });
+});
+
+// =====================================================================
+// checkQuota × seats — the Team shared-pool multiplier
+// =====================================================================
+describe("checkQuota (team seat scaling)", () => {
+  it("scales the team limit by seat count for every feature", () => {
+    for (const f of FEATURES) {
+      const base = PLAN_LIMITS.team[f];
+      // 3 seats → 3× base ceiling.
+      const r = checkQuota("team", f, base * 3 - 1, 1, 3);
+      expect(r.limit).toBe(base * 3);
+      expect(r.blocked).toBe(false);
+      // one past the scaled ceiling blocks.
+      expect(checkQuota("team", f, base * 3, 1, 3).blocked).toBe(true);
+    }
+  });
+
+  it("defaults to 1 seat when omitted (backward-compatible)", () => {
+    const base = PLAN_LIMITS.team.aiCalls;
+    expect(checkQuota("team", "aiCalls", base - 1, 1).limit).toBe(base);
+    expect(checkQuota("team", "aiCalls", base, 1).blocked).toBe(true);
+  });
+
+  it("clamps a malformed 0/negative/fractional seat count to ≥1 seat", () => {
+    const base = PLAN_LIMITS.team.aiCalls;
+    // A 0-seat or negative seat count must never zero out or invert the pool.
+    expect(checkQuota("team", "aiCalls", 0, 1, 0).limit).toBe(base);
+    expect(checkQuota("team", "aiCalls", 0, 1, -5).limit).toBe(base);
+    // Fractional seats floor (2.9 → 2 seats).
+    expect(checkQuota("team", "aiCalls", 0, 1, 2.9).limit).toBe(base * 2);
+  });
+
+  it("does NOT scale non-team plans by seats (pro is always a 1-seat pool)", () => {
+    const base = PLAN_LIMITS.pro.aiCalls;
+    // Even if a seats value leaks in, pro's ceiling is unchanged.
+    expect(checkQuota("pro", "aiCalls", 0, 1, 10).limit).toBe(base);
+    expect(checkQuota("free", "aiCalls", 0, 1, 10).limit).toBe(
+      PLAN_LIMITS.free.aiCalls,
+    );
+    // internal stays unlimited regardless of seats.
+    expect(checkQuota("internal", "aiCalls", 0, 1, 10)).toEqual({
+      unlimited: true,
+      limit: -1,
+      blocked: false,
+    });
+  });
+});
+
+// =====================================================================
+// deriveSeatAccess — a Team member's paid+assigned seat gate
+// =====================================================================
+describe("deriveSeatAccess", () => {
+  const billing = (status: string, seats: number) => ({ status, seats });
+
+  it("grants access to an assigned member of an active team within capacity", () => {
+    const r = deriveSeatAccess(billing("active", 3), ["a", "b", "c"], "b");
+    expect(r).toEqual({ access: true, reason: "ok" });
+  });
+
+  it("honors grace status as paid", () => {
+    expect(deriveSeatAccess(billing("grace", 2), ["a", "b"], "a").access).toBe(
+      true,
+    );
+  });
+
+  it("denies when the team subscription is not active/grace", () => {
+    for (const s of ["canceled", "past_due", "expired", "on_hold", ""]) {
+      const r = deriveSeatAccess(billing(s, 5), ["a", "b"], "a");
+      expect(r.access).toBe(false);
+      expect(r.reason).toBe("not_active");
+    }
+  });
+
+  it("denies a uid that is not in the assignment list", () => {
+    const r = deriveSeatAccess(billing("active", 3), ["a", "b"], "z");
+    expect(r).toEqual({ access: false, reason: "not_assigned" });
+  });
+
+  it("denies an over-capacity assignee (assignment order is the fence)", () => {
+    // 2 paid seats but 3 assigned → the 3rd (index 2) falls off the end.
+    const r = deriveSeatAccess(billing("active", 2), ["a", "b", "c"], "c");
+    expect(r).toEqual({ access: false, reason: "over_capacity" });
+    // the first two keep access.
+    expect(
+      deriveSeatAccess(billing("active", 2), ["a", "b", "c"], "a").access,
+    ).toBe(true);
+    expect(
+      deriveSeatAccess(billing("active", 2), ["a", "b", "c"], "b").access,
+    ).toBe(true);
+  });
+
+  it("normalizes status casing/whitespace", () => {
+    expect(
+      deriveSeatAccess({ status: " ACTIVE ", seats: 1 }, ["a"], "a").access,
+    ).toBe(true);
+  });
+
+  it("treats a malformed seat count as ≥1 seat (never zero-capacity)", () => {
+    // seats:0 must not silently lock out the first assignee.
+    expect(
+      deriveSeatAccess({ status: "active", seats: 0 }, ["a"], "a").access,
+    ).toBe(true);
+    expect(
+      deriveSeatAccess({ status: "active", seats: NaN }, ["a"], "a").access,
+    ).toBe(true);
+  });
+
+  it("denies on null/undefined billing or assignments", () => {
+    expect(deriveSeatAccess(null, ["a"], "a").reason).toBe("not_active");
+    expect(deriveSeatAccess(billing("active", 3), null, "a").reason).toBe(
+      "not_assigned",
+    );
+    expect(deriveSeatAccess(billing("active", 3), undefined, "a").reason).toBe(
+      "not_assigned",
+    );
   });
 });
 

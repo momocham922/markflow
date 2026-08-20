@@ -222,6 +222,105 @@ describe("reserveUsage", () => {
   });
 });
 
+// =====================================================================
+// Team shared pool: meter under a SINGLE teamId key with a seat-scaled ceiling.
+// =====================================================================
+describe("reserveUsage (team shared pool + seats)", () => {
+  it("scales the team ceiling by seat count", async () => {
+    const store = new FakeStore();
+    const base = PLAN_LIMITS.team.aiCalls; // 4000
+    // 3 seats → ceiling 3×base. Seed one below the SCALED ceiling: allowed.
+    store.seed("team_x", { aiCalls: base * 3 - 1 });
+    const r = await reserveUsage(
+      store,
+      sv,
+      "team_x",
+      "aiCalls",
+      1,
+      "team",
+      YM,
+      3,
+    );
+    expect(r.blocked).toBe(false);
+    expect(store.peek("team_x")!.aiCalls).toBe(base * 3);
+  });
+
+  it("BLOCKS once the seat-scaled ceiling is exceeded (no charge)", async () => {
+    const store = new FakeStore();
+    const base = PLAN_LIMITS.team.aiCalls;
+    store.seed("team_x", { aiCalls: base * 3 });
+    store.writeCount = 0;
+    const r = await reserveUsage(
+      store,
+      sv,
+      "team_x",
+      "aiCalls",
+      1,
+      "team",
+      YM,
+      3,
+    );
+    expect(r).toEqual({ blocked: true, used: base * 3 });
+    expect(store.writeCount).toBe(0);
+  });
+
+  it("shares ONE pool across members metered under the same teamId key", async () => {
+    const store = new FakeStore();
+    // Two distinct users, but index.ts meters both under the teamId key.
+    await reserveUsage(store, sv, "team_x", "aiCalls", 10, "team", YM, 5);
+    const r = await reserveUsage(
+      store,
+      sv,
+      "team_x",
+      "aiCalls",
+      7,
+      "team",
+      YM,
+      5,
+    );
+    // Second member sees the first member's usage (shared counter).
+    expect(r.used).toBe(10);
+    expect(store.peek("team_x")!.aiCalls).toBe(17);
+  });
+
+  it("defaults to 1 seat when omitted — regression for pro/free (unchanged)", async () => {
+    const store = new FakeStore();
+    const proLimit = PLAN_LIMITS.pro.aiCalls;
+    store.seed("u_pro", { aiCalls: proLimit - 1 });
+    const ok = await reserveUsage(store, sv, "u_pro", "aiCalls", 1, "pro", YM);
+    expect(ok.blocked).toBe(false);
+    store.seed("u_pro2", { aiCalls: proLimit });
+    const blocked = await reserveUsage(
+      store,
+      sv,
+      "u_pro2",
+      "aiCalls",
+      1,
+      "pro",
+      YM,
+    );
+    expect(blocked.blocked).toBe(true);
+  });
+
+  it("clamps a malformed 0 seat count to a 1-seat team pool (never zero-capacity)", async () => {
+    const store = new FakeStore();
+    const base = PLAN_LIMITS.team.aiCalls;
+    store.seed("team_x", { aiCalls: base - 1 });
+    const r = await reserveUsage(
+      store,
+      sv,
+      "team_x",
+      "aiCalls",
+      1,
+      "team",
+      YM,
+      0,
+    );
+    expect(r.blocked).toBe(false); // 0 seats → clamped to 1×base, last unit allowed
+    expect(store.peek("team_x")!.aiCalls).toBe(base);
+  });
+});
+
 describe("adjustUsage", () => {
   it("applies a positive delta (charge the reconciled difference)", async () => {
     const store = new FakeStore();

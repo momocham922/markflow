@@ -141,6 +141,14 @@ export interface ExistingEntitlement {
   terminal?: unknown;
   /** The subscription id the current state belongs to (scopes a terminal revoke). */
   stripeSubscriptionId?: unknown;
+  /**
+   * Rail-agnostic subscription id (Apple originalTransactionId / Play
+   * purchaseToken / Stripe subscription id). When present it supersedes
+   * stripeSubscriptionId for the cross-sub terminal / same-second scoping, so the
+   * IAP rails get the same "a terminal revoke may only revoke the sub the doc
+   * tracks" protection as Stripe.
+   */
+  subId?: unknown;
 }
 
 /**
@@ -183,6 +191,37 @@ export interface EntitlementIntent {
   currentPeriodEnd?: number;
   cancelAtPeriodEnd?: boolean;
   priceId?: string;
+  /**
+   * Billing rail that produced this intent. Defaults to "stripe" when omitted so
+   * every existing Stripe call site is byte-for-byte unchanged. The rail owns the
+   * doc: decideEntitlementWrite refuses to let one rail overwrite another's doc
+   * (owned_by_<source>), which is the multi-rail double-charge guard.
+   */
+  source?: "stripe" | "app_store" | "play";
+  /**
+   * Rail-agnostic subscription id: Stripe subscription id / Apple
+   * originalTransactionId / Play purchaseToken. Falls back to
+   * stripeSubscriptionId when omitted. Used for cross-sub terminal scoping.
+   */
+  subId?: string;
+  /** Team seat count (subscription item quantity). Team plan only; else 1. */
+  seats?: number;
+  /** The team this subscription funds (checkout metadata). Team plan only. */
+  teamId?: string;
+  /**
+   * The store product identifier that funded this entitlement (Apple product id /
+   * Play product+basePlan / Stripe price id echo). Audit-only, invisible to the
+   * gate; lets support/reconciliation see exactly which SKU is active.
+   */
+  productId?: string;
+  // --- IAP audit metadata (invisible to the gate; for reconciliation/support) ---
+  appStoreOriginalTransactionId?: string;
+  appStoreTransactionId?: string;
+  appAccountToken?: string;
+  playPurchaseToken?: string;
+  playLinkedPurchaseToken?: string;
+  playOrderId?: string;
+  environment?: string;
 }
 
 export type EntitlementDecision =
@@ -212,13 +251,32 @@ export function decideEntitlementWrite(
   const existingSource = String((existing?.source ?? "") as unknown)
     .trim()
     .toLowerCase();
+  // The rail this intent belongs to. Absent = "stripe" so every existing Stripe
+  // call site keeps its exact prior behavior.
+  const intentSource = String((intent.source ?? "stripe") as unknown)
+    .trim()
+    .toLowerCase();
 
   if (existingPlan === "internal")
     return { apply: false, reason: "internal_untouchable" };
-  if (existingSource && existingSource !== "stripe")
+  // CROSS-RAIL SAFETY: a doc owned by one rail (stripe / app_store / play /
+  // founder / …) may only be mutated by that same rail. An empty existingSource
+  // is unclaimed and may be adopted. This is the multi-rail double-charge guard:
+  // an Apple purchase can never silently overwrite (or be overwritten by) an
+  // active Stripe subscription — the second rail's write is refused upstream.
+  if (existingSource && existingSource !== intentSource)
     return { apply: false, reason: `owned_by_${existingSource}` };
 
   const incomingTerminal = intent.terminal === true;
+  // Rail-agnostic subscription id for the terminal / same-second scoping below.
+  // subId supersedes stripeSubscriptionId; Stripe intents that only set
+  // stripeSubscriptionId still resolve identically via the fallback.
+  const existingSubId = String(
+    (existing?.subId ?? existing?.stripeSubscriptionId ?? "") as unknown,
+  ).trim();
+  const intentSubId = String(
+    (intent.subId ?? intent.stripeSubscriptionId ?? "") as unknown,
+  ).trim();
 
   // CROSS-SUB TERMINAL SAFETY (applies REGARDLESS of event age). A terminal
   // revoke (customer.subscription.deleted) may ONLY revoke the subscription the
@@ -232,18 +290,12 @@ export function decideEntitlementWrite(
   // Non-terminal events (created/updated) may legitimately swap the tracked sub,
   // so this guard is terminal-only.
   {
-    const existingSub = String(
-      (existing?.stripeSubscriptionId ?? "") as unknown,
-    ).trim();
-    const intentSub = String(
-      (intent.stripeSubscriptionId ?? "") as unknown,
-    ).trim();
     if (
       incomingTerminal &&
-      existingSource === "stripe" &&
-      existingSub &&
-      intentSub &&
-      existingSub !== intentSub
+      existingSource === intentSource &&
+      existingSubId &&
+      intentSubId &&
+      existingSubId !== intentSubId
     ) {
       return { apply: false, reason: "terminal_other_sub" };
     }
@@ -268,13 +320,8 @@ export function decideEntitlementWrite(
     const stored = Number(existing?.eventCreated) || 0;
     const tie = stored > 0 && intent.eventCreated === stored;
     const existingTerminal = existing?.terminal === true;
-    const existingSub = String(
-      (existing?.stripeSubscriptionId ?? "") as unknown,
-    );
     const sameSub =
-      !existingSub ||
-      !intent.stripeSubscriptionId ||
-      existingSub === intent.stripeSubscriptionId;
+      !existingSubId || !intentSubId || existingSubId === intentSubId;
     let applyOnTie: boolean;
     if (existingTerminal)
       applyOnTie = false; // terminal state is final — never overridden on a tie
@@ -287,7 +334,7 @@ export function decideEntitlementWrite(
   const fields: Record<string, unknown> = {
     plan: intent.plan,
     status: intent.status,
-    source: "stripe",
+    source: intentSource,
     eventId: intent.eventId,
     eventCreated: intent.eventCreated,
     // Always write terminal explicitly (true for a delete, false otherwise) so a
@@ -298,11 +345,30 @@ export function decideEntitlementWrite(
     fields.stripeCustomerId = intent.stripeCustomerId;
   if (intent.stripeSubscriptionId)
     fields.stripeSubscriptionId = intent.stripeSubscriptionId;
+  if (intent.subId) fields.subId = intent.subId;
   if (intent.currentPeriodEnd != null)
     fields.currentPeriodEnd = intent.currentPeriodEnd;
   if (intent.cancelAtPeriodEnd != null)
     fields.cancelAtPeriodEnd = intent.cancelAtPeriodEnd;
   if (intent.priceId) fields.priceId = intent.priceId;
+  // Team per-seat: seats sizes the shared quota pool; teamId links the doc to the
+  // funded team. Both are invisible to derivePlan (gated on {plan,status} only).
+  if (intent.seats != null) fields.seats = intent.seats;
+  if (intent.teamId) fields.teamId = intent.teamId;
+  // IAP audit metadata (invisible to the gate). Conditionally merged so a Stripe
+  // intent never writes empty Apple/Play fields and vice-versa.
+  if (intent.productId) fields.productId = intent.productId;
+  if (intent.appStoreOriginalTransactionId)
+    fields.appStoreOriginalTransactionId = intent.appStoreOriginalTransactionId;
+  if (intent.appStoreTransactionId)
+    fields.appStoreTransactionId = intent.appStoreTransactionId;
+  if (intent.appAccountToken) fields.appAccountToken = intent.appAccountToken;
+  if (intent.playPurchaseToken)
+    fields.playPurchaseToken = intent.playPurchaseToken;
+  if (intent.playLinkedPurchaseToken)
+    fields.playLinkedPurchaseToken = intent.playLinkedPurchaseToken;
+  if (intent.playOrderId) fields.playOrderId = intent.playOrderId;
+  if (intent.environment) fields.environment = intent.environment;
   return { apply: true, fields };
 }
 
@@ -356,4 +422,126 @@ export function pickUid(candidates: Array<unknown>): string | null {
 export function toEpochSeconds(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+// =====================================================================
+// Team per-seat billing (monetization ②)
+// ---------------------------------------------------------------------
+// A Team subscription is a single Stripe subscription whose item quantity IS the
+// seat count. The seat count sizes a SHARED quota pool (see gating.checkQuota's
+// `seats` scale) metered under usage/{teamId}. The authoritative seat count lives
+// in teams/{teamId}.billing.seats (written ONLY by the webhook via Admin SDK);
+// seatAssignments (who may spend) is a separate server-only field.
+// =====================================================================
+
+/**
+ * Validate and clamp a client-requested seat count for checkout / seat change.
+ * - Non-team plans have NO seat concept → always 1 (Pro checkout is unchanged).
+ * - Team must be an integer in [1, max]; anything else → null (caller 400s). We
+ *   never silently coerce an invalid seat count (a 0-seat paid sub, a fractional
+ *   or absurd count) — fail loudly.
+ */
+export function clampSeats(
+  raw: unknown,
+  plan: unknown,
+  max: number,
+): number | null {
+  const p = String(plan ?? "")
+    .trim()
+    .toLowerCase();
+  if (p !== "team") return 1;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > max) return null;
+  return n;
+}
+
+/** The existing teams/{teamId}.billing sub-doc fields this module inspects. */
+export interface ExistingTeamBilling {
+  status?: unknown;
+  eventCreated?: unknown;
+  terminal?: unknown;
+  stripeSubscriptionId?: unknown;
+}
+
+/** A fully-resolved intent to write to teams/{teamId}.billing. */
+export interface TeamBillingIntent {
+  status: OurStatus;
+  seats: number;
+  ownerUid: string;
+  eventId: string;
+  eventCreated: number;
+  terminal?: boolean;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripeSubscriptionItemId?: string;
+  currentPeriodEnd?: number;
+  priceId?: string;
+}
+
+export type TeamBillingDecision =
+  | { apply: false; reason: string }
+  | { apply: true; fields: Record<string, unknown> };
+
+/**
+ * Decide whether (and what) to write to teams/{teamId}.billing for a Stripe
+ * event. Mirrors decideEntitlementWrite's monotonic-ordering + terminal-scoping
+ * discipline (a delete may only revoke the subscription this team doc tracks; a
+ * terminal state, once recorded, is never resurrected by a same-second sibling),
+ * so a delayed/out-of-order event can neither strand a paying team on canceled
+ * nor keep a canceled team paid. Team billing is Stripe-only (no cross-rail
+ * source concept — IAP Team is flat, out of scope here).
+ */
+export function decideTeamBillingWrite(
+  existing: ExistingTeamBilling | null | undefined,
+  intent: TeamBillingIntent,
+): TeamBillingDecision {
+  const incomingTerminal = intent.terminal === true;
+  const existingSub = String(
+    (existing?.stripeSubscriptionId ?? "") as unknown,
+  ).trim();
+  const intentSub = String(
+    (intent.stripeSubscriptionId ?? "") as unknown,
+  ).trim();
+
+  // A terminal revoke may ONLY revoke the subscription this team doc tracks.
+  if (
+    incomingTerminal &&
+    existingSub &&
+    intentSub &&
+    existingSub !== intentSub
+  ) {
+    return { apply: false, reason: "terminal_other_sub" };
+  }
+
+  if (!isEventNewer(intent.eventCreated, Number(existing?.eventCreated))) {
+    const stored = Number(existing?.eventCreated) || 0;
+    const tie = stored > 0 && intent.eventCreated === stored;
+    const existingTerminal = existing?.terminal === true;
+    const sameSub = !existingSub || !intentSub || existingSub === intentSub;
+    let applyOnTie: boolean;
+    if (existingTerminal) applyOnTie = false;
+    else if (incomingTerminal) applyOnTie = sameSub;
+    else applyOnTie = statusRank(intent.status) > statusRank(existing?.status);
+    if (!(tie && applyOnTie)) return { apply: false, reason: "stale_event" };
+  }
+
+  const fields: Record<string, unknown> = {
+    plan: "team",
+    status: intent.status,
+    seats: intent.seats,
+    ownerUid: intent.ownerUid,
+    eventId: intent.eventId,
+    eventCreated: intent.eventCreated,
+    terminal: incomingTerminal,
+  };
+  if (intent.stripeCustomerId)
+    fields.stripeCustomerId = intent.stripeCustomerId;
+  if (intent.stripeSubscriptionId)
+    fields.stripeSubscriptionId = intent.stripeSubscriptionId;
+  if (intent.stripeSubscriptionItemId)
+    fields.stripeSubscriptionItemId = intent.stripeSubscriptionItemId;
+  if (intent.currentPeriodEnd != null)
+    fields.currentPeriodEnd = intent.currentPeriodEnd;
+  if (intent.priceId) fields.priceId = intent.priceId;
+  return { apply: true, fields };
 }

@@ -9,7 +9,10 @@ import {
   decideSubscriptionApply,
   pickUid,
   toEpochSeconds,
+  clampSeats,
+  decideTeamBillingWrite,
   type EntitlementIntent,
+  type TeamBillingIntent,
 } from "./billing";
 import { derivePlan } from "./gating";
 
@@ -466,6 +469,157 @@ describe("decideEntitlementWrite", () => {
     expect(d.fields.terminal).toBe(true);
   });
 
+  // ---------------------------------------------------------------------
+  // Team per-seat + multi-rail field projection (monetization ②/③)
+  // ---------------------------------------------------------------------
+  it("projects seats + teamId for a Team subscription", () => {
+    const teamIntent: EntitlementIntent = {
+      plan: "team",
+      status: "active",
+      eventId: "evt_team",
+      eventCreated: 3000,
+      stripeSubscriptionId: "sub_team",
+      seats: 5,
+      teamId: "team_abc",
+      priceId: "price_team_m",
+    };
+    const d = decideEntitlementWrite(null, teamIntent);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.plan).toBe("team");
+    expect(d.fields.seats).toBe(5);
+    expect(d.fields.teamId).toBe("team_abc");
+    expect(d.fields.source).toBe("stripe");
+  });
+
+  it("writes seats:0 explicitly (a canceled team must not merge-keep old seats)", () => {
+    const cancel: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_team_del",
+      eventCreated: 4000,
+      terminal: true,
+      seats: 0,
+      teamId: "team_abc",
+    };
+    const d = decideEntitlementWrite(
+      { source: "stripe", eventCreated: 1, seats: 5 },
+      cancel,
+    );
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.seats).toBe(0); // seats != null → written even when 0
+  });
+
+  it("defaults source to stripe and mirrors subId from stripeSubscriptionId", () => {
+    // A bare Stripe intent (no source, no subId) must be byte-for-byte unchanged:
+    // source→stripe, and subId is NOT written (only stripeSubscriptionId is).
+    const d = decideEntitlementWrite(null, intent);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.source).toBe("stripe");
+    expect(d.fields.subId).toBeUndefined();
+    expect(d.fields.stripeSubscriptionId).toBe("sub_1");
+  });
+
+  it("projects an app_store rail intent with IAP audit metadata + productId", () => {
+    const appleIntent: EntitlementIntent = {
+      plan: "pro",
+      status: "active",
+      eventId: "apple_evt_1",
+      eventCreated: 5000,
+      source: "app_store",
+      subId: "orig_txn_123",
+      productId: "com.markflow.app.pro.monthly",
+      appStoreOriginalTransactionId: "orig_txn_123",
+      appStoreTransactionId: "txn_456",
+      appAccountToken: "acct_tok",
+      environment: "Production",
+      currentPeriodEnd: 9999,
+    };
+    const d = decideEntitlementWrite(null, appleIntent);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.source).toBe("app_store");
+    expect(d.fields.subId).toBe("orig_txn_123");
+    expect(d.fields.productId).toBe("com.markflow.app.pro.monthly");
+    expect(d.fields.appStoreOriginalTransactionId).toBe("orig_txn_123");
+    expect(d.fields.appStoreTransactionId).toBe("txn_456");
+    expect(d.fields.appAccountToken).toBe("acct_tok");
+    expect(d.fields.environment).toBe("Production");
+    // Stripe-only fields are absent on an Apple intent.
+    expect(d.fields.stripeSubscriptionId).toBeUndefined();
+  });
+
+  it("projects a play rail intent with Play audit metadata", () => {
+    const playIntent: EntitlementIntent = {
+      plan: "pro",
+      status: "active",
+      eventId: "play_evt_1",
+      eventCreated: 6000,
+      source: "play",
+      subId: "purchase_tok_1",
+      productId: "com.markflow.app.pro",
+      playPurchaseToken: "purchase_tok_1",
+      playOrderId: "GPA.1234",
+      environment: "Production",
+    };
+    const d = decideEntitlementWrite(null, playIntent);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.source).toBe("play");
+    expect(d.fields.subId).toBe("purchase_tok_1");
+    expect(d.fields.playPurchaseToken).toBe("purchase_tok_1");
+    expect(d.fields.playOrderId).toBe("GPA.1234");
+  });
+
+  it("lets an app_store rail mutate its own app_store-owned doc", () => {
+    const appleIntent: EntitlementIntent = {
+      plan: "pro",
+      status: "active",
+      eventId: "apple_evt_2",
+      eventCreated: 7000,
+      source: "app_store",
+      subId: "orig_txn_123",
+    };
+    const existing = {
+      source: "app_store",
+      subId: "orig_txn_123",
+      eventCreated: 5000,
+    };
+    expect(decideEntitlementWrite(existing, appleIntent).apply).toBe(true);
+  });
+
+  it("refuses a Stripe intent against an app_store-owned doc (no cross-rail clobber)", () => {
+    // The reverse of the existing owned_by test — a Stripe webhook must not
+    // overwrite an Apple-funded entitlement (that would double-charge the user).
+    expect(decideEntitlementWrite({ source: "app_store" }, intent)).toEqual({
+      apply: false,
+      reason: "owned_by_app_store",
+    });
+  });
+
+  it("scopes a terminal revoke to the SAME rail's subId (Apple originalTransactionId)", () => {
+    // An app_store terminal (expiration) for a DIFFERENT originalTransactionId
+    // must not revoke the currently-active Apple subscription.
+    const existingNew = {
+      source: "app_store",
+      plan: "pro",
+      status: "active",
+      eventCreated: 5000,
+      subId: "orig_txn_new",
+    };
+    const delOld: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "apple_del_old",
+      eventCreated: 9000,
+      terminal: true,
+      source: "app_store",
+      subId: "orig_txn_old",
+    };
+    expect(decideEntitlementWrite(existingNew, delOld)).toEqual({
+      apply: false,
+      reason: "terminal_other_sub",
+    });
+  });
+
   it("omits optional fields that were not provided (partial intent)", () => {
     const minimal: EntitlementIntent = {
       plan: "free",
@@ -590,5 +744,205 @@ describe("toEpochSeconds", () => {
     expect(toEpochSeconds(null)).toBe(0);
     expect(toEpochSeconds("garbage")).toBe(0);
     expect(toEpochSeconds(-5)).toBe(0);
+  });
+});
+
+// =====================================================================
+// clampSeats — validate/clamp a client-requested seat count
+// =====================================================================
+describe("clampSeats", () => {
+  const MAX = 100;
+
+  it("returns 1 for any non-team plan (no seat concept)", () => {
+    expect(clampSeats(5, "pro", MAX)).toBe(1);
+    expect(clampSeats(99, "free", MAX)).toBe(1);
+    expect(clampSeats(3, "internal", MAX)).toBe(1);
+    // even a garbage seat value is irrelevant for non-team.
+    expect(clampSeats("garbage", "pro", MAX)).toBe(1);
+  });
+
+  it("accepts a valid team seat count within [1, max]", () => {
+    expect(clampSeats(1, "team", MAX)).toBe(1);
+    expect(clampSeats(5, "team", MAX)).toBe(5);
+    expect(clampSeats(100, "team", MAX)).toBe(100);
+  });
+
+  it("normalizes plan casing/whitespace", () => {
+    expect(clampSeats(3, " Team ", MAX)).toBe(3);
+    expect(clampSeats(3, "TEAM", MAX)).toBe(3);
+  });
+
+  it("REJECTS (null) an out-of-range/invalid team seat count — fail loud", () => {
+    expect(clampSeats(0, "team", MAX)).toBeNull(); // a 0-seat paid sub
+    expect(clampSeats(-1, "team", MAX)).toBeNull();
+    expect(clampSeats(101, "team", MAX)).toBeNull(); // over cap
+    expect(clampSeats(2.5, "team", MAX)).toBeNull(); // fractional
+    expect(clampSeats("5.5", "team", MAX)).toBeNull(); // fractional string
+    expect(clampSeats("abc", "team", MAX)).toBeNull(); // non-numeric string
+    expect(clampSeats(NaN, "team", MAX)).toBeNull();
+    expect(clampSeats(undefined, "team", MAX)).toBeNull();
+    expect(clampSeats(null, "team", MAX)).toBeNull();
+  });
+
+  it("leniently coerces a whole numeric string (seats is payment-self-limiting)", () => {
+    // seats flows to Stripe checkout quantity — the user pays per seat, so a
+    // coercible "5" is honored rather than rejected; only truly-invalid values do.
+    expect(clampSeats("5", "team", MAX)).toBe(5);
+  });
+});
+
+// =====================================================================
+// decideTeamBillingWrite — teams/{teamId}.billing monotonic + terminal
+// =====================================================================
+describe("decideTeamBillingWrite", () => {
+  const intent: TeamBillingIntent = {
+    status: "active",
+    seats: 5,
+    ownerUid: "owner_1",
+    eventId: "evt_1",
+    eventCreated: 2000,
+    stripeCustomerId: "cus_1",
+    stripeSubscriptionId: "sub_team_1",
+    stripeSubscriptionItemId: "si_1",
+    currentPeriodEnd: 9999,
+    priceId: "price_team_m",
+  };
+
+  it("applies to a fresh (null) doc and projects team billing fields", () => {
+    const d = decideTeamBillingWrite(null, intent);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields).toEqual({
+      plan: "team",
+      status: "active",
+      seats: 5,
+      ownerUid: "owner_1",
+      eventId: "evt_1",
+      eventCreated: 2000,
+      terminal: false,
+      stripeCustomerId: "cus_1",
+      stripeSubscriptionId: "sub_team_1",
+      stripeSubscriptionItemId: "si_1",
+      currentPeriodEnd: 9999,
+      priceId: "price_team_m",
+    });
+  });
+
+  it("drops a stale (older) event — no seat/plan resurrection", () => {
+    const existing = { eventCreated: 3000, stripeSubscriptionId: "sub_team_1" };
+    expect(decideTeamBillingWrite(existing, intent)).toEqual({
+      apply: false,
+      reason: "stale_event",
+    });
+  });
+
+  it("applies a strictly-newer seat change over the existing billing doc", () => {
+    const existing = {
+      status: "active",
+      eventCreated: 1000,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    const bump: TeamBillingIntent = { ...intent, seats: 8, eventCreated: 5000 };
+    const d = decideTeamBillingWrite(existing, bump);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.seats).toBe(8);
+  });
+
+  it("lets a TERMINAL delete win a same-second tie for its own sub (seats:0)", () => {
+    const existingActive = {
+      status: "active",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    const del: TeamBillingIntent = {
+      status: "canceled",
+      seats: 0,
+      ownerUid: "owner_1",
+      eventId: "evt_del",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    const d = decideTeamBillingWrite(existingActive, del);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.status).toBe("canceled");
+    expect(d.fields.seats).toBe(0);
+    expect(d.fields.terminal).toBe(true);
+  });
+
+  it("never resurrects a terminal team billing doc on a same-second sibling", () => {
+    const existingTerminal = {
+      status: "canceled",
+      eventCreated: 2000,
+      terminal: true,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    expect(decideTeamBillingWrite(existingTerminal, intent)).toEqual({
+      apply: false,
+      reason: "stale_event",
+    });
+  });
+
+  it("scopes a terminal revoke to the tracked sub (swap safety)", () => {
+    const existingNew = {
+      status: "active",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_team_2",
+    };
+    const delOld: TeamBillingIntent = {
+      status: "canceled",
+      seats: 0,
+      ownerUid: "owner_1",
+      eventId: "evt_del_old",
+      eventCreated: 9000, // strictly newer, but a DIFFERENT sub
+      terminal: true,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    expect(decideTeamBillingWrite(existingNew, delOld)).toEqual({
+      apply: false,
+      reason: "terminal_other_sub",
+    });
+  });
+
+  it("still revokes the tracked sub on its own strictly-newer terminal delete", () => {
+    const existingSame = {
+      status: "active",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    const delSame: TeamBillingIntent = {
+      status: "canceled",
+      seats: 0,
+      ownerUid: "owner_1",
+      eventId: "evt_del_same",
+      eventCreated: 9000,
+      terminal: true,
+      stripeSubscriptionId: "sub_team_1",
+    };
+    const d = decideTeamBillingWrite(existingSame, delSame);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.status).toBe("canceled");
+    expect(d.fields.terminal).toBe(true);
+  });
+
+  it("omits optional stripe fields that were not provided (partial intent)", () => {
+    const minimal: TeamBillingIntent = {
+      status: "canceled",
+      seats: 0,
+      ownerUid: "owner_1",
+      eventId: "evt_del",
+      eventCreated: 5000,
+    };
+    const d = decideTeamBillingWrite({ eventCreated: 1 }, minimal);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields).toEqual({
+      plan: "team",
+      status: "canceled",
+      seats: 0,
+      ownerUid: "owner_1",
+      eventId: "evt_del",
+      eventCreated: 5000,
+      terminal: false,
+    });
   });
 });

@@ -113,18 +113,69 @@ export interface QuotaCheck {
   blocked: boolean;
 }
 
-/** Pure quota decision for a given plan/feature/current-usage/cost. */
+/**
+ * Pure quota decision for a given plan/feature/current-usage/cost.
+ *
+ * `seats` scales ONLY the team plan's shared pool: a Team subscription meters all
+ * members against a single usage/{teamId} counter whose ceiling is the per-plan
+ * base × seat count (min 1). Non-team plans ignore `seats` entirely (a Pro user
+ * is always a 1-seat pool), so the parameter is backward-compatible — every
+ * existing call that omits it behaves exactly as before. Seats is clamped to ≥1
+ * so a malformed 0/negative seat count can never zero out (or invert) the pool.
+ */
 export function checkQuota(
   plan: Plan,
   feature: Feature,
   used: number,
   cost: number,
+  seats = 1,
 ): QuotaCheck {
   if (plan === "internal")
     return { unlimited: true, limit: -1, blocked: false };
-  const limit = PLAN_LIMITS[plan]?.[feature] ?? -1;
-  if (limit < 0) return { unlimited: true, limit, blocked: false };
+  const base = PLAN_LIMITS[plan]?.[feature] ?? -1;
+  if (base < 0) return { unlimited: true, limit: base, blocked: false };
+  const limit = plan === "team" ? base * Math.max(1, Math.floor(seats)) : base;
   return { unlimited: false, limit, blocked: used + cost > limit };
+}
+
+/** The teams/{teamId}.billing sub-doc fields the seat-access gate inspects. */
+export interface TeamBillingView {
+  status?: unknown;
+  seats?: unknown;
+}
+
+export interface SeatAccess {
+  /** True when this uid currently holds a paid, assigned Team seat. */
+  access: boolean;
+  /** Why access was granted/denied (for logs / 402 payloads). */
+  reason: "ok" | "not_team" | "not_active" | "not_assigned" | "over_capacity";
+}
+
+/**
+ * Decide whether `uid` may spend against a Team's shared pool. A member has
+ * access ONLY when the team subscription is active/grace AND the uid occupies one
+ * of the first `seats` slots of `seatAssignments` (assignment order is the
+ * authoritative capacity fence — assigning more people than paid seats does NOT
+ * grant the overflow access; they fall off the end). seatAssignments and seats
+ * are BOTH server-written (webhook + owner-only seat endpoints); this function
+ * never trusts client input. Pure — no Firestore reads.
+ */
+export function deriveSeatAccess(
+  billing: TeamBillingView | null | undefined,
+  seatAssignments: readonly string[] | null | undefined,
+  uid: string,
+): SeatAccess {
+  const status = String(billing?.status ?? "")
+    .trim()
+    .toLowerCase();
+  if (status !== "active" && status !== "grace")
+    return { access: false, reason: "not_active" };
+  const seats = Math.max(1, Math.floor(Number(billing?.seats) || 0));
+  const assigned = Array.isArray(seatAssignments) ? seatAssignments : [];
+  const idx = assigned.indexOf(uid);
+  if (idx < 0) return { access: false, reason: "not_assigned" };
+  if (idx >= seats) return { access: false, reason: "over_capacity" };
+  return { access: true, reason: "ok" };
 }
 
 /**
