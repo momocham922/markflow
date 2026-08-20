@@ -18,6 +18,22 @@
 | オーナー view-as（`X-View-As` / `/v1/me/entitlement`）        | ✅ **本番 deploy 済**（`OWNER_UIDS` 2件・401 probe OK） |
 | フロント entitlement fetch + view-as UI + quota upsell        | ✅ 実装済（tsc/build/unit 通過・アプリ配信は要 GO）     |
 
+## 実装ステータス（P1 Stripe課金 — ダーク実装・本番デプロイ済）
+
+> 2026-08-20: Stripeサブスク課金の全経路をコード実装し、本番 Cloud Run に**ダークデプロイ済**（`STRIPE_*` 未設定のため `/v1/billing/*` は 503 `billing_not_configured` を返す＝サイレント無効でなく明示失敗）。既存の全AI/STTエンドポイントは無影響（401 auth-required を確認・回帰なし）。**課金を実際に点灯させるにはオーナー作業（§3.5 ランブック）のみ**が残る。
+
+| 項目                                                                     | 状態                                                                |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| billing.ts 純ロジック（price↔plan/status写像/順序保証/書込判断）         | ✅ 実装 + 単体テスト（vitest 176 通過）                             |
+| metering.ts 抽出（reserve→reconcile/refund を純ロジック化）              | ✅ 実装 + 単体テスト                                                |
+| ai-proxy `/v1/billing/{checkout,portal,webhook}` 配線                    | ✅ **本番 deploy 済**（rev 00041-jss @100%・503 dark 確認）         |
+| Webhook 冪等（event.id・成功後マーク）+ 署名検証 + サブスク再取得        | ✅ 実装（stripeEvents/{id} で dedupe・process-before-ACK）          |
+| 同一秒タイのタイブレーク / checkout 二重契約 409 / revoke フェイルセーフ | ✅ 実装（billing.test.ts で網羅）                                   |
+| firestore.rules: stripeEvents / stripeCustomers（クライアント全拒否）    | ✅ **本番 deploy 済**（ruleset 4a946e82 が cloud.firestore に反映） |
+| hosting: Checkout 戻りページ（markflow://billing/success\|cancel）       | ✅ コミット済（`markflow-site` 再デプロイは GO 時）                 |
+| クライアント課金UI（PaywallDialog・UserMenu・StatusBar）                 | ✅ 実装済・`VITE_BILLING_ENABLED` で既定 OFF ゲート（配信は要 GO）  |
+| Stripe アカウント/商品/価格・Secret 登録・env 点灯                       | ⏳ **オーナー作業（§3.5）**                                         |
+
 ## 0. 現状（コード実測サマリ）
 
 - 課金基盤はゼロのグリーンフィールド（`plan`/`tier`/`quota`/`entitlement`/決済SDK すべて未実装）。
@@ -206,6 +222,90 @@ teams/{teamId}               # 既存のチーム構造を拡張
 - Web/desktopのStripe購入 → モバイルはログインで解錠は **Apple 3.1.3(b) / Google consumption-only で合法**。ただし同一Proを iOS IAP / Play Billing でも並置提供する（3.1.3bの条件）。
 - **NG**: モバイルアプリ内からStripe決済へ誘導（米国以外はanti-steering違反）。
 
+### 3.5 Stripe 本番有効化ランブック（オーナー作業・GO 時のみ）
+
+> コード・インフラ基盤は全てデプロイ済（rev 00041-jss・ダーク）。以下は**課金を点灯させる最終手順**。順序厳守。各手順の値は次の手順で使うので都度控える。GCP 操作は必ず `--account ga.crossmedia@gmail.com`。**手順を端折らない**。
+
+**前提**: Stripe 本番アカウント作成済み・日本の事業者情報/銀行口座登録済み・本番モードが有効化済み。
+
+**手順 1 — 商品と価格を作成**（Stripe Dashboard → 「商品カタログ」→「商品を追加」）
+
+1. 商品名「MarkFlow Pro」を作成 →「価格を追加」で 2 つ作る:
+   - 月額: 金額 `¥1,280` / 請求期間「月次」/ 通貨 JPY → 保存 → price ID（`price_...`）を控える＝**PRO_MONTHLY**
+   - 年額: 金額 `¥11,760` / 請求期間「年次」→ price ID を控える＝**PRO_YEARLY**
+2. 商品名「MarkFlow Team」を作成 →「価格を追加」:
+   - 月額: `¥1,980`（席課金は当面「数量」で運用）→ price ID＝**TEAM_MONTHLY**
+   - 年額: `¥19,800` → price ID＝**TEAM_YEARLY**
+   - ※ Team を今回出さないなら TEAM の 2 つは空のままで可（コードは空 price を無視＝そのプランの checkout が 400 になるだけ）。
+
+**手順 2 — カスタマーポータルを有効化**（Dashboard → 「設定」→「Billing」→「カスタマーポータル」）
+
+1. 「有効化」をオン。
+2. 許可する操作:「サブスクリプションのキャンセル」「支払い方法の更新」（プラン変更は任意）にチェック。
+3. ビジネス情報（規約 URL・プライバシー URL）を入力して保存。
+
+**手順 3 — API シークレットキーを取得**（Dashboard 右上が「本番環境」であることを確認 →「開発者」→「API キー」）
+
+1. 「シークレットキー」の「本番環境キーを表示」→ `sk_live_...` をコピー＝**STRIPE_SECRET_KEY**。
+
+**手順 4 — Webhook エンドポイントを登録**（「開発者」→「Webhook」→「エンドポイントを追加」）
+
+1. エンドポイント URL に正確に貼る:
+   `https://markflow-ai-proxy-636447248627.asia-northeast1.run.app/v1/billing/webhook`
+2. 「バージョン」ドロップダウンを開き **`2026-07-29.dahlia`** を選ぶ（コードの `STRIPE_API_VERSION` と一致必須。ズレると item 単位の請求期間 JSON 形が合わず `current_period_end` が取れない）。
+3. 「イベントを選択」で次の 4 つを 1 つずつ追加:
+   - `checkout.session.completed`
+   - `customer.subscription.created`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+4. 「エンドポイントを追加」→ 作成後の画面で「署名シークレット」を表示 → `whsec_...` をコピー＝**STRIPE_WEBHOOK_SECRET**。
+
+**手順 5 — Secret Manager にシークレットを登録**（機密は Secret Manager のみ・.env 禁止）
+
+```bash
+ACC=ga.crossmedia@gmail.com; PROJ=markflow-app-2026
+printf '%s' 'sk_live_XXXX'  | gcloud secrets create stripe-secret-key    --project $PROJ --account $ACC --replication-policy=automatic --data-file=- 2>/dev/null \
+  || printf '%s' 'sk_live_XXXX'  | gcloud secrets versions add stripe-secret-key    --project $PROJ --account $ACC --data-file=-
+printf '%s' 'whsec_XXXX'    | gcloud secrets create stripe-webhook-secret --project $PROJ --account $ACC --replication-policy=automatic --data-file=- 2>/dev/null \
+  || printf '%s' 'whsec_XXXX'    | gcloud secrets versions add stripe-webhook-secret --project $PROJ --account $ACC --data-file=-
+# Cloud Run ランタイム SA に accessor 付与（636447248627-compute）
+for S in stripe-secret-key stripe-webhook-secret; do
+  gcloud secrets add-iam-policy-binding $S --project $PROJ --account $ACC \
+    --member=serviceAccount:636447248627-compute@developer.gserviceaccount.com \
+    --role=roles/secretmanager.secretAccessor; done
+```
+
+**手順 6 — Cloud Run に env / secret を注入して点灯**（`--update-*` でマージ。既存 `INTERNAL_UIDS`/`OWNER_UIDS`/`CLAUDE_MODEL`/`GCP_*` を絶対に消さない。`--timeout 900` 厳守）
+
+```bash
+gcloud run deploy markflow-ai-proxy --source server/ai-proxy \
+  --project markflow-app-2026 --region asia-northeast1 --account ga.crossmedia@gmail.com \
+  --allow-unauthenticated --memory 512Mi --timeout 900 --min-instances 0 --max-instances 3 \
+  --update-secrets=STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest \
+  --update-env-vars=STRIPE_PRICE_PRO_MONTHLY=price_XXX,STRIPE_PRICE_PRO_YEARLY=price_XXX,STRIPE_PRICE_TEAM_MONTHLY=price_XXX,STRIPE_PRICE_TEAM_YEARLY=price_XXX
+# URL は既定で markflow.jp/checkout/success|cancel・/account を使用。変える場合のみ
+#   CHECKOUT_SUCCESS_URL / CHECKOUT_CANCEL_URL / PORTAL_RETURN_URL を追加（success には ?session_id={CHECKOUT_SESSION_ID} を残す）。
+```
+
+**手順 7 — hosting（Checkout 戻りページ）をデプロイ**
+
+- `markflow-site`（nginx）に `hosting/checkout/success` `hosting/checkout/cancel` を含めて再デプロイ（nginx ルートは追加済み）。`PORTAL_RETURN_URL` の既定 `markflow.jp/account` が未整備なら、暫定で `https://markflow.jp/` に変更するか `/account` ページを用意。
+
+**手順 8 — クライアント配信**（billing UI を解禁）
+
+- `VITE_BILLING_ENABLED=1` を付けて 4PF ビルド → `./scripts/bump-version.sh` → 各 release スクリプト（§ CLAUDE.md リリースフロー）。モバイルは anti-steering 遵守（Stripe/Web 価格へ誘導しない）。
+
+**手順 9 — 検証（点灯確認）**
+
+```bash
+BASE=https://markflow-ai-proxy-636447248627.asia-northeast1.run.app
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/v1/billing/webhook -d '{}'   # 503→400(署名不正)に変われば点灯
+```
+
+- Stripe Dashboard の Webhook 画面「テスト送信」で `checkout.session.completed` を送り 2xx を確認。
+- テスト実購入（少額 price でも可）→ `entitlements/{uid}` が `plan:"pro", status:"active", source:"stripe"` になることを Firestore で確認 → アプリ側で Pro 反映を確認。
+- 解約 → `customer.subscription.deleted` 受信で `status` 遷移（`current_period_end` まで有効）を確認。
+
 ---
 
 ## 4. 既存ユーザーの恒久優遇（＝社内スタッフ・internal）
@@ -235,11 +335,13 @@ teams/{teamId}               # 既存のチーム構造を拡張
 9. ⏳ SQLiteミラー（オフライン時のプラン表示）— 任意の後続改善（現状はオンライン endpoint 依存でフェイルソフト）
 10. ⏳ アプリ本番配信（version bump + release scripts）— **gated: 要 GO**（テスターへの outward-facing）
 
-### P1 — Stripe（Desktop + Web）
+### P1 — Stripe（Desktop + Web）— コード完了・ダークデプロイ済（点灯は §3.5 ランブック）
 
-6. Cloud Run: Checkout Session 生成 + Webhook（署名検証・冪等）+ Customer Portal
-7. Tauri: システムブラウザ起動 + `markflow://` ディープリンク復帰
-8. クレジット残数UI + top-up 購入導線
+6. ✅ Cloud Run: Checkout Session 生成 + Webhook（署名検証・冪等・process-before-ACK）+ Customer Portal（rev 00041-jss @100%・`STRIPE_*` 未設定で 503 dark）
+7. ✅ Tauri: システムブラウザ起動（checkout URL を opener で開く）+ `markflow://billing/success|cancel` ディープリンク復帰 + hosting 戻りページ
+8. ✅ 課金UI: PaywallDialog + UserMenu「プランを管理」+ StatusBar プラン表示（`VITE_BILLING_ENABLED` 既定 OFF）
+9. ⏳ **オーナー点灯作業（§3.5）**: Stripe 商品/価格・Secret・env・hosting 再デプロイ・クライアント配信
+10. ⏳ クレジット残数UI + top-up 購入導線（従量精算の可視化・後続）
 
 ### P2 — モバイルIAP（iOS + Android）
 
@@ -262,12 +364,14 @@ teams/{teamId}               # 既存のチーム構造を拡張
 
 - [x] `firestore.rules`: `entitlements`/`usage` 追加ルール → **本番 deploy 済**（live ruleset に entitlements/usage ブロック確認）
 - [x] ai-proxy: entitlement+usage ゲート + view-as → **Cloud Run 本番デプロイ済**（rev 00035-4sf @100%・timeout 900・`INTERNAL_UIDS`(12)/`OWNER_UIDS`(2) env 設定・401 probe 検証）
-- [ ] Cloud Run 新エンドポイント: Stripe Webhook / App Store Notifications v2 / Play RTDN(Pub/Sub subscription)
+- [x] Cloud Run 新エンドポイント: Stripe `/v1/billing/{checkout,portal,webhook}` → **本番 deploy 済（rev 00041-jss・ダーク 503）**
+- [x] `firestore.rules`: `stripeEvents`/`stripeCustomers`（クライアント全拒否・Admin SDK のみ）→ **本番 deploy 済（ruleset 4a946e82）**
+- [ ] Cloud Run 新エンドポイント（モバイル）: App Store Notifications v2 / Play RTDN(Pub/Sub subscription)
 - [ ] Pub/Sub トピック + サブスク作成（Play RTDN 用）+ IAM
 - [ ] GCP: Play Developer API 有効化 + サービスアカウント権限（既存 `play-api-key.json` 拡張 or 新規）
 - [ ] App Store Connect: App Store Server API キー + Notifications v2 URL 登録
-- [ ] Stripe: 本番キー（Secret Manager必須・.env禁止）・Webhook署名シークレット
-- [ ] 環境変数: Cloud Run env + ビルド埋め込み（`VITE_*`）両方
+- [ ] **Stripe 点灯（§3.5）**: 本番キー/Webhook シークレット（Secret Manager）・price ID env・Webhook 登録（`2026-07-29.dahlia`）→ **オーナー作業で完結**
+- [ ] 環境変数: Cloud Run env（`STRIPE_PRICE_*`）+ ビルド埋め込み（`VITE_BILLING_ENABLED`）両方
 
 ## 7. 未確定・要検証（実装前リサーチ）
 
