@@ -6,6 +6,8 @@ import {
   GripVertical,
   Trash2,
   PictureInPicture2,
+  AlertTriangle,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,10 +30,44 @@ const canPopOut = isTauri && !isMobile;
 function ResearchIndicator({
   count,
   analyzing,
+  gated,
+  hasError,
 }: {
   count: number;
   analyzing: boolean;
+  gated: boolean;
+  hasError: boolean;
 }) {
+  // Priority: an active analysis, then existing results, then a failure, then
+  // the capability gate. Whichever wins picks the icon, label and tooltip so
+  // the chip always says WHY it's here (never a blank/ambiguous state).
+  let icon: React.ReactNode;
+  let label: string;
+  let tooltip: string;
+  if (analyzing) {
+    icon = <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />;
+    label = "リサーチ中…";
+    tooltip = "リサーチアシスタントが分析中。クリックで別ウィンドウを開く";
+  } else if (count > 0) {
+    icon = <Search className="h-3.5 w-3.5 text-blue-500" />;
+    label = `リサーチ ${count}`;
+    tooltip = `リサーチ候補が${count}件。クリックで別ウィンドウに表示`;
+  } else if (hasError) {
+    icon = <AlertTriangle className="h-3.5 w-3.5 text-destructive" />;
+    label = "リサーチ失敗";
+    tooltip = "リサーチ解析に失敗しました。クリックで詳細を表示";
+  } else if (gated) {
+    icon = <Lock className="h-3.5 w-3.5 text-muted-foreground" />;
+    label = "自動リサーチはPro";
+    tooltip =
+      "自動リサーチはProプランの機能です。「今すぐ解析」で手動リサーチをご利用いただけます。クリックで別ウィンドウを開く";
+  } else {
+    // No specific signal (the parent gates rendering, so this is a safety net) —
+    // show a neutral research affordance rather than an empty chip.
+    icon = <Search className="h-3.5 w-3.5 text-blue-500" />;
+    label = "リサーチ";
+    tooltip = "クリックで別ウィンドウを開く";
+  }
   return (
     // Anchored to the editor's right-middle edge — clear of the top toolbar
     // buttons and the bottom voice panel.
@@ -42,20 +78,12 @@ function ResearchIndicator({
             onClick={() => openResearchWindow()}
             className="flex items-center gap-1.5 rounded-full border border-border bg-background/95 px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-accent"
           >
-            {analyzing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />
-            ) : (
-              <Search className="h-3.5 w-3.5 text-blue-500" />
-            )}
-            <span>{count > 0 ? `リサーチ ${count}` : "リサーチ中…"}</span>
+            {icon}
+            <span>{label}</span>
             <PictureInPicture2 className="h-3.5 w-3.5 text-muted-foreground" />
           </button>
         </TooltipTrigger>
-        <TooltipContent side="left">
-          {count > 0
-            ? `リサーチ候補が${count}件。クリックで別ウィンドウに表示`
-            : "リサーチアシスタントが分析中。クリックで別ウィンドウを開く"}
-        </TooltipContent>
+        <TooltipContent side="left">{tooltip}</TooltipContent>
       </Tooltip>
     </div>
   );
@@ -67,6 +95,7 @@ export function ResearchPanel() {
     panelVisible,
     analyzing,
     analysisError,
+    featureGated,
     poppedOut,
     includeInStructure,
     togglePanel,
@@ -129,18 +158,36 @@ export function ResearchPanel() {
   }, []);
 
   // Desktop: the floating window is the reading surface; show a minimal chip.
+  // Keep the chip mounted not just for cards/analyzing but also when a capability
+  // gate (Free auto-research) or an analysis error applies — otherwise the whole
+  // research surface silently vanishes and the user has no idea why nothing shows.
   if (canPopOut) {
     if (poppedOut) return null;
-    if (activeCards.length === 0 && !analyzing) return null;
+    if (
+      activeCards.length === 0 &&
+      !analyzing &&
+      !featureGated &&
+      !analysisError
+    )
+      return null;
     return (
-      <ResearchIndicator count={activeCards.length} analyzing={analyzing} />
+      <ResearchIndicator
+        count={activeCards.length}
+        analyzing={analyzing}
+        gated={featureGated}
+        hasError={!!analysisError}
+      />
     );
   }
 
   // Web fallback (no detach available): full in-app panel. Stay mounted when a
-  // (dismissible) analysis error is present so a manual-analyze failure with no
-  // cards yet still surfaces instead of the panel silently vanishing.
-  if (!panelVisible || (activeCards.length === 0 && !analysisError))
+  // (dismissible) analysis error OR a capability gate is present so a manual
+  // failure / Free auto-gate with no cards yet still surfaces instead of the
+  // panel silently vanishing.
+  if (
+    !panelVisible ||
+    (activeCards.length === 0 && !analysisError && !featureGated)
+  )
     return null;
 
   return (

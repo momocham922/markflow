@@ -12,7 +12,14 @@ function applyTheme(theme: "light" | "dark") {
 }
 
 function emitAction(
-  action: "dismiss" | "insert" | "clear" | "retry" | "open-doc" | "set-include",
+  action:
+    | "dismiss"
+    | "insert"
+    | "clear"
+    | "retry"
+    | "open-doc"
+    | "set-include"
+    | "dismiss-error",
   extra?: { id?: string; docId?: string; value?: boolean },
 ) {
   emit("research:action", { action, ...extra }).catch(() => {});
@@ -40,6 +47,8 @@ export function ResearchWindowApp() {
   const [cards, setCards] = useState<ResearchCard[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [includeInStructure, setIncludeInStructure] = useState(false);
+  const [featureGated, setFeatureGated] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -58,6 +67,8 @@ export function ResearchWindowApp() {
         setCards(ev.payload.cards);
         setAnalyzing(ev.payload.analyzing);
         setIncludeInStructure(ev.payload.includeInStructure);
+        setFeatureGated(ev.payload.featureGated);
+        setAnalysisError(ev.payload.analysisError);
         applyTheme(ev.payload.theme);
       });
       if (disposed) {
@@ -138,11 +149,31 @@ export function ResearchWindowApp() {
         </div>
       </div>
 
+      {/* Dismissible error banner — mirrors ResearchCardList so a manual-analyze
+          failure surfaces here too (this window is the primary desktop surface
+          when popped out; a silent failure would violate サイレントフォールバック禁止). */}
+      {analysisError && (
+        <div className="m-2 flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <span className="min-w-0 break-words">{analysisError}</span>
+          <button
+            className="shrink-0 rounded px-1 font-medium hover:bg-destructive/20"
+            onClick={() => emitAction("dismiss-error")}
+            title="閉じる"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       <ScrollArea className="research-scroll min-h-0 flex-1">
         <div className="flex flex-col gap-1.5 p-2">
           {cards.length === 0 ? (
             <div className="px-2 py-6 text-center text-[11px] text-muted-foreground">
-              {analyzing ? "分析中…" : "リサーチ結果はまだありません"}
+              {analyzing
+                ? "分析中…"
+                : featureGated
+                  ? "自動リサーチはProプランの機能です。「今すぐ解析」で手動リサーチをご利用いただけます。"
+                  : "リサーチ結果はまだありません"}
             </div>
           ) : (
             cards.map((card) => (

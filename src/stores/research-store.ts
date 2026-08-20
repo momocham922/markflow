@@ -66,6 +66,14 @@ interface ResearchState {
    * by the global upsell banner instead. null = no error. Dismissible.
    */
   analysisError: string | null;
+  /**
+   * Automatic live research was suppressed by a plan capability gate
+   * (MONETIZATION §1.3: auto research is Pro+, Free is manual-only). Set when
+   * the client-side gate skips an auto tick OR the server returns
+   * FeatureGatedError. Drives a visible "自動リサーチはPro" notice so the gate
+   * is never silent (プロジェクト規則: サイレントフォールバック禁止). Reset per session.
+   */
+  featureGated: boolean;
   poppedOut: boolean;
   /** User choice: weave research findings into the structured document. */
   includeInStructure: boolean;
@@ -97,6 +105,7 @@ interface ResearchState {
   clearCards: () => void;
   setAnalyzing: (v: boolean) => void;
   setAnalysisError: (v: string | null) => void;
+  setFeatureGated: (v: boolean) => void;
   setPoppedOut: (v: boolean) => void;
   setIncludeInStructure: (v: boolean) => void;
   setMobileSheetOpen: (v: boolean) => void;
@@ -110,6 +119,7 @@ export const useResearchStore = create<ResearchState>((set) => ({
   panelVisible: true,
   analyzing: false,
   analysisError: null,
+  featureGated: false,
   poppedOut: false,
   includeInStructure: loadIncludeInStructure(),
   mobileSheetOpen: false,
@@ -122,8 +132,12 @@ export const useResearchStore = create<ResearchState>((set) => ({
       searchedTopics: [],
       analyzing: false,
       analysisError: null,
+      featureGated: false,
     }),
-  endSession: () => set({ sessionActive: false }),
+  // Clear both transient notices on stop so a stopped session can't leave a
+  // stale, undismissable gated chip or error chip mounted while not recording.
+  endSession: () =>
+    set({ sessionActive: false, featureGated: false, analysisError: null }),
   hydrateCards: (cards) => set({ cards }),
   addCard: (card) => set((s) => ({ cards: [...s.cards, card] })),
   updateCard: (id, updates) =>
@@ -155,9 +169,16 @@ export const useResearchStore = create<ResearchState>((set) => ({
   addSearchedTopic: (topic) =>
     set((s) => ({ searchedTopics: [...s.searchedTopics, topic] })),
   togglePanel: () => set((s) => ({ panelVisible: !s.panelVisible })),
-  clearCards: () => set({ cards: [], searchedTopics: [], analysisError: null }),
+  clearCards: () =>
+    set({
+      cards: [],
+      searchedTopics: [],
+      analysisError: null,
+      featureGated: false,
+    }),
   setAnalyzing: (v) => set({ analyzing: v }),
   setAnalysisError: (v) => set({ analysisError: v }),
+  setFeatureGated: (v) => set({ featureGated: v }),
   setPoppedOut: (v) => set({ poppedOut: v }),
   setIncludeInStructure: (v) => {
     try {
@@ -174,6 +195,12 @@ export const useResearchStore = create<ResearchState>((set) => ({
     } catch {
       /* ignore */
     }
-    set({ mobileLiveResearch: v });
+    // Turning auto OFF is a device opt-out, NOT a plan gate — clear any lingering
+    // "auto research is Pro" notice so it doesn't wrongly blame the plan.
+    set(
+      v
+        ? { mobileLiveResearch: v }
+        : { mobileLiveResearch: v, featureGated: false },
+    );
   },
 }));

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { auth } from "@/services/firebase";
+import { useResearchStore } from "@/stores/research-store";
 
 // =====================================================================
 // Entitlement / plan state (monetization P0 — client side)
@@ -146,7 +147,25 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
 
   setViewAs: async (plan) => {
     persistViewAs(plan);
-    set({ viewAs: plan, lastQuotaError: null });
+    // Optimistically reflect the switch in effectivePlan (= viewAs ?? realPlan)
+    // so client-side capability gates (e.g. the live-research auto gate) flip
+    // IMMEDIATELY. Enforcement is per-request via the X-View-As header (or its
+    // absence), so the server already honors the new plan on the next AI call;
+    // the client must not stay stuck on the old effectivePlan if the follow-up
+    // fetch fails offline. The fetch below reconciles against what the server
+    // actually honored.
+    const newEffective = plan ?? get().realPlan;
+    set({
+      viewAs: plan,
+      effectivePlan: newEffective,
+      lastQuotaError: null,
+    });
+    // Switching to a plan that CAN run auto research clears any stale "auto
+    // research is Pro" notice immediately, instead of waiting up to 45s for the
+    // next pipeline tick to reassert it (owner-only path; self-heals anyway).
+    if (newEffective && newEffective !== "free") {
+      useResearchStore.getState().setFeatureGated(false);
+    }
     await get().fetchEntitlement();
   },
 

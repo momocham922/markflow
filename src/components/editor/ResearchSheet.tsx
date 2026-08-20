@@ -21,6 +21,7 @@ export function ResearchSheet({
   const cards = useResearchStore((s) => s.cards);
   const analyzing = useResearchStore((s) => s.analyzing);
   const sessionActive = useResearchStore((s) => s.sessionActive);
+  const featureGated = useResearchStore((s) => s.featureGated);
   const mobileLiveResearch = useResearchStore((s) => s.mobileLiveResearch);
   const includeInStructure = useResearchStore((s) => s.includeInStructure);
   const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
@@ -191,6 +192,17 @@ export function ResearchSheet({
             組込 {includeInStructure ? "ON" : "OFF"}
           </button>
         </div>
+
+        {/* Capability gate notice: the "自動リサーチ" toggle above is inert on the
+            Free plan (auto research is Pro+, MONETIZATION §1.3). Say so instead of
+            leaving the toggle looking broken. Manual "今すぐ解析" still works. Only
+            when cards exist — at 0 cards, ResearchCardList's empty state shows the
+            same message, so this would otherwise duplicate it. */}
+        {featureGated && cards.length > 0 && (
+          <div className="shrink-0 border-b border-border px-3 py-2 text-[11px] text-muted-foreground">
+            自動リサーチはProプランの機能です。「今すぐ解析」で手動リサーチをご利用いただけます。
+          </div>
+        )}
 
         <ResearchCardList cards={cards} />
       </div>

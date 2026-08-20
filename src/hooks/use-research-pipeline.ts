@@ -134,20 +134,37 @@ export function useResearchPipeline({
           !manual &&
           isMobile &&
           !useResearchStore.getState().mobileLiveResearch
-        )
+        ) {
+          // Skipping is a DEVICE opt-out (mobile auto off), not a plan gate.
+          // Clear any stale "auto research is Pro" notice so the sheet blames the
+          // device toggle (which it renders) instead of the plan.
+          useResearchStore.getState().setFeatureGated(false);
           return;
+        }
 
         // Capability gate (MONETIZATION.md §1.3): Free is manual-only for live
         // research — automatic (interval) runs are Pro+. Skip auto ticks for
         // Free up-front so we never fire a request the server will 403 every
         // 45s. Manual triggers fall through (they hit the aiCalls quota for all
         // plans). The server enforces this too; this just avoids the spam.
-        if (!manual && useEntitlementStore.getState().effectivePlan === "free")
+        // Surface the gate (featureGated) so the "リサーチ" indicator can explain
+        // why no cards appear — a silent return left users staring at a UI that
+        // never showed anything (サイレントフォールバック禁止).
+        if (
+          !manual &&
+          useEntitlementStore.getState().effectivePlan === "free"
+        ) {
+          useResearchStore.getState().setFeatureGated(true);
           return;
+        }
 
         pendingRef.current = true;
         useResearchStore.getState().setAnalyzing(true);
         useResearchStore.getState().setAnalysisError(null);
+        // We passed every gate and are actually analyzing — clear any stale
+        // "gated" notice (e.g. the owner switched view-as back to a paid plan
+        // mid-recording, or the entitlement finished loading).
+        useResearchStore.getState().setFeatureGated(false);
         try {
           const searchedTopics = useResearchStore.getState().searchedTopics;
 
@@ -267,15 +284,36 @@ export function useResearchPipeline({
             }
           }
         } catch (err) {
-          // A capability gate (Free + auto research) is expected, not an error:
-          // the client already skips Free auto runs, so this only fires for a
-          // tampered client. Swallow it silently — never surface or log noise.
-          if (err instanceof FeatureGatedError) return;
+          // A capability gate (Free + auto research, MONETIZATION §1.3). The
+          // client-side gate above normally skips Free auto ticks before we get
+          // here, so this fires when effectivePlan hasn't loaded yet (null) or a
+          // tampered client reached the server. Don't log noise, but DO record
+          // the gated state so the "リサーチ" indicator explains the absence of
+          // cards instead of showing nothing (サイレントフォールバック禁止). A manual
+          // run additionally gets a dismissible banner (manual is allowed for
+          // every plan, so a manual gate means a stale/unknown plan — worth saying).
+          // If the session was already stopped (endSession cleared the transient
+          // notices), a late-arriving rejection must NOT resurrect a gated/error
+          // chip while not recording. The finally still clears the spinner.
+          const stillActive = useResearchStore.getState().sessionActive;
+          if (err instanceof FeatureGatedError) {
+            if (stillActive) {
+              useResearchStore.getState().setFeatureGated(true);
+              if (manual) {
+                useResearchStore
+                  .getState()
+                  .setAnalysisError(
+                    "自動リサーチはProプランの機能です。「今すぐ解析」（手動）はご利用いただけます。",
+                  );
+              }
+            }
+            return;
+          }
           console.error("[research] Pipeline error:", err);
           // Surface a MANUAL "今すぐ解析" failure so the button press never fails
           // silently. Auto ticks stay quiet (the next interval retries), and
           // quota 429s already raise the global upsell banner via reportIfQuota.
-          if (manual) {
+          if (manual && stillActive) {
             const msg = err instanceof Error ? err.message : String(err);
             const isNetwork =
               /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(

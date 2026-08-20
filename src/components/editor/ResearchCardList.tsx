@@ -24,6 +24,7 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
   const updateCard = useResearchStore((s) => s.updateCard);
   const analysisError = useResearchStore((s) => s.analysisError);
   const setAnalysisError = useResearchStore((s) => s.setAnalysisError);
+  const featureGated = useResearchStore((s) => s.featureGated);
   const setActiveDocId = useAppStore((s) => s.setActiveDocId);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
@@ -47,7 +48,9 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
       <div className="flex flex-1 flex-col">
         {errorBanner}
         <div className="flex flex-1 items-center justify-center p-6 text-center text-xs text-muted-foreground">
-          録音すると、会議内容に関するリサーチがここに表示されます。
+          {featureGated
+            ? "自動リサーチはProプランの機能です。「今すぐ解析」で手動リサーチをご利用いただけます。"
+            : "録音すると、会議内容に関するリサーチがここに表示されます。"}
         </div>
       </div>
     );
@@ -94,8 +97,14 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
                   loading: false,
                   error: undefined,
                 });
-              } catch {
-                updateCard(card.id, { error: "Retry failed" });
+              } catch (e) {
+                // Surface the real reason instead of a flat "Retry failed", and
+                // always clear the loading flag so the card isn't stuck spinning.
+                updateCard(card.id, {
+                  error:
+                    e instanceof Error ? e.message : "再試行に失敗しました",
+                  loading: false,
+                });
               }
             }}
             onOpenInternal={(docId) => setActiveDocId(docId)}

@@ -26,10 +26,25 @@ export interface ResearchSyncPayload {
   analyzing: boolean;
   theme: "light" | "dark";
   includeInStructure: boolean;
+  /**
+   * Plan capability gate (Free auto-research). The floating window is the
+   * primary desktop reading surface when popped out, so it MUST carry this —
+   * otherwise the gate is silent there (サイレントフォールバック禁止).
+   */
+  featureGated: boolean;
+  /** Dismissible manual-analyze failure message; mirrored to the popped window. */
+  analysisError: string | null;
 }
 
 export interface ResearchActionPayload {
-  action: "dismiss" | "clear" | "retry" | "open-doc" | "insert" | "set-include";
+  action:
+    | "dismiss"
+    | "clear"
+    | "retry"
+    | "open-doc"
+    | "insert"
+    | "set-include"
+    | "dismiss-error";
   id?: string;
   docId?: string;
   value?: boolean;
@@ -129,6 +144,8 @@ function buildSyncPayload(): ResearchSyncPayload {
     analyzing: r.analyzing,
     theme: useAppStore.getState().theme,
     includeInStructure: r.includeInStructure,
+    featureGated: r.featureGated,
+    analysisError: r.analysisError,
   };
 }
 
@@ -201,6 +218,8 @@ export function useResearchWindowManager(): void {
             store.setIncludeInStructure(!!value);
           } else if (action === "clear") {
             store.clearCards();
+          } else if (action === "dismiss-error") {
+            store.setAnalysisError(null);
           } else if (action === "open-doc" && docId) {
             useAppStore.getState().setActiveDocId(docId);
             try {
@@ -230,8 +249,11 @@ export function useResearchWindowManager(): void {
                 loading: false,
                 error: undefined,
               });
-            } catch {
-              store.updateCard(id, { loading: false, error: "Retry failed" });
+            } catch (e) {
+              store.updateCard(id, {
+                loading: false,
+                error: e instanceof Error ? e.message : "再試行に失敗しました",
+              });
             }
           }
         }),
