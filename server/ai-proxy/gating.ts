@@ -63,9 +63,19 @@ export function derivePlan(
   data: { plan?: unknown; status?: unknown } | null | undefined,
 ): Plan {
   if (!data) return "free";
-  const p = String(data.plan ?? "free");
-  const status = String(data.status ?? "active");
-  const paidOk = status === "active" || status === "grace";
+  // Normalize casing/whitespace so a webhook (or a hand-edited doc) writing
+  // "Active" / " pro " / "TRIALING" can never silently downgrade a paying user.
+  const p = String(data.plan ?? "free")
+    .trim()
+    .toLowerCase();
+  const status = String(data.status ?? "active")
+    .trim()
+    .toLowerCase();
+  // active/grace = full access. `trialing` is honored as paid too (defense in
+  // depth: our Stripe webhook normalizes trialing→active before writing, but if
+  // a raw Stripe status ever reaches here a trialing customer must keep access).
+  const paidOk =
+    status === "active" || status === "grace" || status === "trialing";
   if (p === "internal") return "internal";
   if (paidOk && (p === "pro" || p === "team")) return p;
   return "free";
@@ -124,6 +134,34 @@ export function isChargeable(plan: Plan, feature: Feature): boolean {
  */
 export function isAutoResearchAllowed(plan: Plan): boolean {
   return plan !== "free";
+}
+
+/**
+ * The usage-counter delta to apply after a batch transcription completes: the
+ * server-measured billable minutes minus what was pre-reserved. Positive = the
+ * client under-reserved (charge the difference); negative = over-reserved
+ * (refund the difference); 0 = exact. index.ts applies it ONLY when the request
+ * actually charged quota.
+ */
+export function reconcileBatchDelta(
+  measuredMin: number,
+  reserveMin: number,
+): number {
+  return measuredMin - reserveMin;
+}
+
+/**
+ * Whether a guarded request should refund its reserved cost. True ONLY when the
+ * reservation succeeded AND actually charged quota (g.ok && g.charged) AND the
+ * request did not commit (the upstream cost was never incurred). Internal /
+ * unlimited / fail-open guards carry charged:false and therefore never refund —
+ * this is what prevents "refunding" an increment that was never persisted.
+ */
+export function shouldRefund(
+  g: { ok: boolean; charged?: boolean } | null | undefined,
+  committed: boolean,
+): boolean {
+  return !!g && g.ok && !!g.charged && !committed;
 }
 
 /** Speech-to-Text v2 duration string ("1.200s") → seconds. */

@@ -1,0 +1,261 @@
+// =====================================================================
+// Stripe billing pure logic (monetization P1)
+// ---------------------------------------------------------------------
+// Pure, side-effect-free decisions for the Stripe subscription webhook and
+// checkout flow — same discipline as gating.ts / metering.ts: NO stripe /
+// firebase-admin / http imports, so it is exhaustively unit-testable (see
+// billing.test.ts) and the esbuild bundle stays clean. index.ts does the Stripe
+// SDK calls, signature verification, and Firestore reads/writes; it feeds the
+// parsed facts into these functions and applies their decisions.
+//
+// HARD CONTRACT (gating.ts derivePlan): the entitlements/{uid} doc is gated on
+// ONLY {plan, status}. plan ∈ {free,pro,team,internal}; paidOk = active|grace|
+// trialing. Everything this module adds (stripeCustomerId, currentPeriodEnd,
+// eventId, …) is metadata invisible to the gate. The webhook NEVER writes
+// plan:"internal" — that is admin/seed-only and is treated as untouchable here.
+// =====================================================================
+import { parseUidSet } from "./gating";
+
+/** Our entitlement status vocabulary (superset consumed by derivePlan). */
+export type OurStatus = "active" | "grace" | "on_hold" | "canceled";
+
+/**
+ * Map a raw Stripe `subscription.status` to our entitlement status.
+ * - active/trialing → active (full access; trialing is honored as paid)
+ * - past_due       → grace   (dunning; access preserved by derivePlan)
+ * - unpaid/paused  → on_hold (retries exhausted / paused; access revoked, plan
+ *                             retained for reactivation memory)
+ * - canceled/incomplete/incomplete_expired → canceled (never activated / ended)
+ * Returns null for an UNKNOWN status so the caller PRESERVES the current doc
+ * (never silently downgrade a payer on a Stripe status we don't recognize) and
+ * logs it — no silent fallback.
+ */
+export function mapStripeStatus(raw: unknown): OurStatus | null {
+  const s = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  switch (s) {
+    case "active":
+    case "trialing":
+      return "active";
+    case "past_due":
+      return "grace";
+    case "unpaid":
+    case "paused":
+      return "on_hold";
+    case "canceled":
+    case "incomplete":
+    case "incomplete_expired":
+      return "canceled";
+    default:
+      return null;
+  }
+}
+
+/** Immutable price→plan lookup built from env (comma-separated price id lists). */
+export interface PriceMap {
+  pro: ReadonlySet<string>;
+  team: ReadonlySet<string>;
+}
+
+/**
+ * Build a PriceMap from the two env vars. Each may hold several price ids
+ * (monthly + yearly) comma-separated. Trimmed, empties dropped (reuses the same
+ * parser as the uid allowlists).
+ */
+export function buildPriceMap(
+  proIds: string | undefined,
+  teamIds: string | undefined,
+): PriceMap {
+  return { pro: parseUidSet(proIds), team: parseUidSet(teamIds) };
+}
+
+/**
+ * Resolve which plan a Stripe price id grants. Returns null for an unknown price
+ * (caller must NOT grant a plan for a price it doesn't recognize — fail closed).
+ */
+export function mapPriceToPlan(
+  priceId: string | undefined | null,
+  m: PriceMap,
+): "pro" | "team" | null {
+  const id = String(priceId ?? "").trim();
+  if (!id) return null;
+  if (m.pro.has(id)) return "pro";
+  if (m.team.has(id)) return "team";
+  return null;
+}
+
+/**
+ * Resolve the server-authoritative Stripe price id for a checkout request.
+ * plan/interval come from the client but the PRICE never does — the client can
+ * only pick among the ids the server was configured with. Returns null for an
+ * unconfigured/invalid combo (caller returns 400/503, never invents a price).
+ */
+export function resolveCheckoutPriceId(
+  plan: unknown,
+  interval: unknown,
+  env: {
+    proMonthly?: string;
+    proYearly?: string;
+    teamMonthly?: string;
+    teamYearly?: string;
+  },
+): string | null {
+  const p = String(plan ?? "")
+    .trim()
+    .toLowerCase();
+  const i = String(interval ?? "month")
+    .trim()
+    .toLowerCase();
+  const pick = (v?: string) => (v && v.trim() ? v.trim() : null);
+  if (p === "pro") return pick(i === "year" ? env.proYearly : env.proMonthly);
+  if (p === "team")
+    return pick(i === "year" ? env.teamYearly : env.teamMonthly);
+  return null;
+}
+
+/**
+ * Out-of-order guard. Stripe delivers events at-least-once and NOT in order, and
+ * can emit two Event objects for one change. Apply an event only when it is
+ * strictly newer than the last applied one (by event.created epoch seconds), so
+ * a delayed stale event can never resurrect a later state (e.g. a late
+ * `active` after a `canceled`). Exact re-deliveries are caught upstream by the
+ * event.id dedupe; a rare same-second sibling converging on the same end-state
+ * is harmless to drop and self-corrects on the next event / reconcile.
+ */
+export function isEventNewer(
+  incomingCreated: number,
+  storedCreated: number | null | undefined,
+): boolean {
+  const stored = Number(storedCreated) || 0;
+  return incomingCreated > stored;
+}
+
+/** The existing entitlements/{uid} doc fields this module inspects. */
+export interface ExistingEntitlement {
+  plan?: unknown;
+  source?: unknown;
+  status?: unknown;
+  eventCreated?: unknown;
+}
+
+/**
+ * Access-precedence rank of an entitlement status, used ONLY to break an exact
+ * same-second timestamp tie (see decideEntitlementWrite). Higher = more access.
+ * A missing status ranks as "active" to mirror derivePlan (which defaults a
+ * missing status to active); an unrecognized status ranks lowest (no access).
+ */
+const STATUS_RANK: Record<OurStatus, number> = {
+  active: 3,
+  grace: 2,
+  on_hold: 1,
+  canceled: 0,
+};
+function statusRank(s: unknown): number {
+  const raw =
+    s == null || String(s).trim() === ""
+      ? "active"
+      : String(s).trim().toLowerCase();
+  return (STATUS_RANK as Record<string, number>)[raw] ?? 0;
+}
+
+/** A fully-resolved intent to write, produced by index.ts from a Stripe event. */
+export interface EntitlementIntent {
+  plan: "free" | "pro" | "team";
+  status: OurStatus;
+  eventId: string;
+  eventCreated: number;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  currentPeriodEnd?: number;
+  cancelAtPeriodEnd?: boolean;
+  priceId?: string;
+}
+
+export type EntitlementDecision =
+  | { apply: false; reason: string }
+  | { apply: true; fields: Record<string, unknown> };
+
+/**
+ * Decide whether (and what) to write to entitlements/{uid} for a Stripe event,
+ * given the existing doc. Enforces the three invariants:
+ *  1. INTERNAL IS SACRED — never touch a plan:"internal" doc (a staff member who
+ *     also buys a Stripe sub must never be downgraded).
+ *  2. CROSS-RAIL SAFETY — only mutate a doc that is stripe-owned or unclaimed;
+ *     app_store/play/founder docs are owned by their own rail.
+ *  3. MONOTONIC ORDERING — apply only strictly-newer events.
+ * On apply, returns ONLY the fields to merge (setDoc merge preserves
+ * earlySupporter/teamId and any other untouched fields). The caller must always
+ * write `status` explicitly (derivePlan defaults a MISSING status to "active",
+ * so an absent status on a revocation would silently grant access).
+ */
+export function decideEntitlementWrite(
+  existing: ExistingEntitlement | null | undefined,
+  intent: EntitlementIntent,
+): EntitlementDecision {
+  const existingPlan = String((existing?.plan ?? "") as unknown)
+    .trim()
+    .toLowerCase();
+  const existingSource = String((existing?.source ?? "") as unknown)
+    .trim()
+    .toLowerCase();
+
+  if (existingPlan === "internal")
+    return { apply: false, reason: "internal_untouchable" };
+  if (existingSource && existingSource !== "stripe")
+    return { apply: false, reason: `owned_by_${existingSource}` };
+  if (!isEventNewer(intent.eventCreated, Number(existing?.eventCreated))) {
+    // Same-second sibling tie-break. Stripe can emit e.g.
+    // customer.subscription.created (status incomplete → canceled → free) and
+    // .updated (active → pro) with the SAME `created` epoch second; strict-newer
+    // would drop whichever loses the processing-order race and could strand a
+    // payer on free. On an EXACT timestamp tie, let the higher access status win
+    // deterministically (active > grace > on_hold > canceled) so the best-known
+    // state that second is applied regardless of arrival order. A strictly OLDER
+    // event is still rejected as stale (no resurrection).
+    const stored = Number(existing?.eventCreated) || 0;
+    const tie = stored > 0 && intent.eventCreated === stored;
+    const grantsHigher =
+      statusRank(intent.status) > statusRank(existing?.status);
+    if (!(tie && grantsHigher)) return { apply: false, reason: "stale_event" };
+  }
+
+  const fields: Record<string, unknown> = {
+    plan: intent.plan,
+    status: intent.status,
+    source: "stripe",
+    eventId: intent.eventId,
+    eventCreated: intent.eventCreated,
+  };
+  if (intent.stripeCustomerId)
+    fields.stripeCustomerId = intent.stripeCustomerId;
+  if (intent.stripeSubscriptionId)
+    fields.stripeSubscriptionId = intent.stripeSubscriptionId;
+  if (intent.currentPeriodEnd != null)
+    fields.currentPeriodEnd = intent.currentPeriodEnd;
+  if (intent.cancelAtPeriodEnd != null)
+    fields.cancelAtPeriodEnd = intent.cancelAtPeriodEnd;
+  if (intent.priceId) fields.priceId = intent.priceId;
+  return { apply: true, fields };
+}
+
+/**
+ * Pick the first non-empty uid candidate. Used to resolve the uid for an event
+ * from (in priority order) session.client_reference_id, subscription/session
+ * metadata.firebaseUid, then a Firestore customer→uid reverse-map lookup.
+ * Never trusts client-asserted input — every candidate here originates from a
+ * Stripe object the server created with a server-verified uid.
+ */
+export function pickUid(candidates: Array<unknown>): string | null {
+  for (const c of candidates) {
+    const s = typeof c === "string" ? c.trim() : "";
+    if (s) return s;
+  }
+  return null;
+}
+
+/** Stripe duration → epoch seconds passthrough (guards NaN/negatives → 0). */
+export function toEpochSeconds(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}

@@ -28,9 +28,11 @@ import {
   useEntitlementStore,
   planLabel,
   featureLabel,
+  BILLING_ENABLED,
 } from "@/stores/entitlement-store";
 import { useResearchStore } from "@/stores/research-store";
 import { ResearchSheet } from "@/components/editor/ResearchSheet";
+import { PaywallDialog } from "@/components/PaywallDialog";
 import {
   PanelLeft,
   History,
@@ -101,6 +103,7 @@ function App() {
   const resetPreviewUsage = useEntitlementStore((s) => s.resetPreviewUsage);
   const lastQuotaError = useEntitlementStore((s) => s.lastQuotaError);
   const clearQuota = useEntitlementStore((s) => s.clearQuota);
+  const openPaywall = useEntitlementStore((s) => s.openPaywall);
   // Only show blocking overlay for the very first sync (login/startup)
   const prevSyncingRef = useRef(false);
   const initialSyncDoneRef = useRef(false);
@@ -229,17 +232,43 @@ function App() {
     [parseShareToken],
   );
 
-  // Listen for hash changes (share links)
+  /**
+   * Handle a return from Stripe Checkout / Portal. The success/cancel web pages
+   * (markflow.jp/checkout/*) redirect to markflow://billing/{success,cancel},
+   * which arrives here as a deep link. On success we dismiss the in-app browser
+   * (iOS) and poll the entitlement until the webhook-written plan shows up.
+   * Returns true if the URL was a billing return (so callers stop parsing it).
+   */
+  const handleBillingReturn = useCallback((input: string): boolean => {
+    const m = input
+      .trim()
+      .match(
+        /^(?:markflow:\/\/billing\/|https:\/\/markflow\.jp\/checkout\/)(success|cancel)/,
+      );
+    if (!m) return false;
+    // Best-effort dismiss of the iOS SFSafariViewController; harmless elsewhere.
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("dismiss_safari_vc"))
+      .catch(() => {});
+    if (m[1] === "success") {
+      // The plan write lands via webhook a few seconds after redirect; poll.
+      useEntitlementStore.getState().pollEntitlement();
+    }
+    return true;
+  }, []);
+
+  // Listen for hash changes (share links + web billing return)
   useEffect(() => {
     const handleHash = () => {
+      if (handleBillingReturn(window.location.hash)) return;
       const token = parseShareToken(window.location.hash);
       setShareToken(token);
     };
     window.addEventListener("hashchange", handleHash);
     return () => window.removeEventListener("hashchange", handleHash);
-  }, [parseShareToken]);
+  }, [parseShareToken, handleBillingReturn]);
 
-  // Listen for deep link events (markflow://share/{token})
+  // Listen for deep link events (markflow://share/{token}, markflow://billing/*)
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     import("@tauri-apps/plugin-deep-link")
@@ -249,6 +278,7 @@ function App() {
           const initialUrls = await getCurrent();
           if (initialUrls && initialUrls.length > 0) {
             for (const url of initialUrls) {
+              if (handleBillingReturn(url)) break;
               const token = parseShareToken(url);
               if (token) {
                 setShareToken(token);
@@ -260,6 +290,7 @@ function App() {
         // Listen for subsequent deep link events while app is running
         unlisten = await onOpenUrl((urls) => {
           for (const url of urls) {
+            if (handleBillingReturn(url)) break;
             const token = parseShareToken(url);
             if (token) {
               setShareToken(token);
@@ -272,7 +303,7 @@ function App() {
     return () => {
       unlisten?.();
     };
-  }, [parseShareToken]);
+  }, [parseShareToken, handleBillingReturn]);
 
   useEffect(() => {
     loadDocuments();
@@ -964,12 +995,22 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               {lastQuotaError.limit}
               ）。アップグレードで上限を大きく緩和できます。
             </span>
-            <button
-              className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
-              onClick={clearQuota}
-            >
-              閉じる
-            </button>
+            <div className="flex items-center gap-2">
+              {BILLING_ENABLED && (
+                <button
+                  className="rounded-md bg-white px-3 py-0.5 font-medium text-red-600 hover:opacity-90 transition-opacity"
+                  onClick={() => openPaywall(lastQuotaError.feature)}
+                >
+                  アップグレード
+                </button>
+              )}
+              <button
+                className="rounded-md bg-white/20 px-3 py-0.5 hover:bg-white/30 transition-colors"
+                onClick={clearQuota}
+              >
+                閉じる
+              </button>
+            </div>
           </div>
         )}
         {/* Publish banner */}
@@ -1412,6 +1453,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           className="hidden"
           onChange={handleFileChange}
         />
+        {/* Upgrade/paywall (self-gated behind BILLING_ENABLED via openPaywall) */}
+        <PaywallDialog />
       </div>
     </TooltipProvider>
   );

@@ -7,10 +7,16 @@ import {
   RefreshCw,
   Users,
   DatabaseZap,
+  Sparkles,
+  CreditCard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  useEntitlementStore,
+  BILLING_ENABLED,
+} from "@/stores/entitlement-store";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
 import { isMobile } from "@/platform";
 
@@ -60,6 +66,14 @@ export function UserMenu() {
     syncToCloud,
     resetCloudAndReSync,
   } = useAuthStore();
+  const effectivePlan = useEntitlementStore((s) => s.effectivePlan);
+  const openPaywall = useEntitlementStore((s) => s.openPaywall);
+  const openBillingPortal = useEntitlementStore((s) => s.openBillingPortal);
+  // Show the upgrade entry to Free users; the manage entry to paying users.
+  // internal (staff/owner real plan) sees neither — they don't buy.
+  const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
+  const showManage =
+    BILLING_ENABLED && (effectivePlan === "pro" || effectivePlan === "team");
   const [teamOpen, setTeamOpen] = useState(false);
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -198,6 +212,30 @@ export function UserMenu() {
               <Users className="h-4 w-4" />
               チーム管理
             </button>
+            {showUpgrade && (
+              <button
+                className={menuItem}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openPaywall();
+                }}
+              >
+                <Sparkles className="h-4 w-4" />
+                プランをアップグレード
+              </button>
+            )}
+            {showManage && (
+              <button
+                className={menuItem}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openBillingPortal();
+                }}
+              >
+                <CreditCard className="h-4 w-4" />
+                契約を管理
+              </button>
+            )}
             <button
               className={menuItem}
               disabled={syncing || !isOnline}
@@ -241,6 +279,28 @@ export function UserMenu() {
 
   return (
     <div className="flex items-center gap-2">
+      {showUpgrade && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={() => openPaywall()}
+          title="プランをアップグレード"
+        >
+          <Sparkles className={iconSize} />
+        </Button>
+      )}
+      {showManage && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={() => openBillingPortal()}
+          title="契約を管理"
+        >
+          <CreditCard className={iconSize} />
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="icon"

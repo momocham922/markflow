@@ -148,5 +148,16 @@ service cloud.firestore {
         allow write: if false;
       }
     }
+
+    // Stripe billing internals: written ONLY by the ai-proxy webhook via the
+    // Admin SDK (bypasses these rules). No client ever reads or writes them —
+    // stripeEvents/{eventId} is the idempotency dedupe log, stripeCustomers/
+    // {customerId} is the Stripe-customer→uid reverse map for lifecycle events.
+    match /stripeEvents/{eventId} {
+      allow read, write: if false;
+    }
+    match /stripeCustomers/{customerId} {
+      allow read, write: if false;
+    }
   }
 }

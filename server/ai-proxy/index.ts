@@ -1,4 +1,5 @@
 import http from "http";
+import Stripe from "stripe";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
@@ -14,9 +15,27 @@ import {
   parseOffset,
   clampBatchReserveMinutes,
   measuredBatchMinutes,
+  reconcileBatchDelta,
+  shouldRefund,
   type Plan,
   type Feature,
 } from "./gating";
+import {
+  reserveUsage,
+  adjustUsage as meterAdjustUsage,
+  type MeteringStore,
+  type ServerValues,
+} from "./metering";
+import {
+  mapStripeStatus,
+  buildPriceMap,
+  mapPriceToPlan,
+  resolveCheckoutPriceId,
+  decideEntitlementWrite,
+  pickUid,
+  toEpochSeconds,
+  type EntitlementIntent,
+} from "./billing";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
@@ -33,8 +52,336 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 const GCS_BUCKET =
   process.env.GCS_BUCKET || "markflow-app-2026.firebasestorage.app";
 
+// --- Stripe billing config (monetization P1) -------------------------------
+// All secrets come from the environment (Secret Manager in prod, NEVER inline).
+// When STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET are unset the billing routes
+// stay DARK: they return 503 billing_not_configured (explicit failure, never a
+// silent fallback) and every existing route is unaffected. This lets the code
+// ship and deploy before the owner has created the Stripe account/products.
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+// Pin to the SDK's version (stripe-node 22.5.0 → 2026-07-29.dahlia). The
+// Dashboard webhook endpoint MUST be set to the same version or the event JSON
+// shape (item-level billing periods) won't match.
+const STRIPE_API_VERSION = "2026-07-29.dahlia";
+const STRIPE_PRICES = {
+  proMonthly: process.env.STRIPE_PRICE_PRO_MONTHLY || "",
+  proYearly: process.env.STRIPE_PRICE_PRO_YEARLY || "",
+  teamMonthly: process.env.STRIPE_PRICE_TEAM_MONTHLY || "",
+  teamYearly: process.env.STRIPE_PRICE_TEAM_YEARLY || "",
+};
+const PRICE_MAP = buildPriceMap(
+  [STRIPE_PRICES.proMonthly, STRIPE_PRICES.proYearly].filter(Boolean).join(","),
+  [STRIPE_PRICES.teamMonthly, STRIPE_PRICES.teamYearly]
+    .filter(Boolean)
+    .join(","),
+);
+// Landing pages (HTTPS) the browser returns to; they deep-link back into the app
+// via markflow://billing/success|cancel. Defaults live under markflow.jp.
+const CHECKOUT_SUCCESS_URL =
+  process.env.CHECKOUT_SUCCESS_URL ||
+  "https://markflow.jp/checkout/success?session_id={CHECKOUT_SESSION_ID}";
+const CHECKOUT_CANCEL_URL =
+  process.env.CHECKOUT_CANCEL_URL || "https://markflow.jp/checkout/cancel";
+const PORTAL_RETURN_URL =
+  process.env.PORTAL_RETURN_URL || "https://markflow.jp/account";
+
+function billingConfigured(): boolean {
+  return Boolean(STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET);
+}
+
+let _stripe: Stripe | null = null;
+/** Lazily construct the Stripe client. Throws if the secret key is unset. */
+function getStripe(): Stripe {
+  if (!STRIPE_SECRET_KEY) throw new Error("billing_not_configured");
+  if (!_stripe) {
+    _stripe = new Stripe(STRIPE_SECRET_KEY, {
+      apiVersion: STRIPE_API_VERSION as Stripe.LatestApiVersion,
+    });
+  }
+  return _stripe;
+}
+
+/** Extract a Stripe customer id whether the field is expanded or a bare id. */
+function stripeCustomerId(
+  c: string | { id?: string } | null | undefined,
+): string {
+  if (!c) return "";
+  return typeof c === "string" ? c : c.id || "";
+}
+
+/**
+ * Idempotency for Stripe's at-least-once, out-of-order delivery. We mark an
+ * event as processed ONLY AFTER handleStripeEvent succeeds (see the webhook
+ * handler), never before. A mark-BEFORE-process marker stranded by a mid-request
+ * crash (Cloud Run scale-down / OOM) would make Stripe's retry read the event as
+ * a duplicate and drop it forever — and there is no reconcile job. Because every
+ * entitlement write is idempotent (setDoc-merge) and monotonic (isEventNewer +
+ * the same-second status tie-break), reprocessing an event is always safe, so
+ * mark-after loses no correctness and closes the stranded-marker window.
+ */
+async function eventAlreadyProcessed(eventId: string): Promise<boolean> {
+  const snap = await getFirestore()
+    .collection("stripeEvents")
+    .doc(eventId)
+    .get();
+  return snap.exists;
+}
+async function markEventProcessed(eventId: string): Promise<void> {
+  // create() (not set()) so a concurrent double-delivery's second writer hits
+  // ALREADY_EXISTS rather than racing; the caller treats that as harmless.
+  await getFirestore()
+    .collection("stripeEvents")
+    .doc(eventId)
+    .create({ at: FieldValue.serverTimestamp() });
+}
+
+/** Persist the Stripe customer→uid reverse map (for invoice/customer events). */
+async function mapCustomerToUid(
+  customerId: string,
+  uid: string,
+  subscriptionId?: string,
+): Promise<void> {
+  if (!customerId || !uid) return;
+  await getFirestore()
+    .collection("stripeCustomers")
+    .doc(customerId)
+    .set(
+      {
+        uid,
+        ...(subscriptionId ? { subscriptionId } : {}),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+}
+async function lookupUidByCustomer(customerId: string): Promise<string | null> {
+  if (!customerId) return null;
+  try {
+    const snap = await getFirestore()
+      .collection("stripeCustomers")
+      .doc(customerId)
+      .get();
+    return snap.exists ? String(snap.data()?.uid || "") || null : null;
+  } catch (e) {
+    console.error(`[stripe] lookupUidByCustomer ${customerId} failed:`, e);
+    return null;
+  }
+}
+
+/** The uid's stored Stripe customer id (entitlement doc), if any. */
+async function getStoredCustomerId(uid: string): Promise<string> {
+  try {
+    const snap = await getFirestore().collection("entitlements").doc(uid).get();
+    return snap.exists ? String(snap.data()?.stripeCustomerId || "") : "";
+  } catch (e) {
+    console.error(`[stripe] getStoredCustomerId ${uid} failed:`, e);
+    return "";
+  }
+}
+
+/**
+ * Apply a decided entitlement intent to entitlements/{uid} (setDoc merge, so
+ * earlySupporter/teamId survive). Enforces the internal/cross-rail/ordering
+ * invariants via decideEntitlementWrite, and busts the in-memory 60s cache so
+ * the change is visible immediately on this instance.
+ */
+async function writeEntitlementFromIntent(
+  uid: string,
+  intent: EntitlementIntent,
+): Promise<void> {
+  const ref = getFirestore().collection("entitlements").doc(uid);
+  const snap = await ref.get();
+  const decision = decideEntitlementWrite(
+    snap.exists ? (snap.data() as Record<string, unknown>) : null,
+    intent,
+  );
+  if (!decision.apply) {
+    console.log(
+      `[stripe] entitlement skip uid=${uid} reason=${decision.reason} evt=${intent.eventId}`,
+    );
+    return;
+  }
+  await ref.set(
+    { ...decision.fields, updatedAt: FieldValue.serverTimestamp() },
+    { merge: true },
+  );
+  entCache.delete(uid);
+  console.log(
+    `[stripe] entitlement set uid=${uid} plan=${decision.fields.plan} status=${decision.fields.status} evt=${intent.eventId}`,
+  );
+}
+
+/** Build+apply the entitlement intent from an authoritative Subscription. */
+async function applySubscription(
+  uid: string,
+  sub: Stripe.Subscription,
+  eventId: string,
+  eventCreated: number,
+): Promise<void> {
+  const ourStatus = mapStripeStatus(sub.status);
+  if (!ourStatus) {
+    // Unknown Stripe status → preserve current state, never silently downgrade.
+    console.error(
+      `[stripe] unknown subscription status "${sub.status}" sub=${sub.id}; preserving entitlement`,
+    );
+    return;
+  }
+  const item = sub.items?.data?.[0];
+  const priceId = item?.price?.id;
+  const plan = mapPriceToPlan(priceId, PRICE_MAP);
+  if (!plan) {
+    // Fail CLOSED on GRANT (never grant a plan for a price we don't recognize),
+    // but fail SAFE on REVOKE: if this event revokes access (unpaid/paused →
+    // on_hold, canceled/incomplete → canceled), downgrade to free even when the
+    // price is unmapped (e.g. a price id rotated out of env while a subscriber
+    // still holds it), so a non-payer can't retain paid access on a config drift.
+    if (ourStatus === "on_hold" || ourStatus === "canceled") {
+      await writeEntitlementFromIntent(uid, {
+        plan: "free",
+        status: ourStatus,
+        eventId,
+        eventCreated,
+        stripeCustomerId: stripeCustomerId(sub.customer),
+        stripeSubscriptionId: sub.id,
+        cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
+      });
+      return;
+    }
+    console.error(
+      `[stripe] price ${priceId} not mapped to a plan (sub=${sub.id}); skipping grant`,
+    );
+    return;
+  }
+  // current_period_end moved to the item level as of API Basil (2025-03-31).
+  const periodEnd = toEpochSeconds(
+    (item as unknown as { current_period_end?: number })?.current_period_end,
+  );
+  await writeEntitlementFromIntent(uid, {
+    plan,
+    status: ourStatus,
+    eventId,
+    eventCreated,
+    stripeCustomerId: stripeCustomerId(sub.customer),
+    stripeSubscriptionId: sub.id,
+    currentPeriodEnd: periodEnd || undefined,
+    cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
+    priceId: priceId || undefined,
+  });
+}
+
+/** Resolve the uid a Subscription belongs to (metadata first, then reverse map). */
+async function resolveSubscriptionUid(
+  sub: Stripe.Subscription,
+): Promise<string | null> {
+  const fromMeta = pickUid([sub.metadata?.firebaseUid]);
+  if (fromMeta) return fromMeta;
+  const uid = await lookupUidByCustomer(stripeCustomerId(sub.customer));
+  if (!uid) console.error(`[stripe] cannot resolve uid for sub ${sub.id}`);
+  return uid;
+}
+
+/**
+ * Process one verified Stripe event. Drives entitlement state from the
+ * authoritative Subscription object for every path (checkout just establishes
+ * the customer↔uid map, then defers to the subscription). Grace (past_due) and
+ * renewal (back to active) both arrive as customer.subscription.updated, so
+ * invoice.* events are intentionally not needed for the gate.
+ */
+async function handleStripeEvent(event: Stripe.Event): Promise<void> {
+  const eventCreated = toEpochSeconds(event.created);
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object as Stripe.Checkout.Session;
+      if (session.mode !== "subscription") return;
+      const uid = pickUid([
+        session.client_reference_id,
+        session.metadata?.firebaseUid,
+      ]);
+      if (!uid) {
+        console.error(`[stripe] no uid on checkout.session ${session.id}`);
+        return;
+      }
+      const customerId = stripeCustomerId(session.customer);
+      const subId =
+        typeof session.subscription === "string"
+          ? session.subscription
+          : session.subscription?.id || "";
+      if (customerId)
+        await mapCustomerToUid(customerId, uid, subId || undefined);
+      if (subId) {
+        const sub = await getStripe().subscriptions.retrieve(subId);
+        await applySubscription(uid, sub, event.id, eventCreated);
+      }
+      return;
+    }
+    case "customer.subscription.created":
+    case "customer.subscription.updated": {
+      const snap = event.data.object as Stripe.Subscription;
+      const uid = await resolveSubscriptionUid(snap);
+      if (!uid) return;
+      // Apply the LIVE subscription (re-fetched), not the possibly-stale event
+      // snapshot, so two same-second sibling events (created@incomplete +
+      // updated@active) observe the current status and converge; the exact-tie
+      // status precedence in decideEntitlementWrite settles a residual race.
+      // Fall back to the snapshot if the retrieve fails (e.g. already deleted).
+      let sub = snap;
+      try {
+        sub = await getStripe().subscriptions.retrieve(snap.id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[stripe] retrieve sub ${snap.id} failed, using event snapshot: ${msg}`,
+        );
+      }
+      await mapCustomerToUid(stripeCustomerId(sub.customer), uid, sub.id);
+      await applySubscription(uid, sub, event.id, eventCreated);
+      return;
+    }
+    case "customer.subscription.deleted": {
+      const sub = event.data.object as Stripe.Subscription;
+      const uid = await resolveSubscriptionUid(sub);
+      if (!uid) return;
+      await writeEntitlementFromIntent(uid, {
+        plan: "free",
+        status: "canceled",
+        eventId: event.id,
+        eventCreated,
+        stripeCustomerId: stripeCustomerId(sub.customer),
+        stripeSubscriptionId: sub.id,
+        cancelAtPeriodEnd: false,
+      });
+      return;
+    }
+    default:
+      // Other event types are not needed for the gate.
+      return;
+  }
+}
+
 // Initialize Firebase Admin (uses default service account on Cloud Run)
 initializeApp();
+
+// Adapt the real Firestore to the DI surface metering.ts expects. This is the
+// ONLY place the metering primitives touch firebase-admin — the primitives
+// themselves stay pure/testable. `fn as never` bridges the structural mismatch
+// between firebase's Transaction and our minimal UsageTxn (runtime-compatible;
+// the server bundle is not tsc-checked, so a runtime-correct cast is fine).
+const meteringStore: MeteringStore = {
+  usageDoc: (uid, ym) =>
+    getFirestore()
+      .collection("usage")
+      .doc(uid)
+      .collection("months")
+      .doc(ym) as never,
+  runTransaction(fn) {
+    return getFirestore().runTransaction(fn as never);
+  },
+};
+const serverValues: ServerValues = {
+  increment: (n) => FieldValue.increment(n),
+  serverTimestamp: () => FieldValue.serverTimestamp(),
+};
 
 // Safely send a JSON error. If headers were already sent (a stream started, or the
 // client disconnected mid-response), writing a status throws ERR_HTTP_HEADERS_SENT,
@@ -252,26 +599,16 @@ async function guard(
   if (precheck.unlimited) {
     return { ok: true, charged: false, uid, plan, feature, cost, ym };
   }
-  const db = getFirestore();
-  const ref = db.collection("usage").doc(uid).collection("months").doc(ym);
   try {
-    const result = await db.runTransaction(async (tx) => {
-      const snap = await tx.get(ref);
-      const used = snap.exists ? Number(snap.data()?.[feature] || 0) || 0 : 0;
-      const c = checkQuota(plan, feature, used, cost);
-      if (c.blocked) return { blocked: true, used };
-      tx.set(
-        ref,
-        {
-          [feature]: FieldValue.increment(cost),
-          plan,
-          period: ym,
-          updatedAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
-      return { blocked: false, used };
-    });
+    const result = await reserveUsage(
+      meteringStore,
+      serverValues,
+      uid,
+      feature,
+      cost,
+      plan,
+      ym,
+    );
     if (result.blocked) {
       res.writeHead(429, { "Content-Type": "application/json" });
       res.end(
@@ -307,18 +644,15 @@ async function adjustUsage(
   plan: Plan,
   ym: string,
 ): Promise<void> {
-  if (!delta) return;
   try {
-    const db = getFirestore();
-    const ref = db.collection("usage").doc(uid).collection("months").doc(ym);
-    await ref.set(
-      {
-        [feature]: FieldValue.increment(delta),
-        plan,
-        period: ym,
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true },
+    await meterAdjustUsage(
+      meteringStore,
+      serverValues,
+      uid,
+      feature,
+      delta,
+      plan,
+      ym,
     );
   } catch (err) {
     console.error(`adjustUsage(${delta}) failed for ${uid}/${feature}:`, err);
@@ -334,7 +668,11 @@ async function refundIfUncommitted(
   g: GuardResult | null,
   committed: boolean,
 ): Promise<void> {
-  if (!g || !g.ok || !g.charged || committed) return;
+  // shouldRefund treats a non-ok GuardResult ({ok:false}) as never-refund; the
+  // `g.ok &&` guard here narrows the union so g.uid/feature/cost/plan/ym are
+  // accessible after the pure check passes.
+  if (!shouldRefund(g && g.ok ? g : null, committed)) return;
+  if (!g || !g.ok) return;
   await adjustUsage(g.uid, g.feature, -g.cost, g.plan, g.ym);
 }
 
@@ -400,6 +738,97 @@ const server = http.createServer(async (req, res) => {
       res.end("Internal error");
       return;
     }
+  }
+
+  // --- /v1/billing/webhook (Stripe; NO Firebase auth; RAW body) ---
+  // Matched BEFORE the shared string readBody: signature verification needs the
+  // EXACT bytes Stripe signed. Decoding/reassembling into a string corrupts a
+  // multibyte char split across a TCP chunk and breaks HMAC — collect Buffers
+  // and Buffer.concat() with no parsing. We process the event BEFORE ACKing and
+  // only record the dedupe marker AFTER success, so a failure (or mid-request
+  // crash) returns/looks like non-2xx and Stripe retries — there is no reconcile
+  // job yet, so correctness over shaving latency.
+  if (req.method === "POST" && req.url === "/v1/billing/webhook") {
+    if (!billingConfigured()) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "billing_not_configured" }));
+      return;
+    }
+    const bufs: Buffer[] = [];
+    req.on("data", (c: Buffer) => bufs.push(c));
+    req.on("error", () => {
+      if (!res.headersSent) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "read_error" }));
+      }
+    });
+    req.on("end", async () => {
+      const raw = Buffer.concat(bufs);
+      const sig = req.headers["stripe-signature"];
+      let event: Stripe.Event;
+      try {
+        event = getStripe().webhooks.constructEvent(
+          raw,
+          Array.isArray(sig) ? sig[0] : sig || "",
+          STRIPE_WEBHOOK_SECRET,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[stripe] signature verification failed: ${msg}`);
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "webhook_signature" }));
+        return;
+      }
+      // Skip only if we already FULLY processed this exact event (marker is
+      // written post-success). A transient read failure must NOT be resolved as
+      // either "new" (risking lost work) or silently "duplicate" (dropping the
+      // event): return 500 so Stripe retries — reprocessing is idempotent.
+      let alreadyDone: boolean;
+      try {
+        alreadyDone = await eventAlreadyProcessed(event.id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[stripe] dedupe read ${event.id} failed: ${msg}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "webhook_dedupe_failed" }));
+        }
+        return;
+      }
+      if (alreadyDone) {
+        console.log(
+          `[stripe] duplicate event ${event.id} (${event.type}) skipped`,
+        );
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ received: true, duplicate: true }));
+        return;
+      }
+      try {
+        await handleStripeEvent(event);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[stripe] handle ${event.id} (${event.type}) failed: ${msg}`,
+        );
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "webhook_processing_failed" }));
+        }
+        return;
+      }
+      // Mark ONLY after success. A failure to persist the marker is non-fatal:
+      // the entitlement is already applied and a redelivery reprocesses
+      // idempotently — so we still ACK 200 rather than force a needless retry.
+      try {
+        await markEventProcessed(event.id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[stripe] mark ${event.id} processed failed: ${msg}`);
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ received: true }));
+    });
+    return;
   }
 
   if (req.method !== "POST") {
@@ -493,6 +922,132 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
+      return;
+    }
+  }
+
+  // --- /v1/billing/checkout (authed: create a subscription Checkout Session) ---
+  // The client sends { plan:"pro"|"team", interval:"month"|"year" }; the PRICE is
+  // resolved server-side (client never asserts a price). The verified Firebase
+  // uid is attached as client_reference_id AND subscription metadata so the
+  // webhook can map every lifecycle event back to this user.
+  if (req.url === "/v1/billing/checkout") {
+    try {
+      if (!billingConfigured()) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "billing_not_configured" }));
+        return;
+      }
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const body = await readBody();
+      const parsed = body ? JSON.parse(body) : {};
+      const priceId = resolveCheckoutPriceId(
+        parsed.plan,
+        parsed.interval,
+        STRIPE_PRICES,
+      );
+      if (!priceId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_plan" }));
+        return;
+      }
+      // Refuse to open a SECOND subscription for someone who already has access.
+      // Stripe Checkout does not dedupe per-customer, so a stale client / double
+      // tap could otherwise create a duplicate sub and double-charge; and an
+      // internal/other-rail entitlement would be paid for but declined by the
+      // webhook (internal_untouchable / owned_by_*). derivePlan mirrors the gate
+      // exactly (paid = pro|team with active/grace/trialing; internal = access).
+      const entSnap = await getFirestore()
+        .collection("entitlements")
+        .doc(uid)
+        .get();
+      const curPlan = derivePlan(
+        entSnap.exists ? (entSnap.data() as Record<string, unknown>) : null,
+      );
+      if (curPlan !== "free") {
+        // pro/team → manage via portal; internal already has full access.
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "already_subscribed" }));
+        return;
+      }
+      const stripe = getStripe();
+      // Reuse the stored customer so lifecycle webhooks map back to this uid;
+      // create one (tagged with firebaseUid) on the first purchase.
+      let customerId = await getStoredCustomerId(uid);
+      if (!customerId) {
+        let email: string | undefined;
+        try {
+          email = (await getAuth().getUser(uid)).email || undefined;
+        } catch {
+          /* email is optional for customer creation */
+        }
+        const customer = await stripe.customers.create({
+          email,
+          metadata: { firebaseUid: uid },
+        });
+        customerId = customer.id;
+        await mapCustomerToUid(customerId, uid);
+        // Persist the customer id WITHOUT touching plan/status (missing plan →
+        // derivePlan returns free), so a retried checkout reuses this customer.
+        await getFirestore().collection("entitlements").doc(uid).set(
+          {
+            stripeCustomerId: customerId,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
+      const session = await stripe.checkout.sessions.create({
+        mode: "subscription",
+        customer: customerId,
+        line_items: [{ price: priceId, quantity: 1 }],
+        client_reference_id: uid,
+        metadata: { firebaseUid: uid },
+        subscription_data: { metadata: { firebaseUid: uid } },
+        success_url: CHECKOUT_SUCCESS_URL,
+        cancel_url: CHECKOUT_CANCEL_URL,
+        allow_promotion_codes: true,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ url: session.url }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[stripe] checkout failed: ${message}`);
+      sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
+      return;
+    }
+  }
+
+  // --- /v1/billing/portal (authed: open the Stripe Customer Portal) ---
+  // Manage/cancel/update-card. Returns 404 if the user has no Stripe customer yet.
+  if (req.url === "/v1/billing/portal") {
+    try {
+      if (!billingConfigured()) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "billing_not_configured" }));
+        return;
+      }
+      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const customerId = await getStoredCustomerId(uid);
+      if (!customerId) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "no_subscription" }));
+        return;
+      }
+      const session = await getStripe().billingPortal.sessions.create({
+        customer: customerId,
+        return_url: PORTAL_RETURN_URL,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ url: session.url }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[stripe] portal failed: ${message}`);
       sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
       return;
     }
@@ -911,7 +1466,7 @@ const server = http.createServer(async (req, res) => {
         await adjustUsage(
           g.uid,
           "batchMin",
-          measuredMin - reserveMin,
+          reconcileBatchDelta(measuredMin, reserveMin),
           g.plan,
           g.ym,
         );

@@ -5,6 +5,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import {
   useEntitlementStore,
   planLabel,
+  BILLING_ENABLED,
   type ViewAsPlan,
 } from "@/stores/entitlement-store";
 import { isIOS, isMobile, isTauri } from "@/platform";
@@ -68,7 +69,8 @@ export function StatusBar() {
   // Desktop: full layout
   const { activeDocId, documents } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
-  const { isOwner, effectivePlan, viewAs, setViewAs } = useEntitlementStore();
+  const { isOwner, effectivePlan, viewAs, setViewAs, openPaywall } =
+    useEntitlementStore();
   const [betaChannel, setBetaChannel] = useState(false);
 
   useEffect(() => {
@@ -158,10 +160,20 @@ export function StatusBar() {
             </select>
           </label>
         )}
-        {/* Plan badge for general users (and owner while previewing a plan) */}
+        {/* Plan badge for general users (and owner while previewing a plan).
+            When billing is live, a Free badge is a click-to-upgrade entry. */}
         {user &&
           effectivePlan &&
-          (viewAs !== null || effectivePlan !== "internal") && (
+          (viewAs !== null || effectivePlan !== "internal") &&
+          (BILLING_ENABLED && effectivePlan === "free" ? (
+            <button
+              className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
+              title="プランをアップグレード"
+              onClick={() => openPaywall()}
+            >
+              Free · アップグレード
+            </button>
+          ) : (
             <span
               className={cn(
                 "rounded px-1.5 py-0.5 text-[10px] font-medium",
@@ -173,7 +185,7 @@ export function StatusBar() {
             >
               {planLabel(effectivePlan)}
             </span>
-          )}
+          ))}
         {downgrading && (
           <span className="text-amber-500 font-medium animate-pulse">
             Installing Stable...

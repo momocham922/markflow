@@ -12,6 +12,8 @@ import {
   parseOffset,
   clampBatchReserveMinutes,
   measuredBatchMinutes,
+  reconcileBatchDelta,
+  shouldRefund,
   type Plan,
   type Feature,
 } from "./gating";
@@ -182,6 +184,74 @@ describe("derivePlan", () => {
   it("falls back to free for unknown plan values", () => {
     expect(derivePlan({ plan: "enterprise", status: "active" })).toBe("free");
     expect(derivePlan({ plan: 123 })).toBe("free");
+  });
+
+  // Hardening against a Stripe webhook (or hand-edited doc) writing raw values
+  // with different casing / whitespace — must never silently downgrade a payer.
+  it("normalizes casing on plan and status", () => {
+    expect(derivePlan({ plan: "PRO", status: "ACTIVE" })).toBe("pro");
+    expect(derivePlan({ plan: "Team", status: "Grace" })).toBe("team");
+    expect(derivePlan({ plan: "Internal" })).toBe("internal");
+  });
+
+  it("trims surrounding whitespace on plan and status", () => {
+    expect(derivePlan({ plan: " pro ", status: " active " })).toBe("pro");
+    expect(derivePlan({ plan: "\tteam\n", status: "grace" })).toBe("team");
+  });
+
+  it("honors Stripe 'trialing' status as paid (never downgrades a trial)", () => {
+    expect(derivePlan({ plan: "pro", status: "trialing" })).toBe("pro");
+    expect(derivePlan({ plan: "team", status: "TRIALING" })).toBe("team");
+    expect(derivePlan({ plan: "pro", status: " trialing " })).toBe("pro");
+  });
+
+  it("still downgrades genuinely inactive statuses after normalization", () => {
+    expect(derivePlan({ plan: "PRO", status: "PAST_DUE" })).toBe("free");
+    expect(derivePlan({ plan: " team ", status: " canceled " })).toBe("free");
+  });
+});
+
+// =====================================================================
+// reconcileBatchDelta — measured-minus-reserve counter correction
+// =====================================================================
+describe("reconcileBatchDelta", () => {
+  it("charges the difference when the client under-reserved", () => {
+    // reserved 1 min (client claimed durationSec:0), measured 50 → +49.
+    expect(reconcileBatchDelta(50, 1)).toBe(49);
+  });
+
+  it("refunds the difference when the client over-reserved", () => {
+    expect(reconcileBatchDelta(30, 45)).toBe(-15);
+  });
+
+  it("is zero when the reserve was exact", () => {
+    expect(reconcileBatchDelta(60, 60)).toBe(0);
+  });
+});
+
+// =====================================================================
+// shouldRefund — refund a reserved cost only when truly uncommitted
+// =====================================================================
+describe("shouldRefund", () => {
+  it("refunds a charged, uncommitted reservation", () => {
+    expect(shouldRefund({ ok: true, charged: true }, false)).toBe(true);
+  });
+
+  it("never refunds once committed (the upstream cost was incurred)", () => {
+    expect(shouldRefund({ ok: true, charged: true }, true)).toBe(false);
+  });
+
+  it("never refunds an uncharged guard (internal/unlimited/fail-open)", () => {
+    // charged:false → the increment was never persisted, so a refund would
+    // wrongly credit the counter below zero.
+    expect(shouldRefund({ ok: true, charged: false }, false)).toBe(false);
+    expect(shouldRefund({ ok: true }, false)).toBe(false);
+  });
+
+  it("never refunds a failed/absent guard result", () => {
+    expect(shouldRefund({ ok: false }, false)).toBe(false);
+    expect(shouldRefund(null, false)).toBe(false);
+    expect(shouldRefund(undefined, false)).toBe(false);
   });
 });
 
