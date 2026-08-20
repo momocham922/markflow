@@ -657,6 +657,16 @@ export function VoicePanel({
       if (!batchRes.ok) {
         const errText = await batchRes.text();
         reportIfQuota(batchRes.status, errText);
+        // The server may return a clean, user-facing Japanese `message` (e.g.
+        // 429 batch_in_progress: one in-flight batch per user). Prefer it verbatim.
+        let serverMsg = "";
+        try {
+          const j = JSON.parse(errText) as { message?: string };
+          if (typeof j.message === "string") serverMsg = j.message;
+        } catch {
+          /* not JSON; fall through to the raw-text handling below */
+        }
+        if (serverMsg) throw new Error(serverMsg);
         // BatchRecognize (chirp_3) rejects files longer than 60 minutes. Turn
         // the raw STT error into a clear, actionable message for the user.
         if (/too long|60 ?minutes|60\s*分/i.test(errText)) {

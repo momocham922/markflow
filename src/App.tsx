@@ -233,26 +233,47 @@ function App() {
   );
 
   /**
-   * Handle a return from Stripe Checkout / Portal. The success/cancel web pages
-   * (markflow.jp/checkout/*) redirect to markflow://billing/{success,cancel},
-   * which arrives here as a deep link. On success we dismiss the in-app browser
-   * (iOS) and poll the entitlement until the webhook-written plan shows up.
+   * Handle a return from Stripe Checkout / Portal. Two return shapes arrive here
+   * (as deep links on native, or as URL-hash navigations on web):
+   *   - Checkout: markflow://billing/{success,cancel} (web: markflow.jp/checkout/*)
+   *   - Portal:   markflow://billing/updated          (web: markflow.jp/account)
+   * On success we poll for the PURCHASED plan specifically (pendingCheckoutPlan)
+   * so a transient stale "free" read can't stop the poll and strand a paying
+   * user on Free. On a portal return we poll for ANY change (up/down/cancel).
    * Returns true if the URL was a billing return (so callers stop parsing it).
    */
   const handleBillingReturn = useCallback((input: string): boolean => {
-    const m = input
-      .trim()
-      .match(
-        /^(?:markflow:\/\/billing\/|https:\/\/markflow\.jp\/checkout\/)(success|cancel)/,
-      );
-    if (!m) return false;
+    const s = input.trim();
+    let action: "success" | "cancel" | "updated" | null = null;
+    const deep = s.match(/^markflow:\/\/billing\/(success|cancel|updated)/);
+    const checkoutWeb = s.match(
+      /^https:\/\/markflow\.jp\/checkout\/(success|cancel)/,
+    );
+    if (deep) action = deep[1] as "success" | "cancel" | "updated";
+    else if (checkoutWeb) action = checkoutWeb[1] as "success" | "cancel";
+    else if (/^https:\/\/markflow\.jp\/account(?:[/?#]|$)/.test(s))
+      action = "updated";
+    if (!action) return false;
     // Best-effort dismiss of the iOS SFSafariViewController; harmless elsewhere.
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke("dismiss_safari_vc"))
       .catch(() => {});
-    if (m[1] === "success") {
-      // The plan write lands via webhook a few seconds after redirect; poll.
-      useEntitlementStore.getState().pollEntitlement();
+    const store = useEntitlementStore.getState();
+    if (action === "success") {
+      // The plan write lands via webhook a few seconds after redirect; poll for
+      // the exact plan just purchased (persisted, so it survives a cold relaunch
+      // while the Checkout browser was foreground). Fall back to "pro": a success
+      // return unambiguously means a paid plan was bought, so polling for ≥pro is
+      // always safe and never stops the poll on a transient stale Free read.
+      const target = store.pendingCheckoutPlan ?? "pro";
+      store.pollEntitlement({ target });
+      store.clearPendingCheckout();
+    } else if (action === "updated") {
+      // Portal change (upgrade/downgrade/cancel-at-period-end): poll for any move.
+      store.pollEntitlement();
+    } else {
+      // User backed out of Checkout; discard the pending marker.
+      store.clearPendingCheckout();
     }
     return true;
   }, []);

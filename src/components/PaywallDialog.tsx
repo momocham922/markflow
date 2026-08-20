@@ -67,7 +67,10 @@ const PLAN_INFO: Record<
     name: "Team",
     tagline: "チームでの共同編集と共有に",
     icon: Users,
-    unit: "／人",
+    // Checkout currently bills a flat quantity:1 (single subscription), so the
+    // price is NOT per-seat. Show no "／人" unit to avoid over-charging
+    // expectations. Per-seat billing is a deferred product decision.
+    unit: "",
     features: [
       { label: "Proのすべての機能" },
       { label: "AIリクエスト 月4,000回" },

@@ -72,8 +72,14 @@ export function UserMenu() {
   // Show the upgrade entry to Free users; the manage entry to paying users.
   // internal (staff/owner real plan) sees neither — they don't buy.
   const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
+  // Anti-steering (Apple/Google): mobile app users must NOT be routed to the
+  // external Stripe billing portal to manage/cancel their subscription. They
+  // manage it on the web/desktop instead. PaywallDialog is already
+  // anti-steering-safe (purchasable=!isMobile), so showUpgrade stays as-is.
   const showManage =
-    BILLING_ENABLED && (effectivePlan === "pro" || effectivePlan === "team");
+    BILLING_ENABLED &&
+    !isMobile &&
+    (effectivePlan === "pro" || effectivePlan === "team");
   const [teamOpen, setTeamOpen] = useState(false);
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);

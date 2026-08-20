@@ -23,6 +23,8 @@ import {
 import {
   reserveUsage,
   adjustUsage as meterAdjustUsage,
+  acquireBatchLease,
+  releaseBatchLease,
   type MeteringStore,
   type ServerValues,
 } from "./metering";
@@ -32,6 +34,7 @@ import {
   mapPriceToPlan,
   resolveCheckoutPriceId,
   decideEntitlementWrite,
+  decideSubscriptionApply,
   pickUid,
   toEpochSeconds,
   type EntitlementIntent,
@@ -190,22 +193,40 @@ async function writeEntitlementFromIntent(
   uid: string,
   intent: EntitlementIntent,
 ): Promise<void> {
-  const ref = getFirestore().collection("entitlements").doc(uid);
-  const snap = await ref.get();
-  const decision = decideEntitlementWrite(
-    snap.exists ? (snap.data() as Record<string, unknown>) : null,
-    intent,
-  );
+  const db = getFirestore();
+  const ref = db.collection("entitlements").doc(uid);
+  // Read-decide-write MUST be atomic. Stripe delivers a subscription's lifecycle
+  // events out of order and can emit two Events for one change, so several
+  // webhooks for the same uid can run concurrently (multiple Cloud Run
+  // instances, or overlapping retries). A plain get()→decide()→set() interleaves
+  // at the get(): two handlers both read the OLD doc, both decide "apply", and
+  // the one that writes LAST wins — which can be the older/stale event, undoing
+  // the ordering + terminal-revoke invariants decideEntitlementWrite enforces
+  // (a permanent money leak, since there is no reconcile job). Running it inside
+  // a Firestore transaction makes the whole read-decide-write serialize per doc;
+  // Firestore auto-retries on contention and decideEntitlementWrite is pure, so
+  // re-running against the winner's fresh state is always correct.
+  const decision = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const d = decideEntitlementWrite(
+      snap.exists ? (snap.data() as Record<string, unknown>) : null,
+      intent,
+    );
+    if (d.apply) {
+      tx.set(
+        ref,
+        { ...d.fields, updatedAt: FieldValue.serverTimestamp() },
+        { merge: true },
+      );
+    }
+    return d;
+  });
   if (!decision.apply) {
     console.log(
       `[stripe] entitlement skip uid=${uid} reason=${decision.reason} evt=${intent.eventId}`,
     );
     return;
   }
-  await ref.set(
-    { ...decision.fields, updatedAt: FieldValue.serverTimestamp() },
-    { merge: true },
-  );
   entCache.delete(uid);
   console.log(
     `[stripe] entitlement set uid=${uid} plan=${decision.fields.plan} status=${decision.fields.status} evt=${intent.eventId}`,
@@ -220,26 +241,36 @@ async function applySubscription(
   eventCreated: number,
 ): Promise<void> {
   const ourStatus = mapStripeStatus(sub.status);
-  if (!ourStatus) {
-    // Unknown Stripe status → preserve current state, never silently downgrade.
-    console.error(
-      `[stripe] unknown subscription status "${sub.status}" sub=${sub.id}; preserving entitlement`,
-    );
-    return;
-  }
   const item = sub.items?.data?.[0];
   const priceId = item?.price?.id;
   const plan = mapPriceToPlan(priceId, PRICE_MAP);
-  if (!plan) {
-    // Fail CLOSED on GRANT (never grant a plan for a price we don't recognize),
-    // but fail SAFE on REVOKE: if this event revokes access (unpaid/paused →
-    // on_hold, canceled/incomplete → canceled), downgrade to free even when the
-    // price is unmapped (e.g. a price id rotated out of env while a subscriber
-    // still holds it), so a non-payer can't retain paid access on a config drift.
-    if (ourStatus === "on_hold" || ourStatus === "canceled") {
+  // The grant/revoke/skip decision (unknown status, unmapped price, fail-closed
+  // on grant but fail-safe on revoke) is a pure function so it has a regression
+  // net (billing.test.ts) — index.ts itself is not unit-tested.
+  const action = decideSubscriptionApply(ourStatus, plan);
+  switch (action.action) {
+    case "skip_unknown_status":
+      // Unknown Stripe status → preserve current state, never silently downgrade.
+      console.error(
+        `[stripe] unknown subscription status "${sub.status}" sub=${sub.id}; preserving entitlement`,
+      );
+      return;
+    case "skip_unmapped_grant":
+      // A price we don't recognize on a non-revoking event: never grant a plan
+      // for it (fail closed). Only reached when ourStatus is active/grace.
+      console.error(
+        `[stripe] price ${priceId} not mapped to a plan (sub=${sub.id}); skipping grant`,
+      );
+      return;
+    case "revoke_unmapped":
+      // Fail SAFE on REVOKE: this event revokes access (unpaid/paused → on_hold,
+      // canceled/incomplete → canceled) but the price is unmapped (e.g. a price
+      // id rotated out of env while a subscriber still holds it). Downgrade to
+      // free so a non-payer can't retain paid access on a config drift. ourStatus
+      // is guaranteed on_hold|canceled here (decideSubscriptionApply contract).
       await writeEntitlementFromIntent(uid, {
         plan: "free",
-        status: ourStatus,
+        status: ourStatus as "on_hold" | "canceled",
         eventId,
         eventCreated,
         stripeCustomerId: stripeCustomerId(sub.customer),
@@ -247,27 +278,28 @@ async function applySubscription(
         cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
       });
       return;
+    case "grant": {
+      // current_period_end moved to the item level as of API Basil (2025-03-31).
+      const periodEnd = toEpochSeconds(
+        (item as unknown as { current_period_end?: number })
+          ?.current_period_end,
+      );
+      await writeEntitlementFromIntent(uid, {
+        plan: action.plan,
+        // ourStatus is non-null on the grant path (decideSubscriptionApply
+        // returns skip_unknown_status when it is null).
+        status: ourStatus as "active" | "grace" | "on_hold" | "canceled",
+        eventId,
+        eventCreated,
+        stripeCustomerId: stripeCustomerId(sub.customer),
+        stripeSubscriptionId: sub.id,
+        currentPeriodEnd: periodEnd || undefined,
+        cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
+        priceId: priceId || undefined,
+      });
+      return;
     }
-    console.error(
-      `[stripe] price ${priceId} not mapped to a plan (sub=${sub.id}); skipping grant`,
-    );
-    return;
   }
-  // current_period_end moved to the item level as of API Basil (2025-03-31).
-  const periodEnd = toEpochSeconds(
-    (item as unknown as { current_period_end?: number })?.current_period_end,
-  );
-  await writeEntitlementFromIntent(uid, {
-    plan,
-    status: ourStatus,
-    eventId,
-    eventCreated,
-    stripeCustomerId: stripeCustomerId(sub.customer),
-    stripeSubscriptionId: sub.id,
-    currentPeriodEnd: periodEnd || undefined,
-    cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
-    priceId: priceId || undefined,
-  });
 }
 
 /** Resolve the uid a Subscription belongs to (metadata first, then reverse map). */
@@ -378,10 +410,19 @@ const meteringStore: MeteringStore = {
       .doc(uid)
       .collection("months")
       .doc(ym) as never,
+  batchLockDoc: (uid) =>
+    getFirestore().collection("batchLocks").doc(uid) as never,
   runTransaction(fn) {
     return getFirestore().runTransaction(fn as never);
   },
 };
+
+// Per-uid batch-transcribe in-flight lease: cap concurrent BatchRecognize jobs
+// at 1 so a fan-out of concurrent requests cannot launch dozens of paid
+// multi-minute STT jobs in parallel (see metering.ts decideBatchLease). MUST
+// exceed the Cloud Run request timeout (900s) so a legitimately long batch is
+// never reclaimed as "stale" while it is still running.
+const BATCH_LEASE_STALE_MS = 20 * 60 * 1000;
 const serverValues: ServerValues = {
   increment: (n) => FieldValue.increment(n),
   serverTimestamp: () => FieldValue.serverTimestamp(),
@@ -549,7 +590,15 @@ async function resolvePlan(
 }
 
 const entCache = new Map<string, { plan: Plan; at: number }>();
-const ENT_TTL_MS = 60_000;
+// Short TTL so a plan change (cancel / upgrade) written by the webhook becomes
+// visible quickly. The webhook busts THIS instance's cache immediately
+// (entCache.delete on write), but Cloud Run runs multiple instances and a
+// webhook only mutates the one it lands on — so OTHER instances serve the cached
+// plan until their entry expires. 15s bounds that cross-instance staleness to a
+// brief window (residual, LOW: a just-canceled user keeps access for ≤15s on
+// instances that didn't receive the webhook; a just-upgraded user may see the
+// old lower plan for ≤15s — self-heals on expiry, and the client re-polls).
+const ENT_TTL_MS = 15_000;
 
 async function loadEntitlement(uid: string): Promise<Plan> {
   const cached = entCache.get(uid);
@@ -979,6 +1028,52 @@ const server = http.createServer(async (req, res) => {
       // Reuse the stored customer so lifecycle webhooks map back to this uid;
       // create one (tagged with firebaseUid) on the first purchase.
       let customerId = await getStoredCustomerId(uid);
+      // TOCTOU hardening: the derivePlan check above reads the Firestore
+      // entitlement doc, which LAGS a live Stripe subscription while its webhook
+      // is still in flight. A double-tap / stale client could slip past it and
+      // create a SECOND subscription (Stripe Checkout does not dedupe per
+      // customer) → duplicate active subs → double charge. When the customer
+      // already exists, ask Stripe directly — the authoritative source — whether
+      // they hold any non-terminated subscription before opening a new checkout.
+      if (customerId) {
+        try {
+          const subs = await stripe.subscriptions.list({
+            customer: customerId,
+            status: "all",
+            limit: 10,
+          });
+          // Split by whether the sub currently GRANTS access, mirroring
+          // derivePlan (paidOk = active|grace|trialing; past_due maps to grace).
+          //  - HAS_ACCESS: the user already has (or retains, during dunning)
+          //    paid access → block a 2nd checkout as already_subscribed (this is
+          //    the webhook-lag double-charge guard the derivePlan precheck above
+          //    can miss).
+          //  - NEEDS_PAYMENT: a live-but-non-paying sub (retries exhausted →
+          //    unpaid, or paused). derivePlan reports these as free (no access),
+          //    so the precheck above lets them through — but opening a SECOND sub
+          //    would double-charge once the old one resumes. They must fix payment
+          //    on the EXISTING sub, so route them to the portal via a distinct
+          //    code instead of the misleading already_subscribed dead-end.
+          const HAS_ACCESS = ["active", "trialing", "past_due"];
+          const NEEDS_PAYMENT = ["unpaid", "paused"];
+          if (subs.data.some((s) => HAS_ACCESS.includes(s.status))) {
+            res.writeHead(409, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "already_subscribed" }));
+            return;
+          }
+          if (subs.data.some((s) => NEEDS_PAYMENT.includes(s.status))) {
+            res.writeHead(409, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "payment_required" }));
+            return;
+          }
+        } catch (e) {
+          // Never block a legitimate purchase on a transient Stripe list error:
+          // the Firestore precheck above and the webhook's event.id idempotency
+          // still guard against most dupes. Logged, never silent.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error(`[stripe] subscriptions.list precheck ${uid}: ${msg}`);
+        }
+      }
       if (!customerId) {
         let email: string | undefined;
         try {
@@ -1216,6 +1311,9 @@ const server = http.createServer(async (req, res) => {
     let g: GuardResult | null = null;
     let committed = false;
     let reserveMin = 0;
+    let leaseUid = "";
+    let leaseHeld = false;
+    let leaseToken = 0; // the heldAt generation we acquired (for a fenced release)
     try {
       const uid = await verifyFirebaseToken(req.headers.authorization);
       const body = await readBody();
@@ -1266,6 +1364,40 @@ const server = http.createServer(async (req, res) => {
       reserveMin = clampBatchReserveMinutes(chunks);
       g = await guard(req, res, uid, "batchMin", reserveMin);
       if (!g.ok) return;
+
+      // Per-uid in-flight lease: cap concurrent batch jobs at 1 so a fan-out of
+      // concurrent requests (each passing the floored-at-1 reserve) cannot launch
+      // dozens of paid multi-minute BatchRecognize jobs in parallel. Acquired
+      // AFTER the (cheap) reserve and BEFORE the (expensive) job launch. On a
+      // lock-infra error we fail OPEN (proceed without a lease) so a Firestore
+      // blip never breaks a single legitimate transcription; on genuine
+      // contention we return 429 and refund the reserve via `finally`.
+      leaseUid = uid;
+      leaseToken = Date.now();
+      let leaseContended = false;
+      try {
+        leaseHeld = await acquireBatchLease(
+          meteringStore,
+          serverValues,
+          uid,
+          leaseToken,
+          BATCH_LEASE_STALE_MS,
+        );
+        leaseContended = !leaseHeld;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[batch] lease acquire failed for ${uid}: ${msg}`);
+      }
+      if (leaseContended) {
+        res.writeHead(429, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "batch_in_progress",
+            message: "別の文字起こしが処理中です。完了後に再度お試しください。",
+          }),
+        );
+        return;
+      }
 
       const multi = chunks.length > 1;
 
@@ -1495,8 +1627,19 @@ const server = http.createServer(async (req, res) => {
       console.error(`[batch] Error: ${message}`);
       sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
     } finally {
+      // Release the in-flight lease so the user's next batch can proceed. If the
+      // Cloud Run request timeout (900s) kills the process before this runs, the
+      // lease is reclaimed as stale after BATCH_LEASE_STALE_MS (20min > 900s).
+      if (leaseHeld) {
+        await releaseBatchLease(meteringStore, leaseUid, leaseToken).catch(
+          (e) =>
+            console.error(`[batch] lease release failed for ${leaseUid}:`, e),
+        );
+      }
       // On any non-success path (transcription 502, timeout, throw) refund the
-      // full reserve so a failed batch never costs the user minutes.
+      // full reserve so a failed batch never costs the user minutes. Combined
+      // with the lease above this bounds abuse: a timeout-driven refund loop can
+      // now only run ONE job at a time per uid (residual serial retry accepted).
       await refundIfUncommitted(g, committed);
     }
     return;

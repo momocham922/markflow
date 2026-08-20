@@ -2,9 +2,13 @@ import { describe, it, expect } from "vitest";
 import {
   reserveUsage,
   adjustUsage,
+  decideBatchLease,
+  acquireBatchLease,
+  releaseBatchLease,
   type MeteringStore,
   type UsageDoc,
   type UsageTxn,
+  type BatchLockDoc,
   type ServerValues,
 } from "./metering";
 import { reconcileBatchDelta, PLAN_LIMITS } from "./gating";
@@ -39,6 +43,8 @@ function isTs(v: unknown): boolean {
 
 class FakeStore implements MeteringStore {
   docs = new Map<string, Record<string, unknown>>();
+  /** batchLocks/{uid} lease docs. */
+  locks = new Map<string, Record<string, unknown>>();
   /** How many times a document write actually hit the store. */
   writeCount = 0;
   /** How many transactions were opened. */
@@ -78,6 +84,28 @@ class FakeStore implements MeteringStore {
       },
       async set(data) {
         store.write(key, data);
+      },
+    };
+  }
+
+  batchLockDoc(uid: string): BatchLockDoc {
+    const key = uid;
+    const store = this;
+    return {
+      async get() {
+        const d = store.locks.get(key);
+        return { exists: d !== undefined, data: () => d };
+      },
+      async set(data) {
+        const cur = store.locks.get(key) ?? {};
+        for (const [k, v] of Object.entries(data)) {
+          if (isTs(v)) cur[k] = APPLIED_TS;
+          else cur[k] = v;
+        }
+        store.locks.set(key, cur);
+      },
+      async delete() {
+        store.locks.delete(key);
       },
     };
   }
@@ -262,5 +290,152 @@ describe("reserve → reconcile/refund flows", () => {
     // Upstream failed, request uncommitted → refund -cost.
     await adjustUsage(store, sv, "u1", "sttCalls", -1, "free", YM);
     expect(store.peek("u1")!.sttCalls).toBe(0);
+  });
+});
+
+// =====================================================================
+// Batch-transcribe in-flight lease (DoS brake): cap concurrent BatchRecognize
+// jobs at 1 per uid so a fan-out of concurrent requests cannot launch dozens of
+// paid multi-minute STT jobs in parallel.
+// =====================================================================
+const STALE_MS = 20 * 60 * 1000; // must exceed the Cloud Run 900s request timeout
+
+describe("decideBatchLease (pure)", () => {
+  it("acquires when there is no holder (absent / 0 / null)", () => {
+    expect(decideBatchLease(0, 1_000_000, STALE_MS)).toEqual({
+      acquire: true,
+      heldAt: 1_000_000,
+    });
+    expect(decideBatchLease(null, 1_000_000, STALE_MS)).toEqual({
+      acquire: true,
+      heldAt: 1_000_000,
+    });
+    expect(decideBatchLease(undefined, 1_000_000, STALE_MS)).toEqual({
+      acquire: true,
+      heldAt: 1_000_000,
+    });
+  });
+
+  it("REJECTS when a fresh holder still owns the lease", () => {
+    const heldAt = 1_000_000;
+    const now = heldAt + 60_000; // 1 min later, well within stale window
+    expect(decideBatchLease(heldAt, now, STALE_MS)).toEqual({
+      acquire: false,
+      heldAt,
+    });
+  });
+
+  it("acquires when the holder is STALE (crashed / killed before release)", () => {
+    const heldAt = 1_000_000;
+    const now = heldAt + STALE_MS + 1; // just past the stale threshold
+    expect(decideBatchLease(heldAt, now, STALE_MS)).toEqual({
+      acquire: true,
+      heldAt: now,
+    });
+  });
+
+  it("treats the exact stale boundary as reclaimable (>= staleMs)", () => {
+    const heldAt = 1_000_000;
+    const now = heldAt + STALE_MS; // exactly staleMs elapsed
+    expect(decideBatchLease(heldAt, now, STALE_MS).acquire).toBe(true);
+  });
+
+  it("treats a corrupt (non-numeric) heldAt as no holder", () => {
+    expect(
+      decideBatchLease("garbage" as unknown as number, 1_000_000, STALE_MS)
+        .acquire,
+    ).toBe(true);
+  });
+});
+
+describe("acquireBatchLease / releaseBatchLease (wiring)", () => {
+  it("acquires a free lease and records the holder inside a transaction", async () => {
+    const store = new FakeStore();
+    const ok = await acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS);
+    expect(ok).toBe(true);
+    expect(store.txnCount).toBe(1);
+    const lock = store.locks.get("u1")!;
+    expect(lock.heldAt).toBe(1_000_000);
+    expect(lock.uid).toBe("u1");
+    expect(lock.updatedAt).toBe(APPLIED_TS);
+  });
+
+  it("REJECTS a second acquire while a fresh lease is held (no double-write)", async () => {
+    const store = new FakeStore();
+    await acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS);
+    const second = await acquireBatchLease(
+      store,
+      sv,
+      "u1",
+      1_000_000 + 60_000,
+      STALE_MS,
+    );
+    expect(second).toBe(false);
+    // The original holder's timestamp is untouched.
+    expect(store.locks.get("u1")!.heldAt).toBe(1_000_000);
+  });
+
+  it("re-acquires after the holder goes stale", async () => {
+    const store = new FakeStore();
+    await acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS);
+    const later = 1_000_000 + STALE_MS + 1;
+    const ok = await acquireBatchLease(store, sv, "u1", later, STALE_MS);
+    expect(ok).toBe(true);
+    expect(store.locks.get("u1")!.heldAt).toBe(later);
+  });
+
+  it("release frees the lease so the next request can acquire", async () => {
+    const store = new FakeStore();
+    await acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS);
+    await releaseBatchLease(store, "u1", 1_000_000);
+    expect(store.locks.get("u1")).toBeUndefined();
+    // A fresh (non-stale) acquire now succeeds because the holder is gone.
+    const ok = await acquireBatchLease(
+      store,
+      sv,
+      "u1",
+      1_000_000 + 1000,
+      STALE_MS,
+    );
+    expect(ok).toBe(true);
+  });
+
+  it("fenced release is a NO-OP when the lock was reclaimed by a newer generation", async () => {
+    const store = new FakeStore();
+    // Request A acquires at T. Its lease later goes stale and request B reclaims
+    // it at T+STALE (writing a NEW heldAt). When A's finally finally runs, its
+    // fenced release must NOT delete B's fresh lease.
+    await acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS);
+    const reclaimT = 1_000_000 + STALE_MS;
+    const bReclaimed = await acquireBatchLease(
+      store,
+      sv,
+      "u1",
+      reclaimT,
+      STALE_MS,
+    );
+    expect(bReclaimed).toBe(true);
+    // A releases with ITS token (1_000_000) — must not touch B's lease (reclaimT).
+    await releaseBatchLease(store, "u1", 1_000_000);
+    expect(Number(store.locks.get("u1")?.heldAt)).toBe(reclaimT);
+    // B releases with its own token → the lock is now actually freed.
+    await releaseBatchLease(store, "u1", reclaimT);
+    expect(store.locks.get("u1")).toBeUndefined();
+  });
+
+  it("leases are per-uid (one user's lease never blocks another)", async () => {
+    const store = new FakeStore();
+    await acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS);
+    const other = await acquireBatchLease(store, sv, "u2", 1_000_000, STALE_MS);
+    expect(other).toBe(true);
+  });
+
+  it("propagates a store error (caller decides fail-open)", async () => {
+    const store = new FakeStore();
+    store.failNextTransaction();
+    await expect(
+      acquireBatchLease(store, sv, "u1", 1_000_000, STALE_MS),
+    ).rejects.toThrow("firestore unavailable");
+    expect(store.locks.get("u1")).toBeUndefined();
   });
 });

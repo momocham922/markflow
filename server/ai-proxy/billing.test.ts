@@ -6,6 +6,7 @@ import {
   resolveCheckoutPriceId,
   isEventNewer,
   decideEntitlementWrite,
+  decideSubscriptionApply,
   pickUid,
   toEpochSeconds,
   type EntitlementIntent,
@@ -343,7 +344,8 @@ describe("decideEntitlementWrite", () => {
 
   it("ignores a same-second TERMINAL delete for a DIFFERENT subscription (swap safety)", () => {
     // Current doc tracks the NEW active sub_2; a same-second delete of the OLD
-    // sub_1 must not revoke the new subscription.
+    // sub_1 must not revoke the new subscription. The cross-sub terminal guard
+    // catches this before the tie-break (reason: terminal_other_sub).
     const existingNew = {
       plan: "pro",
       status: "active",
@@ -361,7 +363,7 @@ describe("decideEntitlementWrite", () => {
     };
     expect(decideEntitlementWrite(existingNew, delOld)).toEqual({
       apply: false,
-      reason: "stale_event",
+      reason: "terminal_other_sub",
     });
   });
 
@@ -389,6 +391,8 @@ describe("decideEntitlementWrite", () => {
   });
 
   it("drops a strictly-OLDER terminal delete (cannot revoke a newer subscription)", () => {
+    // The cross-sub terminal guard fires regardless of age, so an OLD delete of
+    // a DIFFERENT sub is rejected as terminal_other_sub (never revokes sub_2).
     const existingNew = {
       plan: "pro",
       status: "active",
@@ -406,8 +410,60 @@ describe("decideEntitlementWrite", () => {
     };
     expect(decideEntitlementWrite(existingNew, delOld)).toEqual({
       apply: false,
-      reason: "stale_event",
+      reason: "terminal_other_sub",
     });
+  });
+
+  it("drops a strictly-NEWER terminal delete for a DIFFERENT subscription (no cross-sub revoke)", () => {
+    // THE PREVIOUSLY-MISSING COVERAGE (audit Finding #2, HIGH). A delete of the
+    // OLD sub_1 arriving STRICTLY LATER than the current doc's active sub_2 must
+    // NOT fall through isEventNewer and unconditionally write plan:free — that
+    // would revoke a DIFFERENT, currently-PAYING subscription (permanent money
+    // leak, no reconcile job). The cross-sub terminal guard blocks it.
+    const existingNew = {
+      plan: "pro",
+      status: "active",
+      source: "stripe",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_2",
+    };
+    const delOldNewer: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del_old_newer",
+      eventCreated: 9000, // strictly newer than the active doc
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    const d = decideEntitlementWrite(existingNew, delOldNewer);
+    expect(d).toEqual({ apply: false, reason: "terminal_other_sub" });
+    // And the paying subscription still derives pro (was NOT revoked).
+    expect(derivePlan(existingNew)).toBe("pro");
+  });
+
+  it("still lets a strictly-newer terminal delete of the SAME sub revoke it", () => {
+    // The cross-sub guard is scoped to DIFFERENT subs; the doc's own sub must
+    // still be revocable by its terminal delete.
+    const existingSame = {
+      plan: "pro",
+      status: "active",
+      source: "stripe",
+      eventCreated: 2000,
+      stripeSubscriptionId: "sub_1",
+    };
+    const delSame: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del_same",
+      eventCreated: 9000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    const d = decideEntitlementWrite(existingSame, delSame);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(derivePlan(d.fields)).toBe("free");
+    expect(d.fields.terminal).toBe(true);
   });
 
   it("omits optional fields that were not provided (partial intent)", () => {
@@ -447,6 +503,60 @@ describe("decideEntitlementWrite", () => {
     );
     if (!d.apply) throw new Error("unreachable");
     expect(derivePlan(d.fields)).toBe("free");
+  });
+});
+
+// =====================================================================
+// decideSubscriptionApply — grant / revoke / skip decision from an
+// authoritative Subscription's mapped status + mapped plan.
+// =====================================================================
+describe("decideSubscriptionApply", () => {
+  it("preserves the doc on an UNKNOWN status (never downgrade a payer)", () => {
+    // ourStatus === null (mapStripeStatus didn't recognize it) → skip, even if a
+    // plan mapped. Preserving the existing entitlement is the safe choice.
+    expect(decideSubscriptionApply(null, "pro")).toEqual({
+      action: "skip_unknown_status",
+    });
+    expect(decideSubscriptionApply(null, null)).toEqual({
+      action: "skip_unknown_status",
+    });
+  });
+
+  it("grants the mapped plan for a recognized status + price", () => {
+    expect(decideSubscriptionApply("active", "pro")).toEqual({
+      action: "grant",
+      plan: "pro",
+    });
+    expect(decideSubscriptionApply("grace", "team")).toEqual({
+      action: "grant",
+      plan: "team",
+    });
+    // A recognized plan is granted even on on_hold/canceled — derivePlan then
+    // revokes ACCESS from the status while retaining the plan for reactivation.
+    expect(decideSubscriptionApply("on_hold", "pro")).toEqual({
+      action: "grant",
+      plan: "pro",
+    });
+  });
+
+  it("REVOKES to free on an unmapped price when the event revokes access", () => {
+    // Fail SAFE: a price rotated out of env must not let a non-payer keep access.
+    expect(decideSubscriptionApply("on_hold", null)).toEqual({
+      action: "revoke_unmapped",
+    });
+    expect(decideSubscriptionApply("canceled", null)).toEqual({
+      action: "revoke_unmapped",
+    });
+  });
+
+  it("SKIPS granting on an unmapped price when the event would grant access", () => {
+    // Fail CLOSED: never grant a plan for a price we can't recognize.
+    expect(decideSubscriptionApply("active", null)).toEqual({
+      action: "skip_unmapped_grant",
+    });
+    expect(decideSubscriptionApply("grace", null)).toEqual({
+      action: "skip_unmapped_grant",
+    });
   });
 });
 

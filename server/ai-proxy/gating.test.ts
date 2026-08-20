@@ -261,12 +261,19 @@ describe("shouldRefund", () => {
 describe("resolveViewAs", () => {
   const owners = new Set(["owner1", "owner2"]);
 
-  it("honors a valid plan header for an owner", () => {
+  it("honors a valid metered plan header for an owner", () => {
     expect(resolveViewAs("free", "owner1", owners)).toBe("free");
     expect(resolveViewAs("pro", "owner1", owners)).toBe("pro");
     expect(resolveViewAs("team", "owner2", owners)).toBe("team");
-    // Owner may also view "internal" (a lateral/no-op, still allowed).
-    expect(resolveViewAs("internal", "owner1", owners)).toBe("internal");
+  });
+
+  it("REFUSES X-View-As:internal even for an owner (no header-escalation)", () => {
+    // SECURITY (audit Finding #12): "internal" is unlimited/unmetered. If an
+    // owner whose real entitlement is free/pro could set X-View-As:internal they
+    // would escalate to unmetered access via a header. Only free/pro/team are
+    // previewable (VIEW_AS_PLANS); internal is rejected → null (real plan used).
+    expect(resolveViewAs("internal", "owner1", owners)).toBeNull();
+    expect(resolveViewAs(" Internal ", "owner1", owners)).toBeNull();
   });
 
   it("ignores the header entirely for non-owners (no escalation)", () => {

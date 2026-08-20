@@ -21,6 +21,11 @@ export type Feature = "aiCalls" | "sttCalls" | "batchMin" | "images";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const VIEW_AS_KEY = "markflow_view_as";
+// The plan a Checkout is in flight for, persisted so it survives the process
+// being OS-killed while the external Checkout browser is foregrounded (common on
+// mobile). Without it, a cold relaunch on markflow://billing/success would poll
+// with no target and could latch a just-upgraded payer on a transient stale Free.
+const PENDING_CHECKOUT_KEY = "markflow_pending_checkout";
 
 // Master switch for the purchase UI. Stays OFF (no CTA anywhere) until the owner
 // has created the Stripe account/products and set the server secrets — so the
@@ -37,20 +42,25 @@ export type BillingInterval = "month" | "year";
  * can dismiss it; desktop/Android use the OS browser. Falls back to window.open
  * on plain web where the Tauri commands are unavailable.
  */
-async function openBillingUrl(url: string): Promise<void> {
+async function openBillingUrl(url: string): Promise<boolean> {
   try {
     const { isIOS } = await import("@/platform");
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke(isIOS ? "open_safari_vc" : "open_external_url", { url });
+    return true;
   } catch (err) {
     console.error(
       "[billing] native open failed, falling back to window.open:",
       err,
     );
     try {
-      window.open(url, "_blank", "noopener");
+      // window.open returns null when blocked (e.g. popup blocker on plain web,
+      // or the user-activation window lost after our awaits). Treat that as a
+      // failure so the caller can surface it — never a silent no-op.
+      const w = window.open(url, "_blank", "noopener");
+      return w != null;
     } catch {
-      /* nothing more we can do */
+      return false;
     }
   }
 }
@@ -66,6 +76,8 @@ function billingErrorMessage(code: string): string {
       return "有効なサブスクリプションが見つかりません。";
     case "already_subscribed":
       return "すでに有効なプランをご利用中です。変更は「契約を管理」から行えます。";
+    case "payment_required":
+      return "以前のサブスクリプションのお支払いが未完了です。お支払い方法の更新ページを開きます。";
     case "unauthorized":
       return "サインインが必要です。";
     case "no_checkout_url":
@@ -96,6 +108,25 @@ function persistViewAs(plan: ViewAsPlan | null) {
   try {
     if (plan) localStorage.setItem(VIEW_AS_KEY, plan);
     else localStorage.removeItem(VIEW_AS_KEY);
+  } catch {
+    /* localStorage unavailable */
+  }
+}
+
+/** Purchasable plans only (pro/team). Used to validate the persisted target. */
+function loadPendingCheckout(): "pro" | "team" | null {
+  try {
+    const v = localStorage.getItem(PENDING_CHECKOUT_KEY);
+    return v === "pro" || v === "team" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistPendingCheckout(plan: "pro" | "team" | null) {
+  try {
+    if (plan) localStorage.setItem(PENDING_CHECKOUT_KEY, plan);
+    else localStorage.removeItem(PENDING_CHECKOUT_KEY);
   } catch {
     /* localStorage unavailable */
   }
@@ -134,6 +165,13 @@ interface EntitlementState {
   paywallOpen: boolean;
   /** Which metered feature triggered the paywall (for contextual copy). */
   paywallReason: Feature | null;
+  /**
+   * The plan the user is currently checking out (set when the Checkout browser
+   * opens, cleared once the entitlement reaches it). The billing-return handler
+   * passes this as pollEntitlement's `target` so the poll waits for the PURCHASED
+   * plan specifically, instead of stopping on any transient plan change.
+   */
+  pendingCheckoutPlan: ViewAsPlan | null;
 
   fetchEntitlement: () => Promise<void>;
   setViewAs: (plan: ViewAsPlan | null) => Promise<void>;
@@ -145,6 +183,8 @@ interface EntitlementState {
     plan: ViewAsPlan,
     interval?: BillingInterval,
   ) => Promise<void>;
+  /** Clear the pending-checkout target (store + persisted copy). */
+  clearPendingCheckout: () => void;
   /**
    * Open the Stripe customer portal (manage/cancel an existing subscription).
    * Returns the outcome so a caller OUTSIDE the paywall dialog (e.g. the
@@ -155,13 +195,18 @@ interface EntitlementState {
    */
   openBillingPortal: () => Promise<{ ok: boolean; error?: string }>;
   /**
-   * Poll `/v1/me/entitlement` until the plan changes or the budget is spent —
-   * used after returning from Checkout, since the webhook write + the endpoint's
-   * per-instance entitlement cache mean the new plan may lag a few seconds.
+   * Poll `/v1/me/entitlement` until the plan reaches `target` (or higher), or —
+   * when no target is given (portal return) — until it changes at all, or the
+   * budget is spent. Used after returning from Checkout/Portal, since the webhook
+   * write + the endpoint's per-instance entitlement cache mean the new plan may
+   * lag a few seconds. Passing `target` prevents a transient downward/stale read
+   * (e.g. a cross-instance cache still serving Free) from stopping the poll and
+   * latching a paying user on Free.
    */
   pollEntitlement: (opts?: {
     tries?: number;
     intervalMs?: number;
+    target?: ViewAsPlan | null;
   }) => Promise<void>;
   /** Open the upgrade dialog (no-op when billing is disabled). */
   openPaywall: (reason?: Feature | null) => void;
@@ -185,6 +230,9 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   billingError: null,
   paywallOpen: false,
   paywallReason: null,
+  // Seed from localStorage so a checkout target survives a cold relaunch (the
+  // process can be OS-killed while the external Checkout browser is foreground).
+  pendingCheckoutPlan: loadPendingCheckout(),
 
   fetchEntitlement: async () => {
     const user = auth.currentUser;
@@ -284,6 +332,11 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   reportQuota: (e) => set({ lastQuotaError: { ...e, at: Date.now() } }),
   clearQuota: () => set({ lastQuotaError: null }),
 
+  clearPendingCheckout: () => {
+    persistPendingCheckout(null);
+    set({ pendingCheckoutPlan: null });
+  },
+
   startCheckout: async (plan, interval = "month") => {
     if (!BILLING_ENABLED) return;
     const user = auth.currentUser;
@@ -310,11 +363,31 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
           .catch(() => ({}) as Record<string, unknown>);
         const code =
           typeof body.error === "string" ? body.error : `http_${res.status}`;
+        // A live-but-unpaid/paused subscription can't open a SECOND checkout (it
+        // would double-charge once the old one resumes) — the user must fix
+        // payment on the EXISTING sub. Route them straight to the billing portal
+        // instead of a dead-end "already subscribed" error they can't act on.
+        if (code === "payment_required") {
+          const r = await get().openBillingPortal();
+          if (r.ok) set({ billingError: billingErrorMessage(code) });
+          return;
+        }
         throw new Error(code);
       }
       const data = (await res.json()) as { url?: string };
       if (!data.url) throw new Error("no_checkout_url");
-      await openBillingUrl(data.url);
+      // Open the Checkout browser FIRST; only on a CONFIRMED open do we record
+      // the purchase target and dismiss the paywall. If the open fails (popup
+      // blocked / no browser), surface an error and keep the paywall up — never a
+      // silent no-op (the paywall is the only surface that renders billingError).
+      const opened = await openBillingUrl(data.url);
+      if (!opened) throw new Error("no_checkout_url");
+      set({
+        pendingCheckoutPlan: plan,
+        paywallOpen: false,
+        paywallReason: null,
+      });
+      persistPendingCheckout(plan);
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
       console.error("[billing] checkout failed:", raw);
@@ -368,6 +441,19 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   pollEntitlement: async (opts) => {
     const tries = opts?.tries ?? 20;
     const intervalMs = opts?.intervalMs ?? 3000;
+    const target = opts?.target ?? null;
+    // Ordered rank so "did the plan reach what I bought?" is a monotonic test,
+    // not a bare inequality. A checkout for "pro" must NOT stop the poll on a
+    // transient downward/stale read (e.g. a cached "free" served by another
+    // Cloud Run instance whose entCache hasn't expired yet) — that would latch
+    // a paying user on Free. With a target we stop ONLY when we've reached or
+    // exceeded it; downward/equal-to-baseline reads are ignored until then.
+    const RANK: Record<Plan, number> = {
+      free: 0,
+      pro: 1,
+      team: 2,
+      internal: 3,
+    };
     // Seed the baseline from a FRESH fetch. Before this call effectivePlan can
     // still be null (a failed/one-shot login fetch), and a null→"free" first
     // read would otherwise be mistaken for "the plan changed" — stopping the
@@ -376,17 +462,25 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     // (before stays null), we re-seed from the first successful read below.
     await get().fetchEntitlement();
     let before = get().effectivePlan;
+    // If we already satisfy the target at the baseline read, we're done.
+    if (target && before != null && RANK[before] >= RANK[target]) return;
     for (let i = 0; i < tries; i++) {
       await new Promise((r) => setTimeout(r, intervalMs));
       await get().fetchEntitlement();
       const now = get().effectivePlan;
       if (now == null) continue; // fetch failed; keep waiting
+      if (target) {
+        // Purchase/upgrade path: only an upward transition to (or past) the
+        // purchased plan ends the poll. Ignore downward/stale reads entirely.
+        if (RANK[now] >= RANK[target]) return;
+        continue;
+      }
       if (before == null) {
         before = now; // establish the baseline lazily after the first good read
         continue;
       }
-      // Stop as soon as the plan actually changes (up OR down). A no-op portal
-      // visit (e.g. cancel-at-period-end) just times out harmlessly.
+      // Untargeted (e.g. portal-return) path: stop as soon as the plan actually
+      // changes (up OR down). A no-op portal visit just times out harmlessly.
       if (now !== before) return;
     }
   },

@@ -159,5 +159,12 @@ service cloud.firestore {
     match /stripeCustomers/{customerId} {
       allow read, write: if false;
     }
+
+    // Batch-transcribe concurrency leases: written ONLY by the ai-proxy via the
+    // Admin SDK (bypasses these rules). Caps a user to one in-flight batch job;
+    // no client ever reads or writes them.
+    match /batchLocks/{userId} {
+      allow read, write: if false;
+    }
   }
 }

@@ -219,6 +219,36 @@ export function decideEntitlementWrite(
     return { apply: false, reason: `owned_by_${existingSource}` };
 
   const incomingTerminal = intent.terminal === true;
+
+  // CROSS-SUB TERMINAL SAFETY (applies REGARDLESS of event age). A terminal
+  // revoke (customer.subscription.deleted) may ONLY revoke the subscription the
+  // doc currently tracks. A customer can transiently hold two subscriptions
+  // (a checkout race, a manual dashboard sub, an on_hold sub left while a new one
+  // is bought), and Stripe emits each sub's lifecycle independently. Without this
+  // scope, a *strictly-newer* delete of the OLD sub would fall straight through
+  // the isEventNewer branch below and unconditionally write plan:free — revoking
+  // a DIFFERENT, currently-PAYING subscription. The same-second tie-break already
+  // scoped this via `sameSub`; a strict-newer delete must be scoped identically.
+  // Non-terminal events (created/updated) may legitimately swap the tracked sub,
+  // so this guard is terminal-only.
+  {
+    const existingSub = String(
+      (existing?.stripeSubscriptionId ?? "") as unknown,
+    ).trim();
+    const intentSub = String(
+      (intent.stripeSubscriptionId ?? "") as unknown,
+    ).trim();
+    if (
+      incomingTerminal &&
+      existingSource === "stripe" &&
+      existingSub &&
+      intentSub &&
+      existingSub !== intentSub
+    ) {
+      return { apply: false, reason: "terminal_other_sub" };
+    }
+  }
+
   if (!isEventNewer(intent.eventCreated, Number(existing?.eventCreated))) {
     // Same-second sibling tie-break. Stripe emits related lifecycle events within
     // one second, out of order, and `event.created` is only second-granular.
@@ -274,6 +304,37 @@ export function decideEntitlementWrite(
     fields.cancelAtPeriodEnd = intent.cancelAtPeriodEnd;
   if (intent.priceId) fields.priceId = intent.priceId;
   return { apply: true, fields };
+}
+
+/**
+ * Decide, from an authoritative Subscription's mapped status + mapped plan, what
+ * applySubscription must do. Extracted as a pure function so the money-critical
+ * invariants have a regression net (index.ts itself is not unit-tested):
+ *  - unknown Stripe status (ourStatus === null) → PRESERVE the current doc
+ *    (never silently downgrade a payer on a status we don't recognize).
+ *  - recognized price → GRANT that plan (with the mapped status).
+ *  - UNMAPPED price (mapPriceToPlan === null): fail CLOSED on grant but SAFE on
+ *    revoke — if the event revokes access (on_hold/canceled), still downgrade to
+ *    free (a price id rotated out of env must not let a non-payer keep access);
+ *    otherwise skip (never grant a plan for a price we can't recognize).
+ */
+export type SubscriptionAction =
+  | { action: "skip_unknown_status" }
+  | { action: "revoke_unmapped" }
+  | { action: "skip_unmapped_grant" }
+  | { action: "grant"; plan: "pro" | "team" };
+
+export function decideSubscriptionApply(
+  ourStatus: OurStatus | null,
+  plan: "pro" | "team" | null,
+): SubscriptionAction {
+  if (!ourStatus) return { action: "skip_unknown_status" };
+  if (!plan) {
+    if (ourStatus === "on_hold" || ourStatus === "canceled")
+      return { action: "revoke_unmapped" };
+    return { action: "skip_unmapped_grant" };
+  }
+  return { action: "grant", plan };
 }
 
 /**

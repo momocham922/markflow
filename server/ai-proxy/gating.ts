@@ -28,6 +28,17 @@ export const ALL_PLANS: ReadonlySet<Plan> = new Set<Plan>([
   "internal",
 ]);
 
+// Plans an owner may PREVIEW via X-View-As. "internal" is intentionally excluded:
+// it is unlimited/unmetered, so accepting X-View-As:internal would let an owner
+// whose real entitlement is free/pro escalate to unmetered access via a header
+// (the client type ViewAsPlan already excludes internal; the server must mirror
+// that, not merely trust the client to never send it).
+export const VIEW_AS_PLANS: ReadonlySet<Plan> = new Set<Plan>([
+  "free",
+  "pro",
+  "team",
+]);
+
 /** Parse a comma-separated env value into a trimmed, non-empty Set. */
 export function parseUidSet(env: string | undefined): Set<string> {
   return new Set(
@@ -51,7 +62,8 @@ export function resolveViewAs(
   const v = (Array.isArray(raw) ? raw[0] : raw)?.trim();
   if (!v) return null;
   if (!ownerUids.has(uid)) return null; // owner-only; ignore for everyone else
-  return ALL_PLANS.has(v as Plan) ? (v as Plan) : null;
+  // Only free/pro/team are previewable — never "internal" (see VIEW_AS_PLANS).
+  return VIEW_AS_PLANS.has(v as Plan) ? (v as Plan) : null;
 }
 
 /**
