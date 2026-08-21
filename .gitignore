@@ -1,8 +1,26 @@
 # Dependencies
 node_modules/
 
+# Secrets / local env (keep .env.example tracked)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Signing material (defensive — never commit even if currently outside the repo)
+*.keystore
+*.jks
+*.p8
+*.p12
+*.pem
+*.mobileprovision
+key.properties
+
 # Windows setup bundle (contains signing key)
 .windows-setup/
+
+# Internal staff uid override (PII — uid↔name roster kept out of git)
+scripts/internal-uids.local
 
 # Build
 dist/
@@ -28,3 +46,11 @@ test-results/
 npm-debug.log*
 pnpm-debug.log*
 .android-version-code
+
+# Build / tool caches (machine-generated)
+tsconfig.tsbuildinfo
+.firebase/
+
+# Local Claude runtime state
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

@@ -26,22 +26,40 @@ DB="(default)"
 BASE="https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/${DB}/documents"
 DRY_RUN="${DRY_RUN:-0}"
 
-# 2026-08-18 時点でアクティベート済みの社内スタッフ uid（8名 + テスト2）。
-# name はコメント（監査用）。REST には uid のみ使用。
+# アクティベート済みの社内スタッフ uid（実スタッフ8名分の10 uid + テスト2）。
+# 個人名は本ファイルに書かない（PII をリポジトリに載せない方針）。uid↔氏名の
+# 対応表はプロジェクト外の非公開メモに保持する。REST には uid のみ使用。
+# 実スタッフ以外の override が必要なときは scripts/internal-uids.local（gitignore
+# 済み・1 行 1 uid・# 以降コメント可）を置けばそちらを優先して読む。
 UIDS=(
-  "BqYnuaZy3GQ2jWDcpeEitfxFR173"  # 三田遼平 (personal / owner)
-  "9ff2wglT9QRmAyLqjrYJgPxIVb73"  # 三田遼平 (corp)
-  "A0lwZ2pMv7TPPpJuLJKXcOSLJwf1"  # Sota Sato
-  "CsNoefEnZLVz3i1eoOBkciKj6uw2"  # 古田太一 (corp)
-  "DC7LviMTDZMO5hVcUMkwQnGD4nG3"  # 林千咲
-  "95ubzl1zg2N9BgqTuaTM1p38PXr2"  # 篠崎隆太朗 (corp)
-  "F59z29niiRa15YyGzayMIzH5hK63"  # 三浦玲嗣
-  "ZeBRcujqF0NTuqT2Lbz2oMIrCZJ3"  # 翔太
-  "WkG0ditPu2NOIUGwgLsVRw4S0sf1"  # 岩﨑大造 (corp)
-  "RHyQXRfPouf9dHI9nI9D4Q652ER2"  # 岩崎大造 (personal)
+  "BqYnuaZy3GQ2jWDcpeEitfxFR173"  # staff-01 (owner / personal)
+  "9ff2wglT9QRmAyLqjrYJgPxIVb73"  # staff-01 (owner / corp)
+  "A0lwZ2pMv7TPPpJuLJKXcOSLJwf1"  # staff-02
+  "CsNoefEnZLVz3i1eoOBkciKj6uw2"  # staff-03 (corp)
+  "DC7LviMTDZMO5hVcUMkwQnGD4nG3"  # staff-04
+  "95ubzl1zg2N9BgqTuaTM1p38PXr2"  # staff-05 (corp)
+  "F59z29niiRa15YyGzayMIzH5hK63"  # staff-06
+  "ZeBRcujqF0NTuqT2Lbz2oMIrCZJ3"  # staff-07
+  "WkG0ditPu2NOIUGwgLsVRw4S0sf1"  # staff-08 (corp)
+  "RHyQXRfPouf9dHI9nI9D4Q652ER2"  # staff-08 (personal)
   "GmlVWUd6j0QksScUCK8aPOmHS913"  # test-sync-a (test account)
   "D7OFKHqxQtTqdIQzoJP95VLkCV42"  # test-sync-b (test account)
 )
+
+# Optional untracked override: one uid per line (# comments allowed). Lets staff
+# be added/rotated without editing this tracked file (keeps future PII out of git).
+# bash 3.2 safe (macOS default bash has no mapfile) — read line by line.
+LOCAL_UIDS_FILE="$(dirname "$0")/internal-uids.local"
+if [ -f "$LOCAL_UIDS_FILE" ]; then
+  OVERRIDE=()
+  while IFS= read -r token; do
+    [ -n "$token" ] && OVERRIDE+=("$token")
+  done < <(sed 's/#.*//' "$LOCAL_UIDS_FILE" | grep -oE '[A-Za-z0-9]+')
+  if [ "${#OVERRIDE[@]}" -gt 0 ]; then
+    UIDS=("${OVERRIDE[@]}")
+    echo "  (using ${#UIDS[@]} uids from internal-uids.local override)"
+  fi
+fi
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
