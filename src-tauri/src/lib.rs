@@ -872,10 +872,38 @@ struct UpdateCheckResult {
     body: Option<String>,
 }
 
-const STABLE_ENDPOINT: &str =
+// --- Update manifest endpoints ---
+// Default = public GitHub Releases (works while the repo is public, unchanged
+// behavior for every existing build). The distribution migration (decision #1)
+// self-hosts the manifests + artifacts behind markflow.jp/updates (GCS-backed,
+// see hosting/nginx.conf + scripts/release-updates-gcs.sh) so the GitHub repo
+// can be made PRIVATE without breaking auto-update. The transition build is
+// produced by setting MARKFLOW_UPDATE_BASE=https://markflow.jp/updates at
+// COMPILE time — kept as a compile-time env (not a runtime flag) because Tauri
+// resolves the updater endpoint at build; keeping the default on GitHub means
+// the plain working tree is always shippable even before the new host exists.
+const STABLE_ENDPOINT_GITHUB: &str =
     "https://github.com/momocham922/markflow/releases/latest/download/latest.json";
-const BETA_ENDPOINT: &str =
+const BETA_ENDPOINT_GITHUB: &str =
     "https://github.com/momocham922/markflow/releases/download/beta/beta.json";
+
+fn stable_endpoint() -> String {
+    match option_env!("MARKFLOW_UPDATE_BASE") {
+        Some(base) if !base.is_empty() => {
+            format!("{}/latest.json", base.trim_end_matches('/'))
+        }
+        _ => STABLE_ENDPOINT_GITHUB.to_string(),
+    }
+}
+
+fn beta_endpoint() -> String {
+    match option_env!("MARKFLOW_UPDATE_BASE") {
+        Some(base) if !base.is_empty() => {
+            format!("{}/beta.json", base.trim_end_matches('/'))
+        }
+        _ => BETA_ENDPOINT_GITHUB.to_string(),
+    }
+}
 
 #[tauri::command]
 async fn check_for_update(
@@ -883,8 +911,8 @@ async fn check_for_update(
     channel: String,
 ) -> Result<Option<UpdateCheckResult>, String> {
     let endpoint = match channel.as_str() {
-        "beta" => BETA_ENDPOINT,
-        _ => STABLE_ENDPOINT,
+        "beta" => beta_endpoint(),
+        _ => stable_endpoint(),
     };
 
     let url: url::Url = endpoint.parse().map_err(|e: url::ParseError| e.to_string())?;
@@ -909,8 +937,8 @@ async fn check_for_update(
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), String> {
     let endpoint = match channel.as_str() {
-        "beta" => BETA_ENDPOINT,
-        _ => STABLE_ENDPOINT,
+        "beta" => beta_endpoint(),
+        _ => stable_endpoint(),
     };
 
     let url: url::Url = endpoint.parse().map_err(|e: url::ParseError| e.to_string())?;
@@ -943,7 +971,7 @@ async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), St
 /// Bypasses semver comparison so beta users can switch back to stable.
 #[tauri::command]
 async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
-    let url: url::Url = STABLE_ENDPOINT
+    let url: url::Url = stable_endpoint()
         .parse()
         .map_err(|e: url::ParseError| e.to_string())?;
 
@@ -2500,9 +2528,9 @@ pub fn run() {
                         .as_deref()
                         .unwrap_or("");
                     let endpoint = if version.contains("beta") {
-                        BETA_ENDPOINT
+                        beta_endpoint()
                     } else {
-                        STABLE_ENDPOINT
+                        stable_endpoint()
                     };
 
                     let url: url::Url = match endpoint.parse() {
