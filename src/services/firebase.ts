@@ -39,10 +39,40 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "",
 };
 
+// Only the PUBLIC client_id ships in the bundle. The client_secret lives ONLY
+// on the ai-proxy (BFF): the browser runs the authorization-code flow, then the
+// received `code` is exchanged for tokens server-side via exchangeOAuthCode().
+// Never reintroduce VITE_GOOGLE_CLIENT_SECRET / VITE_GITHUB_CLIENT_SECRET here —
+// a client secret in a distributed binary / public repo is a leaked secret.
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-const GOOGLE_CLIENT_SECRET = import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
 const GITHUB_CLIENT_ID = import.meta.env.VITE_GITHUB_CLIENT_ID || "";
-const GITHUB_CLIENT_SECRET = import.meta.env.VITE_GITHUB_CLIENT_SECRET || "";
+const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
+
+/**
+ * Exchange an OAuth authorization code for tokens via the ai-proxy BFF.
+ * The provider client_secret never reaches this bundle — the proxy holds it.
+ */
+async function exchangeOAuthCode(
+  provider: "google" | "github",
+  code: string,
+  redirectUri: string,
+): Promise<{ id_token?: string; access_token?: string }> {
+  const res = await fetch(`${AI_PROXY_URL}/v1/auth/oauth/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, code, redirectUri }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = ((await res.json()) as { error?: string })?.error || "";
+    } catch {
+      /* body not JSON */
+    }
+    throw new Error(`Token exchange failed: ${res.status} ${detail}`.trim());
+  }
+  return res.json();
+}
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
@@ -70,24 +100,7 @@ export async function checkPendingOAuthCode(): Promise<User | null> {
     if (!code) return null;
 
     const redirectUri = "http://localhost:19847/callback";
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const err = await tokenResponse.text();
-      throw new Error(`Token exchange failed: ${err}`);
-    }
-
-    const tokens = await tokenResponse.json();
+    const tokens = await exchangeOAuthCode("google", code, redirectUri);
     const credential = GoogleAuthProvider.credential(
       tokens.id_token,
       tokens.access_token,
@@ -182,25 +195,8 @@ export async function signInWithGoogle(): Promise<User | null> {
         .catch(fail);
     });
 
-    // Exchange code for tokens
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code: authCode,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const err = await tokenResponse.text();
-      throw new Error(`Token exchange failed: ${err}`);
-    }
-
-    const tokens = await tokenResponse.json();
+    // Exchange code for tokens (server-side; client_secret stays on the proxy)
+    const tokens = await exchangeOAuthCode("google", authCode, redirectUri);
     const credential = GoogleAuthProvider.credential(
       tokens.id_token,
       tokens.access_token,
@@ -266,24 +262,7 @@ export async function signInWithGoogle(): Promise<User | null> {
     platform.openExternal(authUrl).catch(fail);
   });
 
-  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      code: authCode,
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
-      redirect_uri: redirectUri,
-      grant_type: "authorization_code",
-    }),
-  });
-
-  if (!tokenResponse.ok) {
-    const err = await tokenResponse.text();
-    throw new Error(`Token exchange failed: ${err}`);
-  }
-
-  const tokens = await tokenResponse.json();
+  const tokens = await exchangeOAuthCode("google", authCode, redirectUri);
   const credential = GoogleAuthProvider.credential(
     tokens.id_token,
     tokens.access_token,
@@ -299,8 +278,8 @@ export async function signInWithGitHub(): Promise<User | null> {
   const port = 19847;
   const redirectUri = `http://localhost:${port}/callback`;
 
-  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-    throw new Error("GitHub OAuth credentials not configured");
+  if (!GITHUB_CLIENT_ID) {
+    throw new Error("GitHub OAuth client id not configured");
   }
 
   // Mobile: use system browser for OAuth
@@ -366,31 +345,8 @@ export async function signInWithGitHub(): Promise<User | null> {
         .catch(fail);
     });
 
-    const tokenResponse = await fetch(
-      "https://github.com/login/oauth/access_token",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          client_id: GITHUB_CLIENT_ID,
-          client_secret: GITHUB_CLIENT_SECRET,
-          code: authCode,
-          redirect_uri: redirectUri,
-        }),
-      },
-    );
-
-    if (!tokenResponse.ok) {
-      throw new Error(
-        `GitHub token exchange failed: ${await tokenResponse.text()}`,
-      );
-    }
-
-    const tokens = await tokenResponse.json();
-    if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+    const tokens = await exchangeOAuthCode("github", authCode, redirectUri);
+    if (!tokens.access_token) throw new Error("GitHub token exchange failed");
     const credential = GithubAuthProvider.credential(tokens.access_token);
     const result = await signInWithCredential(auth, credential);
     return result.user;
@@ -446,31 +402,8 @@ export async function signInWithGitHub(): Promise<User | null> {
     platform.openExternal(authUrl).catch(fail);
   });
 
-  const tokenResponse = await fetch(
-    "https://github.com/login/oauth/access_token",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code: authCode,
-        redirect_uri: redirectUri,
-      }),
-    },
-  );
-
-  if (!tokenResponse.ok) {
-    throw new Error(
-      `GitHub token exchange failed: ${await tokenResponse.text()}`,
-    );
-  }
-
-  const tokens = await tokenResponse.json();
-  if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+  const tokens = await exchangeOAuthCode("github", authCode, redirectUri);
+  if (!tokens.access_token) throw new Error("GitHub token exchange failed");
   const credential = GithubAuthProvider.credential(tokens.access_token);
   const result = await signInWithCredential(auth, credential);
   return result.user;
