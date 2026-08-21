@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Loader2, Sparkles, Users, ExternalLink } from "lucide-react";
 import {
   Dialog,
@@ -17,6 +17,7 @@ import {
   type ViewAsPlan,
 } from "@/stores/entitlement-store";
 import { PRICING, yen } from "@/lib/pricing";
+import { UsageMeter } from "@/components/UsageMeter";
 
 interface PlanFeature {
   label: string;
@@ -207,8 +208,16 @@ export function PaywallDialog() {
     openTeamManage,
     billingBusy,
     billingError,
+    fetchEntitlement,
   } = useEntitlementStore();
   const [interval, setInterval] = useState<BillingInterval>("month");
+
+  // Refresh usage/limits when the paywall opens so the meter reflects the exact
+  // count that just triggered it (a 429 already refetches, but the paywall can
+  // also be opened manually from the StatusBar/UserMenu where usage may be stale).
+  useEffect(() => {
+    if (paywallOpen) void fetchEntitlement();
+  }, [paywallOpen, fetchEntitlement]);
 
   // Team billing needs a concrete team (teamId) + seat count, which this generic
   // paywall has no context for. Route the Team card into team management, where
@@ -231,6 +240,10 @@ export function PaywallDialog() {
               : "より多くのAI・音声・リサーチ機能をご利用いただけます。"}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Current plan + live usage (also gives Free users context on which
+            meter they've exhausted before being asked to upgrade). */}
+        <UsageMeter highlight={paywallReason} />
 
         {/* Billing interval toggle */}
         <div className="flex justify-center">

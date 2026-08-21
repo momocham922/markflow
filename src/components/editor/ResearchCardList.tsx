@@ -2,6 +2,10 @@ import { useState } from "react";
 import { useResearchStore } from "@/stores/research-store";
 import type { ResearchCard, ResearchSource } from "@/stores/research-store";
 import { useAppStore } from "@/stores/app-store";
+import {
+  useEntitlementStore,
+  BILLING_ENABLED,
+} from "@/stores/entitlement-store";
 import { groundedSearch } from "@/services/research";
 import { getPlatform } from "@/platform";
 import { insertResearchCard } from "@/hooks/use-research-window";
@@ -25,6 +29,7 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
   const analysisError = useResearchStore((s) => s.analysisError);
   const setAnalysisError = useResearchStore((s) => s.setAnalysisError);
   const featureGated = useResearchStore((s) => s.featureGated);
+  const openPaywall = useEntitlementStore((s) => s.openPaywall);
   const setActiveDocId = useAppStore((s) => s.setActiveDocId);
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
@@ -47,10 +52,24 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
     return (
       <div className="flex flex-1 flex-col">
         {errorBanner}
-        <div className="flex flex-1 items-center justify-center p-6 text-center text-xs text-muted-foreground">
-          {featureGated
-            ? "自動リサーチはProプランの機能です。「今すぐ解析」で手動リサーチをご利用いただけます。"
-            : "録音すると、会議内容に関するリサーチがここに表示されます。"}
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-xs text-muted-foreground">
+          {featureGated ? (
+            <>
+              <span>
+                自動リサーチはProプランの機能です。「今すぐ解析」で手動リサーチをご利用いただけます。
+              </span>
+              {BILLING_ENABLED && (
+                <button
+                  className="rounded-md bg-primary/10 px-3 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/20"
+                  onClick={() => openPaywall()}
+                >
+                  Proにアップグレード
+                </button>
+              )}
+            </>
+          ) : (
+            "録音すると、会議内容に関するリサーチがここに表示されます。"
+          )}
         </div>
       </div>
     );

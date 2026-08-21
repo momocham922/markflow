@@ -59,7 +59,7 @@
 
 ## 1. ティア設計（Free / Pro / Team / Enterprise）
 
-> **2026-08-18 精緻化**: 「1回=1消費」の平坦課金を廃止し、**実COGSに比例する重み付けクレジット制**へ移行（敵対的検証で3大破綻＝執筆Pro満額赤字/音声ヘビーPro回収不能/Team共有プール鯨枯渇 を原価構造で是正）。原価は一次情報で検証済み（§1.1）。AIモデルは全て **Claude Opus 5**（Vertex `claude-opus-5` @ global）へ更新。**Opus 5 も入力$5/M・出力$25/M で 4.8 と同一単価**のため、下記クレジット経済は不変。
+> **2026-08-21 確定（フラット回数制に統一）**: クレジット制（重み付けcr）は**不採用**。実装済みのサーバ実効ゲート（[server/ai-proxy/gating.ts](server/ai-proxy/gating.ts) `PLAN_LIMITS`）＝**機能別・月間の平坦な回数上限**を唯一の課金モデルとする。理由: (1) 既にサーバ側で回数メーターが本番稼働（`aiCalls`/`sttCalls`/`batchMin`/`images`）しており真実源はこれ、(2) UI（[PaywallDialog.tsx](src/components/PaywallDialog.tsx)）も「月2,000回」等の回数表記で配線済み、(3) crの内部換算はユーザーに不透明で残量把握が難しい。残量メーターは**回数 X/Y**（例: AIリクエスト 1,340/2,000）で表示する。原価分析（§1.1）は上限値を実COGSに合わせて較正するための参照として維持する。AIモデルは **Claude Opus 5**（Vertex `claude-opus-5` @ global、入力$5/M・出力$25/M）。
 
 無料で開放して獲得フックにするもの＝**限界コスト≒0のコモディティ**（エディタ本体・Markdown/プレビュー・Mermaid/OGP/Wikiリンク・マインドマップ/キャンバス/可視化・オフライン・エクスポート・テーマ・MCP/Slack）。
 
@@ -74,62 +74,64 @@
 | Google Search grounding | 月5,000無料→$14/1,000クエリ（Gemini3は**検索クエリ単位**課金） | 実測               | ai.google.dev pricing                   |
 | Gemini 3.x Flash        | $1.5/M・$9/M                                                   | 推定               | ai.google.dev pricing                   |
 
-### 1.2 重み付けクレジット（1cr ≈ $0.01 実COGS）
+### 1.2 課金モデル＝機能別・月間の平坦な回数上限（実装＝真実源）
 
-重み = round(実単価 ÷ $0.01)。最大の出血点（執筆・音声refine・自動リサーチ）は**既定でFlashルーティング**、Opus品質は高価値操作/上位ティア/オプトインでプレミアム消費。UIは操作ごとの数字でなく単一「残量%」に集約。割引（キャッシュ90%/Batch50%/DynamicBatch75%）は**原価床に前借りせず**マージン上振れにのみ算入。
+課金の単位は**機能ごとに独立した「月間◯回」**。サーバ（[gating.ts](server/ai-proxy/gating.ts) `PLAN_LIMITS`）が唯一の実効上限で、`-1` は無制限、`internal` は完全バイパス。当月使用量は `usage/{poolKey}/months/{yyyy-mm}` に加算され、JST 月初にリセット。
 
-| 操作                                       | 重み  | 実原価       | 経路                                |
-| ------------------------------------------ | ----- | ------------ | ----------------------------------- |
-| AI執筆・ルーティン（文法/トーン/言い換え） | 1 cr  | $0.005-0.011 | Gemini Flash 既定                   |
-| AI執筆・高価値（詳細化/構造化）            | 4 cr  | $0.035       | Opus 5（明示/上位ティア）           |
-| 音声refine・Flash既定                      | 12 cr | $0.117       | Flash（既定）                       |
-| 音声refine・Opusプレミアム                 | 35 cr | $0.35        | Opus 5（オプトイン・**隠し機能※**） |
-| ライブリサーチ解析（Director）             | 9 cr  | $0.09        | Opus 5・**既定OFF+ハード上限**      |
-| grounded-search                            | 3 cr  | $0.028       | Flash+検索（5,000無料枠内は$0）     |
-| AI画像（NanoBanana2 1K）                   | 7 cr  | $0.067       | 執筆と別の枚数枠                    |
+| メーター（feature） | 数える対象                                          | Free | Pro   | Team（／席） | 単位  |
+| ------------------- | --------------------------------------------------- | ---- | ----- | ------------ | ----- |
+| `aiCalls`           | AIチャット + ライブリサーチ解析 + grounded-search   | 30   | 2,000 | 4,000        | 回/月 |
+| `sttCalls`          | ライブSTTチャンク（会議中のリアルタイム文字起こし） | 100  | 6,000 | 12,000       | 回/月 |
+| `batchMin`          | BatchRecognize（refine／一括文字起こし）の実測分数  | 60   | 3,000 | 6,000        | 分/月 |
+| `images`            | AI画像生成（NanoBanana2）                           | 2    | 500   | 1,000        | 枚/月 |
 
-- **音声は二軸目の独立メーター**（分単位・課金軸が違う）: ライブ $0.016/分・バッチ $0.004/分（Dynamic Batch）。1回の音声→文書化は「音声分」と「refine cr」を同時消費。
-- ※ **refine（音声の高品質整形）は現状 品質が実験段階のため『隠し機能』として提供し、将来の品質確定後に正式ゲート化**（重み 12/35cr は確定済み）。既定は Flash refine。
+- **これらの数値は起点のプレースホルダ**（[gating.ts:19-22](server/ai-proxy/gating.ts#L19)）。一般公開前に §1.1 の実COGSから較正する（measure-then-derive）。変更は `PLAN_LIMITS` のみを編集すれば全PF・全ゲート・残量メーターに即反映される（単一ソース）。
+- **Team はプール共有**: `usage/{teamId}` の単一カウンタに全メンバーの消費が乗り、上限は `base × 席数`（[checkQuota](server/ai-proxy/gating.ts#L126) `seats`）。オーナーは自席を消費せず常にアクセス可。
+- **`batchMin` だけは分数**（回数でなく実測分）。他3つは「1操作=1回」。上限超過は **429 `quota_exceeded`**（`{feature, plan, limit, used}`）で明示失敗。
+- **音声→文書化の1セッション**は `sttCalls`（ライブ中のチャンク）と `batchMin`（refine時の再STT分数）を別軸で消費する。
+- refine（高品質整形）は品質が実験段階のため既定 Flash・UI上は控えめに提供（隠し機能）。課金上は `batchMin` に集約され、専用の追加メーターは設けない。
 
 ### 1.3 機能→ティア マッピング
 
-| 機能                             | Free                          | Pro                                     | Team                              | Enterprise       |
-| -------------------------------- | ----------------------------- | --------------------------------------- | --------------------------------- | ---------------- |
-| ローカル編集・全描画・オフライン | ✅ 無制限                     | ✅                                      | ✅                                | ✅               |
-| クラウド同期（Firestore）        | 2台 / 50文書 / 1GB            | ✅ 無制限（公正利用）×全PF              | ✅ プール+管理者制御              | ✅               |
-| バージョン履歴                   | ローカル無制限 / クラウド7日  | クラウド30日                            | 90日〜                            | 保持ポリシー可   |
-| AI執筆（チャット/8アクション）   | Flash + **Opus 5体験10回/月** | Opusフル（ルーティンFlashハイブリッド） | Opusフル（プール消費）            | committed-use    |
-| 音声→文書化（含有分）            | 60分 / refine5回・Flash整形   | 1,200分・Flash refine既定               | 1,000分/席プール                  | committed-use    |
-| 音声refineモデル                 | Flashのみ                     | Flash既定 +（Opusは隠し/実験）          | Flash既定 +（Opusは隠し/実験）    | —                |
-| ライブリサーチ + grounded-search | 手動2-3回のみ・自動不可       | opt-in・既定OFF+支出上限+費用明示       | +管理者キャップ・プール           | +committed-use   |
-| AI画像生成（別枠）               | 月2枚                         | クレジット（7cr/枚）                    | クレジット（プール）              | committed-use    |
-| Web公開（markflow.jp/p/）        | ❌                            | 10ページ + PW保護                       | 無制限 + 独自ドメイン             | +高度管理        |
-| リアルタイム協業（Yjs）          | ゲスト0                       | ゲスト2-3名                             | **メンバー/ゲスト無制限（中核）** | ✅               |
-| カスタム語彙 / ベクトル横断検索  | ❌                            | ✅                                      | チーム共有辞書                    | ✅               |
-| API/自動化（MCP・Webhook）       | 接続入口のみ                  | 個人スコープ                            | 組織連携                          | 組織連携+        |
-| SSO / 監査 / ロール権限          | ❌                            | ❌                                      | SAML SSO + 監査 + ロール          | **SCIM/DPA/SLA** |
-| 消費上限・予算管理               | 上限到達で停止                | 残量%メーター + top-up                  | 席別/機能別キャップ+予算アラート  | committed-use    |
-| サポート                         | コミュニティ                  | 優先メール                              | SLA付き                           | 専任             |
+| 機能                             | Free                         | Pro                               | Team                              | Enterprise       |
+| -------------------------------- | ---------------------------- | --------------------------------- | --------------------------------- | ---------------- |
+| ローカル編集・全描画・オフライン | ✅ 無制限                    | ✅                                | ✅                                | ✅               |
+| クラウド同期（Firestore）        | 2台 / 50文書 / 1GB           | ✅ 無制限（公正利用）×全PF        | ✅ プール+管理者制御              | ✅               |
+| バージョン履歴                   | ローカル無制限 / クラウド7日 | クラウド30日                      | 90日〜                            | 保持ポリシー可   |
+| AI執筆（`aiCalls`回）            | 30回/月（Opus 5）            | 2,000回/月                        | 4,000回/月・席（プール）          | committed-use    |
+| 音声→文書化（`batchMin`分）      | 60分・Flash整形              | 3,000分・Flash refine既定         | 6,000分/席プール                  | committed-use    |
+| 音声refineモデル                 | Flashのみ                    | Flash既定 +（Opusは隠し/実験）    | Flash既定 +（Opusは隠し/実験）    | —                |
+| ライブリサーチ + grounded-search | 手動2-3回のみ・自動不可      | opt-in・既定OFF+支出上限+費用明示 | +管理者キャップ・プール           | +committed-use   |
+| AI画像生成（別枠 `images`）      | 月2枚                        | 月500枚                           | 月1,000枚/席（プール）            | committed-use    |
+| Web公開（markflow.jp/p/）        | ❌                           | 10ページ + PW保護                 | 無制限 + 独自ドメイン             | +高度管理        |
+| リアルタイム協業（Yjs）          | ゲスト0                      | ゲスト2-3名                       | **メンバー/ゲスト無制限（中核）** | ✅               |
+| カスタム語彙 / ベクトル横断検索  | ❌                           | ✅                                | チーム共有辞書                    | ✅               |
+| API/自動化（MCP・Webhook）       | 接続入口のみ                 | 個人スコープ                      | 組織連携                          | 組織連携+        |
+| SSO / 監査 / ロール権限          | ❌                           | ❌                                | SAML SSO + 監査 + ロール          | **SCIM/DPA/SLA** |
+| 消費上限・予算管理               | 上限到達で停止               | 機能別 回数メーター（X/Y）        | 席別/機能別キャップ+予算アラート  | committed-use    |
+| サポート                         | コミュニティ                 | 優先メール                        | SLA付き                           | 専任             |
 
 ### 1.4 各ティア（価格・枠・粗利方針）
 
-| ティア         | 価格          | クレジット/月                       | 音声/月              | 目標粗利                                                                |
-| -------------- | ------------- | ----------------------------------- | -------------------- | ----------------------------------------------------------------------- |
-| **Free**       | ¥0            | 200 cr                              | 60分（refine5回）    | 獲得コスト（実COGS ≈ $1-2）                                             |
-| **Pro**        | ¥1,280/月     | 1,500 cr                            | 1,200分（20h）       | 中央値利用で55-65%（満額≈break-even、超過はtop-up/Voice Boosterで回収） |
-| **Team**       | ¥1,980/席・月 | 3,000 cr/席（**席横断共有プール**） | 1,000分/席（プール） | 50-60%（プール平準化+席別上限）                                         |
-| **Enterprise** | 見積          | committed-use                       | committed-use        | 高（価格弾力性の低いガバナンス機能で裏付け）                            |
+> 枠は全て `PLAN_LIMITS`（[gating.ts](server/ai-proxy/gating.ts)）由来の**月間回数/分数**。この表は編集しない — 数値変更は `PLAN_LIMITS` を編集し、当表とメーターUIは自動的に追従する（単一ソース）。
 
-- **Free**: 毎月リセット・繰越なし。Opus 5体験10回/月で品質差を必ず試させ転換動機化。成長すると音声・自動リサーチ・公開・同時編集の壁でPro転換。
-- **Pro**: ルーティン執筆をFlashハイブリッド化し実消費を枠1,500crの約60%へ抑制（40%ヘッドルーム）。自動リサーチ既定OFF+セッション単位ハード支出上限+「約¥X」明示確認で原価爆弾を物理停止。
-- **Team**: 席別/機能別ハードキャップ+管理者予算アラート&キャップで「鯨2名が5名を飢餓」破綻を防止。SAML SSO+監査はTeam同梱、SCIM/DPA/専任SLAはEnterpriseへ分離（法人のサプライズ請求嫌悪を排除）。
+| ティア         | 価格          | `aiCalls`/月  | `sttCalls`/月 | `batchMin`/月  | `images`/月   | 目標粗利                                     |
+| -------------- | ------------- | ------------- | ------------- | -------------- | ------------- | -------------------------------------------- |
+| **Free**       | ¥0            | 30            | 100           | 60分           | 2枚           | 獲得コスト（実COGS ≈ $1-2）                  |
+| **Pro**        | ¥1,280/月     | 2,000         | 6,000         | 3,000分（50h） | 500枚         | 中央値利用で55-65%（満額≈break-even）        |
+| **Team**       | ¥1,980/席・月 | 4,000/席      | 12,000/席     | 6,000分/席     | 1,000枚/席    | 50-60%（プール平準化+席別上限）              |
+| **Enterprise** | 見積          | committed-use | committed-use | committed-use  | committed-use | 高（価格弾力性の低いガバナンス機能で裏付け） |
+
+- **Free**: 毎月 JST 月初リセット・繰越なし。Opus 5 の品質を体験させ、`aiCalls`/音声/公開/同時編集の壁でPro転換を促す。
+- **Pro**: ルーティン執筆を Flash ハイブリッド化して実消費を枠の約60%へ抑制（ヘッドルーム確保）。自動リサーチは既定OFF+opt-in で原価爆弾を物理停止。上限超過は 429 で明示停止（サイレント赤字ゼロ）。
+- **Team**: `usage/{teamId}` プール共有で上限 = `base × 席数`。席別/機能別ハードキャップ+管理者予算アラートで「鯨2名が5名を飢餓」破綻を防止。SAML SSO+監査はTeam同梱、SCIM/DPA/専任SLAはEnterpriseへ分離。
 - **Enterprise（新設）**: 消費者3ティアは維持しつつ上位に見積制を接ぎ木。committed-useで予測可能請求。
 
-### 1.5 アドオン・Top-up
+### 1.5 上限超過時の扱い（アドオン・Top-up は将来検討）
 
-- **Voice Booster ¥1,500/月 = +1,800分 + refine枠拡張**（**確定：ヘビー音声は第4ティアでなくアドオンで収容**）。内部は Flash + Dynamic Batch で原価固定し「無制限に見える定額」を実現（Granola/Otter の無制限訴求に横付け）。
-- **Top-up**: クレジット ¥1,000=300cr（¥3.3/cr・粗利≈55%・90日繰越）／音声パック ¥1,200=300分。Teamはプールへ追加（席数割引）+ committed-use。
-- 高COGS操作（Opus refine 35 / リサーチ 9 / grounded 3）は含有を薄くし従量精算比率を上げる。満額でも top-up/Voice Booster で回収する構造でサイレント赤字ゼロ。
+- 現行モデルでは**上限に達したら 429 `quota_exceeded` で明示停止**（サイレント課金・自動従量なし）。ユーザーは翌月リセットまで待つか上位プランへアップグレードする。
+- **Voice Booster / Top-up（クレジット追加購入・音声パック）は将来の拡張候補**（未実装・未確定）。導入する場合も課金単位はクレジットでなく**該当メーターの回数/分数の追加枠**として `PLAN_LIMITS` の上に加算する設計にする（クレジット制は不採用のため二重の単位系を作らない）。
+- ヘビー音声（`batchMin` 常時上限張り付き）ユーザーは、専用アドオンを設けるか Team/Enterprise の committed-use へ誘導するかをローンチ後テレメトリで判断する。
 
 ---
 
@@ -146,8 +148,7 @@
 - **二重価格**：iOS/AndroidのIAPはApple/Google手数料(15〜26%)を吸収するため割高に（例 モバイル¥1,600/月 vs Web¥1,280/月・Team ¥2,400/席）。ただし**モバイルアプリ内からWeb価格へ誘導するのはNG**（米国外anti-steering）。案内はメール等アプリ外で。
 - **年割強化＝買い切り志向層の受け皿（確定方針）**: 買い切り志向（Typora/Bear/Superwhisper Lifetime 等）には Lifetime を用意せず、**年割の割安感（Pro 年¥11,760＝実質¥980/月・月比 -23%）で対抗**。長期割の追加拡充も検討。
 - 学割40%・複数デバイス/ファミリー割を併設（Obsidian/Ulysses/Craft踏襲）。
-- **アドオン: Voice Booster ¥1,500/月（確定）** — ヘビー音声を独立ティアでなくアドオンで収容（+1,800分+refine枠拡張・内部Flash+Batchで原価固定）。
-- top-up（クレジット追加購入）を全ティアに用意。Team はプールへ追加 + committed-use。
+- **アドオン/Top-up は将来検討（未実装）**: ヘビー音声向けの追加枠は、導入する場合も**該当メーター（`batchMin` 等）の回数/分数を上乗せする方式**とし、クレジット制は採らない（§1.5）。
 
 ---
 
@@ -175,14 +176,13 @@ usage/{uid}/months/{yyyy-mm} # 使用量カウンタ。サーバ専用書込（�
   updatedAt: <ts>
 
 teams/{teamId}               # 既存のチーム構造を拡張
-  seats: number
-  members: [...]
-  sharedCreditPool: number
+  seats: number              # 席数。プール上限 = base × seats
+  members: [...]             # 席割当。usage/{teamId} を全メンバーで共有消費
 ```
 
 - **firestore.rules**: `entitlements/{uid}` と `usage/{uid}/months/{ym}` は `allow read: if owner; allow write: if false;`（現状 `users`/`user_settings` は本人書込可なので真実源にできない — ここに `plan` を置くと自己付与でPro化される）。**実装済**（[firestore.rules](firebase/firestore.rules)）。
 - **オフライン**: entitlement を SQLite にミラー（読取専用キャッシュ）。実効判定は必ずサーバ側。
-- **カウンタは launch placeholder**: 現状は「回数ベース」の粗いメーター（`aiCalls`/`sttCalls`/`images` は1回=1、`batchMin` は分数）。一般公開前に実COGSから分/トークンベースへ精緻化（measure-then-derive）。
+- **カウンタ＝課金モデルそのもの**（フラット回数制）: `aiCalls`/`sttCalls`/`images` は1操作=1回、`batchMin` のみ実測分数。上限値（`PLAN_LIMITS`）は launch placeholder で、一般公開前に §1.1 実COGSから較正（measure-then-derive）。単位（回数/分数）は変えない。
 
 ### 3.2 実効ゲート（ai-proxy）
 
@@ -282,10 +282,12 @@ gcloud run deploy markflow-ai-proxy --source server/ai-proxy \
   --project markflow-app-2026 --region asia-northeast1 --account ga.crossmedia@gmail.com \
   --allow-unauthenticated --memory 512Mi --timeout 900 --min-instances 0 --max-instances 3 \
   --update-secrets=STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest \
-  --update-env-vars=STRIPE_PRICE_PRO_MONTHLY=price_XXX,STRIPE_PRICE_PRO_YEARLY=price_XXX,STRIPE_PRICE_TEAM_MONTHLY=price_XXX,STRIPE_PRICE_TEAM_YEARLY=price_XXX
+  --update-env-vars=STRIPE_PRICE_PRO_MONTHLY=price_XXX,STRIPE_PRICE_PRO_YEARLY=price_XXX,STRIPE_PRICE_TEAM_MONTHLY=price_XXX,STRIPE_PRICE_TEAM_YEARLY=price_XXX,NONAI_GATES_ENABLED=1
 # URL は既定で markflow.jp/checkout/success|cancel・/account を使用。変える場合のみ
 #   CHECKOUT_SUCCESS_URL / CHECKOUT_CANCEL_URL / PORTAL_RETURN_URL を追加（success には ?session_id={CHECKOUT_SESSION_ID} を残す）。
 ```
+
+> **`NONAI_GATES_ENABLED=1` の意味**（§3.6 参照）: 非AIゲートのサーバ側実効化（現状は Web 公開ページの配信ゲート `/p/`）を点灯するマスタースイッチ。既定 OFF。`billingConfigured()` と**分離**しているのは、本番 Cloud Run に既に **TEST モードの Stripe キーが載っている**ため（`billingConfigured()===true`）。もし配信ゲートを `billingConfigured()` に紐づけると **GO 前に公開ページを 402 で止めてしまう**。クライアント側の `VITE_BILLING_ENABLED`（ビルド時 OFF・手順 8）と対になり、両方 GO 時に同時点灯する。
 
 **手順 7 — hosting（Checkout 戻りページ）をデプロイ**
 
@@ -305,6 +307,24 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/v1/billing/webhook -d '{}
 - Stripe Dashboard の Webhook 画面「テスト送信」で `checkout.session.completed` を送り 2xx を確認。
 - テスト実購入（少額 price でも可）→ `entitlements/{uid}` が `plan:"pro", status:"active", source:"stripe"` になることを Firestore で確認 → アプリ側で Pro 反映を確認。
 - 解約 → `customer.subscription.deleted` 受信で `status` 遷移（`current_period_end` まで有効）を確認。
+
+---
+
+### 3.6 非AIゲートの実装ステータス（AI/STT 以外の有料機能ゲート）
+
+> AI/STT/画像は ai-proxy のメータリングで実効ゲート済み（§3.2・429 `quota_exceeded`）。ここでは**それ以外**の有料機能ゲート（§1.3 マッピング）の実装状況を正直に記録する。クライアント側ゲートは `VITE_BILLING_ENABLED`（ビルド時・既定 OFF）、サーバ側の非AIゲートは `NONAI_GATES_ENABLED`（Cloud Run env・既定 OFF）で二重に暗転しており、**GO まで完全に不活性**。
+
+| 有料機能                     | ゲート層              | 状態      | 実装 / 保留理由                                                                                                                                                                                                                                                                                                                |
+| ---------------------------- | --------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Web 公開（Pro+）             | クライアント + サーバ | ✅ 実装済 | クライアント: [App.tsx](src/App.tsx) `handlePublish` で free を弾き paywall（`BILLING_ENABLED`）。サーバ: publish は Storage 直書きのため配信時が唯一の実効点 → [/p/ ハンドラ](server/ai-proxy/index.ts) が所有者 free の公開ページを 402 で拒否（`NONAI_GATES_ENABLED`・所有者 internal/Pro は透過・lookup 失敗は fail-open） |
+| 共同編集ゲスト（Pro+）       | クライアント          | ✅ 実装済 | [ShareDialog.tsx](src/components/ShareDialog.tsx) `handleInvite` で `collaboratorLimit(plan)`（free:0 / pro:3 / team+internal:∞）超過を弾き paywall（`BILLING_ENABLED`）。ヘルパは [entitlement-store.ts](src/stores/entitlement-store.ts)                                                                                     |
+| 共同編集ゲスト（サーバ強制） | firestore.rules       | ⏳ 保留   | 招待数の上限をルールで fail-closed にすると**既存の共有ドキュメントの編集経路**を壊すリスク（コア編集パスに人数カウント制約を課す）。GO 後にサーバ側（Cloud Function もしくは招待時の proxy 経由バリデーション）で安全に実装する。現状クライアントゲートのみ                                                                   |
+| カスタム語彙（Team）         | —                     | ⏳ 保留   | 現状は STT hints の**自動生成**のみで、ユーザー管理機能として未製品化。機能自体を作ってからゲートする                                                                                                                                                                                                                          |
+| ベクトル検索（Pro+）         | —                     | ⏳ 未実装 | 機能自体が未存在（[project_vector_search_plan](.claude/…)）。実装時にゲートを同梱                                                                                                                                                                                                                                              |
+| クラウド同期上限             | —                     | ⏳ 保留   | デバイス数/ドキュメント数/容量のメータリング基盤が未整備。導入時に usage スキーマを拡張してゲート                                                                                                                                                                                                                              |
+| バージョン履歴保持           | —                     | ⏳ 保留   | クラウド保持の刈り込みジョブが未整備。保持期間差別化は保持基盤の実装とセット                                                                                                                                                                                                                                                   |
+
+**保留分の共通方針**: fail-closed をコア編集/同期パスに軽率に入れて既存データ利用を壊すより、①機能の製品化 ②メータリング基盤 ③安全なサーバ実効点、が揃ってからゲートを同梱する（サイレント破壊 > 一時的な取りこぼしの回避）。GO の可否は「Web 公開＋共同編集ゲスト（クライアント）」で最初の非AI課金導線として十分成立する。
 
 ---
 
@@ -341,7 +361,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/v1/billing/webhook -d '{}
 7. ✅ Tauri: システムブラウザ起動（checkout URL を opener で開く）+ `markflow://billing/success|cancel` ディープリンク復帰 + hosting 戻りページ
 8. ✅ 課金UI: PaywallDialog + UserMenu「プランを管理」+ StatusBar プラン表示（`VITE_BILLING_ENABLED` 既定 OFF）
 9. ⏳ **オーナー点灯作業（§3.5）**: Stripe 商品/価格・Secret・env・hosting 再デプロイ・クライアント配信
-10. ⏳ クレジット残数UI + top-up 購入導線（従量精算の可視化・後続）
+10. ⏳ 回数メーターUI（機能別 X/Y 残量表示・上限接近アラート）— 課金の可視化（後続）
 
 ### P2 — モバイルIAP（iOS + Android）
 
@@ -351,7 +371,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/v1/billing/webhook -d '{}
 
 ### P3 — Team + Founders + ローンチ
 
-12. Team: 席課金・共有クレジットプール・チーム権限/SSO（既存 team 構造拡張）
+12. Team: 席課金・共有回数プール（`usage/{teamId}`）・チーム権限/SSO（既存 team 構造拡張）
 13. Founders: 既存ユーザースナップショット → 恒久フラグ付与
 14. 価格表・課金設定UI・請求管理（StatusBar 等）
 15. 全PF同時ローンチ
@@ -375,19 +395,57 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/v1/billing/webhook -d '{}
 
 ## 7. 未確定・要検証（実装前リサーチ）
 
-**確定済み（2026-08-18）**: Voice=アドオン方式 / 買い切り志向=年割強化（Lifetime不採用） / refine=隠し機能→将来正式化 / AIモデル=全て Claude Opus 5。
+**確定済み**: 課金モデル=フラット回数制（`PLAN_LIMITS`・2026-08-21） / 買い切り志向=年割強化（Lifetime不採用） / refine=隠し機能→将来正式化 / AIモデル=全て Claude Opus 5。
 
 **要検証（ローンチ前 or ローンチ後テレメトリ）:**
 
-- **中央値利用率 30-40% の前提**（粗利55-65%の土台・現状 unverified）→ ローンチ後テレメトリで確定するまで粗利を「確定」としない。
-- **音声refineの実トークン数**（重み 12/35cr は input30k/output8k 推定ベース）→ 実プロンプトのトークンカウントで再較正。
+- **`PLAN_LIMITS` の上限値較正**（現状 placeholder）→ §1.1 実COGS と中央値利用率のテレメトリから、各メーターの回数/分数を粗利55-65%へ合わせ込む。
+- **中央値利用率 30-40% の前提**（粗利の土台・現状 unverified）→ ローンチ後テレメトリで確定するまで粗利を「確定」としない。
+- **`aiCalls` の混在コスト**（1 call の実コストが chat/analyze/grounded で大きく異なる。grounded は Gemini3 が1リクエストで複数検索を発火しうる）→ 高COGS操作の実測トークン/検索クエリ数で、上限を保守的に設定するか feature を分割するか判断。
 - **Flash refine の構造化品質が商用許容水準か**（refine隠し機能の正式化条件）→ ローンチ前に品質評価データセットで検証。
-- **grounding 重み3の妥当性**（Gemini3は1リクエストで複数検索が発火しうる＝検索クエリ単位課金のため過小計上リスク）。
-- Free の Opus 5体験10回/月が転換促進か共食いか → A/Bテスト。
+- Free 枠（`aiCalls` 30回等）が転換促進か共食いか → A/Bテスト。
 - Team席課金 ¥1,980/席の受容性、Enterprise を即時立ち上げか段階導入か（SCIM/DPA/SLA需要確度）。
-- Voice Booster ¥1,500 の価格妥当性。
+- ヘビー音声向けアドオン/Top-up（回数上乗せ方式）の要否・価格（§1.5）。
 - モバイルIAP二重価格（Pro iOS ¥1,600）の UI 提示方法（Web価格併記 or PF別出し分け）。
 - 既存 internal スタッフ12名の無制限バイパスをローンチ後も恒久継続するか。
 - Tauri IAPコミュニティプラグインの保守状況・StoreKit2/Play Billing v8対応度（実測）。
 - 日本 User Choice Billing 採用可否（非ゲーム・手数料4%減）。
-- 新モデル（Opus後継/Gemini後継/NanoBanana Lite $0.034）登場時のクレジット重み再較正。
+- 新モデル（Opus後継/Gemini後継/NanoBanana Lite $0.034）登場時の `PLAN_LIMITS` 再較正。
+
+---
+
+## 8. 公開リポ是正（配信移設 + OAuth ローテ）— 順序厳守ランブック
+
+> GitHub が **public** リポである問題の是正。フリーミアム化と同時に完成させる。**外向き/不可逆手順はオーナー GO 待ち**。コード側は実装済み（working tree・未 commit）。
+
+### 8.1 更新配信の脱 GitHub（決定①）— privatize の前提
+
+auto-updater が公開 GitHub Releases URL に依存しているため、**単純な非公開化は全ユーザーの自動更新を破壊する**。先に配信を markflow.jp/updates（GCS backed）へ移設する。
+
+- **実装済（コード）**: [lib.rs](src-tauri/src/lib.rs) の更新エンドポイントを `option_env!("MARKFLOW_UPDATE_BASE")` で切替（既定=GitHub＝working tree はそのまま出荷可）。[nginx.conf](hosting/nginx.conf) に `/updates/` reverse-proxy 追加（markflow-site 再デプロイまで不活性）。[release-updates-gcs.sh](scripts/release-updates-gcs.sh) で manifest（markflow.jp URL）+ 成果物を GCS へ publish。
+- **オーナー手順（GO 時・順序厳守）**:
+  1. バケット作成 + 公開読取: `gsutil mb -p markflow-app-2026 -l asia-northeast1 gs://markflow-updates` → `gsutil iam ch allUsers:roles/storage.objectViewer gs://markflow-updates`（`--account ga.crossmedia@gmail.com`）
+  2. `markflow-site` 再デプロイ（`/updates/` route を live 化）
+  3. 移行ビルド: `MARKFLOW_UPDATE_BASE=https://markflow.jp/updates` + 署名 env 付きで `pnpm tauri build`
+  4. **dual-publish**: `./scripts/release-beta.sh`（GitHub＝旧クライアント）**と** `./scripts/release-updates-gcs.sh beta`（GCS＝移行ビルド）を両方
+  5. 移行ビルドが markflow.jp から更新取得することを実機検証 → 移行期間を置く（未更新ユーザーは privatize 後 DMG 手配布で救済）
+  6. **GitHub リポ非公開化**（→ 8.3）。以降 GCS-only（tauri.conf.json:67 も markflow.jp へ更新）
+- **禁止**: 移設・移行リリース前に privatize するな（順序違反＝自動更新の全破壊）。
+
+### 8.2 OAuth シークレット ローテ（決定②）— サーバ移設後
+
+- **実装済（コード + デプロイ）**: トークン交換を ai-proxy `/v1/auth/oauth/exchange` へ移設し、クライアントから `client_secret` を撤去（Secret Manager 化・rev 00046-df9 デプロイ済）。
+- **オーナー手順（GO 時）**: 移設済みの**新クライアントを配布した後**に、GCP/GitHub コンソールで旧シークレットを Reset/Regenerate（旧バンドル内の漏洩値を無効化）。順序: 新ビルド配布 → ローテ（逆順にすると配布前の旧クライアントが即死）。
+
+### 8.3 GitHub 非公開化 + 履歴（決定①の締め）
+
+- **前提**: 8.1 完了（配信移設済み）+ 8.2 の新クライアント配布済み。
+- リポを Private 化（オーナー操作）。CI（Windows ビルド）は private でも動くが成果物取得元を調整。
+- **git 履歴の残留 PII/シークレット**: 過去 commit に漏洩 OAuth secret（ローテで無効化＝本質是正）と社内スタッフ uid↔氏名（commit be05cd7）が残る。privatize で実効遮断されるため履歴 purge は任意・後続（`git filter-repo`）。working tree は既にサニタイズ済（[seed-internal-entitlements.sh](scripts/seed-internal-entitlements.sh) から氏名撤去・uid↔氏名は非公開ロスター管理・`scripts/internal-uids.local` override は gitignore 済）。
+
+### 8.4 完了済みセキュリティ・ハイジーン（working tree）
+
+- `.gitignore` 強化（`.env` 系 / 署名 material `*.keystore|*.jks|*.p8|*.p12|*.pem` / ビルドキャッシュ / ローカル状態 / `scripts/internal-uids.local`）+ `git rm --cached`（.env / tsbuildinfo / .firebase cache / scheduled_tasks.lock）
+- `build.gradle.kts` の keystore パスワードのハードコード削除（`ANDROID_KEYSTORE_PASS` 必須・未設定は署名 config を空にしてビルド失敗＝サイレント排除）
+- ドキュメント/SKILL から実シークレット・API KeyID・実パスをプレースホルダ化
+- seed スクリプトから社内スタッフ氏名（PII）を撤去（uid + `staff-NN` ラベルのみ）

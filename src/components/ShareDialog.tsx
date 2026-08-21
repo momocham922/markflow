@@ -40,6 +40,11 @@ import {
 } from "@/services/sharing";
 import { fetchDocument, saveDocumentToFirestore } from "@/services/firebase";
 import {
+  useEntitlementStore,
+  collaboratorLimit,
+  BILLING_ENABLED,
+} from "@/stores/entitlement-store";
+import {
   loadSlackNotifyConfig,
   saveSlackNotifyConfig,
   notifySlack,
@@ -208,6 +213,23 @@ export function ShareDialog({
 
   const handleInvite = async () => {
     if (!activeDocId || !inviteEmail.trim()) return;
+    // Guest collaboration is gated by plan (MONETIZATION §1.3): Free 0 / Pro 3 /
+    // Team unlimited. Enforced once billing is live; the dark period (all users
+    // internal → unlimited) is untouched. Client gate + upsell; the count cap has
+    // no server rule yet (see collaboratorLimit doc).
+    if (BILLING_ENABLED) {
+      const plan = useEntitlementStore.getState().effectivePlan;
+      const limit = collaboratorLimit(plan);
+      if (collaborators.length >= limit) {
+        setError(
+          plan === "free"
+            ? "共同編集への招待はProプラン以上の機能です。"
+            : `現在のプランで招待できる共同編集者は${limit}人までです。上位プランで拡張できます。`,
+        );
+        useEntitlementStore.getState().openPaywall();
+        return;
+      }
+    }
     setInviting(true);
     setError("");
     try {

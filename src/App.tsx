@@ -733,6 +733,19 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       setPublishError("ドキュメントを選択してログインしてください");
       return;
     }
+    // Web publish is a Pro+ feature (MONETIZATION §1.3). Gate the Free plan
+    // once billing is live; open the paywall instead of publishing. Tied to
+    // BILLING_ENABLED so the dark period (all current users = internal) is
+    // untouched. Server-side belt-and-suspenders: the ai-proxy /p/ serve
+    // handler refuses to render pages owned by a Free account.
+    if (BILLING_ENABLED) {
+      const plan = useEntitlementStore.getState().effectivePlan;
+      if (plan === "free") {
+        setPublishError("Web公開はProプラン以上の機能です。");
+        useEntitlementStore.getState().openPaywall();
+        return;
+      }
+    }
     setPublishing(true);
     setPublishError(null);
     try {

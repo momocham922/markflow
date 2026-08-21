@@ -98,6 +98,16 @@ function billingConfigured(): boolean {
   return Boolean(STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET);
 }
 
+// Master switch for non-AI paid gates that this server enforces (currently the
+// Web-publish serve gate in /p/). Ships DARK: OFF until the owner flips it at GO,
+// alongside the LIVE Stripe promotion + the client VITE_BILLING_ENABLED build.
+// Kept SEPARATE from billingConfigured() on purpose — billing is live in TEST
+// mode right now (keys present), and we must NOT start gating public pages before
+// the owner's explicit GO. Set NONAI_GATES_ENABLED=1 to activate.
+const NONAI_GATES_ENABLED =
+  process.env.NONAI_GATES_ENABLED === "1" ||
+  process.env.NONAI_GATES_ENABLED === "true";
+
 // --- In-App Purchase config (monetization ③, Phase 0 DARK) -----------------
 // The Apple/Play verify + server-notification endpoints stay DARK (503
 // iap_not_configured) until the store credentials exist — exactly like the Stripe
@@ -110,6 +120,29 @@ const APP_STORE_KEY_ID = process.env.APP_STORE_KEY_ID || "";
 const APP_STORE_PRIVATE_KEY = process.env.APP_STORE_PRIVATE_KEY || "";
 const PLAY_PACKAGE_NAME = process.env.PLAY_PACKAGE_NAME || "";
 const PLAY_SERVICE_ACCOUNT = process.env.PLAY_SERVICE_ACCOUNT_JSON || "";
+
+// --- OAuth token exchange (BFF: keep provider client_secret server-side) ----
+// The client secret NEVER ships in the desktop/mobile bundle (a public GitHub
+// repo + a distributable binary both leak it). The client runs the browser
+// authorization-code flow, then POSTs the received `code` to
+// /v1/auth/oauth/exchange; THIS server holds the secret and does the exchange.
+// Unauthenticated by design — the user is not signed in yet (this IS the sign-in
+// step). Abuse is bounded: a valid code is single-use, provider-issued against
+// OUR client_id, and only redeemable for the fixed localhost redirect below.
+const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || "";
+const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+const GITHUB_OAUTH_CLIENT_ID = process.env.GITHUB_OAUTH_CLIENT_ID || "";
+const GITHUB_OAUTH_CLIENT_SECRET = process.env.GITHUB_OAUTH_CLIENT_SECRET || "";
+// Only redirect URIs the app actually uses may be redeemed here. This is an
+// allowlist, not a trust anchor (the provider already binds the code to a
+// registered redirect_uri) — it stops this endpoint being repurposed as a
+// generic exchange oracle for some other redirect.
+const OAUTH_ALLOWED_REDIRECTS = new Set(
+  (process.env.OAUTH_ALLOWED_REDIRECTS || "http://localhost:19847/callback")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
 /** Apple IAP verification is configured (all App Store Server API creds present). */
 function appleIapConfigured(): boolean {
@@ -799,6 +832,11 @@ interface ResolvedEntitlement {
   realPlan: Plan;
   meterKey: string;
   seats: number;
+  // Set when the plan could NOT be resolved (Firestore error) and we fell back to
+  // "free". Lets callers that must fail OPEN (the publish serve-gate) tell a
+  // genuine free plan apart from a lookup blip. The AI metering path ignores it
+  // (a blip still meters as free = fail-closed on quota, the intended trade-off).
+  degraded?: boolean;
 }
 
 const entCache = new Map<string, ResolvedEntitlement & { at: number }>();
@@ -817,7 +855,10 @@ async function loadEntitlement(uid: string): Promise<ResolvedEntitlement> {
   const now = Date.now();
   if (cached && now - cached.at < ENT_TTL_MS) return cached;
   const resolved = await computeEntitlement(uid);
-  entCache.set(uid, { ...resolved, at: now });
+  // Never cache a degraded (error-derived) result: caching "free" from a blip
+  // would poison this instance for the full TTL and turn a momentary Firestore
+  // hiccup into ~15s of wrong answers. Let the next call retry instead.
+  if (!resolved.degraded) entCache.set(uid, { ...resolved, at: now });
   return resolved;
 }
 
@@ -856,7 +897,7 @@ async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
     // Fail to per-uid "free" (NOT unlimited) so a Firestore blip can neither
     // break the product nor leak unlimited cost. Logged explicitly — never silent.
     console.error(`loadEntitlement failed for ${uid}:`, err);
-    return { realPlan: "free", meterKey: uid, seats: 1 };
+    return { realPlan: "free", meterKey: uid, seats: 1, degraded: true };
   }
 }
 
@@ -1041,13 +1082,68 @@ const server = http.createServer(async (req, res) => {
       const objUrl = `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o/${encodeURIComponent(
         objectPath,
       )}?alt=media`;
-      const r = await fetch(objUrl, {
+      // Fetch the object and resolve owner-gating in parallel to keep the common
+      // (allowed) path fast.
+      const objPromise = fetch(objUrl, {
         headers: { Authorization: `Bearer ${token}` },
       });
+
+      // Web publish is a Pro+ feature (MONETIZATION §1.3). Once billing is live,
+      // refuse to RENDER pages whose owner is on Free — the server-side counterpart
+      // to the client publish gate (publish writes Storage directly, so this serve
+      // handler is the only server enforcement point). Gated ONLY when
+      // NONAI_GATES_ENABLED — NOT billingConfigured(): billing is live in TEST mode
+      // right now (keys present), so keying on it would gate public pages before the
+      // owner's GO. This flag ships OFF and flips at GO alongside client billing.
+      // Fails OPEN on any lookup error: a public page's availability outweighs a
+      // rare transient revenue leak (the opposite trade-off to the AI guard, which
+      // fails closed on quota).
+      let ownerGated = false;
+      if (NONAI_GATES_ENABLED) {
+        try {
+          const dsnap = await getFirestore()
+            .collection("documents")
+            .doc(docId)
+            .get();
+          const ownerUid = dsnap.exists
+            ? String(
+                (dsnap.data() as Record<string, unknown>)?.ownerId || "",
+              ).trim()
+            : "";
+          if (ownerUid && !INTERNAL_UIDS.has(ownerUid)) {
+            const ent = await loadEntitlement(ownerUid);
+            // Fail OPEN: gate ONLY a genuinely-free owner, never one whose plan
+            // lookup degraded to "free" on a Firestore error (loadEntitlement
+            // swallows the throw and flags degraded), so a blip can't 402 a
+            // paying owner's public page.
+            ownerGated = ent.realPlan === "free" && !ent.degraded;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[publish] owner gate lookup failed for ${docId}: ${msg}`,
+          );
+          // fail-open: ownerGated stays false
+        }
+      }
+
+      const r = await objPromise;
       if (!r.ok) {
         res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
         res.end(
           '<!doctype html><meta charset="utf-8"><title>Not found</title><body style="font-family:-apple-system,sans-serif;padding:3rem;text-align:center;color:#555"><h1 style="font-size:1.2rem">このドキュメントは公開されていません</h1><p>リンクが失効したか、公開が停止された可能性があります。</p></body>',
+        );
+        return;
+      }
+      if (ownerGated) {
+        // 402 Payment Required — the page exists but its owner's plan no longer
+        // includes Web publish. no-store so a re-upgrade reflects immediately.
+        res.writeHead(402, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(
+          '<!doctype html><meta charset="utf-8"><title>Unavailable</title><body style="font-family:-apple-system,sans-serif;padding:3rem;text-align:center;color:#555"><h1 style="font-size:1.2rem">この公開ページは現在ご利用いただけません</h1><p>Web公開はProプラン以上の機能です。公開を続けるにはページ所有者のプランのアップグレードが必要です。</p></body>',
         );
         return;
       }
@@ -1172,6 +1268,129 @@ const server = http.createServer(async (req, res) => {
       req.on("end", () => resolve(data));
       req.on("error", reject);
     });
+
+  // --- /v1/auth/oauth/exchange (BFF: swap authorization code → tokens) ---
+  // Unauthenticated on purpose: this precedes Firebase sign-in. The client sends
+  // { provider, code, redirectUri }; we redeem the code with the provider using
+  // the SERVER-held client_secret and return only the tokens the client feeds to
+  // GoogleAuthProvider/GithubAuthProvider.credential(). No secret ever reaches
+  // the client bundle. Errors fail loudly (never a silent fallback).
+  if (req.url === "/v1/auth/oauth/exchange") {
+    try {
+      const body = await readBody();
+      let parsed: { provider?: string; code?: string; redirectUri?: string };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+      const provider = String(parsed.provider || "");
+      const code = String(parsed.code || "");
+      const redirectUri = String(
+        parsed.redirectUri || "http://localhost:19847/callback",
+      );
+      if (provider !== "google" && provider !== "github") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unsupported_provider" }));
+        return;
+      }
+      if (!code) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "missing_code" }));
+        return;
+      }
+      if (!OAUTH_ALLOWED_REDIRECTS.has(redirectUri)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "redirect_not_allowed" }));
+        return;
+      }
+
+      if (provider === "google") {
+        if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "oauth_not_configured" }));
+          return;
+        }
+        const r = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code,
+            client_id: GOOGLE_OAUTH_CLIENT_ID,
+            client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+            redirect_uri: redirectUri,
+            grant_type: "authorization_code",
+          }),
+        });
+        const text = await r.text();
+        if (!r.ok) {
+          console.error(`[oauth] google exchange failed: ${r.status} ${text}`);
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "exchange_failed" }));
+          return;
+        }
+        const tokens = JSON.parse(text);
+        // Only return what the client needs to build the Firebase credential.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id_token: tokens.id_token,
+            access_token: tokens.access_token,
+          }),
+        );
+        return;
+      }
+
+      // provider === "github"
+      if (!GITHUB_OAUTH_CLIENT_ID || !GITHUB_OAUTH_CLIENT_SECRET) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "oauth_not_configured" }));
+        return;
+      }
+      const r = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          client_id: GITHUB_OAUTH_CLIENT_ID,
+          client_secret: GITHUB_OAUTH_CLIENT_SECRET,
+          code,
+          redirect_uri: redirectUri,
+        }),
+      });
+      const text = await r.text();
+      if (!r.ok) {
+        console.error(`[oauth] github exchange failed: ${r.status} ${text}`);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "exchange_failed" }));
+        return;
+      }
+      const tokens = JSON.parse(text);
+      if (tokens.error) {
+        console.error(
+          `[oauth] github exchange error: ${tokens.error_description || tokens.error}`,
+        );
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "exchange_failed" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: tokens.access_token }));
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[oauth] exchange error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
 
   // --- /v1/me/entitlement (client: effective plan + limits + usage) ---
   // Single source for UI gating. Honors the owner-only X-View-As header so the

@@ -691,6 +691,26 @@ export function planLabel(plan: Plan | null): string {
   }
 }
 
+/**
+ * Max collaborators (guests) a plan may invite to a SINGLE document
+ * (MONETIZATION §1.3): Free 0 / Pro 3 / Team & internal unlimited. This is a
+ * capability gate (not a metered PLAN_LIMITS counter), so it lives client-side;
+ * the server-side counterpart (a Firestore-rules count cap keyed to the owner's
+ * plan) is a deferred follow-up because a fail-closed rule on the core document
+ * write path would risk breaking existing shared docs.
+ */
+export function collaboratorLimit(plan: Plan | null): number {
+  switch (plan) {
+    case "team":
+    case "internal":
+      return Infinity;
+    case "pro":
+      return 3;
+    default: // free / null
+      return 0;
+  }
+}
+
 /** Human-readable label for a metered feature (Japanese UI). */
 export function featureLabel(feature: Feature): string {
   switch (feature) {
