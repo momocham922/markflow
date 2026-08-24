@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "iap",
+  "description": "In-App Purchase (StoreKit 2 / Play Billing) — mobile only. Desktop keeps Stripe, so this capability is scoped to iOS + Android where the tauri-plugin-iap crate is compiled in.",
+  "platforms": ["iOS", "android"],
+  "windows": ["main"],
+  "permissions": ["iap:default"]
+}

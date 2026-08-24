@@ -2380,14 +2380,24 @@ fn clear_voice_archive() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_fs::init());
+
+    // In-App Purchase (StoreKit 2 on iOS, Play Billing v9 on Android) — MOBILE ONLY.
+    // The `tauri-plugin-iap` crate is compiled only for iOS/Android (see Cargo.toml
+    // target cfg), so this registration MUST be cfg-gated too, or the desktop build
+    // would fail to resolve the symbol. Desktop keeps Stripe. Purchases stay dark
+    // until VITE_BILLING_ENABLED and the store products go live.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let builder = builder.plugin(tauri_plugin_iap::init());
+
+    builder
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations(

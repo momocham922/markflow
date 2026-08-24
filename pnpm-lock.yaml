@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@choochmeque/tauri-plugin-iap-api':
+        specifier: 0.9.1
+        version: 0.9.1
       '@codemirror/lang-markdown':
         specifier: ^6.5.0
         version: 6.5.0
@@ -347,6 +350,9 @@ packages:
 
   '@chevrotain/utils@11.1.2':
     resolution: {integrity: sha512-4mudFAQ6H+MqBTfqLmU7G1ZwRzCLfJEooL/fsF6rCX5eePMbGhoy5n4g+G4vlh2muDcsCTJtL+uKbOzWxs5LHA==}
+
+  '@choochmeque/tauri-plugin-iap-api@0.9.1':
+    resolution: {integrity: sha512-ifn8OutdYxWYJ5uPF0cBgyPVLXJgci/6Ycr3VTfPoR63UXPp6KlHb1LW008h6rAYq+64dkKj9i3wLtkZ3xWumQ==}
 
   '@codemirror/autocomplete@6.20.1':
     resolution: {integrity: sha512-1cvg3Vz1dSSToCNlJfRA2WSI4ht3K+WplO0UMOgmUYPivCyy2oueZY6Lx7M9wThm7SDUBViRmuT+OG/i8+ON9A==}
@@ -5833,6 +5839,10 @@ snapshots:
   '@chevrotain/types@11.1.2': {}
 
   '@chevrotain/utils@11.1.2': {}
+
+  '@choochmeque/tauri-plugin-iap-api@0.9.1':
+    dependencies:
+      '@tauri-apps/api': 2.10.1
 
   '@codemirror/autocomplete@6.20.1':
     dependencies:

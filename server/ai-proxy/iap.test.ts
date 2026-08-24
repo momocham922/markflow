@@ -9,6 +9,10 @@ import {
   isProdEnvironment,
   buildAppleIntent,
   buildPlayIntent,
+  appleFactsFromDecoded,
+  playFactsFromPurchaseV2,
+  parseRtdnEnvelope,
+  buildPlayVoidIntent,
   type AppleFacts,
   type PlayFacts,
 } from "./iap";
@@ -352,5 +356,258 @@ describe("buildPlayIntent", () => {
       source: "stripe",
     });
     expect(stripeD).toEqual({ apply: false, reason: "owned_by_play" });
+  });
+});
+
+// =====================================================================
+// Pure adapters: store-SDK decoded shapes → Facts → Intent → gate.
+// =====================================================================
+describe("appleFactsFromDecoded", () => {
+  // A verified JWSTransactionDecodedPayload (subset of the real shape). The
+  // numeric subscription status is NOT in the txn — it comes from the caller.
+  const TXN = {
+    productId: "com.markflow.app.pro.monthly",
+    transactionId: "2000000999",
+    originalTransactionId: "2000000111",
+    appAccountToken: "5b1f0c7e-0000-4000-8000-000000000001",
+    environment: "Production",
+    purchaseDate: 1_787_000_000_000,
+    expiresDate: 1_789_000_000_000,
+    signedDate: 1_787_000_500_000,
+    bundleId: "com.markflow.app",
+    type: "Auto-Renewable Subscription",
+  };
+
+  it("extracts every AppleFacts field from a decoded transaction", () => {
+    const f = appleFactsFromDecoded(TXN, { status: 1 });
+    expect(f.productId).toBe("com.markflow.app.pro.monthly");
+    expect(f.status).toBe(1);
+    expect(f.environment).toBe("Production");
+    expect(f.originalTransactionId).toBe("2000000111");
+    expect(f.transactionId).toBe("2000000999");
+    expect(f.appAccountToken).toBe("5b1f0c7e-0000-4000-8000-000000000001");
+    expect(f.expiresDateMs).toBe(1_789_000_000_000);
+    expect(f.signedDateMs).toBe(1_787_000_500_000);
+    // eventId defaults to the transactionId on the /iap/verify path.
+    expect(f.eventId).toBe("2000000999");
+  });
+
+  it("eventId override wins (ASSN notificationUUID path)", () => {
+    const f = appleFactsFromDecoded(TXN, { status: 1, eventId: "uuid-abc" });
+    expect(f.eventId).toBe("uuid-abc");
+  });
+
+  it("end-to-end: decoded active txn → pro grant", () => {
+    const f = appleFactsFromDecoded(TXN, { status: 1 });
+    const r = buildAppleIntent(f);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.plan).toBe("pro");
+    expect(r.intent.status).toBe("active");
+    expect(r.intent.source).toBe("app_store");
+    expect(r.intent.subId).toBe("2000000111");
+    const d = decideEntitlementWrite(null, r.intent);
+    expect(d.apply).toBe(true);
+    if (d.apply) expect(derivePlan(d.fields)).toBe("pro");
+  });
+
+  it("end-to-end: revoked (5) txn is terminal → canceled to free", () => {
+    const f = appleFactsFromDecoded(TXN, { status: 5 });
+    const r = buildAppleIntent(f);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.status).toBe("canceled");
+    expect(r.intent.terminal).toBe(true);
+    expect(r.intent.plan).toBe("pro"); // plan echo; gate uses canceled status
+  });
+});
+
+describe("playFactsFromPurchaseV2", () => {
+  // A verified SubscriptionPurchaseV2 (subset). productId + expiryTime are under
+  // lineItems[]; the hashed uid is externalAccountIdentifiers.
+  const PURCHASE = {
+    subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
+    linkedPurchaseToken: null,
+    acknowledgementState: "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED",
+    startTime: "2026-08-24T10:00:00Z",
+    externalAccountIdentifiers: { obfuscatedExternalAccountId: "hash-uid-xyz" },
+    lineItems: [
+      {
+        productId: "com.markflow.app.pro",
+        expiryTime: "2026-09-24T10:00:00Z",
+        latestSuccessfulOrderId: "GPA.1111-2222-3333-44444",
+      },
+    ],
+  };
+
+  it("extracts PlayFacts from lineItems + external account id", () => {
+    const f = playFactsFromPurchaseV2(PURCHASE, {
+      purchaseToken: "tok-123",
+      eventTimeMs: 1_787_000_000_000,
+    });
+    expect(f.productId).toBe("com.markflow.app.pro");
+    expect(f.subscriptionState).toBe("SUBSCRIPTION_STATE_ACTIVE");
+    expect(f.purchaseToken).toBe("tok-123");
+    expect(f.orderId).toBe("GPA.1111-2222-3333-44444");
+    expect(f.externalAccountId).toBe("hash-uid-xyz");
+    expect(f.expiryTimeMs).toBe(Date.parse("2026-09-24T10:00:00Z"));
+    expect(f.eventTimeMs).toBe(1_787_000_000_000);
+    expect(f.eventId).toBe("tok-123");
+  });
+
+  it("falls back to startTime for eventTimeMs and ctx.productId when no lineItems", () => {
+    const f = playFactsFromPurchaseV2(
+      {
+        subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
+        startTime: "2026-08-24T10:00:00Z",
+      },
+      {
+        purchaseToken: "tok-9",
+        productId: "com.markflow.app.team",
+        eventId: "msg-1",
+      },
+    );
+    expect(f.productId).toBe("com.markflow.app.team");
+    expect(f.eventTimeMs).toBe(Date.parse("2026-08-24T10:00:00Z"));
+    expect(f.eventId).toBe("msg-1");
+  });
+
+  it("end-to-end: active purchase → pro grant", () => {
+    const f = playFactsFromPurchaseV2(PURCHASE, {
+      purchaseToken: "tok-123",
+      eventTimeMs: 1_787_000_000_000,
+    });
+    const r = buildPlayIntent(f);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.plan).toBe("pro");
+    expect(r.intent.status).toBe("active");
+    expect(r.intent.source).toBe("play");
+    expect(r.intent.subId).toBe("tok-123");
+    const d = decideEntitlementWrite(null, r.intent);
+    expect(d.apply).toBe(true);
+    if (d.apply) expect(derivePlan(d.fields)).toBe("pro");
+  });
+});
+
+describe("parseRtdnEnvelope", () => {
+  function envelope(obj: unknown, messageId = "msg-42"): string {
+    const data = Buffer.from(JSON.stringify(obj), "utf8").toString("base64");
+    return JSON.stringify({
+      message: { data, messageId },
+      subscription: "projects/markflow-app-2026/subscriptions/rtdn",
+    });
+  }
+
+  it("parses a subscription notification", () => {
+    const body = envelope({
+      version: "1.0",
+      packageName: "com.markflow.editor",
+      eventTimeMillis: 1_787_000_000_000,
+      subscriptionNotification: {
+        version: "1.0",
+        notificationType: 4,
+        purchaseToken: "tok-abc",
+        subscriptionId: "com.markflow.app.pro",
+      },
+    });
+    const p = parseRtdnEnvelope(body);
+    expect(p).not.toBeNull();
+    expect(p!.messageId).toBe("msg-42");
+    expect(p!.packageName).toBe("com.markflow.editor");
+    expect(p!.eventTimeMs).toBe(1_787_000_000_000);
+    expect(p!.subscription).toEqual({
+      notificationType: 4,
+      purchaseToken: "tok-abc",
+      subscriptionId: "com.markflow.app.pro",
+    });
+    expect(p!.voided).toBeUndefined();
+    expect(p!.test).toBe(false);
+  });
+
+  it("parses a voided (refund) notification", () => {
+    const body = envelope({
+      packageName: "com.markflow.editor",
+      eventTimeMillis: 1_787_000_000_000,
+      voidedPurchaseNotification: {
+        purchaseToken: "tok-void",
+        orderId: "GPA.void",
+        productType: 1,
+        refundType: 1,
+      },
+    });
+    const p = parseRtdnEnvelope(body);
+    expect(p!.voided).toEqual({
+      purchaseToken: "tok-void",
+      orderId: "GPA.void",
+      productType: 1,
+      refundType: 1,
+    });
+    expect(p!.subscription).toBeUndefined();
+  });
+
+  it("flags a test notification", () => {
+    const body = envelope({
+      packageName: "com.markflow.editor",
+      testNotification: { version: "1.0" },
+    });
+    expect(parseRtdnEnvelope(body)!.test).toBe(true);
+  });
+
+  it("returns null for malformed envelopes (no redelivery)", () => {
+    expect(parseRtdnEnvelope("not json")).toBeNull();
+    expect(parseRtdnEnvelope(JSON.stringify({ message: {} }))).toBeNull(); // no data
+    expect(
+      parseRtdnEnvelope(JSON.stringify({ message: { data: "x" } })),
+    ).toBeNull(); // no messageId
+    expect(
+      parseRtdnEnvelope(
+        JSON.stringify({
+          message: { data: "!!!notbase64json", messageId: "m" },
+        }),
+      ),
+    ).toBeNull(); // undecodable data
+  });
+});
+
+describe("buildPlayVoidIntent", () => {
+  it("builds a terminal canceled revoke for the token", () => {
+    const r = buildPlayVoidIntent("tok-void", "msg-9", 1_787_000_000_000);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.plan).toBe("free");
+    expect(r.intent.status).toBe("canceled");
+    expect(r.intent.terminal).toBe(true);
+    expect(r.intent.source).toBe("play");
+    expect(r.intent.subId).toBe("tok-void");
+    expect(r.intent.eventCreated).toBe(Math.floor(1_787_000_000_000 / 1000));
+  });
+
+  it("missing token → not ok", () => {
+    expect(buildPlayVoidIntent("", "e", 1)).toEqual({
+      ok: false,
+      reason: "missing_purchase_token",
+    });
+  });
+
+  it("a void terminal-revokes an active play doc for the same token", () => {
+    const active = buildPlayIntent({
+      productId: "com.markflow.app.pro",
+      subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
+      purchaseToken: "tok-same",
+      eventTimeMs: 1_787_000_000_000,
+      eventId: "e1",
+    } as PlayFacts);
+    expect(active.ok).toBe(true);
+    if (!active.ok) return;
+    const d1 = decideEntitlementWrite(null, active.intent);
+    expect(d1.apply).toBe(true);
+    if (!d1.apply) return;
+    const voidR = buildPlayVoidIntent("tok-same", "e2", 1_787_000_100_000);
+    expect(voidR.ok).toBe(true);
+    if (!voidR.ok) return;
+    const d2 = decideEntitlementWrite(d1.fields, voidR.intent);
+    expect(d2.apply).toBe(true);
+    if (d2.apply) expect(derivePlan(d2.fields)).toBe("free");
   });
 });

@@ -44,6 +44,26 @@ import {
   type TeamBillingIntent,
   type ExistingTeamBilling,
 } from "./billing";
+import {
+  appleFactsFromDecoded,
+  playFactsFromPurchaseV2,
+  parseRtdnEnvelope,
+  buildAppleIntent,
+  buildPlayIntent,
+  buildPlayVoidIntent,
+  isProdEnvironment,
+  type IapIntentResult,
+} from "./iap";
+// Store-SDK verification (impure). Marked --external in the esbuild bundle and
+// installed in the Docker image; the top-level require runs even when IAP is DARK
+// (creds absent), so both packages MUST be present in node_modules at boot.
+import {
+  SignedDataVerifier,
+  AppStoreServerAPIClient,
+  Environment,
+} from "@apple/app-store-server-library";
+import { GoogleAuth } from "google-auth-library";
+import { APPLE_ROOT_CERTS } from "./apple-root-certs";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
@@ -118,6 +138,11 @@ const APPLE_BUNDLE_ID = process.env.APPLE_BUNDLE_ID || "";
 const APP_STORE_ISSUER_ID = process.env.APP_STORE_ISSUER_ID || "";
 const APP_STORE_KEY_ID = process.env.APP_STORE_KEY_ID || "";
 const APP_STORE_PRIVATE_KEY = process.env.APP_STORE_PRIVATE_KEY || "";
+// The app's numeric App Store id (adamId). REQUIRED by SignedDataVerifier for
+// PRODUCTION receipts/notifications (it cross-checks data.appAppleId); Sandbox
+// does not use it. Set once the App Store product exists.
+const APP_STORE_APP_APPLE_ID =
+  Number(process.env.APP_STORE_APP_APPLE_ID) || undefined;
 const PLAY_PACKAGE_NAME = process.env.PLAY_PACKAGE_NAME || "";
 const PLAY_SERVICE_ACCOUNT = process.env.PLAY_SERVICE_ACCOUNT_JSON || "";
 
@@ -309,6 +334,295 @@ async function writeEntitlementFromIntent(
   console.log(
     `[stripe] entitlement set uid=${uid} plan=${decision.fields.plan} status=${decision.fields.status} evt=${intent.eventId}`,
   );
+}
+
+// =====================================================================
+// In-App Purchase verification I/O (monetization ③) — Apple + Google Play.
+// ---------------------------------------------------------------------
+// The IMPURE half of ./iap.ts: Apple JWS verification via
+// @apple/app-store-server-library and Play verification via the Android Publisher
+// REST API (google-auth-library mints the service-account token). The decoded,
+// TRUSTED payloads are handed to the ./iap.ts pure builders and the resulting
+// intent is applied through writeEntitlementFromIntent — the SAME cross-rail-safe
+// pipeline Stripe uses (decideEntitlementWrite refuses to let an IAP purchase
+// overwrite an active Stripe sub, and vice-versa). Everything here is DARK: the
+// endpoints return 503 before any of this runs until store credentials exist.
+//
+// uid binding: the buyer's firebase uid is bound to the store subscription id
+// (Apple originalTransactionId / Play purchaseToken) in iapCustomers at
+// /iap/verify, where the uid is the VERIFIED Firebase token — never a
+// client-asserted account token. The unauthenticated server notifications (Apple
+// ASSN / Play RTDN) resolve the uid from that binding.
+// =====================================================================
+
+let _appleVerifierProd: SignedDataVerifier | null = null;
+let _appleVerifierSandbox: SignedDataVerifier | null = null;
+/**
+ * Lazily build the per-environment Apple signed-data verifier. enableOnlineChecks
+ * is false: the certificate chain is validated offline against the embedded Apple
+ * roots (no OCSP round-trip that could flake and reject a valid payment). A prod
+ * receipt is verified with the prod verifier, a sandbox receipt with the sandbox
+ * verifier — callers try prod first and fall back to sandbox on mismatch.
+ */
+function appleVerifier(production: boolean): SignedDataVerifier {
+  if (production) {
+    if (!_appleVerifierProd) {
+      _appleVerifierProd = new SignedDataVerifier(
+        APPLE_ROOT_CERTS,
+        false,
+        Environment.PRODUCTION,
+        APPLE_BUNDLE_ID,
+        APP_STORE_APP_APPLE_ID,
+      );
+    }
+    return _appleVerifierProd;
+  }
+  if (!_appleVerifierSandbox) {
+    _appleVerifierSandbox = new SignedDataVerifier(
+      APPLE_ROOT_CERTS,
+      false,
+      Environment.SANDBOX,
+      APPLE_BUNDLE_ID,
+      undefined,
+    );
+  }
+  return _appleVerifierSandbox;
+}
+
+let _appleApiProd: AppStoreServerAPIClient | null = null;
+let _appleApiSandbox: AppStoreServerAPIClient | null = null;
+/** Lazily build the per-environment App Store Server API client (ES256 JWT auth). */
+function appleApi(production: boolean): AppStoreServerAPIClient {
+  if (production) {
+    if (!_appleApiProd) {
+      _appleApiProd = new AppStoreServerAPIClient(
+        APP_STORE_PRIVATE_KEY,
+        APP_STORE_KEY_ID,
+        APP_STORE_ISSUER_ID,
+        APPLE_BUNDLE_ID,
+        Environment.PRODUCTION,
+      );
+    }
+    return _appleApiProd;
+  }
+  if (!_appleApiSandbox) {
+    _appleApiSandbox = new AppStoreServerAPIClient(
+      APP_STORE_PRIVATE_KEY,
+      APP_STORE_KEY_ID,
+      APP_STORE_ISSUER_ID,
+      APPLE_BUNDLE_ID,
+      Environment.SANDBOX,
+    );
+  }
+  return _appleApiSandbox;
+}
+
+/**
+ * Verify + decode a StoreKit2 signed transaction JWS, routing environment
+ * automatically: production first, sandbox on failure (the standard Apple
+ * pattern — a tampered receipt fails BOTH verifiers and throws, so it is
+ * rejected, never granted).
+ */
+async function appleVerifyTransaction(
+  jws: string,
+): Promise<{ txn: Record<string, unknown>; production: boolean }> {
+  try {
+    const txn = await appleVerifier(true).verifyAndDecodeTransaction(jws);
+    return { txn: txn as unknown as Record<string, unknown>, production: true };
+  } catch {
+    const txn = await appleVerifier(false).verifyAndDecodeTransaction(jws);
+    return {
+      txn: txn as unknown as Record<string, unknown>,
+      production: false,
+    };
+  }
+}
+
+/** Verify + decode an App Store Server Notification V2 (prod → sandbox routing). */
+async function appleVerifyNotification(
+  signedPayload: string,
+): Promise<Record<string, unknown>> {
+  try {
+    return (await appleVerifier(true).verifyAndDecodeNotification(
+      signedPayload,
+    )) as unknown as Record<string, unknown>;
+  } catch {
+    return (await appleVerifier(false).verifyAndDecodeNotification(
+      signedPayload,
+    )) as unknown as Record<string, unknown>;
+  }
+}
+
+/**
+ * The authoritative numeric subscription status (1..5) + the latest signed
+ * transaction for an originalTransactionId, via "Get All Subscription Statuses".
+ * The status is NOT carried in the transaction JWS, so /iap/verify calls this to
+ * learn whether the sub is active/grace/on-hold/expired/revoked. Returns null
+ * when the id is unknown to the App Store.
+ */
+async function appleAuthoritativeStatus(
+  originalTransactionId: string,
+  production: boolean,
+): Promise<{ status: number; signedTransactionInfo?: string } | null> {
+  const resp = (await appleApi(production).getAllSubscriptionStatuses(
+    originalTransactionId,
+  )) as unknown as Record<string, unknown>;
+  const groups = Array.isArray(resp?.data)
+    ? (resp.data as Array<Record<string, unknown>>)
+    : [];
+  const pick = (lt: Record<string, unknown>) => ({
+    status: Number(lt?.status),
+    signedTransactionInfo: lt?.signedTransactionInfo
+      ? String(lt.signedTransactionInfo)
+      : undefined,
+  });
+  for (const g of groups) {
+    const lasts = Array.isArray(g?.lastTransactions)
+      ? (g.lastTransactions as Array<Record<string, unknown>>)
+      : [];
+    for (const lt of lasts) {
+      if (
+        String(lt?.originalTransactionId ?? "").trim() === originalTransactionId
+      ) {
+        return pick(lt);
+      }
+    }
+  }
+  const first = groups[0]?.lastTransactions as
+    Array<Record<string, unknown>> | undefined;
+  const lt0 = Array.isArray(first) ? first[0] : undefined;
+  return lt0 ? pick(lt0) : null;
+}
+
+let _playAuth: GoogleAuth | null = null;
+function playAuth(): GoogleAuth {
+  if (!_playAuth) {
+    _playAuth = new GoogleAuth({
+      credentials: JSON.parse(PLAY_SERVICE_ACCOUNT),
+      scopes: ["https://www.googleapis.com/auth/androidpublisher"],
+    });
+  }
+  return _playAuth;
+}
+async function playAccessToken(): Promise<string> {
+  const client = await playAuth().getClient();
+  const t = await client.getAccessToken();
+  const token = typeof t === "string" ? t : t?.token;
+  if (!token) throw new Error("play_auth_failed");
+  return token;
+}
+/** Authoritative subscription state via purchases.subscriptionsv2.get (REST). */
+async function playGetSubscriptionV2(
+  token: string,
+): Promise<Record<string, unknown>> {
+  const at = await playAccessToken();
+  const url =
+    `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/` +
+    `${encodeURIComponent(PLAY_PACKAGE_NAME)}/purchases/subscriptionsv2/tokens/` +
+    `${encodeURIComponent(token)}`;
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${at}` } });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`play_get_failed ${r.status} ${text}`);
+  return JSON.parse(text) as Record<string, unknown>;
+}
+/** Acknowledge a Play subscription (else Google auto-refunds within ~3 days). */
+async function playAcknowledge(
+  productId: string,
+  token: string,
+): Promise<void> {
+  const at = await playAccessToken();
+  const url =
+    `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/` +
+    `${encodeURIComponent(PLAY_PACKAGE_NAME)}/purchases/subscriptions/` +
+    `${encodeURIComponent(productId)}/tokens/${encodeURIComponent(token)}:acknowledge`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${at}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+  // 410 Gone = already acknowledged / expired — harmless.
+  if (!r.ok && r.status !== 410) {
+    const t = await r.text();
+    throw new Error(`play_ack_failed ${r.status} ${t}`);
+  }
+}
+
+/** iapEvents dedupe (mirror of stripeEvents; mark AFTER successful handling). */
+async function iapEventAlreadyProcessed(eventId: string): Promise<boolean> {
+  const snap = await getFirestore().collection("iapEvents").doc(eventId).get();
+  return snap.exists;
+}
+async function markIapEventProcessed(eventId: string): Promise<void> {
+  // create() (not set()) so a concurrent double-delivery's second writer hits
+  // ALREADY_EXISTS; the caller treats a mark failure as non-fatal (idempotent).
+  await getFirestore()
+    .collection("iapEvents")
+    .doc(eventId)
+    .create({ at: FieldValue.serverTimestamp() });
+}
+
+/** iapCustomers doc for a store subscription id (Firestore ids cannot hold "/"). */
+function iapCustomerRef(subId: string) {
+  return getFirestore()
+    .collection("iapCustomers")
+    .doc(subId.replace(/\//g, "_"));
+}
+/**
+ * Bind a store subscription id → firebase uid, CREATE-ONCE (first claimant wins).
+ * A different uid claiming an already-bound subId is an anomaly (account transfer
+ * / abuse) and is refused + logged — never silently reassigned.
+ */
+async function bindIapCustomer(
+  subId: string,
+  uid: string,
+  meta: Record<string, unknown> = {},
+): Promise<void> {
+  if (!subId || !uid) return;
+  const ref = iapCustomerRef(subId);
+  try {
+    await ref.create({ uid, ...meta, createdAt: FieldValue.serverTimestamp() });
+  } catch {
+    const snap = await ref.get();
+    const existing = snap.exists ? String(snap.data()?.uid || "") : "";
+    if (existing && existing !== uid) {
+      console.error(
+        `[iap] subId ${subId} already bound to ${existing}; refused ${uid}`,
+      );
+    }
+  }
+}
+async function lookupIapCustomer(subId: string): Promise<string | null> {
+  if (!subId) return null;
+  try {
+    const snap = await iapCustomerRef(subId).get();
+    return snap.exists ? String(snap.data()?.uid || "") || null : null;
+  } catch (e) {
+    console.error(`[iap] lookupIapCustomer ${subId} failed:`, e);
+    return null;
+  }
+}
+
+/** Apply a built IAP intent for a resolved uid through the shared pipeline. */
+async function applyIapIntent(
+  uid: string,
+  result: IapIntentResult,
+  ctx: string,
+): Promise<boolean> {
+  if (!result.ok) {
+    console.warn(`[iap] ${ctx} skip: ${result.reason}`);
+    return false;
+  }
+  if (!uid) {
+    console.error(
+      `[iap] ${ctx} no uid for subId=${result.intent.subId} — cannot apply`,
+    );
+    return false;
+  }
+  await writeEntitlementFromIntent(uid, result.intent);
+  return true;
 }
 
 /**
@@ -1961,11 +2275,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- /v1/billing/iap/verify (authed: verify a mobile IAP → entitlement) ---
-  // Phase 0 DARK: returns 503 iap_not_configured until store credentials exist.
-  // Phase 1 will decode+verify the Apple JWS / call the Play API, feed the facts
-  // into iap.buildAppleIntent / buildPlayIntent, and apply the result through the
-  // SAME writeEntitlementFromIntent pipeline Stripe uses (cross-rail safe). The
-  // uid is the VERIFIED Firebase uid (never the client-asserted account token).
+  // The client sends { platform:"ios", jws } (StoreKit2 signed transaction) or
+  // { platform:"android", purchaseToken, productId }. We verify the receipt
+  // server-side, build the intent via iap.ts, bind the store subId→uid (using the
+  // VERIFIED Firebase uid, never a client-asserted token), and apply through the
+  // SAME writeEntitlementFromIntent pipeline Stripe uses (cross-rail safe). DARK:
+  // 503 until store credentials exist.
   if (req.url === "/v1/billing/iap/verify") {
     try {
       const uid = await verifyFirebaseToken(req.headers.authorization);
@@ -1974,54 +2289,337 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "iap_not_configured" }));
         return;
       }
-      // Configured but verification not yet wired (Phase 1). Fail LOUDLY — never
-      // silently grant an entitlement for an unverified purchase.
-      console.warn(
-        `[iap] verify called (configured) uid=${uid} — not yet wired`,
-      );
-      res.writeHead(501, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "iap_verification_not_implemented" }));
+      const body = await readBody();
+      let parsed: {
+        platform?: string;
+        jws?: string;
+        purchaseToken?: string;
+        productId?: string;
+      };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+      const platform = String(parsed.platform || "").toLowerCase();
+
+      if (platform === "ios") {
+        if (!appleIapConfigured()) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "iap_not_configured" }));
+          return;
+        }
+        const jws = String(parsed.jws || "").trim();
+        if (!jws) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "missing_jws" }));
+          return;
+        }
+        const { txn, production } = await appleVerifyTransaction(jws);
+        const originalTxId = String(txn.originalTransactionId || "").trim();
+        if (!originalTxId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_transaction" }));
+          return;
+        }
+        // Authoritative numeric status (+ latest signed txn) from the App Store
+        // Server API — the JWS alone does not carry active/expired/revoked.
+        const authStatus = await appleAuthoritativeStatus(
+          originalTxId,
+          production,
+        );
+        let effectiveTxn = txn;
+        if (authStatus?.signedTransactionInfo) {
+          try {
+            effectiveTxn = (await appleVerifier(
+              production,
+            ).verifyAndDecodeTransaction(
+              authStatus.signedTransactionInfo,
+            )) as unknown as Record<string, unknown>;
+          } catch {
+            /* fall back to the client-supplied (already-verified) txn */
+          }
+        }
+        const facts = appleFactsFromDecoded(effectiveTxn, {
+          status: authStatus?.status,
+        });
+        const result = buildAppleIntent(facts);
+        if (!result.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: result.reason }));
+          return;
+        }
+        await bindIapCustomer(result.intent.subId!, uid, {
+          source: "app_store",
+          productId: result.intent.productId,
+        });
+        await applyIapIntent(uid, result, "verify/ios");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            plan: result.intent.plan,
+            status: result.intent.status,
+          }),
+        );
+        return;
+      }
+
+      if (platform === "android") {
+        if (!playIapConfigured()) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "iap_not_configured" }));
+          return;
+        }
+        const token = String(parsed.purchaseToken || "").trim();
+        if (!token) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "missing_purchase_token" }));
+          return;
+        }
+        const purchase = await playGetSubscriptionV2(token);
+        // Acknowledge within the 3-day window or Google auto-refunds the buyer.
+        if (
+          String(purchase.acknowledgementState || "") ===
+          "ACKNOWLEDGEMENT_STATE_PENDING"
+        ) {
+          const li = Array.isArray(purchase.lineItems)
+            ? (purchase.lineItems as Array<Record<string, unknown>>)[0]
+            : undefined;
+          const pid = String(li?.productId || parsed.productId || "").trim();
+          if (pid) {
+            try {
+              await playAcknowledge(pid, token);
+            } catch (e) {
+              console.error("[iap] play acknowledge failed:", e);
+            }
+          }
+        }
+        const facts = playFactsFromPurchaseV2(purchase, {
+          productId: parsed.productId,
+          purchaseToken: token,
+          eventTimeMs: Date.now(),
+        });
+        const result = buildPlayIntent(facts);
+        if (!result.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: result.reason }));
+          return;
+        }
+        await bindIapCustomer(result.intent.subId!, uid, {
+          source: "play",
+          productId: result.intent.productId,
+        });
+        await applyIapIntent(uid, result, "verify/android");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            plan: result.intent.plan,
+            status: result.intent.status,
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unsupported_platform" }));
       return;
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal server error";
+      console.error(`[iap] verify failed: ${message}`);
       sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
       return;
     }
   }
 
   // --- /v1/billing/appstore/notifications (Apple Server Notifications V2) ---
-  // NO Firebase auth — Apple posts a signed JWS. Phase 0 DARK: 503 until creds
-  // exist. Phase 1 verifies the JWS chain, decodes the transaction/renewal info,
-  // and applies via writeEntitlementFromIntent.
+  // NO Firebase auth — Apple posts { signedPayload } (a JWS whose signature is
+  // self-contained, so a plain JSON body read is safe). We verify the chain,
+  // dedupe on notificationUUID, decode the nested transaction, and apply via the
+  // shared pipeline. uid resolves from the iapCustomers binding /iap/verify set.
+  // 5xx on failure so Apple retries; 200 once recorded.
   if (req.url === "/v1/billing/appstore/notifications") {
     if (!appleIapConfigured()) {
       res.writeHead(503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "iap_not_configured" }));
       return;
     }
-    console.warn(
-      "[iap] appstore notification received (configured) — not yet wired",
-    );
-    res.writeHead(501, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "iap_verification_not_implemented" }));
-    return;
+    try {
+      const body = await readBody();
+      let parsed: { signedPayload?: string };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+      const signedPayload = String(parsed.signedPayload || "").trim();
+      if (!signedPayload) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "missing_payload" }));
+        return;
+      }
+      const notification = await appleVerifyNotification(signedPayload);
+      const uuid = String(notification.notificationUUID || "").trim();
+      if (!uuid) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_notification" }));
+        return;
+      }
+      const eventId = `apple:${uuid}`;
+      if (await iapEventAlreadyProcessed(eventId)) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ received: true, duplicate: true }));
+        return;
+      }
+      const data = (notification.data || {}) as Record<string, unknown>;
+      const signedTx = String(data.signedTransactionInfo || "").trim();
+      if (signedTx) {
+        const production = isProdEnvironment(data.environment);
+        const txn = (await appleVerifier(production).verifyAndDecodeTransaction(
+          signedTx,
+        )) as unknown as Record<string, unknown>;
+        const facts = appleFactsFromDecoded(txn, {
+          status: data.status,
+          eventId: uuid,
+        });
+        const result = buildAppleIntent(facts);
+        const subId = String(txn.originalTransactionId || "").trim();
+        const uid = await lookupIapCustomer(subId);
+        if (result.ok && uid) {
+          await applyIapIntent(uid, result, "notif/apple");
+        } else {
+          console.warn(
+            `[iap] apple notif ${uuid} unmapped subId=${subId} ok=${result.ok}`,
+          );
+        }
+      } else {
+        // Non-subscription notification (e.g. CONSUMPTION_REQUEST) — nothing to
+        // apply, but still dedupe-record so Apple stops retrying.
+        console.log(`[iap] apple notif ${uuid} no transaction — ack`);
+      }
+      try {
+        await markIapEventProcessed(eventId);
+      } catch (e) {
+        console.error(`[iap] mark ${eventId} failed:`, e);
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ received: true }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[iap] appstore notification failed: ${message}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "notification_failed" }));
+      }
+      return;
+    }
   }
 
   // --- /v1/billing/play/rtdn (Google Play Real-time Developer Notifications) ---
-  // NO Firebase auth — Play pushes via Pub/Sub. Phase 0 DARK: 503 until creds
-  // exist. Phase 1 validates the push, calls the Play Developer API for the
-  // authoritative subscription, and applies via writeEntitlementFromIntent.
+  // NO Firebase auth — Play pushes a Pub/Sub envelope. RTDN is a change-SIGNAL:
+  // we re-fetch the authoritative subscription via the Play API (never trust the
+  // push payload's state). Dedupe on the Pub/Sub messageId; ack malformed
+  // messages with 200 to stop pointless redelivery; 500 on transient Play-API
+  // failure so Pub/Sub retries. uid resolves from the iapCustomers binding.
   if (req.url === "/v1/billing/play/rtdn") {
     if (!playIapConfigured()) {
       res.writeHead(503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "iap_not_configured" }));
       return;
     }
-    console.warn("[iap] play RTDN received (configured) — not yet wired");
-    res.writeHead(501, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "iap_verification_not_implemented" }));
-    return;
+    try {
+      const body = await readBody();
+      const rtdn = parseRtdnEnvelope(body);
+      if (!rtdn) {
+        // Permanently-malformed envelope: ack so Pub/Sub drops it, log loudly.
+        console.error("[iap] play RTDN malformed envelope — ack");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ received: true, ignored: true }));
+        return;
+      }
+      const eventId = `play:${rtdn.messageId}`;
+      if (await iapEventAlreadyProcessed(eventId)) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ received: true, duplicate: true }));
+        return;
+      }
+      if (rtdn.test) {
+        try {
+          await markIapEventProcessed(eventId);
+        } catch (e) {
+          console.error(`[iap] mark ${eventId} failed:`, e);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ received: true, test: true }));
+        return;
+      }
+
+      if (rtdn.voided) {
+        const token = rtdn.voided.purchaseToken;
+        const result = buildPlayVoidIntent(
+          token,
+          rtdn.messageId,
+          rtdn.eventTimeMs,
+        );
+        const uid = await lookupIapCustomer(token);
+        if (result.ok && uid) {
+          await applyIapIntent(uid, result, "rtdn/void");
+        } else {
+          console.warn(
+            `[iap] play void ${rtdn.messageId} unmapped token ok=${result.ok}`,
+          );
+        }
+      } else if (rtdn.subscription) {
+        const token = rtdn.subscription.purchaseToken;
+        const purchase = await playGetSubscriptionV2(token);
+        const facts = playFactsFromPurchaseV2(purchase, {
+          productId: rtdn.subscription.subscriptionId,
+          purchaseToken: token,
+          eventId: rtdn.messageId,
+          eventTimeMs: rtdn.eventTimeMs,
+        });
+        const result = buildPlayIntent(facts);
+        // Prefer the server-established binding; fall back to the obfuscated
+        // account id we set at purchase (returned by the authoritative Play API).
+        let uid = await lookupIapCustomer(token);
+        if (!uid && result.ok) uid = String(result.uid || "") || null;
+        if (result.ok && uid) {
+          await bindIapCustomer(result.intent.subId!, uid, { source: "play" });
+          await applyIapIntent(uid, result, "rtdn/sub");
+        } else {
+          console.warn(
+            `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
+          );
+        }
+      } else {
+        console.log(`[iap] play RTDN ${rtdn.messageId} no actionable body`);
+      }
+      try {
+        await markIapEventProcessed(eventId);
+      } catch (e) {
+        console.error(`[iap] mark ${eventId} failed:`, e);
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ received: true }));
+      return;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[iap] play RTDN failed: ${message}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "rtdn_failed" }));
+      }
+      return;
+    }
   }
 
   // --- /v1/voice/transcribe ---

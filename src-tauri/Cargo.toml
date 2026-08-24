@@ -49,3 +49,10 @@ objc2-foundation = { version = "0.3", features = ["NSString"] }
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSURL", "NSString"] }
+
+# In-App Purchase (StoreKit 2 on iOS, Play Billing v9 on Android) — MOBILE ONLY.
+# Desktop keeps Stripe: macOS StoreKit IAP requires an app-sandboxed Mac App Store
+# build, which is INCOMPATIBLE with MarkFlow's Developer-ID DMG distribution, so the
+# plugin is never compiled into the macOS/Windows/Linux binaries (byte-unaffected).
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+tauri-plugin-iap = "0.9"

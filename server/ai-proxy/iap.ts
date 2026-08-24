@@ -274,3 +274,203 @@ export function buildPlayIntent(facts: PlayFacts): IapIntentResult {
   };
   return { ok: true, uid, intent };
 }
+
+// =====================================================================
+// Pure adapters: store-SDK decoded shapes → AppleFacts / PlayFacts.
+// ---------------------------------------------------------------------
+// index.ts performs the IMPURE verification (Apple SignedDataVerifier / the Play
+// Developer API) and hands the DECODED, TRUSTED payload here. These adapters do
+// nothing but field extraction + shape-normalisation, so they stay exhaustively
+// unit-testable and keep index.ts free of hand-rolled field plucking. They never
+// decide trust — a caller must only feed a payload that verification accepted.
+// =====================================================================
+
+/** ISO-8601 / RFC-3339 date string → epoch ms (0 when absent/unparseable). */
+function isoToMs(v: unknown): number {
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** A numeric string/number → finite number, else 0. */
+function toNum(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Map a verified, decoded Apple JWSTransaction payload (from
+ * SignedDataVerifier.verifyAndDecodeTransaction) → AppleFacts. The numeric
+ * subscription `status` (1..5) is NOT in the transaction payload — it comes from
+ * the App Store Server API "Get All Subscription Statuses" call or the ASSN V2
+ * notification `data.status`, so the caller passes it in. `eventId` defaults to
+ * the transactionId (the /iap/verify path) but is the notificationUUID for ASSN.
+ */
+export function appleFactsFromDecoded(
+  txn: Record<string, unknown>,
+  opts: { status: unknown; eventId?: unknown },
+): AppleFacts {
+  return {
+    productId: txn.productId,
+    status: opts.status,
+    environment: txn.environment,
+    originalTransactionId: txn.originalTransactionId,
+    transactionId: txn.transactionId,
+    appAccountToken: txn.appAccountToken,
+    expiresDateMs: txn.expiresDate,
+    signedDateMs: txn.signedDate,
+    eventId:
+      String(opts.eventId ?? "").trim() ||
+      String(txn.transactionId ?? "").trim(),
+  };
+}
+
+/**
+ * Map a verified Play SubscriptionPurchaseV2 (purchases.subscriptionsv2.get) →
+ * PlayFacts. `productId`/`expiryTime` live under lineItems[] in v2; the buyer's
+ * hashed uid is externalAccountIdentifiers.obfuscatedExternalAccountId. The
+ * caller supplies the purchaseToken (the API path param, not echoed in the body)
+ * and the ordering key `eventTimeMs` (Date.now() at /iap/verify, or the RTDN
+ * eventTimeMillis) since a Play purchase carries no per-event signed timestamp.
+ */
+export function playFactsFromPurchaseV2(
+  purchase: Record<string, unknown>,
+  ctx: {
+    productId?: unknown;
+    purchaseToken: unknown;
+    eventId?: unknown;
+    eventTimeMs?: unknown;
+  },
+): PlayFacts {
+  const lineItems = Array.isArray(purchase.lineItems)
+    ? (purchase.lineItems as Array<Record<string, unknown>>)
+    : [];
+  const li0 = lineItems[0] ?? {};
+  const ext = (purchase.externalAccountIdentifiers ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const token = String(ctx.purchaseToken ?? "").trim();
+  return {
+    productId: String(li0.productId ?? ctx.productId ?? "").trim(),
+    subscriptionState: purchase.subscriptionState,
+    purchaseToken: token,
+    linkedPurchaseToken: purchase.linkedPurchaseToken,
+    orderId: li0.latestSuccessfulOrderId,
+    externalAccountId: ext.obfuscatedExternalAccountId,
+    expiryTimeMs: isoToMs(li0.expiryTime),
+    eventTimeMs: toNum(ctx.eventTimeMs) || isoToMs(purchase.startTime),
+    eventId: String(ctx.eventId ?? "").trim() || token,
+  };
+}
+
+/** A parsed Google Play RTDN (Pub/Sub push envelope → DeveloperNotification). */
+export interface RtdnParsed {
+  /** Pub/Sub message id — the notification idempotency key. */
+  messageId: string;
+  packageName: string;
+  eventTimeMs: number;
+  /** Present for a subscription state change (the common case). */
+  subscription?: {
+    notificationType: number;
+    purchaseToken: string;
+    subscriptionId: string;
+  };
+  /** Present for a refund/chargeback (revoke the entitlement for the token). */
+  voided?: {
+    purchaseToken: string;
+    orderId: string;
+    productType: number;
+    refundType: number;
+  };
+  /** True for Google's connectivity test notification (ack, do nothing). */
+  test: boolean;
+}
+
+/**
+ * Parse a Google Play RTDN Pub/Sub push request body → RtdnParsed (null when the
+ * envelope is malformed — the caller acks with 400 so Pub/Sub does not redeliver
+ * a permanently-broken message). RTDN is a CHANGE-SIGNAL only: the caller must
+ * re-fetch the authoritative subscription via the Play Developer API; this only
+ * extracts the purchaseToken/subscriptionId to fetch and the messageId to dedupe.
+ */
+export function parseRtdnEnvelope(rawBody: string): RtdnParsed | null {
+  let envelope: Record<string, unknown>;
+  try {
+    envelope = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const message = (envelope?.message ?? null) as Record<string, unknown> | null;
+  if (!message || typeof message.data !== "string") return null;
+  const messageId = String(
+    message.messageId ?? message.message_id ?? "",
+  ).trim();
+  if (!messageId) return null;
+
+  let decoded: Record<string, unknown>;
+  try {
+    decoded = JSON.parse(
+      Buffer.from(message.data, "base64").toString("utf8"),
+    ) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  const out: RtdnParsed = {
+    messageId,
+    packageName: String(decoded.packageName ?? "").trim(),
+    eventTimeMs: toNum(decoded.eventTimeMillis),
+    test: false,
+  };
+  const sub = decoded.subscriptionNotification as
+    Record<string, unknown> | undefined;
+  const voided = decoded.voidedPurchaseNotification as
+    Record<string, unknown> | undefined;
+  if (sub && typeof sub === "object") {
+    out.subscription = {
+      notificationType: toNum(sub.notificationType),
+      purchaseToken: String(sub.purchaseToken ?? "").trim(),
+      subscriptionId: String(sub.subscriptionId ?? "").trim(),
+    };
+  } else if (voided && typeof voided === "object") {
+    out.voided = {
+      purchaseToken: String(voided.purchaseToken ?? "").trim(),
+      orderId: String(voided.orderId ?? "").trim(),
+      productType: toNum(voided.productType),
+      refundType: toNum(voided.refundType),
+    };
+  } else if (decoded.testNotification) {
+    out.test = true;
+  }
+  return out;
+}
+
+/**
+ * Build a REVOKE intent for a refunded/voided Play purchase
+ * (voidedPurchaseNotification carries no subscriptionState, so it cannot go
+ * through subscriptionsv2.get). The refund is terminal for the token: canceled +
+ * terminal, seats:1, source:"play". uid is resolved by the caller via iapCustomers.
+ */
+export function buildPlayVoidIntent(
+  token: unknown,
+  eventId: unknown,
+  eventTimeMs: unknown,
+): IapIntentResult {
+  const t = String(token ?? "").trim();
+  if (!t) return { ok: false, reason: "missing_purchase_token" };
+  const ms = toNum(eventTimeMs);
+  const intent: EntitlementIntent = {
+    plan: "free",
+    status: "canceled",
+    source: "play",
+    subId: t,
+    eventId: String(eventId ?? "").trim() || t,
+    eventCreated: ms > 0 ? Math.floor(ms / 1000) : 0,
+    terminal: true,
+    seats: 1,
+    playPurchaseToken: t,
+  };
+  return { ok: true, uid: "", intent };
+}

@@ -98,6 +98,23 @@ function billingErrorMessage(code: string): string {
       return "割り当てるメンバーを指定してください。";
     case "not_team_member":
       return "チームに参加していないユーザーには席を割り当てられません。";
+    // --- Mobile In-App Purchase (StoreKit / Play Billing) ---
+    case "iap_not_configured":
+      return "アプリ内課金は現在準備中です。しばらくお待ちください。";
+    case "no_receipt":
+    case "no_purchase_token":
+    case "missing_jws":
+    case "missing_purchase_token":
+      return "購入情報を取得できませんでした。もう一度お試しください。";
+    case "invalid_transaction":
+    case "unknown_status":
+    case "unmapped_product":
+      return "この購入を確認できませんでした。時間をおいて再度お試しください。";
+    case "unsupported_platform":
+      return "このプラットフォームではアプリ内課金を利用できません。";
+    case "purchase_failed":
+    case "verify_failed":
+      return "購入処理に失敗しました。時間をおいて再度お試しください。";
     default:
       return "決済の処理に失敗しました。時間をおいて再度お試しください。";
   }
@@ -404,9 +421,44 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     }
     // free/internal are not purchasable; guard here too (server also rejects).
     if (plan !== "pro" && plan !== "team") return;
-    // Team checkout needs a concrete team context (the funded team) and a seat
-    // count; the server rejects a team checkout without them. Guard client-side
-    // so we fail loudly with a clear message instead of a raw server error.
+
+    // On mobile the stores REQUIRE their own IAP rails (Apple/Google forbid
+    // routing digital-goods payments through an external processor like Stripe),
+    // so a mobile purchase goes through the native StoreKit/Play sheet and the
+    // server's /v1/billing/iap/verify — never the Stripe checkout URL. This runs
+    // BEFORE the Stripe-only team teamId guard below because Team on mobile is a
+    // flat single-user IAP grant (per-seat Team stays desktop/web) and needs no
+    // teamId. Desktop/web fall through to Stripe.
+    try {
+      const { isMobile } = await import("@/platform");
+      if (isMobile) {
+        set({ billingBusy: true, billingError: null });
+        const { purchaseMobileSubscription } =
+          await import("@/services/mobile-billing");
+        const r = await purchaseMobileSubscription(plan, interval);
+        if (r.ok) {
+          set({ paywallOpen: false, paywallReason: null });
+          // The server has already written the entitlement; poll until the
+          // endpoint's per-instance cache reflects the purchased plan.
+          await get().pollEntitlement({ target: plan });
+        } else if (r.error !== "purchase_canceled") {
+          set({ billingError: billingErrorMessage(r.error) });
+        }
+        set({ billingBusy: false });
+        return;
+      }
+    } catch (err) {
+      console.error("[billing] mobile purchase failed:", err);
+      set({
+        billingError: billingErrorMessage("purchase_failed"),
+        billingBusy: false,
+      });
+      return;
+    }
+
+    // Team checkout (Stripe) needs a concrete team context (the funded team) and
+    // a seat count; the server rejects a team checkout without them. Guard
+    // client-side so we fail loudly with a clear message instead of a raw error.
     if (plan === "team") {
       const teamId = String(opts?.teamId ?? "").trim();
       if (!teamId) {
@@ -415,6 +467,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       }
     }
     set({ billingBusy: true, billingError: null });
+
     try {
       const token = await user.getIdToken();
       const teamId = String(opts?.teamId ?? "").trim();
