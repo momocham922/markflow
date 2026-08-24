@@ -112,6 +112,8 @@ function billingErrorMessage(code: string): string {
       return "この購入を確認できませんでした。時間をおいて再度お試しください。";
     case "unsupported_platform":
       return "このプラットフォームではアプリ内課金を利用できません。";
+    case "team_mobile_unavailable":
+      return "Teamプランのご購入はデスクトップ版またはWebからお願いします。モバイルアプリではProプランのみご購入いただけます。";
     case "purchase_failed":
     case "verify_failed":
       return "購入処理に失敗しました。時間をおいて再度お試しください。";
@@ -425,13 +427,18 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     // On mobile the stores REQUIRE their own IAP rails (Apple/Google forbid
     // routing digital-goods payments through an external processor like Stripe),
     // so a mobile purchase goes through the native StoreKit/Play sheet and the
-    // server's /v1/billing/iap/verify — never the Stripe checkout URL. This runs
-    // BEFORE the Stripe-only team teamId guard below because Team on mobile is a
-    // flat single-user IAP grant (per-seat Team stays desktop/web) and needs no
-    // teamId. Desktop/web fall through to Stripe.
+    // server's /v1/billing/iap/verify — never the Stripe checkout URL. Mobile IAP
+    // is Pro-only: Team is per-seat and sold on desktop/web (Stripe) only — there
+    // is no Team SKU in App Store Connect / Play — so a mobile Team request fails
+    // loudly here instead of launching a purchase for a SKU that does not exist.
+    // Desktop/web fall through to Stripe.
     try {
       const { isMobile } = await import("@/platform");
       if (isMobile) {
+        if (plan === "team") {
+          set({ billingError: billingErrorMessage("team_mobile_unavailable") });
+          return;
+        }
         set({ billingBusy: true, billingError: null });
         const { purchaseMobileSubscription } =
           await import("@/services/mobile-billing");

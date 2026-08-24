@@ -61,6 +61,11 @@ export async function purchaseMobileSubscription(
   const user = auth.currentUser;
   if (!user) return { ok: false, error: "unauthorized" };
   if (!isIOS && !isAndroid) return { ok: false, error: "unsupported_platform" };
+  // Defense-in-depth: mobile IAP is Pro-only. Team is per-seat and sold on
+  // desktop/web (Stripe) only — no Team SKU exists in App Store Connect / Play.
+  // startCheckout already blocks this, but refuse here too so no caller can start
+  // a native purchase for a non-existent Team product.
+  if (plan !== "pro") return { ok: false, error: "team_mobile_unavailable" };
 
   // Dynamic import so the plugin api is never pulled into desktop/web bundles'
   // critical path; the native commands only exist in the iOS/Android binaries.
