@@ -2737,7 +2737,11 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         },
         body: JSON.stringify({
           anthropic_version: "vertex-2023-10-16",
-          max_tokens: 3072,
+          // Headroom for opus-5's default `thinking` tokens PLUS the JSON brief:
+          // with thinking on, a 3072 ceiling can be spent before the JSON is
+          // emitted, truncating it ("no JSON found"). The ceiling is a cap, not a
+          // charge — we still only pay for tokens actually produced.
+          max_tokens: 8192,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
           stream: false,
@@ -2756,8 +2760,20 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const vertexData = (await vertexRes.json()) as any;
-      const text =
-        vertexData.content?.[0]?.text || vertexData.content?.text || "";
+      // Claude 5 models (claude-opus-5) emit a leading `thinking` block by
+      // default, so content[0] is usually NOT the text block. Reading
+      // content[0].text (the old code) therefore returned "" for EVERY opus-5
+      // response — logged as "empty response from Claude" — which silently
+      // killed live research (0 searches → 0 cards). Concatenate ALL text-type
+      // blocks instead; this is model-agnostic (works with or without thinking).
+      const text = Array.isArray(vertexData.content)
+        ? vertexData.content
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .filter((b: any) => b?.type === "text")
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .map((b: any) => b?.text || "")
+            .join("")
+        : vertexData.content?.text || "";
 
       if (!text) {
         console.log("[research] analyze: empty response from Claude");
@@ -2884,8 +2900,20 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const geminiData = (await geminiRes.json()) as any;
-      const summary =
-        geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      // gemini-3.5-flash is a thinking model: its first part CAN be a pure
+      // `thought` part (no text), which would make the old `parts[0].text`
+      // read undefined → empty summary. Join every non-thought text part so
+      // the answer is captured regardless of thought-part ordering. (Same
+      // class of regression as the opus-5 thinking-block fix above.)
+      const gParts = geminiData.candidates?.[0]?.content?.parts;
+      const summary = Array.isArray(gParts)
+        ? gParts
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .filter((p: any) => !p?.thought && typeof p?.text === "string")
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .map((p: any) => p.text)
+            .join("")
+        : "";
       const groundingMeta = geminiData.candidates?.[0]?.groundingMetadata;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
