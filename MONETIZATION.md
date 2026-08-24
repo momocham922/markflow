@@ -145,7 +145,7 @@
 | **Enterprise** | 見積                      | 見積（年間コミット）   | 見積           |
 
 - ポジショニング＝**AIノート群($10-20)の割安版**（執筆エディタ群$3-6とAIノート群の中間の空白帯）。
-- **二重価格**：iOS/AndroidのIAPはApple/Google手数料(15〜26%)を吸収するため割高に（例 モバイル¥1,600/月 vs Web¥1,280/月・Team ¥2,400/席）。ただし**モバイルアプリ内からWeb価格へ誘導するのはNG**（米国外anti-steering）。案内はメール等アプリ外で。
+- **二重価格（確定・Apple商品作成済）**：iOS/AndroidのIAPはApple/Google手数料(15〜26%)を吸収するため割高に。**モバイルIAPはPro単独**（Pro月 ¥1,500/$9.99・Pro年 ¥14,000/$89.99）。**Teamはモバイル非販売**（自動更新サブスクは席数量を売れないため Web/Stripe 席課金のみ、モバイルはログイン解錠）。純額フロア：モバイル¥1,500→15%SBP後¥1,275純 > Web Pro月¥1,280→¥1,242純 ✓（SBP=15%加入がリリースゲート／30%時は¥1,050へ低下）。ただし**モバイルアプリ内からWeb価格へ誘導するのはNG**（米国外anti-steering）。案内はメール等アプリ外で。
 - **年割強化＝買い切り志向層の受け皿（確定方針）**: 買い切り志向（Typora/Bear/Superwhisper Lifetime 等）には Lifetime を用意せず、**年割の割安感（Pro 年¥11,760＝実質¥980/月・月比 -23%）で対抗**。長期割の追加拡充も検討。
 - 学割40%・複数デバイス/ファミリー割を併設（Obsidian/Ulysses/Craft踏襲）。
 - **アドオン/Top-up は将来検討（未実装）**: ヘビー音声向けの追加枠は、導入する場合も**該当メーター（`batchMin` 等）の回数/分数を上乗せする方式**とし、クレジット制は採らない（§1.5）。
@@ -205,6 +205,7 @@ teams/{teamId}               # 既存のチーム構造を拡張
 
 **B. StoreKit 2（iOS）**
 
+- **App Store Connect 商品作成済（提出準備中）**: サブスクグループ `MarkFlow Subscriptions`（groupId 22331665）配下に Pro のみ2商品。`com.markflow.app.pro.monthly`（¥1,500/$9.99・1か月）/ `com.markflow.app.pro.yearly`（¥14,000/$89.99・1年）。両商品とも level 1 = crossgrade（月↔年切替がup/downgrade扱いにならない）。**Teamはモバイル非販売**。productId はクライアント↔サーバで lockstep 必須（`src-tauri/capabilities/iap.json` は iOS/Android のみ）。
 - Tauri IAPブリッジ（コミュニティ製 `spicavi/tauri-plugin-purchases` or `Choochmeque/tauri-plugin-iap`、**要保守状況の実測検証**。無ければ objc2 で自前ブリッジ）。
 - 購入 → 署名済み JWS トランザクション → Cloud Run → **App Store Server API v2** で検証（verifyReceipt/通知v1はdeprecated）。
 - **App Store Server Notifications v2**（Webhook）→ `entitlements/{uid}` 更新。`appAccountToken = uid` で名寄せ。
@@ -406,7 +407,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/v1/billing/webhook -d '{}
 - Free 枠（`aiCalls` 30回等）が転換促進か共食いか → A/Bテスト。
 - Team席課金 ¥1,980/席の受容性、Enterprise を即時立ち上げか段階導入か（SCIM/DPA/SLA需要確度）。
 - ヘビー音声向けアドオン/Top-up（回数上乗せ方式）の要否・価格（§1.5）。
-- モバイルIAP二重価格（Pro iOS ¥1,600）の UI 提示方法（Web価格併記 or PF別出し分け）。
+- モバイルIAP二重価格の UI 提示方法（Web価格併記 or PF別出し分け）。※価格は確定（Pro月¥1,500/$9.99・Pro年¥14,000/$89.99、Team非販売）・App Store Connect商品作成済（`com.markflow.app.pro.monthly`/`com.markflow.app.pro.yearly`、level 1=crossgrade）。残るのは提示UIのみ。
 - 既存 internal スタッフ12名の無制限バイパスをローンチ後も恒久継続するか。
 - Tauri IAPコミュニティプラグインの保守状況・StoreKit2/Play Billing v8対応度（実測）。
 - 日本 User Choice Billing 採用可否（非ゲーム・手数料4%減）。
