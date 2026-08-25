@@ -65,6 +65,45 @@ async function openBillingUrl(url: string): Promise<boolean> {
   }
 }
 
+/**
+ * Open the STORE-native subscription-management surface for an IAP subscription.
+ * Apple and Google REQUIRE their in-app subscriptions be cancelled/changed through
+ * their own system UI — the Stripe customer portal has no record of them, so
+ * routing an IAP subscriber there is a dead end. We hand the store deep-link to
+ * the OS opener (NOT SFSafariViewController) so iOS resolves the itms-apps://
+ * scheme straight to Settings › Subscriptions and Android routes the Play link
+ * into the Play app; the https forms are the web fallbacks when managed from a
+ * desktop where the buyer happens to hold a store subscription.
+ */
+async function openStoreSubscriptions(
+  source: "app_store" | "play",
+): Promise<boolean> {
+  let url: string;
+  if (source === "app_store") {
+    const { isIOS } = await import("@/platform");
+    url = isIOS
+      ? "itms-apps://apps.apple.com/account/subscriptions"
+      : "https://apps.apple.com/account/subscriptions";
+  } else {
+    url = "https://play.google.com/store/account/subscriptions";
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    // System open (openURL/opener) — handles itms-apps:// and the Play intent,
+    // unlike SFSafariViewController which only takes http/https.
+    await invoke("open_external_url", { url });
+    return true;
+  } catch (err) {
+    console.error("[billing] store subscriptions open failed:", err);
+    try {
+      const w = window.open(url, "_blank", "noopener");
+      return w != null;
+    } catch {
+      return false;
+    }
+  }
+}
+
 /** Map a server/transport error code to a localized, user-facing message. */
 function billingErrorMessage(code: string): string {
   switch (code) {
@@ -83,6 +122,8 @@ function billingErrorMessage(code: string): string {
     case "no_checkout_url":
     case "no_portal_url":
       return "決済ページを開けませんでした。時間をおいて再度お試しください。";
+    case "store_manage_failed":
+      return "サブスクリプション管理画面を開けませんでした。デバイスの設定アプリからも変更できます。";
     // --- Team seat billing ---
     case "team_id_required":
       return "対象のチームを選択してください。";
@@ -195,6 +236,14 @@ interface EntitlementState {
    */
   seats: number;
   period: string | null;
+  /**
+   * Billing rail that owns THIS user's subscription (stripe / app_store / play /
+   * founder), or null for free / an assigned team member. Drives where "契約を管理"
+   * sends the user: Stripe's customer portal has NO record of an Apple/Google IAP
+   * subscription, so an IAP subscriber must be routed to the store's own
+   * management surface instead (openBillingPortal branches on this).
+   */
+  source: string | null;
   loading: boolean;
   loaded: boolean;
   /** Last 429 quota_exceeded surfaced by an AI call, for upsell UI. */
@@ -300,6 +349,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   usage: { ...ZERO_USAGE },
   seats: 1,
   period: null,
+  source: null,
   loading: false,
   loaded: false,
   lastQuotaError: null,
@@ -346,6 +396,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
         usage: d.usage ? { ...ZERO_USAGE, ...d.usage } : { ...ZERO_USAGE },
         seats: Math.max(1, Math.floor(Number(d.seats) || 1)),
         period: d.period ?? null,
+        source: typeof d.source === "string" ? d.source : null,
         loaded: true,
         loading: false,
       });
@@ -541,6 +592,29 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       set({ billingError: msg });
       return { ok: false, error: msg };
     }
+    // IAP subscriptions (Apple / Google) live ONLY in the store — the Stripe
+    // customer portal has no record of them, so /v1/billing/portal would fail
+    // (no_customer). Route an IAP subscriber to the store's own management UI,
+    // which Apple/Google mandate for cancelling or changing an IAP sub.
+    const source = get().source;
+    if (source === "app_store" || source === "play") {
+      set({ billingBusy: true, billingError: null });
+      try {
+        const opened = await openStoreSubscriptions(source);
+        // A failed open is a failure, never a silent success — a user trying to
+        // cancel must get feedback (サイレントフォールバック禁止).
+        if (!opened) throw new Error("store_manage_failed");
+        return { ok: true };
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : String(err);
+        console.error("[billing] store manage failed:", raw);
+        const msg = billingErrorMessage(raw);
+        set({ billingError: msg });
+        return { ok: false, error: msg };
+      } finally {
+        set({ billingBusy: false });
+      }
+    }
     set({ billingBusy: true, billingError: null });
     try {
       const token = await user.getIdToken();
@@ -724,6 +798,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       usage: { ...ZERO_USAGE },
       seats: 1,
       period: null,
+      source: null,
       loaded: false,
       loading: false,
       lastQuotaError: null,

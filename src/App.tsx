@@ -34,6 +34,11 @@ import { useResearchStore } from "@/stores/research-store";
 import { ResearchSheet } from "@/components/editor/ResearchSheet";
 import { PaywallDialog } from "@/components/PaywallDialog";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
+import { FeedbackDialog } from "@/components/FeedbackDialog";
+import { useFeedbackStore } from "@/stores/feedback-store";
+import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
+import { useTelemetryStore } from "@/stores/telemetry-store";
+import { track } from "@/services/telemetry";
 import {
   PanelLeft,
   History,
@@ -336,6 +341,17 @@ function App() {
     const cleanup = initAuth();
     return cleanup;
   }, [initAuth]);
+
+  // Boot product telemetry (consent-gated, dark-safe) and record the session
+  // open. track() is a no-op until the user has consented, so app_open only
+  // lands for opted-in users; the endpoint is also server-dark until enabled.
+  const initTelemetryStore = useTelemetryStore((s) => s.init);
+  useEffect(() => {
+    void initTelemetryStore().then(() => {
+      track("app_open");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Sync before close — flush DB + cloud sync before window closes
   useEffect(() => {
@@ -839,6 +855,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
       );
 
       setPublishUrl(url);
+      track("publish", { plan: useEntitlementStore.getState().effectivePlan });
       try {
         await navigator.clipboard.writeText(url);
       } catch {}
@@ -1511,8 +1528,32 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <PaywallDialog />
         {/* Team management + seat billing (global; opened from UserMenu/Paywall) */}
         <GlobalTeamManageDialog />
+        {/* Bug report / feedback (global; opened from UserMenu and crash-prefill) */}
+        <GlobalFeedbackDialog />
+        {/* Regional analytics consent surface (once, until the user decides) */}
+        <TelemetryConsentBanner />
       </div>
     </TooltipProvider>
+  );
+}
+
+/**
+ * Global mount of the feedback dialog, driven by the feedback store's `open`
+ * flag. Mounted once here so "問題を報告" (UserMenu) and a throttled crash-prefill
+ * both route through openFeedback() to a single instance.
+ */
+function GlobalFeedbackDialog() {
+  const open = useFeedbackStore((s) => s.open);
+  const prefillError = useFeedbackStore((s) => s.prefillError);
+  const closeFeedback = useFeedbackStore((s) => s.closeFeedback);
+  return (
+    <FeedbackDialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) closeFeedback();
+      }}
+      prefillError={prefillError}
+    />
   );
 }
 

@@ -194,6 +194,33 @@ service cloud.firestore {
         && resource.data.uid == request.auth.uid;
     }
 
+    // Crash reports: written client-side by reportCrash() (Rust panic hook +
+    // window.onerror/unhandledrejection → firebase.ts). These had NO rule and so
+    // were DEFAULT-DENIED — every reportCrash() addDoc silently failed (the fn
+    // swallows the error), so we captured ZERO crashes. A user may create ONLY a
+    // report stamped with their own uid and read ONLY their own. The Admin SDK
+    // (ai-proxy) bypasses these rules for aggregation/Slack.
+    match /crash_reports/{reportId} {
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+    }
+
+    // User feedback (bug reports / feature requests): written ONLY by the ai-proxy
+    // /v1/feedback endpoint via the Admin SDK (it verifies the Firebase token,
+    // server-stamps uid/email, redacts PII, and computes the dedupe fingerprint),
+    // so clients never write directly. A user may read back their OWN submissions;
+    // the aggregate `feedback_groups` (dedupe/threshold state) is fully server-only.
+    match /feedback/{feedbackId} {
+      allow read: if request.auth != null
+        && resource.data.uid == request.auth.uid;
+      allow write: if false;
+    }
+    match /feedback_groups/{fingerprint} {
+      allow read, write: if false;
+    }
+
     // Entitlements: server-write-only source of truth for paid plan status.
     // Written exclusively by the ai-proxy / billing webhooks via the Admin SDK
     // (which bypasses these rules). Clients may read their own to render UI

@@ -40,6 +40,7 @@ import {
   type Team,
 } from "@/services/sharing";
 import { fetchDocument } from "@/services/firebase";
+import { track } from "@/services/telemetry";
 import { isIOS, isMobile } from "@/platform";
 
 // ── Folder tree helpers ──────────────────────────────────────
@@ -401,6 +402,7 @@ export function Sidebar() {
       docType,
     };
     addDocument(doc);
+    track("doc_create", { docType, source: "sidebar" });
     setActiveDocId(doc.id);
     setExpandedFolders((prev) => new Set([...prev, folder]));
     if (authUser) {

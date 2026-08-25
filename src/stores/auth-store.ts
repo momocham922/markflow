@@ -389,6 +389,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       } else {
         await signInWithGoogle();
       }
+      const { track } = await import("@/services/telemetry");
+      track("sign_in", { provider });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("Login failed:", error);

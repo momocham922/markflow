@@ -64,6 +64,20 @@ import {
 } from "@apple/app-store-server-library";
 import { GoogleAuth } from "google-auth-library";
 import { APPLE_ROOT_CERTS } from "./apple-root-certs";
+import {
+  normalizeFeedbackKind,
+  sanitizeMessage,
+  sanitizeError,
+  feedbackFingerprint,
+  shouldNotifyFeedback,
+  buildFeedbackSlackPayload,
+  type FeedbackKind,
+} from "./feedback";
+import {
+  cleanBatch,
+  buildInsertRows,
+  type BigQueryInsertRow,
+} from "./telemetry";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
@@ -354,14 +368,25 @@ async function writeEntitlementFromIntent(
     return d;
   });
   if (!decision.apply) {
-    console.log(
-      `[stripe] entitlement skip uid=${uid} reason=${decision.reason} evt=${intent.eventId}`,
-    );
+    // Money-risk refusals: a purchase whose write was refused because ANOTHER
+    // rail still owns a live doc (owned_by_*) or a terminal targeted the wrong
+    // sub (terminal_other_sub) can mean a customer was CHARGED but not granted —
+    // or not revoked. Elevate those to error level (with rail + sub context) so a
+    // Cloud Logging alert policy can catch them; benign ordering/idempotency
+    // skips (stale_event, internal_untouchable) stay at log level.
+    const reason = decision.reason;
+    const moneyRisk =
+      reason.startsWith("owned_by_") || reason === "terminal_other_sub";
+    const src = intent.source ?? "stripe";
+    const sub = intent.subId ?? intent.stripeSubscriptionId ?? "";
+    const line = `entitlement skip uid=${uid} reason=${reason} source=${src} sub=${sub} evt=${intent.eventId}`;
+    if (moneyRisk) console.error(`[billing][ALERT] ${line}`);
+    else console.log(`[billing] ${line}`);
     return;
   }
   entCache.delete(uid);
   console.log(
-    `[stripe] entitlement set uid=${uid} plan=${decision.fields.plan} status=${decision.fields.status} evt=${intent.eventId}`,
+    `[billing] entitlement set uid=${uid} plan=${decision.fields.plan} status=${decision.fields.status} source=${intent.source ?? "stripe"} evt=${intent.eventId}`,
   );
 }
 
@@ -1344,6 +1369,143 @@ const INTERNAL_UIDS = parseUidSet(process.env.INTERNAL_UIDS);
 // affects the owner's own usage document.
 const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
 
+// Slack Agent-notification webhook for the feedback pipeline. Injected via Secret
+// Manager in Cloud Run (never committed). Unset = DARK: feedback is still stored,
+// the notification is just skipped (logged), so the endpoint is safe to ship
+// before the secret is wired.
+const FEEDBACK_SLACK_WEBHOOK = process.env.FEEDBACK_SLACK_WEBHOOK || "";
+
+/**
+ * Best-effort Slack notification for a feedback event. Never throws into the
+ * request path — a webhook hiccup must not fail the user's report (already
+ * persisted by the time this runs). DARK-safe: no-op when the webhook is unset.
+ */
+async function notifyFeedbackSlack(payload: unknown): Promise<void> {
+  if (!FEEDBACK_SLACK_WEBHOOK) {
+    console.log("[feedback] slack webhook unset — notification skipped");
+    return;
+  }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const resp = await fetch(FEEDBACK_SLACK_WEBHOOK, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        console.error(`[feedback] slack notify http ${resp.status}`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    console.error(
+      `[feedback] slack notify failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------
+// Telemetry → BigQuery. DARK by default: TELEMETRY_ENABLED must be "true" AND
+// the dataset/table must exist. When dark the endpoint accepts-and-drops (200,
+// stored:0) so a consenting client's offline queue drains instead of growing
+// unbounded for a sink that isn't live yet. Uses ADC (Cloud Run's service
+// account) + the BigQuery insertAll REST API — no extra npm dependency.
+// ---------------------------------------------------------------------
+const TELEMETRY_ENABLED =
+  (process.env.TELEMETRY_ENABLED || "").trim().toLowerCase() === "true";
+const BQ_DATASET = process.env.BQ_DATASET || "markflow_analytics";
+const BQ_TELEMETRY_TABLE = process.env.BQ_TELEMETRY_TABLE || "events";
+
+let _bqAuth: GoogleAuth | null = null;
+function bqAuth(): GoogleAuth {
+  if (!_bqAuth) {
+    // No explicit credentials → Application Default Credentials (the Cloud Run
+    // runtime service account). It needs roles/bigquery.dataEditor on the dataset.
+    _bqAuth = new GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/bigquery.insertdata"],
+    });
+  }
+  return _bqAuth;
+}
+async function bqAccessToken(): Promise<string> {
+  const client = await bqAuth().getClient();
+  const t = await client.getAccessToken();
+  const token = typeof t === "string" ? t : t?.token;
+  if (!token) throw new Error("bq_auth_failed");
+  return token;
+}
+
+/**
+ * Stream rows into the telemetry table (tabledata.insertAll). Returns the number
+ * of rows BigQuery accepted. skipInvalidRows/ignoreUnknownValues make a single
+ * malformed row lossy rather than failing the whole batch. Throws only on a
+ * transport / auth / HTTP error so the caller can decide to 5xx (client retries).
+ */
+async function bqInsertTelemetry(rows: BigQueryInsertRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const at = await bqAccessToken();
+  const url =
+    `https://bigquery.googleapis.com/bigquery/v2/projects/` +
+    `${encodeURIComponent(GCP_PROJECT_ID)}/datasets/${encodeURIComponent(BQ_DATASET)}` +
+    `/tables/${encodeURIComponent(BQ_TELEMETRY_TABLE)}/insertAll`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${at}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      kind: "bigquery#tableDataInsertAllRequest",
+      skipInvalidRows: true,
+      ignoreUnknownValues: true,
+      rows,
+    }),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`bq_insert_failed ${r.status} ${text}`);
+  const body = JSON.parse(text) as {
+    insertErrors?: Array<{ index: number; errors: unknown[] }>;
+  };
+  const failed = body.insertErrors?.length ?? 0;
+  if (failed > 0) {
+    console.error(
+      `[telemetry] ${failed}/${rows.length} rows rejected by BigQuery: ${JSON.stringify(body.insertErrors?.slice(0, 3))}`,
+    );
+  }
+  return rows.length - failed;
+}
+
+// Consent gate (defense-in-depth). The client only SENDS telemetry when the user
+// has consented and mirrors that flag to user_settings/{uid}.telemetry_consent;
+// the server independently verifies it here so a client bug / forged request
+// can't write telemetry for a non-consenting user. Fails CLOSED (no consent
+// record → treated as NOT consented). Cached briefly to avoid a Firestore read
+// per batch.
+const consentCache = new Map<string, { ok: boolean; at: number }>();
+const CONSENT_TTL_MS = 5 * 60 * 1000;
+async function telemetryConsent(uid: string): Promise<boolean> {
+  const now = Date.now();
+  const hit = consentCache.get(uid);
+  if (hit && now - hit.at < CONSENT_TTL_MS) return hit.ok;
+  let ok = false;
+  try {
+    const snap = await getFirestore().doc(`user_settings/${uid}`).get();
+    ok = snap.exists && snap.data()?.telemetry_consent === true;
+  } catch (err) {
+    // Fail closed — a lookup blip must not silently open telemetry.
+    console.error(
+      `[telemetry] consent read failed uid=${uid}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    ok = false;
+  }
+  consentCache.set(uid, { ok, at: now });
+  return ok;
+}
+
 /**
  * Resolve the effective plan for a request: real plan (internal allowlist or
  * entitlement doc), then apply the owner-only view-as override if present.
@@ -1357,11 +1519,12 @@ async function resolvePlan(
   viewAs: Plan | null;
   meterKey: string;
   seats: number;
+  source: string | null;
 }> {
   let real: ResolvedEntitlement;
   if (INTERNAL_UIDS.has(uid)) {
     // Internal allowlist is unmetered — meter under the uid (never consulted).
-    real = { realPlan: "internal", meterKey: uid, seats: 1 };
+    real = { realPlan: "internal", meterKey: uid, seats: 1, source: null };
   } else {
     real = await loadEntitlement(uid);
   }
@@ -1375,6 +1538,7 @@ async function resolvePlan(
     viewAs,
     meterKey: real.meterKey,
     seats: real.seats,
+    source: real.source ?? null,
   };
 }
 
@@ -1387,6 +1551,14 @@ interface ResolvedEntitlement {
   realPlan: Plan;
   meterKey: string;
   seats: number;
+  /**
+   * The billing rail that owns THIS uid's own subscription doc (stripe /
+   * app_store / play / founder), or null for free / an assigned team MEMBER (who
+   * owns no subscription). The client uses it to route "契約を管理" to the correct
+   * surface — Stripe's customer portal has no record of an Apple/Google IAP sub,
+   * so an IAP subscriber must be sent to the store's own management UI instead.
+   */
+  source?: string | null;
   // Set when the plan could NOT be resolved (Firestore error) and we fell back to
   // "free". Lets callers that must fail OPEN (the publish serve-gate) tell a
   // genuine free plan apart from a lookup blip. The AI metering path ignores it
@@ -1434,20 +1606,28 @@ async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
     const db = getFirestore();
     const snap = await db.collection("entitlements").doc(uid).get();
     const data = snap.exists ? (snap.data() as Record<string, unknown>) : null;
+    const source = data?.source ? String(data.source) : null;
     const plan = data ? derivePlan(data) : "free";
     if (plan === "team") {
       const teamId = String(data?.teamId || "").trim() || uid;
       const seats = Math.max(1, Math.floor(Number(data?.seats) || 1));
-      return { realPlan: "team", meterKey: teamId, seats };
+      return { realPlan: "team", meterKey: teamId, seats, source };
     }
     if (plan === "pro" || plan === "internal") {
-      return { realPlan: plan, meterKey: uid, seats: 1 };
+      return { realPlan: plan, meterKey: uid, seats: 1, source };
     }
-    // free own-entitlement → maybe an assigned member of a paid team.
+    // free own-entitlement → maybe an assigned member of a paid team. The team
+    // MEMBER owns no subscription of their own (the team owner's doc holds the
+    // rail), so source stays null — "契約を管理" is not their action.
     const seat = await resolveTeamSeat(db, uid);
     if (seat)
-      return { realPlan: "team", meterKey: seat.teamId, seats: seat.seats };
-    return { realPlan: "free", meterKey: uid, seats: 1 };
+      return {
+        realPlan: "team",
+        meterKey: seat.teamId,
+        seats: seat.seats,
+        source: null,
+      };
+    return { realPlan: "free", meterKey: uid, seats: 1, source };
   } catch (err) {
     // Fail to per-uid "free" (NOT unlimited) so a Firestore blip can neither
     // break the product nor leak unlimited cost. Logged explicitly — never silent.
@@ -2190,6 +2370,281 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[users/resolve] error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
+
+  // --- /v1/feedback (in-app bug report / feature request pipeline) ----------
+  // Authenticated users submit free-text feedback (bug / idea / other) plus a
+  // small NON-PII diagnostic context (app version, platform, os, locale, and the
+  // active doc ID only — NEVER the document body). The server, not the client,
+  // is authoritative for identity (uid/email from the verified token) and safety
+  // (PII/secret redaction of the free text). Each report is stored at
+  // feedback/{id}; a rolling aggregate at feedback_groups/{fingerprint} dedupes
+  // near-identical reports so a spike is one grouped signal, not N pings. Slack
+  // (the shared Agent channel) is notified on a NEW group and at the 5th/25th
+  // occurrence. Firestore is the source of truth; Slack is best-effort.
+  if (req.method === "POST" && req.url === "/v1/feedback") {
+    try {
+      let uid: string;
+      try {
+        uid = await verifyFirebaseToken(req.headers.authorization);
+      } catch {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const body = await readBody();
+      let parsed: {
+        kind?: string;
+        message?: string;
+        context?: Record<string, unknown>;
+      };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+
+      const kind: FeedbackKind = normalizeFeedbackKind(parsed.kind);
+      const message = sanitizeMessage(parsed.message);
+      if (message.length < 3) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "empty_message" }));
+        return;
+      }
+
+      // Client-supplied diagnostic context — clamped, non-PII only. The active
+      // doc ID is kept for reproduction; the doc BODY is never accepted.
+      const ctx =
+        parsed.context && typeof parsed.context === "object"
+          ? parsed.context
+          : {};
+      const str = (v: unknown, max: number) => String(v ?? "").slice(0, max);
+      const appVersion = str(ctx.appVersion, 32);
+      const platform = str(ctx.platform, 32);
+      const osVersion = str(ctx.osVersion, 64);
+      const locale = str(ctx.locale, 32);
+      const activeDocId = str(ctx.activeDocId, 64);
+      const errorText = sanitizeError(ctx.error);
+
+      // Server-authoritative identity (never trust the client for this).
+      let email = "";
+      let displayName = "";
+      try {
+        const u = await getAuth().getUser(uid);
+        email = u.email || "";
+        displayName = u.displayName || "";
+      } catch {
+        /* profile lookup best-effort */
+      }
+      // Plan for triage — best-effort, must not block a report.
+      let plan = "unknown";
+      try {
+        plan = (await resolvePlan(req, uid)).realPlan;
+      } catch {
+        /* ignore */
+      }
+
+      const fingerprint = feedbackFingerprint(kind, appVersion, message);
+      const db = getFirestore();
+      const now = FieldValue.serverTimestamp();
+
+      const fbRef = db.collection("feedback").doc();
+      await fbRef.set({
+        uid,
+        email,
+        displayName,
+        plan,
+        kind,
+        message,
+        error: errorText,
+        appVersion,
+        platform,
+        osVersion,
+        locale,
+        activeDocId,
+        fingerprint,
+        status: "open",
+        createdAt: now,
+      });
+
+      // Atomically bump the aggregate so concurrent reports of the same issue
+      // produce a correct count (and a single "new group" winner).
+      const grpRef = db.collection("feedback_groups").doc(fingerprint);
+      let count = 1;
+      let isNew = false;
+      try {
+        await db.runTransaction(async (tx) => {
+          const snap = await tx.get(grpRef);
+          if (snap.exists) {
+            count = Number(snap.data()?.count || 0) + 1;
+            tx.set(
+              grpRef,
+              { count, lastAt: now, kind, sample: message.slice(0, 140) },
+              { merge: true },
+            );
+          } else {
+            isNew = true;
+            count = 1;
+            tx.set(
+              grpRef,
+              {
+                count: 1,
+                firstAt: now,
+                lastAt: now,
+                kind,
+                status: "open",
+                sample: message.slice(0, 140),
+              },
+              { merge: true },
+            );
+          }
+        });
+      } catch (err) {
+        // Aggregation is a nicety; the primary report is already stored. Degrade
+        // to a single notification rather than losing the signal entirely.
+        console.error(
+          `[feedback] group txn failed fp=${fingerprint}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        isNew = true;
+      }
+
+      if (shouldNotifyFeedback(count, isNew)) {
+        // Fire-and-forget; already responded-worthy work is done.
+        void notifyFeedbackSlack(
+          buildFeedbackSlackPayload({
+            kind,
+            count,
+            isNew,
+            message,
+            plan,
+            appVersion,
+            platform,
+            email,
+            fingerprint,
+          }),
+        );
+      }
+
+      console.log(
+        `[feedback] stored uid=${uid} kind=${kind} fp=${fingerprint} count=${count} new=${isNew}`,
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, id: fbRef.id, fingerprint }));
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[feedback] error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
+
+  // --- /v1/telemetry (product analytics → BigQuery) -------------------------
+  // Consenting clients POST a small BATCH of structured events (name + scalar
+  // props, never free prose). The server is authoritative for identity (uid/plan
+  // from the verified token), receive time, and safety (name/prop sanitization +
+  // PII redaction happen in telemetry.ts). Two independent gates protect the
+  // user: (1) TELEMETRY_ENABLED — DARK by default; until the BigQuery sink is
+  // provisioned + flipped on we ACCEPT-AND-DROP (200, stored:0) so a client's
+  // offline queue drains rather than growing unbounded. (2) a server-side
+  // consent check against user_settings/{uid}.telemetry_consent — fail-closed,
+  // so a client bug or forged request can't record telemetry for a
+  // non-consenting user even after go-live. Events stream into BigQuery via
+  // insertAll with a per-event insertId for best-effort dedup on retries.
+  if (req.method === "POST" && req.url === "/v1/telemetry") {
+    try {
+      let uid: string;
+      try {
+        uid = await verifyFirebaseToken(req.headers.authorization);
+      } catch {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const body = await readBody();
+      let parsed: {
+        events?: unknown;
+        context?: Record<string, unknown>;
+      };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+
+      const nowMs = Date.now();
+      const events = cleanBatch(parsed.events, uid, nowMs);
+      if (events.length === 0) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, stored: 0 }));
+        return;
+      }
+
+      // Gate 1: dark until the sink exists. Accept-and-drop so the client purges
+      // its queue rather than retrying forever against a table that isn't live.
+      if (!TELEMETRY_ENABLED) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, stored: 0, dark: true }));
+        return;
+      }
+
+      // Gate 2: server-side consent (fail-closed). Accept-and-drop so a client
+      // that shouldn't have sent still clears its queue quietly.
+      if (!(await telemetryConsent(uid))) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, stored: 0, consent: false }));
+        return;
+      }
+
+      // Plan for segmentation — best-effort, must not block ingestion.
+      let plan = "unknown";
+      try {
+        plan = (await resolvePlan(req, uid)).realPlan;
+      } catch {
+        /* ignore */
+      }
+
+      // Client-supplied device meta — clamped, non-identifying.
+      const ctx =
+        parsed.context && typeof parsed.context === "object"
+          ? parsed.context
+          : {};
+      const str = (v: unknown, max: number) => String(v ?? "").slice(0, max);
+      const rows = buildInsertRows(events, {
+        uid,
+        plan,
+        appVersion: str(ctx.appVersion, 32),
+        platform: str(ctx.platform, 32),
+        osVersion: str(ctx.osVersion, 64),
+        locale: str(ctx.locale, 32),
+        serverTsIso: new Date(nowMs).toISOString(),
+      });
+
+      // A BigQuery/auth error THROWS → 500 → the client keeps the batch and
+      // retries later (offline queue). Never silently lose accepted-consented data.
+      const stored = await bqInsertTelemetry(rows);
+      console.log(
+        `[telemetry] uid=${uid} plan=${plan} stored=${stored}/${rows.length}`,
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, stored }));
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[telemetry] error: ${msg}`);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "internal_error" }));

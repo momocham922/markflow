@@ -10,6 +10,8 @@ import {
   Sparkles,
   CreditCard,
   Trash2,
+  MessageSquareWarning,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -20,6 +22,8 @@ import {
 } from "@/stores/entitlement-store";
 import { isMobile } from "@/platform";
 import { DeleteAccountDialog } from "@/components/DeleteAccountDialog";
+import { useFeedbackStore } from "@/stores/feedback-store";
+import { useTelemetryStore } from "@/stores/telemetry-store";
 
 function UserAvatar({
   user,
@@ -71,6 +75,10 @@ export function UserMenu() {
   const openPaywall = useEntitlementStore((s) => s.openPaywall);
   const openBillingPortal = useEntitlementStore((s) => s.openBillingPortal);
   const openTeamManage = useEntitlementStore((s) => s.openTeamManage);
+  const openFeedback = useFeedbackStore((s) => s.openFeedback);
+  const telemetryConsent = useTelemetryStore((s) => s.consent);
+  const telemetryReady = useTelemetryStore((s) => s.ready);
+  const setTelemetryConsentChoice = useTelemetryStore((s) => s.setConsent);
   // Show the upgrade entry to Free users; the manage entry to paying users.
   // internal (staff/owner real plan) sees neither — they don't buy.
   const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
@@ -273,6 +281,30 @@ export function UserMenu() {
             </button>
             <div className="my-1 border-t border-border" />
             <button
+              className={menuItem}
+              onClick={() => {
+                setMobileMenuOpen(false);
+                openFeedback();
+              }}
+            >
+              <MessageSquareWarning className="h-4 w-4" />
+              問題を報告
+            </button>
+            {telemetryReady && (
+              <button
+                className={menuItem}
+                onClick={() => setTelemetryConsentChoice(!telemetryConsent)}
+                title="匿名の利用状況データの共有を切り替えます"
+              >
+                <BarChart3 className="h-4 w-4" />
+                <span className="flex-1">利用状況データの共有</span>
+                <span className="text-xs text-muted-foreground">
+                  {telemetryConsent ? "オン" : "オフ"}
+                </span>
+              </button>
+            )}
+            <div className="my-1 border-t border-border" />
+            <button
               className={cn(menuItem, "text-destructive")}
               onClick={() => {
                 setMobileMenuOpen(false);
@@ -379,6 +411,36 @@ export function UserMenu() {
               <DatabaseZap className="h-3 w-3" />
               クラウドリセット＆再同期
             </button>
+            <div className="my-1 border-t border-border" />
+            <button
+              className={cn(
+                "flex w-full items-center gap-2 rounded-sm px-3 hover:bg-accent text-left",
+                isMobile ? "py-2.5 text-sm" : "py-1.5 text-xs",
+              )}
+              onClick={() => {
+                setSyncMenuOpen(false);
+                openFeedback();
+              }}
+            >
+              <MessageSquareWarning className="h-3 w-3" />
+              問題を報告
+            </button>
+            {telemetryReady && (
+              <button
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-sm px-3 hover:bg-accent text-left",
+                  isMobile ? "py-2.5 text-sm" : "py-1.5 text-xs",
+                )}
+                onClick={() => setTelemetryConsentChoice(!telemetryConsent)}
+                title="匿名の利用状況データの共有を切り替えます"
+              >
+                <BarChart3 className="h-3 w-3" />
+                <span className="flex-1">利用状況データの共有</span>
+                <span className="text-muted-foreground">
+                  {telemetryConsent ? "オン" : "オフ"}
+                </span>
+              </button>
+            )}
             <div className="my-1 border-t border-border" />
             <button
               className={cn(

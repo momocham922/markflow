@@ -191,6 +191,8 @@ describe("decideEntitlementWrite", () => {
       terminal: false,
       stripeCustomerId: "cus_1",
       stripeSubscriptionId: "sub_1",
+      // subId mirrors stripeSubscriptionId on every apply (cross-sub scoping).
+      subId: "sub_1",
       currentPeriodEnd: 9999,
       cancelAtPeriodEnd: false,
       priceId: "price_pro_m",
@@ -219,6 +221,219 @@ describe("decideEntitlementWrite", () => {
     expect(decideEntitlementWrite({ source: "founder" }, intent).apply).toBe(
       false,
     );
+  });
+
+  // ---- CROSS-RAIL DEAD-DOC HANDOFF (money-critical) --------------------------
+  // A purchase on a NEW rail may ADOPT the doc ONLY when the other rail's doc is
+  // dead: a final terminal revoke, OR an explicitly canceled/expired sub that no
+  // longer grants access. This fixes the reported leak — an App Store sub lapses
+  // (Apple status 2 → "canceled", terminal=FALSE) and the user re-subscribes via
+  // Stripe: without adoption they are charged but never granted Pro. A LIVE
+  // (active/grace) or reactivatable (on_hold) doc must STAY locked to its rail.
+  it("lets Stripe ADOPT an EXPIRED app_store doc (Apple status 2 → canceled, non-terminal)", () => {
+    const existing = {
+      plan: "free",
+      status: "canceled",
+      source: "app_store",
+      terminal: false, // Apple expiry is NOT terminal
+      subId: "apple_orig_tx",
+      eventCreated: 1000,
+    };
+    const d = decideEntitlementWrite(existing, intent); // stripe active@2000, sub_1
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.source).toBe("stripe");
+    expect(derivePlan(d.fields)).toBe("pro");
+    // subId MUST be re-scoped to the adopting rail's sub, else a later Stripe
+    // cancel mis-scopes as terminal_other_sub and never revokes.
+    expect(d.fields.subId).toBe("sub_1");
+  });
+
+  it("lets Stripe ADOPT a TERMINAL app_store doc (Apple revoked / refund)", () => {
+    const existing = {
+      plan: "free",
+      status: "canceled",
+      source: "app_store",
+      terminal: true,
+      subId: "apple_orig_tx",
+      eventCreated: 1000,
+    };
+    expect(decideEntitlementWrite(existing, intent).apply).toBe(true);
+  });
+
+  it("does NOT let Stripe overwrite a LIVE (active) app_store doc", () => {
+    const existing = {
+      plan: "pro",
+      status: "active",
+      source: "app_store",
+      subId: "apple_orig_tx",
+      eventCreated: 1000,
+    };
+    expect(decideEntitlementWrite(existing, intent)).toEqual({
+      apply: false,
+      reason: "owned_by_app_store",
+    });
+  });
+
+  it("does NOT let Stripe overwrite a GRACE app_store doc (dunning, still access)", () => {
+    const existing = {
+      plan: "pro",
+      status: "grace",
+      source: "app_store",
+      eventCreated: 1000,
+    };
+    expect(decideEntitlementWrite(existing, intent).apply).toBe(false);
+  });
+
+  it("does NOT let Stripe overwrite an ON_HOLD app_store doc (its own rail may recover it)", () => {
+    const existing = {
+      plan: "pro",
+      status: "on_hold",
+      source: "app_store",
+      eventCreated: 1000,
+    };
+    expect(decideEntitlementWrite(existing, intent)).toEqual({
+      apply: false,
+      reason: "owned_by_app_store",
+    });
+  });
+
+  it("treats a MISSING status on a foreign doc as LIVE — not adoptable", () => {
+    // derivePlan defaults a missing status to active; only an EXPLICIT
+    // canceled/terminal doc is dead. A source-only doc must stay locked.
+    expect(decideEntitlementWrite({ source: "app_store" }, intent)).toEqual({
+      apply: false,
+      reason: "owned_by_app_store",
+    });
+  });
+
+  it("REGRESSION: after Stripe adopts an expired Apple doc, canceling the ADOPTING Stripe sub revokes", () => {
+    // Proves the subId re-scope: without it, existingSubId(=stale apple) would
+    // differ from the delete's sub and refuse as terminal_other_sub → leak.
+    const expiredApple = {
+      plan: "free",
+      status: "canceled",
+      source: "app_store",
+      terminal: false,
+      subId: "apple_orig_tx",
+      eventCreated: 1000,
+    };
+    const adopt = decideEntitlementWrite(expiredApple, intent); // stripe sub_1 @2000
+    expect(adopt.apply).toBe(true);
+    if (!adopt.apply) throw new Error("unreachable");
+    expect(adopt.fields.subId).toBe("sub_1");
+    // The doc as it exists after the setDoc(merge).
+    const adopted = { ...expiredApple, ...adopt.fields };
+    const del: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del",
+      eventCreated: 5000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    const d = decideEntitlementWrite(adopted, del);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(derivePlan(d.fields)).toBe("free");
+  });
+
+  it("REGRESSION: adopt → cancel → re-subscribe(NEW sub) → cancel fully revokes (no stale subId leak)", () => {
+    // The exact permanent house money leak the adversarial review reproduced.
+    // With an adoption-ONLY subId re-scope, step 3 (re-subscribe to sub_2) would
+    // update stripeSubscriptionId but leave subId pinned to sub_1, so step 4's
+    // cancel of sub_2 would see existingSubId(=sub_1) !== intentSubId(=sub_2) and
+    // refuse as terminal_other_sub — the user keeps Pro forever after cancelling
+    // their only paying sub. The unconditional subId SYNC makes every apply track
+    // the live sub, so the final cancel revokes.
+    const expiredApple = {
+      plan: "free",
+      status: "canceled",
+      source: "app_store",
+      terminal: false,
+      subId: "apple_orig_tx",
+      eventCreated: 1000,
+    };
+    // 1. Stripe sub_1 adopts the dead Apple doc.
+    const adopt = decideEntitlementWrite(expiredApple, intent); // sub_1 @2000
+    if (!adopt.apply) throw new Error("unreachable");
+    expect(adopt.fields.subId).toBe("sub_1");
+    let doc: Record<string, unknown> = { ...expiredApple, ...adopt.fields };
+
+    // 2. Cancel sub_1 → revoke.
+    const cancel1: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del_1",
+      eventCreated: 5000,
+      terminal: true,
+      stripeSubscriptionId: "sub_1",
+    };
+    const d1 = decideEntitlementWrite(doc, cancel1);
+    if (!d1.apply) throw new Error("unreachable");
+    expect(derivePlan(d1.fields)).toBe("free");
+    doc = { ...doc, ...d1.fields };
+    expect(doc.subId).toBe("sub_1"); // still tracks the cancelled sub
+
+    // 3. Re-subscribe on Stripe with a NEW sub_2.
+    const resub: EntitlementIntent = {
+      plan: "pro",
+      status: "active",
+      eventId: "evt_2",
+      eventCreated: 6000,
+      stripeCustomerId: "cus_1",
+      stripeSubscriptionId: "sub_2",
+      currentPeriodEnd: 9999,
+      priceId: "price_pro_m",
+    };
+    const d2 = decideEntitlementWrite(doc, resub);
+    if (!d2.apply) throw new Error("unreachable");
+    expect(derivePlan(d2.fields)).toBe("pro");
+    doc = { ...doc, ...d2.fields };
+    // The fix: subId now tracks the NEW sub, not the stale sub_1.
+    expect(doc.subId).toBe("sub_2");
+    expect(doc.stripeSubscriptionId).toBe("sub_2");
+
+    // 4. Cancel sub_2 → MUST revoke (was refused as terminal_other_sub pre-fix).
+    const cancel2: EntitlementIntent = {
+      plan: "free",
+      status: "canceled",
+      eventId: "evt_del_2",
+      eventCreated: 7000,
+      terminal: true,
+      stripeSubscriptionId: "sub_2",
+    };
+    const d3 = decideEntitlementWrite(doc, cancel2);
+    expect(d3.apply).toBe(true); // NOT terminal_other_sub
+    if (!d3.apply) throw new Error("unreachable");
+    doc = { ...doc, ...d3.fields };
+    expect(derivePlan(doc)).toBe("free");
+  });
+
+  it("Apple ADOPTING a dead Stripe doc is already subId-safe (IAP intents set subId)", () => {
+    const deadStripe = {
+      plan: "free",
+      status: "canceled",
+      source: "stripe",
+      terminal: true,
+      subId: "sub_old",
+      stripeSubscriptionId: "sub_old",
+      eventCreated: 1000,
+    };
+    const appleIntent: EntitlementIntent = {
+      plan: "pro",
+      status: "active",
+      eventId: "evt_a",
+      eventCreated: 2000,
+      source: "app_store",
+      subId: "apple_orig_tx",
+      terminal: false,
+    };
+    const d = decideEntitlementWrite(deadStripe, appleIntent);
+    expect(d.apply).toBe(true);
+    if (!d.apply) throw new Error("unreachable");
+    expect(d.fields.source).toBe("app_store");
+    expect(d.fields.subId).toBe("apple_orig_tx");
   });
 
   it("mutates a stripe-owned or unclaimed (no source) doc", () => {
@@ -511,12 +726,14 @@ describe("decideEntitlementWrite", () => {
   });
 
   it("defaults source to stripe and mirrors subId from stripeSubscriptionId", () => {
-    // A bare Stripe intent (no source, no subId) must be byte-for-byte unchanged:
-    // source→stripe, and subId is NOT written (only stripeSubscriptionId is).
+    // A bare Stripe intent (no source, no explicit subId): source→stripe, and
+    // subId is written = stripeSubscriptionId on EVERY apply so cross-sub terminal
+    // scoping never goes stale after a re-subscribe (money-critical — see the
+    // subId SYNC in billing.ts and the adopt→cancel→resubscribe→cancel regression).
     const d = decideEntitlementWrite(null, intent);
     if (!d.apply) throw new Error("unreachable");
     expect(d.fields.source).toBe("stripe");
-    expect(d.fields.subId).toBeUndefined();
+    expect(d.fields.subId).toBe("sub_1");
     expect(d.fields.stripeSubscriptionId).toBe("sub_1");
   });
 

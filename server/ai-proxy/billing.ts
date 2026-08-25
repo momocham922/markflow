@@ -260,12 +260,34 @@ export function decideEntitlementWrite(
   if (existingPlan === "internal")
     return { apply: false, reason: "internal_untouchable" };
   // CROSS-RAIL SAFETY: a doc owned by one rail (stripe / app_store / play /
-  // founder / …) may only be mutated by that same rail. An empty existingSource
-  // is unclaimed and may be adopted. This is the multi-rail double-charge guard:
-  // an Apple purchase can never silently overwrite (or be overwritten by) an
-  // active Stripe subscription — the second rail's write is refused upstream.
-  if (existingSource && existingSource !== intentSource)
-    return { apply: false, reason: `owned_by_${existingSource}` };
+  // founder / …) may normally only be mutated by that same rail. An empty
+  // existingSource is unclaimed and may be adopted. This is the multi-rail
+  // double-charge guard: one rail can never silently overwrite (or be overwritten
+  // by) another rail's LIVE subscription — the second rail's write is refused.
+  //
+  // DEAD-DOC HANDOFF (the exception): if the other rail's doc is DEAD — a final
+  // terminal revoke, OR an explicitly canceled/expired subscription that no
+  // longer grants access — then a purchase on a DIFFERENT rail is a legitimate
+  // FRESH subscription and may ADOPT the doc. Without this, a real customer who
+  // lets their App Store sub lapse (Apple status 2 → "canceled", NOT terminal)
+  // and then subscribes again on desktop/web via Stripe is charged but never
+  // granted Pro — a silent money leak. A still-LIVE doc (active/grace) OR a
+  // reactivatable one (on_hold — dunning/paused, whose OWN rail may still recover
+  // it) stays locked to its rail, so this never stomps a paying subscription. A
+  // MISSING status is treated as LIVE (derivePlan defaults missing → active), not
+  // dead — only an EXPLICIT canceled/terminal doc is adoptable.
+  if (existingSource && existingSource !== intentSource) {
+    const existingTerminal = existing?.terminal === true;
+    const existingStatus = String((existing?.status ?? "") as unknown)
+      .trim()
+      .toLowerCase();
+    const existingDead = existingTerminal || existingStatus === "canceled";
+    if (!existingDead)
+      return { apply: false, reason: `owned_by_${existingSource}` };
+    // else: adopting a DEAD foreign doc — allowed. subId is re-scoped to THIS
+    // rail's id unconditionally below (see the subId sync), so the defunct
+    // foreign subId never survives the merge.
+  }
 
   const incomingTerminal = intent.terminal === true;
   // Rail-agnostic subscription id for the terminal / same-second scoping below.
@@ -345,7 +367,6 @@ export function decideEntitlementWrite(
     fields.stripeCustomerId = intent.stripeCustomerId;
   if (intent.stripeSubscriptionId)
     fields.stripeSubscriptionId = intent.stripeSubscriptionId;
-  if (intent.subId) fields.subId = intent.subId;
   if (intent.currentPeriodEnd != null)
     fields.currentPeriodEnd = intent.currentPeriodEnd;
   if (intent.cancelAtPeriodEnd != null)
@@ -369,6 +390,20 @@ export function decideEntitlementWrite(
     fields.playLinkedPurchaseToken = intent.playLinkedPurchaseToken;
   if (intent.playOrderId) fields.playOrderId = intent.playOrderId;
   if (intent.environment) fields.environment = intent.environment;
+  // subId SYNC (money-critical — keep authoritative on EVERY apply). subId is the
+  // rail-agnostic id that cross-sub terminal scoping (above) and the same-second
+  // tie-break compare against, and it takes PRECEDENCE over stripeSubscriptionId
+  // in existingSubId. Stripe intents carry only stripeSubscriptionId (never
+  // intent.subId), so intentSubId falls back to it. If we wrote subId only
+  // sometimes (e.g. only on cross-rail adoption), a Stripe doc's subId would go
+  // STALE the next time the tracked sub changed — a later re-subscribe updates
+  // stripeSubscriptionId but the pinned subId would still shadow it, so the
+  // eventual cancel of the NEW sub would see existingSubId(=old) !== intentSubId
+  // (=new) and refuse as `terminal_other_sub`, stranding a CANCELED user on Pro
+  // forever (a permanent house money leak). Writing it on every apply makes subId
+  // always track the currently-tracked subscription across re-subscribes and
+  // cross-rail adoption alike.
+  if (intentSubId) fields.subId = intentSubId;
   return { apply: true, fields };
 }
 

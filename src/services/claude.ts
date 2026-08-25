@@ -1,5 +1,6 @@
 import { auth } from "./firebase";
 import { aiProxyHeaders, reportIfQuota } from "./ai-proxy";
+import { track } from "./telemetry";
 
 const AI_PROXY_URL =
   import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
@@ -159,6 +160,11 @@ export async function sendToClaude(
   };
   if (toolsList) body.tools = toolsList;
 
+  track("ai_request", {
+    mode: onChunk ? "stream" : "oneshot",
+    tools: !!toolsList,
+  });
+
   try {
     const result = await callClaudeApi(
       idToken,
@@ -208,6 +214,8 @@ export async function sendWithToolLoop(
   const toolsList = buildToolsList(tools, customTools);
   const conversationMessages = [...messages];
   const maxIterations = 10;
+
+  track("ai_request", { mode: "tool_loop", tools: !!toolsList });
 
   try {
     for (let i = 0; i < maxIterations; i++) {
