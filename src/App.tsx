@@ -38,7 +38,8 @@ import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { useTelemetryStore } from "@/stores/telemetry-store";
-import { track } from "@/services/telemetry";
+import { track, getConsent } from "@/services/telemetry";
+import { initCrashReporting } from "@/services/crash";
 import {
   PanelLeft,
   History,
@@ -349,6 +350,10 @@ function App() {
   useEffect(() => {
     void initTelemetryStore().then(() => {
       track("app_open");
+      // Crash reporting shares the analytics consent gate; start it once consent
+      // has resolved. No-op unless a DSN was compiled in (DARK build) AND the
+      // user consented — see services/crash.ts.
+      initCrashReporting();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -452,7 +457,10 @@ function App() {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("cancel_auto_update");
-        // Send pending crash reports to Firestore
+        // Send pending crash reports to Firestore — ONLY with telemetry
+        // consent (same privacy gate as GlitchTip). Without consent, leave them
+        // queued in the Rust store; they flush if/when the user opts in.
+        if (!getConsent()) return;
         const reports = await invoke<string[]>("get_crash_reports").catch(
           () => [] as string[],
         );
@@ -473,9 +481,13 @@ function App() {
     return () => clearTimeout(timer);
   }, []);
 
-  // Global JS error handler → Firestore crash report
+  // Global JS error handler → Firestore crash report.
+  // Consent-gated at fire time: a user who declined telemetry sends nothing.
+  // (GlitchTip captures the same errors when consented + scrubbed; this path
+  // additionally covers builds shipped without a DSN.)
   useEffect(() => {
     const handleError = (event: ErrorEvent) => {
+      if (!getConsent()) return;
       import("@/services/firebase").then(({ reportCrash }) => {
         reportCrash({
           type: "js_error",
@@ -489,6 +501,7 @@ function App() {
       });
     };
     const handleRejection = (event: PromiseRejectionEvent) => {
+      if (!getConsent()) return;
       import("@/services/firebase").then(({ reportCrash }) => {
         reportCrash({
           type: "unhandled_rejection",

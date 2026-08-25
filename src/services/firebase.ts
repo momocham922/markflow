@@ -435,6 +435,11 @@ export async function reportCrash(
   data: Record<string, unknown>,
 ): Promise<void> {
   try {
+    // Defense-in-depth privacy gate: never persist a crash report unless the
+    // user consented to telemetry. Callers gate too, but this is the last line.
+    // Lazy import avoids a static firebase<->telemetry cycle.
+    const { getConsent } = await import("./telemetry");
+    if (!getConsent()) return;
     const userId = auth.currentUser?.uid || null;
     await addDoc(collection(firestore, "crash_reports"), {
       ...data,
