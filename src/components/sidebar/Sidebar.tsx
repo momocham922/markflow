@@ -108,7 +108,7 @@ interface TeamWithDocs extends Team {
 
 export function Sidebar() {
   const {
-    documents,
+    documents: allDocuments,
     activeDocId,
     setActiveDocId,
     addDocument,
@@ -170,6 +170,22 @@ export function Sidebar() {
 
   // Shared with me
   const user = useAuthStore((s) => s.user);
+
+  // Fail-closed UI barrier: never render a PRIVATE document owned by another
+  // account, regardless of what slipped into the store (an in-flight sync
+  // reviving a row after an account-switch wipe, a cold start that loaded the
+  // previous account's SQLite rows before auth resolved, or a switch-purge
+  // skipped on iOS when getSetting/wipe threw). Own docs (ownerId === uid),
+  // unclaimed offline docs (ownerId null), and shared/team docs are unaffected.
+  const documents = useMemo(
+    () =>
+      allDocuments.filter(
+        (d) =>
+          !(d.ownerId && d.ownerId !== user?.uid && !d.isShared && !d.teamId),
+      ),
+    [allDocuments, user?.uid],
+  );
+
   const [sharedDocs, setSharedDocs] = useState<
     { id: string; title: string; role: "editor" | "viewer" }[]
   >([]);
@@ -209,6 +225,10 @@ export function Sidebar() {
           return { ...team, docs, folders } as TeamWithDocs;
         }),
       );
+      // Account may have switched while we were fetching — dropping stale
+      // results here prevents the previous account's team docs from repopulating
+      // the sidebar after a switch (data-isolation guard).
+      if (useAuthStore.getState().user?.uid !== uid) return;
       setTeams(teamsWithDocs);
       // Auto-expand if there's only one team
       if (teamsWithDocs.length === 1) {
@@ -246,19 +266,31 @@ export function Sidebar() {
       setTeamsLoaded(true);
       return;
     }
+    const uid = user.uid;
+    // Clear the previous account's shared/team lists IMMEDIATELY on switch so a
+    // slow fetch for the new account can't leave the old account's shared docs
+    // visible in the meantime (data-isolation guard).
+    setSharedDocs([]);
+    setTeams([]);
     setTeamsLoaded(false);
+    // Only apply async results if this account is still the signed-in one.
+    const applyShared = (docs: typeof sharedDocs) => {
+      if (useAuthStore.getState().user?.uid === uid) setSharedDocs(docs);
+    };
     Promise.all([
-      fetchSharedWithMe(user.uid)
-        .then(setSharedDocs)
+      fetchSharedWithMe(uid)
+        .then(applyShared)
         .catch(() => {}),
-      refreshTeams(user.uid),
-    ]).then(() => setTeamsLoaded(true));
+      refreshTeams(uid),
+    ]).then(() => {
+      if (useAuthStore.getState().user?.uid === uid) setTeamsLoaded(true);
+    });
 
     // Poll every 15s to pick up changes from other members
     teamsRefreshTimer.current = setInterval(() => {
-      refreshTeams(user.uid);
-      fetchSharedWithMe(user.uid)
-        .then(setSharedDocs)
+      refreshTeams(uid);
+      fetchSharedWithMe(uid)
+        .then(applyShared)
         .catch(() => {});
     }, 15_000);
 

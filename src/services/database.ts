@@ -343,6 +343,40 @@ export async function clearAllLocalDocuments(): Promise<void> {
   }
 }
 
+/**
+ * Fail-closed data-isolation guard. Remove any locally-cached PRIVATE document
+ * that belongs to a DIFFERENT account — `owner_id` is set, is NOT the current
+ * uid, and the doc is not shared/team (`is_shared = 0`; team docs are stored with
+ * `is_shared = 1`). This runs on EVERY login independently of the LAST_UID switch
+ * purge, so even when that purge is skipped (getSetting/wipe throwing on iOS) or
+ * an in-flight sync revived a row, another account's private docs can never
+ * linger in the sidebar. Preserved: own docs (`owner_id = uid`), unclaimed docs
+ * created offline before any login (`owner_id IS NULL`), and shared/team docs.
+ * Returns the number of documents removed.
+ */
+export async function purgeForeignDocuments(uid: string): Promise<number> {
+  if (!uid) return 0;
+  const database = await getDb();
+  // Read all rows and filter in JS (NOT via a compound SQL WHERE): the in-memory
+  // adapter used on web/tests only models `WHERE col = $N` equality, so a
+  // `owner_id != $1 AND is_shared = 0` predicate would silently match nothing and
+  // return every row — which would then delete the whole cache. Equality-only
+  // DELETEs below are handled identically by both adapters and real SQLite.
+  const all = await database.select<DbDocument[]>("SELECT * FROM documents");
+  const foreign = all.filter(
+    (r) => r.owner_id != null && r.owner_id !== uid && r.is_shared === 0,
+  );
+  for (const { id } of foreign) {
+    await database.execute("DELETE FROM documents WHERE id = $1", [id]);
+    await database.execute("DELETE FROM versions WHERE document_id = $1", [id]);
+    await database.execute(
+      "DELETE FROM document_snapshots_v2 WHERE document_id = $1",
+      [id],
+    );
+  }
+  return foreign.length;
+}
+
 export async function getSetting(key: string): Promise<string | null> {
   const database = await getDb();
   const rows = await database.select<{ value: string }[]>(

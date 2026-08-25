@@ -72,6 +72,14 @@ interface AppState {
    * timer can't resurrect a just-cleared doc after the switch wipe.
    */
   resetLocalDocuments: () => void;
+  /**
+   * Fail-closed isolation guard: drop from the IN-MEMORY list any PRIVATE doc
+   * owned by a DIFFERENT account (ownerId set, != uid, not shared/team). Runs on
+   * login so a cold start that loaded the previous account's SQLite rows before
+   * auth resolved can't leave them in the sidebar. Complements the SQLite-level
+   * purgeForeignDocuments() so the leak is impossible at both layers.
+   */
+  dropForeignDocuments: (uid: string) => void;
 
   // Folder management
   folders: string[];
@@ -415,6 +423,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       cloudSyncTimer = null;
     }
     set({ documents: [], activeDocId: null, folders: ["/"] });
+  },
+
+  dropForeignDocuments: (uid: string) => {
+    if (!uid) return;
+    set((s) => {
+      const kept = s.documents.filter(
+        (d) => !(d.ownerId && d.ownerId !== uid && !d.isShared && !d.teamId),
+      );
+      if (kept.length === s.documents.length) return {};
+      return {
+        documents: kept,
+        activeDocId:
+          s.activeDocId && !kept.some((d) => d.id === s.activeDocId)
+            ? null
+            : s.activeDocId,
+      };
+    });
   },
 
   addDocument: async (doc) => {

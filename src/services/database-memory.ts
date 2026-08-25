@@ -112,10 +112,37 @@ export class MemoryDatabase {
     if (!colMatch) return { rowsAffected: 0 };
     const columns = colMatch[1].split(",").map((c) => c.trim());
 
-    // Build row from bind values
+    // Parse the VALUES(...) list so each column maps to its OWN slot. A slot is
+    // either a `$N` placeholder (→ bindValues[N-1]) or an inline literal (e.g.
+    // `is_dirty` is written as a literal `1`, not a bind param). Mapping columns
+    // to bindValues by index would misalign every column after the first literal
+    // — which silently corrupted owner_id / is_shared in this adapter.
+    const valuesMatch = query.match(/VALUES\s*\(([^)]+)\)/i);
     const row: Record<string, unknown> = {};
-    for (let i = 0; i < columns.length; i++) {
-      row[columns[i]] = bindValues[i] ?? null;
+    if (valuesMatch) {
+      const slots = valuesMatch[1].split(",").map((s) => s.trim());
+      for (let i = 0; i < columns.length; i++) {
+        const slot = slots[i];
+        if (slot === undefined) {
+          row[columns[i]] = null;
+          continue;
+        }
+        const param = slot.match(/^\$(\d+)$/);
+        if (param) {
+          row[columns[i]] = bindValues[parseInt(param[1], 10) - 1] ?? null;
+        } else if (/^-?\d+(\.\d+)?$/.test(slot)) {
+          row[columns[i]] = Number(slot);
+        } else if (/^NULL$/i.test(slot)) {
+          row[columns[i]] = null;
+        } else {
+          row[columns[i]] = slot.replace(/^'(.*)'$/, "$1");
+        }
+      }
+    } else {
+      // No parseable VALUES list — fall back to positional bind mapping.
+      for (let i = 0; i < columns.length; i++) {
+        row[columns[i]] = bindValues[i] ?? null;
+      }
     }
 
     // Handle ON CONFLICT (upsert)

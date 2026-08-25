@@ -27,6 +27,7 @@ import {
   clearDeletedDoc,
   getSetting,
   setSetting,
+  purgeForeignDocuments,
 } from "@/services/database";
 import { wipeLocalUserData } from "@/services/local-reset";
 
@@ -119,13 +120,46 @@ async function backfillLocalVersionsToCloud(uid: string, displayName: string) {
 // --- Sync mutex: prevents concurrent syncFromCloud / syncToCloud ---
 // Try-lock: if already running, drop the call (next 60s interval will catch up).
 let syncLocked = false;
+// Spinner watchdog: an iOS/WKWebView Firestore call can hang with no timeout,
+// leaving the caller's `set({ syncing: true })` stuck (the StatusBar spinner
+// spins forever). Force the flag back off after 60s so the UI never lies — the
+// lock is left as-is (the pre-existing try-lock semantics are unchanged); a hung
+// operation still resolves/rejects on its own and its finally is idempotent.
+let syncWatchdog: ReturnType<typeof setTimeout> | null = null;
+function armSyncWatchdog() {
+  if (syncWatchdog) clearTimeout(syncWatchdog);
+  syncWatchdog = setTimeout(() => {
+    syncWatchdog = null;
+    if (useAuthStore.getState().syncing) {
+      console.warn("[auth-store] sync watchdog: clearing stuck syncing flag");
+      useAuthStore.setState({ syncing: false });
+    }
+  }, 60_000);
+}
+function disarmSyncWatchdog() {
+  if (syncWatchdog) {
+    clearTimeout(syncWatchdog);
+    syncWatchdog = null;
+  }
+}
+// Force-release the try-lock. Called on logout so a still-running (or hung)
+// pre-logout flush can't starve the NEXT account's login sync — without this,
+// B's syncFromCloud is silently dropped and B's sidebar stays empty until the
+// 60s interval. The stale flush keeps its own captured uid/docs, so releasing
+// early cannot cross-contaminate accounts.
+function resetSyncLock() {
+  syncLocked = false;
+  disarmSyncWatchdog();
+}
 async function withSyncLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
   if (syncLocked) return undefined;
   syncLocked = true;
+  armSyncWatchdog();
   try {
     return await fn();
   } finally {
     syncLocked = false;
+    disarmSyncWatchdog();
   }
 }
 
@@ -208,6 +242,29 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           console.error("[auth-store] account-switch check failed:", e);
         }
 
+        // --- Fail-closed isolation guard (runs UNCONDITIONALLY) --------------
+        // The LAST_UID purge above is best-effort: on iOS/WKWebView getSetting or
+        // wipeLocalUserData can throw (SQLITE_BUSY under concurrent login queries)
+        // and the whole block is skipped, or an in-flight A-sync revives a row
+        // after the wipe. So independently of prevUid, remove every PRIVATE doc
+        // owned by another account from BOTH SQLite and the in-memory list. This
+        // does not depend on getSetting/wipe succeeding, so a foreign account's
+        // private docs can never remain in the sidebar. Own/unclaimed/shared/team
+        // docs are preserved (see purgeForeignDocuments / dropForeignDocuments).
+        try {
+          const removed = await purgeForeignDocuments(user.uid);
+          if (removed > 0) {
+            console.warn(
+              `[auth-store] Fail-closed purge removed ${removed} foreign private doc(s) from local cache`,
+            );
+          }
+        } catch (e) {
+          console.error("[auth-store] foreign-doc purge failed:", e);
+        }
+        // Cold start loads SQLite BEFORE auth resolves, so foreign rows may already
+        // be in memory even after the DB purge above — drop them from the store too.
+        useAppStore.getState().dropForeignDocuments(user.uid);
+
         // Rehydrate the in-memory list from THIS account's local cache. After a
         // switch-purge that yields [] (SQLite is empty); after a same-account
         // re-login (logout cleared the in-memory list) it restores the cached
@@ -233,6 +290,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // Without this, syncFromCloud may see default themeSettings and
         // overwrite correct SQLite values with stale cloud values.
         const syncThenBackfill = async () => {
+          // Re-run the fail-closed drop here because this is the ONE point
+          // guaranteed to execute AFTER loadDocuments' final set() has landed
+          // (it runs either because app was already initialized, or via the
+          // subscribe below that fires ON initialized becoming true). Closes the
+          // TOCTOU where App.tsx's initial loadDocuments — started before auth
+          // resolved — captures the previous account's rows and lands its set()
+          // AFTER the drop at line 266, re-injecting foreign private docs into
+          // the store. Idempotent no-op when the store is already clean.
+          useAppStore.getState().dropForeignDocuments(user.uid);
           const syncStartedAt = Date.now();
           await get().syncFromCloud();
           const uploaded = await get().syncToCloud();
@@ -362,6 +428,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Also drop `syncing` so a stuck spinner from an in-flight sync can't
       // persist across the logout.
       set({ user: null, syncing: false });
+      // Release the sync try-lock so the NEXT account's login sync isn't starved
+      // by a still-running/hung pre-logout flush (would leave B's sidebar empty).
+      resetSyncLock();
       useAppStore.getState().resetLocalDocuments();
       useEntitlementStore.getState().reset();
       // Research cards are user content — clear them so the login screen (and any
@@ -735,6 +804,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             );
             if (isStale()) return; // account switched mid-batch
             for (let j = 0; j < batch.length; j++) {
+              if (isStale()) return; // re-check: addDocument below awaits per item
               const fullDoc = results[j];
               const entry = batch[j];
               if (!fullDoc || !fullDoc.content?.trim()) {
@@ -854,6 +924,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             );
             if (isStale()) return; // account switched mid-batch
             for (let j = 0; j < batch.length; j++) {
+              if (isStale()) return; // re-check: addDocument below awaits per item
               const fullDoc = results[j];
               const entry = batch[j];
               if (!fullDoc || !fullDoc.content?.trim()) {
