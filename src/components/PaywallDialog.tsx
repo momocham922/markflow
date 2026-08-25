@@ -106,7 +106,7 @@ function PlanCard({
   return (
     <div
       className={cn(
-        "relative flex flex-col rounded-lg border p-5",
+        "relative flex flex-col rounded-lg border p-4 sm:p-5",
         info.recommended
           ? "border-primary/60 bg-primary/[0.03] shadow-sm"
           : "border-border",
@@ -128,7 +128,7 @@ function PlanCard({
       </div>
       <p className="mt-1 text-xs text-muted-foreground">{info.tagline}</p>
 
-      <div className="mt-4 flex items-baseline gap-1">
+      <div className="mt-3 sm:mt-4 flex items-baseline gap-1">
         <span className="text-2xl font-bold tracking-tight">
           {yen(interval === "year" ? Math.round(price / 12) : price)}
         </span>
@@ -153,7 +153,7 @@ function PlanCard({
         </p>
       )}
 
-      <ul className="mt-4 flex-1 space-y-2">
+      <ul className="mt-3 sm:mt-4 flex-1 space-y-1.5 sm:space-y-2">
         {info.features.map((f) => (
           <li key={f.label} className="flex items-start gap-2 text-xs">
             <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />
@@ -162,7 +162,7 @@ function PlanCard({
         ))}
       </ul>
 
-      <div className="mt-5">
+      <div className="mt-4 sm:mt-5">
         {isCurrent ? (
           <Button
             variant="outline"
@@ -237,7 +237,10 @@ export function PaywallDialog() {
 
   return (
     <Dialog open={paywallOpen} onOpenChange={(o) => !o && closePaywall()}>
-      <DialogContent className="sm:max-w-2xl">
+      {/* Tighter vertical rhythm on phones (gap-3) so the sheet isn't cramped,
+          and hide the (ugly) overflow scrollbar on THIS dialog only — the
+          base DialogContent keeps it scrollable, we just don't paint the bar. */}
+      <DialogContent className="sm:max-w-2xl gap-3 sm:gap-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <DialogHeader>
           <DialogTitle>プランをアップグレード</DialogTitle>
           <DialogDescription>
@@ -279,7 +282,11 @@ export function PaywallDialog() {
           </div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        {/* Mobile: Team is not purchasable here (per-seat, desktop/web only), so
+            a second full-height card is just wasted vertical space that forces
+            the sheet to scroll. Show only the Pro card + a one-line Team pointer.
+            Desktop keeps the side-by-side comparison. */}
+        {isMobile ? (
           <PlanCard
             plan="pro"
             interval={interval}
@@ -288,22 +295,41 @@ export function PaywallDialog() {
             onSubscribe={(p) => startCheckout(p, interval)}
             onManage={openBillingPortal}
             purchasable={proPurchasable}
-            ctaShowsExternal={!isMobile}
-          />
-          <PlanCard
-            plan="team"
-            interval={interval}
-            currentPlan={effectivePlan}
-            busy={billingBusy}
-            // Team purchase + seat management both live in the team dialog.
-            onSubscribe={goToTeamManage}
-            onManage={goToTeamManage}
-            purchasable={teamPurchasable}
-            ctaLabel="チームを設定して購入"
-            manageLabel="チーム席を管理"
             ctaShowsExternal={false}
           />
-        </div>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <PlanCard
+              plan="pro"
+              interval={interval}
+              currentPlan={effectivePlan}
+              busy={billingBusy}
+              onSubscribe={(p) => startCheckout(p, interval)}
+              onManage={openBillingPortal}
+              purchasable={proPurchasable}
+              ctaShowsExternal={!isMobile}
+            />
+            <PlanCard
+              plan="team"
+              interval={interval}
+              currentPlan={effectivePlan}
+              busy={billingBusy}
+              // Team purchase + seat management both live in the team dialog.
+              onSubscribe={goToTeamManage}
+              onManage={goToTeamManage}
+              purchasable={teamPurchasable}
+              ctaLabel="チームを設定して購入"
+              manageLabel="チーム席を管理"
+              ctaShowsExternal={false}
+            />
+          </div>
+        )}
+
+        {isMobile && (
+          <p className="text-center text-[11px] text-muted-foreground">
+            Teamプラン（チーム共同編集・共有フォルダ）はデスクトップ版またはWebからご利用いただけます。
+          </p>
+        )}
 
         {billingError && (
           <p className="text-center text-xs text-red-500">{billingError}</p>

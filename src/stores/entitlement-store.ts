@@ -101,6 +101,8 @@ function billingErrorMessage(code: string): string {
     // --- Mobile In-App Purchase (StoreKit / Play Billing) ---
     case "iap_not_configured":
       return "アプリ内課金は現在準備中です。しばらくお待ちください。";
+    case "sandbox_not_allowed":
+      return "サンドボックス（テスト）購入は現在このアカウントでは有効化されていません。";
     case "no_receipt":
     case "no_purchase_token":
     case "missing_jws":

@@ -156,6 +156,25 @@ const IAP_ALLOW_SANDBOX =
   process.env.IAP_ALLOW_SANDBOX === "1" ||
   process.env.IAP_ALLOW_SANDBOX === "true";
 
+// Per-uid sandbox allowlist. A handful of internal/tester uids may complete a
+// Sandbox (TestFlight) / License-tester purchase so the owner can validate the
+// IAP flow end-to-end WITHOUT flipping the global IAP_ALLOW_SANDBOX, which would
+// hand real Pro to ANY sandbox tester. This is production-SAFE to keep set: a
+// non-listed real user still gets `sandbox_not_allowed`. Only consulted at the
+// authed /iap/verify sites (the acting uid is the VERIFIED Firebase uid there);
+// the server-to-server notification handlers carry no acting uid and stay on the
+// global flag (they ack-but-don't-apply sandbox events in production).
+const IAP_SANDBOX_UIDS = new Set(
+  (process.env.IAP_SANDBOX_UIDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+/** True when `uid` may complete a sandbox/test purchase (global flag or allowlist). */
+function sandboxAllowedFor(uid: string): boolean {
+  return IAP_ALLOW_SANDBOX || IAP_SANDBOX_UIDS.has(uid);
+}
+
 // --- OAuth token exchange (BFF: keep provider client_secret server-side) ----
 // The client secret NEVER ships in the desktop/mobile bundle (a public GitHub
 // repo + a distributable binary both leak it). The client runs the browser
@@ -3014,9 +3033,9 @@ const server = http.createServer(async (req, res) => {
         const { txn, production } = await appleVerifyTransaction(jws);
         // Reject a Sandbox receipt in production: it verifies (Apple's sandbox
         // chain is valid) but represents a free test purchase, so granting on it
-        // would hand real Pro to any sandbox tester. Allowed only on an explicit
-        // TestFlight/testing build (IAP_ALLOW_SANDBOX=1).
-        if (!production && !IAP_ALLOW_SANDBOX) {
+        // would hand real Pro to any sandbox tester. Allowed only for the global
+        // testing flag OR an allowlisted tester uid (IAP_SANDBOX_UIDS).
+        if (!production && !sandboxAllowedFor(uid)) {
           console.warn(`[iap] verify/ios rejected sandbox receipt uid=${uid}`);
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "sandbox_not_allowed" }));
@@ -3108,7 +3127,8 @@ const server = http.createServer(async (req, res) => {
         });
         // Reject a License-tester test purchase in production (parity with the
         // Apple sandbox reject) — it is a free test grant, not a real payment.
-        if (facts.test && !IAP_ALLOW_SANDBOX) {
+        // Allowlisted tester uids (IAP_SANDBOX_UIDS) may proceed for validation.
+        if (facts.test && !sandboxAllowedFor(uid)) {
           console.warn(
             `[iap] verify/android rejected test purchase uid=${uid}`,
           );
