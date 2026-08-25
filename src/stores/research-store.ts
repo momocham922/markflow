@@ -110,6 +110,14 @@ interface ResearchState {
   setIncludeInStructure: (v: boolean) => void;
   setMobileSheetOpen: (v: boolean) => void;
   setMobileLiveResearch: (v: boolean) => void;
+  /**
+   * Wipe ALL in-memory research state on logout / account switch. `cards` hold
+   * research summaries + sources (user content) and would otherwise linger for
+   * the NEXT account signing in on the same device. Persisted preferences are
+   * re-read from localStorage; on an account switch local-reset clears those
+   * keys first, so this resets them to defaults too.
+   */
+  reset: () => void;
 }
 
 export const useResearchStore = create<ResearchState>((set) => ({
@@ -203,4 +211,19 @@ export const useResearchStore = create<ResearchState>((set) => ({
         : { mobileLiveResearch: v, featureGated: false },
     );
   },
+  reset: () =>
+    set({
+      sessionActive: false,
+      cards: [],
+      searchedTopics: [],
+      panelVisible: true,
+      analyzing: false,
+      analysisError: null,
+      featureGated: false,
+      poppedOut: false,
+      mobileSheetOpen: false,
+      // Re-read persisted prefs (cleared by local-reset on an account switch).
+      includeInStructure: loadIncludeInStructure(),
+      mobileLiveResearch: loadMobileLiveResearch(),
+    }),
 }));

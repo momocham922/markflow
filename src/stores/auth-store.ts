@@ -21,7 +21,18 @@ import {
 } from "@/services/sharing";
 import { useAppStore, type Document, type DocType } from "./app-store";
 import { useEntitlementStore } from "./entitlement-store";
-import { getDeletedDocIds, clearDeletedDoc } from "@/services/database";
+import { useResearchStore } from "./research-store";
+import {
+  getDeletedDocIds,
+  clearDeletedDoc,
+  getSetting,
+  setSetting,
+} from "@/services/database";
+import { wipeLocalUserData } from "@/services/local-reset";
+
+// Persisted marker of the last account that synced on THIS device. A mismatch on
+// login means a DIFFERENT user signed in and the local cache must be purged.
+const LAST_UID_KEY = "last_signed_in_uid";
 
 // --- One-time backfill: upload local SQLite versions to Firestore ---
 let versionBackfillDone = false;
@@ -141,6 +152,12 @@ interface AuthState {
   init: () => () => void;
   login: (provider?: "google" | "github") => Promise<void>;
   logout: () => Promise<void>;
+  /**
+   * Permanently delete the signed-in account and ALL its data (Apple 5.1.1(v)).
+   * Calls the ai-proxy cascade, transparently re-authenticating once if the
+   * server demands a fresh sign-in, then wipes every local trace on success.
+   */
+  deleteAccount: () => Promise<{ ok: boolean; error?: string }>;
   syncToCloud: () => Promise<boolean>;
   syncFromCloud: () => Promise<void>;
   deleteFromCloud: (docId: string) => Promise<void>;
@@ -155,9 +172,52 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   loginError: null,
 
   init: () => {
-    const unsubAuth = onAuthChange((user) => {
+    // onAuthChange = onAuthStateChanged: fires on sign-in/sign-out/initial only
+    // (NOT on hourly token refresh), so the account-switch purge + rehydrate
+    // below run exactly once per real auth transition.
+    const unsubAuth = onAuthChange(async (user) => {
       set({ user, loading: false });
       if (user) {
+        // --- Account-switch isolation (data privacy) ---------------------
+        // SQLite is a single per-device cache with NO per-user scoping. If a
+        // DIFFERENT account signed in since last time, the previous user's
+        // PRIVATE docs (owned by them, not shared) survive sync reconciliation
+        // and leak into this user's sidebar. Purge the local cache BEFORE any
+        // sync so the new account starts clean.
+        try {
+          const prevUid = await getSetting(LAST_UID_KEY);
+          if (prevUid && prevUid !== user.uid) {
+            console.warn(
+              `[auth-store] Account switch ${prevUid} → ${user.uid}: purging local cache`,
+            );
+            // Clear in-memory + cancel pending saves FIRST (so no timer can
+            // re-insert an old doc during the async wipe), then purge SQLite +
+            // Yjs IndexedDB.
+            useAppStore.getState().resetLocalDocuments();
+            await wipeLocalUserData();
+            // Drop the previous account's in-memory research cards (content) and
+            // re-read prefs now that local-reset cleared their localStorage keys.
+            useResearchStore.getState().reset();
+            // Drop cross-account tracking so the new user's sync is clean.
+            collabActiveDocIds.clear();
+            cloudPulledDocIds.clear();
+            versionBackfillDone = false;
+          }
+          await setSetting(LAST_UID_KEY, user.uid);
+        } catch (e) {
+          console.error("[auth-store] account-switch check failed:", e);
+        }
+
+        // Rehydrate the in-memory list from THIS account's local cache. After a
+        // switch-purge that yields [] (SQLite is empty); after a same-account
+        // re-login (logout cleared the in-memory list) it restores the cached
+        // docs so the sidebar is correct even offline. On cold start the
+        // App.tsx effect already populated it, so skip to avoid a double load.
+        const app = useAppStore.getState();
+        if (app.initialized && app.documents.length === 0) {
+          await app.loadDocuments();
+        }
+
         // Save user profile for collaborator lookups
         saveUserProfile({
           uid: user.uid,
@@ -271,12 +331,130 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: async () => {
+    // Flush any unsynced local edits BEFORE dropping the session. An account
+    // switch is logout-A → login-B, and B's login purges the shared (un-scoped)
+    // local cache. Once B is authenticated we can no longer upload as A, so this
+    // is A's last chance to persist offline/dirty work to the cloud. Best-effort
+    // and time-boxed (8s) so a slow network never hangs logout; if A is offline
+    // the edits remain in SQLite for A's next same-account login (only a later
+    // different-account login on this device would purge them — an inherent limit
+    // of a device-shared local cache, not a silent drop of reachable data).
+    try {
+      const { user, isOnline } = get();
+      if (user && isOnline) {
+        await Promise.race([
+          get().syncToCloud(),
+          new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+        ]);
+      }
+    } catch (e) {
+      console.error("[auth-store] pre-logout flush failed:", e);
+    }
     try {
       await signOut();
-      set({ user: null });
-      useEntitlementStore.getState().reset();
     } catch (error) {
       console.error("Logout failed:", error);
+    } finally {
+      // Clear the session + in-memory docs regardless of signOut outcome, so the
+      // sidebar never shows the previous account's documents after logout. SQLite
+      // is intentionally KEPT (a same-account re-login rehydrates from it, works
+      // offline); a DIFFERENT account signing in purges it via the switch check.
+      // Also drop `syncing` so a stuck spinner from an in-flight sync can't
+      // persist across the logout.
+      set({ user: null, syncing: false });
+      useAppStore.getState().resetLocalDocuments();
+      useEntitlementStore.getState().reset();
+      // Research cards are user content — clear them so the login screen (and any
+      // next account) never shows the previous user's research.
+      useResearchStore.getState().reset();
+    }
+  },
+
+  deleteAccount: async (): Promise<{ ok: boolean; error?: string }> => {
+    const proxyBase = import.meta.env.VITE_AI_PROXY_URL || "";
+    if (!proxyBase) {
+      return { ok: false, error: "削除サービスに接続できません。" };
+    }
+    if (!get().isOnline) {
+      return {
+        ok: false,
+        error: "オフラインです。オンラインに接続してから再度お試しください。",
+      };
+    }
+
+    // POST the delete with a FRESH id token (force-refresh). The server also
+    // requires a recent sign-in (auth_time within 5 min); when it isn't, it
+    // returns 401 reauth_required and we re-run the provider sign-in once.
+    const callDelete = async (): Promise<Response> => {
+      const { auth } = await import("@/services/firebase");
+      const current = auth.currentUser;
+      if (!current) throw new Error("not_signed_in");
+      const token = await current.getIdToken(true);
+      return fetch(`${proxyBase}/v1/account/delete`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    };
+
+    try {
+      let res = await callDelete();
+      if (res.status === 401) {
+        let body: { error?: string } = {};
+        try {
+          body = (await res.clone().json()) as { error?: string };
+        } catch {
+          /* non-JSON */
+        }
+        if (body.error === "reauth_required" || body.error === "unauthorized") {
+          // Re-authenticate via the user's ORIGINAL provider, then retry once.
+          const { auth } = await import("@/services/firebase");
+          const providerId =
+            auth.currentUser?.providerData?.[0]?.providerId || "";
+          if (providerId.includes("github")) await signInWithGitHub();
+          else await signInWithGoogle();
+          res = await callDelete();
+        }
+      }
+
+      if (!res.ok) {
+        let err =
+          "アカウントの削除に失敗しました。時間をおいて再度お試しください。";
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j.error === "reauth_required") {
+            err =
+              "セキュリティのため再ログインが必要です。もう一度お試しください。";
+          }
+        } catch {
+          /* keep default */
+        }
+        return { ok: false, error: err };
+      }
+
+      // Success: the server deleted the Firebase Auth user AND all cloud data.
+      // Purge every local trace on this device and drop the session.
+      try {
+        await wipeLocalUserData();
+      } catch (e) {
+        console.error("[auth-store] post-delete local wipe failed:", e);
+      }
+      try {
+        await signOut();
+      } catch {
+        /* session is already invalid server-side; ignore */
+      }
+      set({ user: null, syncing: false });
+      useAppStore.getState().resetLocalDocuments();
+      useEntitlementStore.getState().reset();
+      useResearchStore.getState().reset();
+      return { ok: true };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[auth-store] deleteAccount failed:", msg);
+      return { ok: false, error: "アカウントの削除に失敗しました。" };
     }
   },
 
@@ -286,6 +464,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     const result = await withSyncLock(async () => {
       set({ syncing: true });
+      // --- Account-switch generation guard (data isolation, P0) --------------
+      // This sync captured `user` (= account A) at call time and then performs
+      // many awaited fetches. If account B signs in mid-flight, onAuthChange has
+      // already set `user = B` in the store (and purged A's local cache), so any
+      // store write we still make below would REVIVE A's private docs into B's
+      // sidebar — the exact leak we are closing. `isStale()` returns true once
+      // the live session uid no longer matches the uid this sync started with
+      // (a different account, or a logout to null); we bail before every batch of
+      // store writes so a late-completing A-sync can never pollute B.
+      const syncUid = user.uid;
+      const isStale = () => get().user?.uid !== syncUid;
       try {
         // Load locally deleted doc IDs to skip during sync
         let deletedDocIds: Set<string>;
@@ -317,6 +506,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             fetchUserSettings(user.uid).catch(() => null),
           ],
         );
+
+        // Account switched while we were fetching — abandon before any write.
+        if (isStale()) return;
 
         // Restore all user settings from cloud
         if (cloudSettings) {
@@ -421,6 +613,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         }
 
+        if (isStale()) return;
         const appStore = useAppStore.getState();
         const localDocs = appStore.documents;
 
@@ -436,6 +629,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         // Merge user's own cloud docs
         for (const cloudDoc of cloudDocs) {
+          if (isStale()) return; // account switched mid-merge — stop writing
           if (deletedDocIds.has(cloudDoc.id)) continue; // skip locally deleted
 
           cloudDocIds.add(cloudDoc.id);
@@ -539,6 +733,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             const results = await Promise.all(
               batch.map((s) => fetchDocument(s.id).catch(() => null)),
             );
+            if (isStale()) return; // account switched mid-batch
             for (let j = 0; j < batch.length; j++) {
               const fullDoc = results[j];
               const entry = batch[j];
@@ -657,6 +852,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             const results = await Promise.all(
               batch.map((t) => fetchDocument(t.id).catch(() => null)),
             );
+            if (isStale()) return; // account switched mid-batch
             for (let j = 0; j < batch.length; j++) {
               const fullDoc = results[j];
               const entry = batch[j];
@@ -724,8 +920,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // Reconcile deletions: remove local docs that no longer exist in cloud.
         // For own docs: verify deletion by checking Firestore directly (never rely on timing alone)
         // For shared/team docs: remove if not in cloud (non-owner, cloud is source of truth)
+        if (isStale()) return; // account switched — do not reconcile B's store as A
         const finalDocs = useAppStore.getState().documents;
         for (const local of finalDocs) {
+          if (isStale()) return; // account switched mid-reconcile
           if (collabActiveDocIds.has(local.id)) continue; // skip actively edited docs
           if (cloudDocIds.has(local.id)) continue; // exists in cloud — keep
 
@@ -733,6 +931,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             // Own doc not in query results. Could be:
             // a) Deleted on another device → should delete locally
             // b) Never synced / upload failed → must NOT delete
+            //
+            // GUARD (P0 data-loss fix): only a doc that was PREVIOUSLY synced to
+            // the cloud (synced_at set) can be a genuine remote deletion. A doc
+            // with synced_at == NULL has never been uploaded (created offline /
+            // first sync still pending / earlier upload failed) — deleting it here
+            // would permanently destroy content that syncToCloud is about to push.
+            // syncFromCloud always runs BEFORE syncToCloud, so a freshly-created
+            // local doc reaches this point unsynced by design.
+            let everSynced = false;
+            try {
+              const { getDocument } = await import("@/services/database");
+              const dbDoc = await getDocument(local.id);
+              everSynced = !!(dbDoc && dbDoc.synced_at);
+            } catch {
+              // Can't read local sync state → keep the doc (fail safe).
+              everSynced = false;
+            }
+            if (!everSynced) {
+              continue; // never uploaded — keep; syncToCloud will push it
+            }
             // Direct Firestore check is authoritative — no timing heuristics.
             try {
               const cloudDoc = await fetchDocument(local.id);
@@ -774,6 +992,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             );
             await appStore.deleteDocument(local.id);
           }
+        }
+
+        // Any locally-present doc that exists in the cloud is, by definition,
+        // synced — stamp synced_at so the reconciliation above treats a later
+        // remote deletion correctly. markDocumentsSynced only touches existing
+        // local rows, so passing the full cloud id set is safe.
+        try {
+          const { markDocumentsSynced } = await import("@/services/database");
+          await markDocumentsSynced(Array.from(cloudDocIds));
+        } catch (e) {
+          console.error("Failed to mark cloud docs synced:", e);
         }
 
         // NOTE: lastSyncAt is updated by the CALLER after both syncFromCloud + syncToCloud complete.
@@ -980,6 +1209,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             return false;
           return true;
         });
+        const syncedOk: string[] = [];
         for (const d of syncableDocs) {
           const payload = {
             id: d.id,
@@ -999,10 +1229,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           };
           try {
             await saveDocumentToFirestore(payload);
+            syncedOk.push(d.id);
           } catch (saveErr) {
             // Transaction failed — fall back to merge save (preserves collaborators/shareLink)
             try {
               await saveDocumentMerge(payload);
+              syncedOk.push(d.id);
             } catch (mergeErr) {
               console.error(
                 `Failed to sync document ${d.id}:`,
@@ -1011,6 +1243,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               );
             }
           }
+        }
+        // Stamp synced_at on everything that reached the cloud, so the deletion
+        // reconciliation can never mistake an uploaded doc for a never-synced one
+        // (and, conversely, so a genuine remote deletion is still actionable).
+        try {
+          const { markDocumentsSynced } = await import("@/services/database");
+          await markDocumentsSynced(syncedOk);
+        } catch (e) {
+          console.error("Failed to mark documents synced:", e);
         }
         // Edit notifications are handled by debounce in App.tsx
         // (10min idle / document switch / app close)

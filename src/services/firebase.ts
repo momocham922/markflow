@@ -49,6 +49,20 @@ const GITHUB_CLIENT_ID = import.meta.env.VITE_GITHUB_CLIENT_ID || "";
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
 /**
+ * Generate a cryptographically random OAuth `state` value. It is sent in the
+ * authorization URL and verified by the loopback callback listener (Rust) so a
+ * forged callback (CSRF / auth-code injection) that doesn't echo this exact
+ * value is rejected. 32 URL-safe chars ≈ 190 bits of entropy.
+ */
+function generateOAuthState(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, "0"))
+    .join("")
+    .slice(0, 32);
+}
+
+/**
  * Exchange an OAuth authorization code for tokens via the ai-proxy BFF.
  * The provider client_secret never reaches this bundle — the proxy holds it.
  */
@@ -127,8 +141,9 @@ export async function signInWithGoogle(): Promise<User | null> {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
-    // Start localhost callback server (iOS mode)
-    await invoke<number>("oauth_listen", { ios: true });
+    // Start localhost callback server (iOS mode) with the CSRF state to verify.
+    const oauthState = generateOAuthState();
+    await invoke<number>("oauth_listen", { ios: true, state: oauthState });
 
     const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
@@ -137,6 +152,7 @@ export async function signInWithGoogle(): Promise<User | null> {
       scope: "openid email profile",
       prompt: "select_account",
       access_type: "offline",
+      state: oauthState,
     });
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
@@ -206,7 +222,8 @@ export async function signInWithGoogle(): Promise<User | null> {
   }
 
   // Desktop: use local OAuth callback server + external browser
-  await platform.startOAuthListener();
+  const oauthState = generateOAuthState();
+  await platform.startOAuthListener(oauthState);
 
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
@@ -215,6 +232,7 @@ export async function signInWithGoogle(): Promise<User | null> {
     scope: "openid email profile",
     prompt: "select_account",
     access_type: "offline",
+    state: oauthState,
   });
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
@@ -287,12 +305,14 @@ export async function signInWithGitHub(): Promise<User | null> {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
-    await invoke<number>("oauth_listen", { ios: true });
+    const oauthState = generateOAuthState();
+    await invoke<number>("oauth_listen", { ios: true, state: oauthState });
 
     const params = new URLSearchParams({
       client_id: GITHUB_CLIENT_ID,
       redirect_uri: redirectUri,
       scope: "read:user user:email",
+      state: oauthState,
     });
     const authUrl = `https://github.com/login/oauth/authorize?${params}`;
 
@@ -353,12 +373,14 @@ export async function signInWithGitHub(): Promise<User | null> {
   }
 
   // Desktop: external browser
-  await platform.startOAuthListener();
+  const oauthState = generateOAuthState();
+  await platform.startOAuthListener(oauthState);
 
   const params = new URLSearchParams({
     client_id: GITHUB_CLIENT_ID,
     redirect_uri: redirectUri,
     scope: "read:user user:email",
+    state: oauthState,
   });
   const authUrl = `https://github.com/login/oauth/authorize?${params}`;
 

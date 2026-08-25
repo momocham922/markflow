@@ -145,6 +145,16 @@ const APP_STORE_APP_APPLE_ID =
   Number(process.env.APP_STORE_APP_APPLE_ID) || undefined;
 const PLAY_PACKAGE_NAME = process.env.PLAY_PACKAGE_NAME || "";
 const PLAY_SERVICE_ACCOUNT = process.env.PLAY_SERVICE_ACCOUNT_JSON || "";
+// Sandbox / test-purchase policy. Ships FALSE (production-safe): a StoreKit
+// Sandbox transaction (Apple environment !== "Production") or a Play test
+// purchase (License-tester `testPurchase` marker) must NEVER grant a real
+// entitlement in the production deployment — otherwise a tester with a free
+// sandbox subscription gets Pro for real. Set IAP_ALLOW_SANDBOX=1 ONLY on a
+// TestFlight/internal-testing build where verifying the purchase flow requires
+// accepting sandbox receipts. In production this stays unset → sandbox rejected.
+const IAP_ALLOW_SANDBOX =
+  process.env.IAP_ALLOW_SANDBOX === "1" ||
+  process.env.IAP_ALLOW_SANDBOX === "true";
 
 // --- OAuth token exchange (BFF: keep provider client_secret server-side) ----
 // The client secret NEVER ships in the desktop/mobile bundle (a public GitHub
@@ -1061,15 +1071,227 @@ async function getGcpAccessToken(): Promise<string> {
   return data.access_token;
 }
 
+// Revocation / disabled-account check for the metered (cost-incurring) paths.
+// verifyIdToken(token, true) makes a getUser() round-trip to Firebase Auth on
+// every call, so we cache "this uid passed a full revocation check at T" for a
+// short TTL: the added latency is one round-trip per uid per window (not per
+// request), and the window bounds how long a revoked/disabled user could keep
+// spending quota after being signed-out-everywhere / disabled.
+const REVOCATION_TTL_MS = 5 * 60 * 1000;
+const REVOCATION_CACHE_MAX = 50000;
+const revocationCheckedAt = new Map<string, number>();
+
+// Firebase Auth error codes meaning the credential is genuinely no longer valid
+// (signed out everywhere / password changed / account disabled or deleted).
+// These fail CLOSED (rethrow → 401). Any OTHER error from the revocation
+// round-trip is transient (network blip to Firebase Auth) — the base token has
+// already passed signature + expiry verification, so we log explicitly and
+// allow rather than couple a Firebase outage to a total auth outage.
+const REVOCATION_HARD_CODES = new Set([
+  "auth/id-token-revoked",
+  "auth/user-disabled",
+  "auth/user-not-found",
+]);
+
 async function verifyFirebaseToken(
   authHeader: string | undefined,
+  opts?: { checkRevoked?: boolean },
 ): Promise<string> {
   if (!authHeader?.startsWith("Bearer ")) {
     throw new Error("Missing or invalid Authorization header");
   }
   const idToken = authHeader.slice(7);
+  // Signature + expiry validation — uses cached public keys, no network call.
   const decoded = await getAuth().verifyIdToken(idToken);
-  return decoded.uid;
+  const uid = decoded.uid;
+
+  if (opts?.checkRevoked) {
+    const now = Date.now();
+    const last = revocationCheckedAt.get(uid) || 0;
+    if (now - last > REVOCATION_TTL_MS) {
+      try {
+        // Throws auth/id-token-revoked or auth/user-disabled if the credential
+        // is no longer valid; also re-fetches the user (catches deletion).
+        await getAuth().verifyIdToken(idToken, true);
+        if (revocationCheckedAt.size > REVOCATION_CACHE_MAX) {
+          revocationCheckedAt.clear();
+        }
+        revocationCheckedAt.set(uid, now);
+      } catch (e) {
+        const code = (e as { code?: string })?.code || "";
+        if (REVOCATION_HARD_CODES.has(code)) {
+          throw e; // fail closed — genuinely revoked / disabled / deleted
+        }
+        // Transient — base token is cryptographically valid and unexpired.
+        console.error(
+          `[auth] revocation check transient failure for ${uid}: ${code || e}`,
+        );
+      }
+    }
+  }
+
+  return uid;
+}
+
+// =====================================================================
+// Account deletion cascade (Apple App Store Guideline 5.1.1(v))
+// ---------------------------------------------------------------------
+// Deleting an account must remove ALL of the user's data. These helpers run via
+// the Admin SDK / GCS JSON API (bypassing Firestore + Storage rules) since much
+// of that data is server-write-only (entitlements/usage/teamSeats) or client-
+// deny (published/*). Each helper is best-effort and bounded so a single stuck
+// object never wedges the overall deletion — the last step (auth-user delete)
+// still runs so the account is genuinely gone.
+// =====================================================================
+
+/** Max pages (× 200 docs) a single collection sweep will process. A backstop
+ *  against an unbounded loop if some deletes keep failing (they'd re-match). */
+const ACCOUNT_DELETE_MAX_PAGES = 100;
+
+/**
+ * Delete every document in `collection` where `field == value`, 200 at a time.
+ * `perDoc` (optional) runs before each doc is deleted (e.g. to remove a coupled
+ * Storage object or cancel a subscription). `recursive` uses recursiveDelete so
+ * subcollections (versions/research_sessions/comments, usage months, ai_chats)
+ * are removed too. Per-doc failures are logged and skipped. Returns the count
+ * successfully deleted.
+ */
+async function deleteDocsWhere(
+  collection: string,
+  field: string,
+  value: string,
+  opts?: {
+    recursive?: boolean;
+    perDoc?: (id: string, data: Record<string, unknown>) => Promise<void>;
+  },
+): Promise<number> {
+  const db = getFirestore();
+  let total = 0;
+  for (let page = 0; page < ACCOUNT_DELETE_MAX_PAGES; page++) {
+    const snap = await db
+      .collection(collection)
+      .where(field, "==", value)
+      .limit(200)
+      .get();
+    if (snap.empty) break;
+    let progressed = false;
+    for (const doc of snap.docs) {
+      if (opts?.perDoc) {
+        try {
+          await opts.perDoc(doc.id, doc.data() as Record<string, unknown>);
+        } catch (e) {
+          console.error(
+            `[account/delete] perDoc ${collection}/${doc.id} failed:`,
+            e,
+          );
+        }
+      }
+      try {
+        if (opts?.recursive) await db.recursiveDelete(doc.ref);
+        else await doc.ref.delete();
+        total++;
+        progressed = true;
+      } catch (e) {
+        console.error(
+          `[account/delete] delete ${collection}/${doc.id} failed:`,
+          e,
+        );
+      }
+    }
+    // If a whole page failed to delete, another pass would re-fetch the same
+    // docs forever — stop rather than spin.
+    if (!progressed) break;
+    if (snap.size < 200) break;
+  }
+  return total;
+}
+
+/**
+ * Delete every Storage object under `prefix` (e.g. `audio/<uid>/`) via the GCS
+ * JSON API, paginating through the listing. 404s count as already-gone. A single
+ * object failure is logged and the sweep continues. Returns the count removed.
+ */
+async function deleteStoragePrefix(prefix: string): Promise<number> {
+  const token = await getGcpAccessToken();
+  let deleted = 0;
+  let pageToken: string | undefined;
+  let pages = 0;
+  do {
+    const listUrl =
+      `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o` +
+      `?prefix=${encodeURIComponent(prefix)}` +
+      (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+    const listRes = await fetch(listUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!listRes.ok) {
+      const t = await listRes.text().catch(() => "");
+      console.error(
+        `[account/delete] list ${prefix} failed ${listRes.status}: ${t}`,
+      );
+      break;
+    }
+    const data = (await listRes.json()) as {
+      items?: { name?: string }[];
+      nextPageToken?: string;
+    };
+    for (const item of data.items ?? []) {
+      const name = item.name;
+      if (!name) continue;
+      const delUrl = `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o/${encodeURIComponent(
+        name,
+      )}`;
+      const del = await fetch(delUrl, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (del.ok || del.status === 404) deleted++;
+      else {
+        const t = await del.text().catch(() => "");
+        console.error(
+          `[account/delete] delete object ${name} failed ${del.status}: ${t}`,
+        );
+      }
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken && ++pages < ACCOUNT_DELETE_MAX_PAGES);
+  return deleted;
+}
+
+/**
+ * Best-effort cancellation of a user's personal Stripe subscription when their
+ * account is deleted, so a removed user is never charged again. No-op when Stripe
+ * is unconfigured (DARK) or the user has no customer. Never throws.
+ */
+async function cancelPersonalStripeSubscription(uid: string): Promise<void> {
+  if (!isBillingConfigured()) return;
+  try {
+    const entSnap = await getFirestore()
+      .collection("entitlements")
+      .doc(uid)
+      .get();
+    const customerId = String(entSnap.data()?.stripeCustomerId || "").trim();
+    if (!customerId) return;
+    const stripe = getStripe();
+    const subs = await stripe.subscriptions.list({
+      customer: customerId,
+      status: "all",
+      limit: 100,
+    });
+    for (const sub of subs.data) {
+      if (["canceled", "incomplete_expired"].includes(sub.status)) continue;
+      try {
+        await stripe.subscriptions.cancel(sub.id);
+      } catch (e) {
+        console.error(
+          `[account/delete] cancel sub ${sub.id} for ${uid} failed:`,
+          e,
+        );
+      }
+    }
+  } catch (e) {
+    console.error(`[account/delete] stripe cleanup for ${uid} failed:`, e);
+  }
 }
 
 // =====================================================================
@@ -1706,6 +1928,478 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // --- /v1/publish (owner-only web publish: server writes the Storage object) ---
+  // The published HTML object (published/{docId}.html) is now written ONLY here.
+  // storage.rules denies all client writes to published/*, so this endpoint is
+  // the single enforcement point: it verifies the caller OWNS the document
+  // (Firestore ownerId === uid) before writing, caps the payload size, and — when
+  // NONAI_GATES_ENABLED — refuses a Free owner (Web publish is Pro+). Previously
+  // any authenticated user could overwrite/delete/inflate ANY published page.
+  if (req.method === "POST" && req.url === "/v1/publish") {
+    try {
+      let uid: string;
+      try {
+        uid = await verifyFirebaseToken(req.headers.authorization);
+      } catch {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const body = await readBody();
+      let parsed: { docId?: string; html?: string };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+      const docId = String(parsed.docId || "");
+      const html = typeof parsed.html === "string" ? parsed.html : "";
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_doc_id" }));
+        return;
+      }
+      // Cap payload: a published page is a single rendered document. 10MB is far
+      // above any real doc and blocks storage-abuse via this endpoint.
+      if (!html || Buffer.byteLength(html, "utf8") > 10 * 1024 * 1024) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "payload_too_large_or_empty" }));
+        return;
+      }
+      // Ownership: only the document's owner may publish it.
+      const dsnap = await getFirestore()
+        .collection("documents")
+        .doc(docId)
+        .get();
+      if (!dsnap.exists) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "document_not_found" }));
+        return;
+      }
+      const ownerUid = String(
+        (dsnap.data() as Record<string, unknown>)?.ownerId || "",
+      ).trim();
+      if (!ownerUid || ownerUid !== uid) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_document_owner" }));
+        return;
+      }
+      // Pro+ gate (server-side counterpart to the client gate). Ships OFF; flips
+      // at GO via NONAI_GATES_ENABLED. Fail OPEN on lookup error so a Firestore
+      // blip never blocks a paying owner from (re)publishing.
+      if (NONAI_GATES_ENABLED && !INTERNAL_UIDS.has(uid)) {
+        try {
+          const ent = await loadEntitlement(uid);
+          if (ent.realPlan === "free" && !ent.degraded) {
+            res.writeHead(402, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "plan_required", plan: "free" }));
+            return;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[publish] plan gate lookup failed for ${docId}: ${msg}`,
+          );
+          // fail-open
+        }
+      }
+      const objectPath = `published/${docId}.html`;
+      const token = await getGcpAccessToken();
+      const uploadUrl = `https://storage.googleapis.com/upload/storage/v1/b/${GCS_BUCKET}/o?uploadType=media&name=${encodeURIComponent(
+        objectPath,
+      )}`;
+      const up = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "text/html; charset=utf-8",
+        },
+        body: html,
+      });
+      if (!up.ok) {
+        const t = await up.text().catch(() => "");
+        console.error(`[publish] GCS upload failed ${up.status}: ${t}`);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "storage_write_failed" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[publish] error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
+
+  // --- /v1/unpublish (owner-only: delete the published Storage object) ---
+  if (req.method === "POST" && req.url === "/v1/unpublish") {
+    try {
+      let uid: string;
+      try {
+        uid = await verifyFirebaseToken(req.headers.authorization);
+      } catch {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const body = await readBody();
+      let parsed: { docId?: string };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+      const docId = String(parsed.docId || "");
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_doc_id" }));
+        return;
+      }
+      // Ownership: only the owner may unpublish. A missing doc means nothing to
+      // protect — the object (if any) is orphaned, so allow its removal.
+      const dsnap = await getFirestore()
+        .collection("documents")
+        .doc(docId)
+        .get();
+      if (dsnap.exists) {
+        const ownerUid = String(
+          (dsnap.data() as Record<string, unknown>)?.ownerId || "",
+        ).trim();
+        if (ownerUid && ownerUid !== uid) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "not_document_owner" }));
+          return;
+        }
+      }
+      const objectPath = `published/${docId}.html`;
+      const token = await getGcpAccessToken();
+      const delUrl = `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o/${encodeURIComponent(
+        objectPath,
+      )}`;
+      const del = await fetch(delUrl, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      // 404 = already gone; treat as success.
+      if (!del.ok && del.status !== 404) {
+        const t = await del.text().catch(() => "");
+        console.error(`[unpublish] GCS delete failed ${del.status}: ${t}`);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "storage_delete_failed" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[unpublish] error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
+
+  // --- /v1/users/resolve (email -> uid, for collaborator/team invites) ------
+  // Invites are by email, but the client must NOT be able to enumerate the whole
+  // `users` collection (all emails/uids/photos). firestore.rules now restricts
+  // `users` read to the owner, so email->uid resolution moves here: an
+  // authenticated caller submits ONE email and gets back only {exists, uid}.
+  // Uses the Admin SDK getUserByEmail (Firebase Auth is the authoritative email
+  // registry), never leaks profile fields, and is rate-limited by Cloud Run.
+  // This is the same minimal existence oracle every invite-by-email product
+  // exposes (Slack/Notion/Docs) — the win is killing bulk directory enumeration.
+  if (req.method === "POST" && req.url === "/v1/users/resolve") {
+    try {
+      try {
+        await verifyFirebaseToken(req.headers.authorization);
+      } catch {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const body = await readBody();
+      let parsed: { email?: string };
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json" }));
+        return;
+      }
+      const email = String(parsed.email || "")
+        .trim()
+        .toLowerCase();
+      // Basic shape check — not full RFC validation, just enough to reject junk.
+      if (
+        !email ||
+        email.length > 320 ||
+        !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_email" }));
+        return;
+      }
+      try {
+        const record = await getAuth().getUserByEmail(email);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ exists: true, uid: record.uid }));
+      } catch (err) {
+        // getUserByEmail throws auth/user-not-found for unknown emails — that's a
+        // normal "no account" answer, not a server error.
+        const code = (err as { code?: string })?.code || "";
+        if (code === "auth/user-not-found") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ exists: false, uid: null }));
+          return;
+        }
+        throw err;
+      }
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[users/resolve] error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
+
+  // --- /v1/account/delete (self-service account + all-data deletion) --------
+  // Apple App Store Guideline 5.1.1(v): an app that supports account creation
+  // MUST let the user delete their account from within the app. This is the
+  // single server-side cascade. It requires a FRESH re-authentication (the ID
+  // token's auth_time must be within 5 minutes) so a stale/stolen token can't
+  // nuke an account, then removes EVERYTHING the user owns via the Admin SDK
+  // (which bypasses Firestore + Storage rules): owned documents and their
+  // subcollections + published HTML, owned teams (+ Stripe sub cancel), the
+  // entitlement / usage / settings / profile / seat-index / billing reverse
+  // maps, and all Storage under audio/{uid}/ and images/{uid}/. It also scrubs
+  // the uid from docs/teams owned by OTHERS (collaborator + membership entries).
+  // The Firebase Auth user is deleted LAST so the account is genuinely gone even
+  // if a best-effort sub-step logged a partial failure.
+  if (req.method === "POST" && req.url === "/v1/account/delete") {
+    try {
+      // Verify + require a RECENT re-auth. checkRevoked=true also rejects a token
+      // whose session was already revoked (defense-in-depth for this destructive op).
+      if (!req.headers.authorization?.startsWith("Bearer ")) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      let uid: string;
+      let authTime: number;
+      try {
+        const decoded = await getAuth().verifyIdToken(
+          req.headers.authorization.slice(7),
+          true,
+        );
+        uid = decoded.uid;
+        authTime = Number(decoded.auth_time || 0);
+      } catch {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (!authTime || nowSec - authTime > 300) {
+        // The client must reauthenticate (fresh sign-in) immediately before
+        // calling. Surface a distinct code so the UI can prompt re-login.
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "reauth_required" }));
+        return;
+      }
+
+      const db = getFirestore();
+      const summary: Record<string, number> = {};
+
+      // 1) Cancel any personal Stripe subscription so a deleted user isn't billed.
+      await cancelPersonalStripeSubscription(uid);
+
+      // 2) Owned documents: recursively delete each (versions/research_sessions/
+      //    comments go with it) and remove the coupled published HTML object.
+      const gcsToken = await getGcpAccessToken().catch(() => "");
+      summary.documents = await deleteDocsWhere("documents", "ownerId", uid, {
+        recursive: true,
+        perDoc: async (docId) => {
+          if (!gcsToken) return;
+          const objectPath = `published/${docId}.html`;
+          const delUrl = `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o/${encodeURIComponent(
+            objectPath,
+          )}`;
+          const del = await fetch(delUrl, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${gcsToken}` },
+          });
+          if (!del.ok && del.status !== 404) {
+            const t = await del.text().catch(() => "");
+            console.error(
+              `[account/delete] published/${docId} delete ${del.status}: ${t}`,
+            );
+          }
+        },
+      });
+
+      // 3) Scrub the uid from documents owned by OTHERS where they collaborate
+      //    (array + map entries), so it no longer appears as a collaborator.
+      let scrubbedDocs = 0;
+      for (let page = 0; page < ACCOUNT_DELETE_MAX_PAGES; page++) {
+        const snap = await db
+          .collection("documents")
+          .where("collaboratorUids", "array-contains", uid)
+          .limit(200)
+          .get();
+        if (snap.empty) break;
+        let progressed = false;
+        for (const doc of snap.docs) {
+          try {
+            await doc.ref.update({
+              collaboratorUids: FieldValue.arrayRemove(uid),
+              [`collaborators.${uid}`]: FieldValue.delete(),
+            });
+            scrubbedDocs++;
+            progressed = true;
+          } catch (e) {
+            console.error(
+              `[account/delete] scrub collaborator ${doc.id} failed:`,
+              e,
+            );
+          }
+        }
+        if (!progressed || snap.size < 200) break;
+      }
+      summary.collaboratorScrubbed = scrubbedDocs;
+
+      // 4) Owned teams: cancel their Stripe subscription then recursively delete.
+      summary.teamsOwned = await deleteDocsWhere("teams", "ownerId", uid, {
+        recursive: true,
+        perDoc: async (_teamId, data) => {
+          const billing = (data.billing ?? null) as {
+            stripeSubscriptionId?: unknown;
+          } | null;
+          const subId = String(billing?.stripeSubscriptionId ?? "").trim();
+          if (subId && isBillingConfigured()) {
+            try {
+              await getStripe().subscriptions.cancel(subId);
+            } catch (e) {
+              console.error(
+                `[account/delete] cancel team sub ${subId} failed:`,
+                e,
+              );
+            }
+          }
+        },
+      });
+
+      // 5) Scrub uid from teams owned by OTHERS where they are a member.
+      let scrubbedTeams = 0;
+      for (let page = 0; page < ACCOUNT_DELETE_MAX_PAGES; page++) {
+        const snap = await db
+          .collection("teams")
+          .where("memberUids", "array-contains", uid)
+          .limit(200)
+          .get();
+        if (snap.empty) break;
+        let progressed = false;
+        for (const doc of snap.docs) {
+          const data = doc.data() as Record<string, unknown>;
+          if (String(data.ownerId || "") === uid) continue; // owned → already deleted in step 4
+          try {
+            await doc.ref.update({
+              memberUids: FieldValue.arrayRemove(uid),
+              [`seatAssignments.${uid}`]: FieldValue.delete(),
+            });
+            scrubbedTeams++;
+            progressed = true;
+          } catch (e) {
+            console.error(
+              `[account/delete] scrub team member ${doc.id} failed:`,
+              e,
+            );
+          }
+        }
+        if (!progressed || snap.size < 200) break;
+      }
+      summary.teamMembershipScrubbed = scrubbedTeams;
+
+      // 6) User-keyed singletons + reverse indexes (server-write-only docs).
+      const deleteDoc = async (path: string) => {
+        try {
+          await db.doc(path).delete();
+        } catch (e) {
+          console.error(`[account/delete] delete ${path} failed:`, e);
+        }
+      };
+      const recursiveDeleteDoc = async (path: string) => {
+        try {
+          await db.recursiveDelete(db.doc(path));
+        } catch (e) {
+          console.error(`[account/delete] recursiveDelete ${path} failed:`, e);
+        }
+      };
+      await recursiveDeleteDoc(`usage/${uid}`); // + months subcollection
+      await recursiveDeleteDoc(`user_settings/${uid}`); // + ai_chats subcollection
+      await deleteDoc(`entitlements/${uid}`);
+      await deleteDoc(`users/${uid}`);
+      await deleteDoc(`teamSeats/${uid}`);
+      await deleteDoc(`batchLocks/${uid}`);
+
+      // 7) Billing reverse maps + the user's error logs.
+      summary.stripeCustomers = await deleteDocsWhere(
+        "stripeCustomers",
+        "uid",
+        uid,
+      );
+      summary.iapCustomers = await deleteDocsWhere("iapCustomers", "uid", uid);
+      summary.errorLogs = await deleteDocsWhere("error_logs", "uid", uid);
+
+      // 8) Storage: all raw audio and uploaded images for this user.
+      summary.audioObjects = await deleteStoragePrefix(`audio/${uid}/`);
+      summary.imageObjects = await deleteStoragePrefix(`images/${uid}/`);
+
+      // 9) Finally, delete the Firebase Auth user. This is the Apple-critical
+      //    step — the account must be gone. If it fails we surface 500 so the
+      //    client keeps the user signed in to retry (data above is idempotent).
+      try {
+        await getAuth().deleteUser(uid);
+      } catch (e) {
+        console.error(`[account/delete] deleteUser ${uid} failed:`, e);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "auth_delete_failed" }));
+        return;
+      }
+
+      console.log(
+        `[account/delete] uid=${uid} complete: ${JSON.stringify(summary)}`,
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, deleted: summary }));
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[account/delete] error: ${msg}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_error" }));
+      }
+      return;
+    }
+  }
+
   // --- /v1/me/entitlement (client: effective plan + limits + usage) ---
   // Single source for UI gating. Honors the owner-only X-View-As header so the
   // owner's UI matches what the server will actually enforce this request.
@@ -2318,6 +3012,16 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         const { txn, production } = await appleVerifyTransaction(jws);
+        // Reject a Sandbox receipt in production: it verifies (Apple's sandbox
+        // chain is valid) but represents a free test purchase, so granting on it
+        // would hand real Pro to any sandbox tester. Allowed only on an explicit
+        // TestFlight/testing build (IAP_ALLOW_SANDBOX=1).
+        if (!production && !IAP_ALLOW_SANDBOX) {
+          console.warn(`[iap] verify/ios rejected sandbox receipt uid=${uid}`);
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "sandbox_not_allowed" }));
+          return;
+        }
         const originalTxId = String(txn.originalTransactionId || "").trim();
         if (!originalTxId) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -2402,6 +3106,16 @@ const server = http.createServer(async (req, res) => {
           purchaseToken: token,
           eventTimeMs: Date.now(),
         });
+        // Reject a License-tester test purchase in production (parity with the
+        // Apple sandbox reject) — it is a free test grant, not a real payment.
+        if (facts.test && !IAP_ALLOW_SANDBOX) {
+          console.warn(
+            `[iap] verify/android rejected test purchase uid=${uid}`,
+          );
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "sandbox_not_allowed" }));
+          return;
+        }
         const result = buildPlayIntent(facts);
         if (!result.ok) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -2479,8 +3193,14 @@ const server = http.createServer(async (req, res) => {
       }
       const data = (notification.data || {}) as Record<string, unknown>;
       const signedTx = String(data.signedTransactionInfo || "").trim();
-      if (signedTx) {
-        const production = isProdEnvironment(data.environment);
+      const notifProduction = isProdEnvironment(data.environment);
+      if (signedTx && !notifProduction && !IAP_ALLOW_SANDBOX) {
+        // Sandbox notification in a production deployment — never apply it (would
+        // grant/alter a real entitlement from a test purchase). Still ack +
+        // dedupe-record below so Apple stops retrying.
+        console.log(`[iap] apple notif ${uuid} sandbox — ack, not applied`);
+      } else if (signedTx) {
+        const production = notifProduction;
         const txn = (await appleVerifier(production).verifyAndDecodeTransaction(
           signedTx,
         )) as unknown as Record<string, unknown>;
@@ -2586,18 +3306,27 @@ const server = http.createServer(async (req, res) => {
           eventId: rtdn.messageId,
           eventTimeMs: rtdn.eventTimeMs,
         });
-        const result = buildPlayIntent(facts);
-        // Prefer the server-established binding; fall back to the obfuscated
-        // account id we set at purchase (returned by the authoritative Play API).
-        let uid = await lookupIapCustomer(token);
-        if (!uid && result.ok) uid = String(result.uid || "") || null;
-        if (result.ok && uid) {
-          await bindIapCustomer(result.intent.subId!, uid, { source: "play" });
-          await applyIapIntent(uid, result, "rtdn/sub");
-        } else {
-          console.warn(
-            `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
+        if (facts.test && !IAP_ALLOW_SANDBOX) {
+          // Test-purchase RTDN in production — ack + dedupe-record, never apply.
+          console.log(
+            `[iap] play sub ${rtdn.messageId} test — ack, not applied`,
           );
+        } else {
+          const result = buildPlayIntent(facts);
+          // Prefer the server-established binding; fall back to the obfuscated
+          // account id we set at purchase (from the authoritative Play API).
+          let uid = await lookupIapCustomer(token);
+          if (!uid && result.ok) uid = String(result.uid || "") || null;
+          if (result.ok && uid) {
+            await bindIapCustomer(result.intent.subId!, uid, {
+              source: "play",
+            });
+            await applyIapIntent(uid, result, "rtdn/sub");
+          } else {
+            console.warn(
+              `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
+            );
+          }
         }
       } else {
         console.log(`[iap] play RTDN ${rtdn.messageId} no actionable body`);
@@ -2627,7 +3356,9 @@ const server = http.createServer(async (req, res) => {
     let g: GuardResult | null = null;
     let committed = false;
     try {
-      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization, {
+        checkRevoked: true,
+      });
       const body = await readBody();
       const parsed = JSON.parse(body);
       const audio: string = parsed.audio; // base64-encoded audio
@@ -2785,7 +3516,9 @@ const server = http.createServer(async (req, res) => {
     let leaseHeld = false;
     let leaseToken = 0; // the heldAt generation we acquired (for a fenced release)
     try {
-      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization, {
+        checkRevoked: true,
+      });
       const body = await readBody();
       const parsed = JSON.parse(body);
       const language: string = parsed.language || "ja-JP";
@@ -3120,7 +3853,9 @@ const server = http.createServer(async (req, res) => {
     let g: GuardResult | null = null;
     let committed = false;
     try {
-      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization, {
+        checkRevoked: true,
+      });
       const body = await readBody();
       const parsed = JSON.parse(body);
       const prompt: string = parsed.prompt;
@@ -3204,7 +3939,9 @@ const server = http.createServer(async (req, res) => {
     let g: GuardResult | null = null;
     let committed = false;
     try {
-      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization, {
+        checkRevoked: true,
+      });
       const body = await readBody();
       const parsed = JSON.parse(body);
       const transcriptDiff: string = parsed.transcriptDiff || "";
@@ -3405,8 +4142,10 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         questionItems.length > 0
           ? { topic: rawQuestions.topic || "", items: questionItems }
           : null;
+      // Log counts only — the generated search queries are derived from the
+      // user's private research/document content and must not hit stdout logs.
       console.log(
-        `[research] analyze: ${searches.length} searches, ${questionItems.length} questions — ${searches.map((s: { query: string }) => s.query).join(" | ")}`,
+        `[research] analyze: ${searches.length} searches, ${questionItems.length} questions`,
       );
       committed = true;
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -3428,7 +4167,9 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
     let g: GuardResult | null = null;
     let committed = false;
     try {
-      const uid = await verifyFirebaseToken(req.headers.authorization);
+      const uid = await verifyFirebaseToken(req.headers.authorization, {
+        checkRevoked: true,
+      });
       const body = await readBody();
       const parsed = JSON.parse(body);
       const query: string = parsed.query || "";
@@ -3536,8 +4277,10 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
       const webSearchQueries: string[] = groundingMeta?.webSearchQueries || [];
 
+      // Log counts only — `query` is the user's private research input and must
+      // not be written to stdout logs (only length as a coarse size signal).
       console.log(
-        `[research] grounded-search: query="${query}" sources=${sources.length} searches=${webSearchQueries.length}`,
+        `[research] grounded-search: queryLen=${query.length} sources=${sources.length} searches=${webSearchQueries.length}`,
       );
       committed = true;
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -3565,7 +4308,9 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
   let committed = false;
   try {
     // Verify Firebase auth
-    const uid = await verifyFirebaseToken(req.headers.authorization);
+    const uid = await verifyFirebaseToken(req.headers.authorization, {
+      checkRevoked: true,
+    });
 
     const body = await readBody();
     const parsed = JSON.parse(body);

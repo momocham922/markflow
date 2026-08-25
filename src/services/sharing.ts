@@ -13,8 +13,45 @@ import {
   serverTimestamp,
   type Timestamp,
 } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 
 const firestore = getFirestore();
+
+// ─── Email → uid resolution (server-side) ──────────────────────
+// The `users` collection is owner-read-only (firestore.rules), so the client
+// cannot query it to map an invite email to a uid without exposing the whole
+// directory. Instead we ask the ai-proxy, which resolves ONE email at a time via
+// the Admin SDK and returns only { exists, uid }. No proxy configured, no token,
+// or a transport error THROWS — we never silently treat a lookup failure as
+// "user not found" (that would add a dead collaborator entry that can never gain
+// access). A genuine 200 { exists:false } is the legitimate "not registered yet"
+// answer and is returned normally.
+export async function resolveUserByEmail(
+  email: string,
+): Promise<{ exists: boolean; uid: string | null }> {
+  const proxyBase = import.meta.env.VITE_AI_PROXY_URL || "";
+  if (!proxyBase) {
+    throw new Error("ユーザー検索に必要な接続先が設定されていません。");
+  }
+  const user = getAuth().currentUser;
+  if (!user) {
+    throw new Error("サインインが必要です。");
+  }
+  const token = await user.getIdToken();
+  const res = await fetch(`${proxyBase}/v1/users/resolve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    throw new Error(`ユーザー検索に失敗しました (HTTP ${res.status})`);
+  }
+  const data = (await res.json()) as { exists?: boolean; uid?: string | null };
+  return { exists: !!data.exists, uid: data.uid ?? null };
+}
 
 // ─── Share Links ───────────────────────────────────────────────
 
@@ -107,12 +144,8 @@ export interface Collaborator {
 
 /** Check if a user with the given email has ever signed in to the app */
 export async function checkUserExists(email: string): Promise<boolean> {
-  const usersQ = query(
-    collection(firestore, "users"),
-    where("email", "==", email),
-  );
-  const snap = await getDocs(usersQ);
-  return !snap.empty;
+  const { exists } = await resolveUserByEmail(email);
+  return exists;
 }
 
 /** Add a collaborator to a document by email (atomic transaction) */
@@ -121,14 +154,9 @@ export async function addCollaborator(
   email: string,
   role: "editor" | "viewer",
 ): Promise<void> {
-  // Look up the user by email in the users collection
-  const usersQ = query(
-    collection(firestore, "users"),
-    where("email", "==", email),
-  );
-  const usersSnap = await getDocs(usersQ);
-
-  const uid = usersSnap.empty ? "" : usersSnap.docs[0].id;
+  // Resolve email -> uid via the server (users collection is not client-readable).
+  const { uid: resolvedUid } = await resolveUserByEmail(email);
+  const uid = resolvedUid || "";
   const key = uid || email.replace(/[.#$/\[\]]/g, "_");
 
   const ref = doc(firestore, "documents", docId);
@@ -347,13 +375,13 @@ export async function addTeamMember(
   teamId: string,
   member: { email: string; uid?: string; role: "admin" | "member" },
 ): Promise<void> {
-  // Look up the user by email
-  const usersQ = query(
-    collection(firestore, "users"),
-    where("email", "==", member.email),
-  );
-  const usersSnap = await getDocs(usersQ);
-  const uid = member.uid || (usersSnap.empty ? "" : usersSnap.docs[0].id);
+  // Resolve email -> uid via the server (users collection is not client-readable).
+  let resolvedUid = member.uid || "";
+  if (!resolvedUid) {
+    const r = await resolveUserByEmail(member.email);
+    resolvedUid = r.uid || "";
+  }
+  const uid = resolvedUid;
 
   const teamMember: TeamMember = {
     uid,

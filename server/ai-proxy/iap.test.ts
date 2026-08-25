@@ -453,6 +453,17 @@ describe("playFactsFromPurchaseV2", () => {
     expect(f.expiryTimeMs).toBe(Date.parse("2026-09-24T10:00:00Z"));
     expect(f.eventTimeMs).toBe(1_787_000_000_000);
     expect(f.eventId).toBe("tok-123");
+    // A normal purchase carries no `testPurchase` marker.
+    expect(f.test).toBe(false);
+  });
+
+  it("flags a License-tester purchase via the testPurchase marker", () => {
+    // Play sets `testPurchase` (an object) ONLY for License-tester purchases.
+    const f = playFactsFromPurchaseV2(
+      { ...PURCHASE, testPurchase: {} },
+      { purchaseToken: "tok-test", eventTimeMs: 1_787_000_000_000 },
+    );
+    expect(f.test).toBe(true);
   });
 
   it("falls back to startTime for eventTimeMs and ctx.productId when no lineItems", () => {

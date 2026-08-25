@@ -153,6 +153,20 @@ async function ensureMigrations(database: DatabaseLike) {
       /* already exists */
     }
 
+    // synced_at column (migration v11) — timestamp of the last successful cloud
+    // sync for this doc. NULL means the doc has NEVER been persisted to Firestore
+    // (created offline / first sync pending / prior upload failed). This is the
+    // authoritative signal the deletion-reconciliation uses to distinguish a doc
+    // genuinely deleted in the cloud (synced_at set, now absent) from one that was
+    // simply never uploaded (synced_at NULL) — the latter must never be deleted.
+    try {
+      await database.execute(
+        `ALTER TABLE documents ADD COLUMN synced_at INTEGER DEFAULT NULL`,
+      );
+    } catch {
+      /* already exists */
+    }
+
     // deleted_docs table (migration v9) — tracks locally deleted docs to prevent re-sync
     await database.execute(`CREATE TABLE IF NOT EXISTS deleted_docs (
       doc_id TEXT PRIMARY KEY,
@@ -281,6 +295,52 @@ export async function upsertDocument(doc: {
 export async function deleteDocument(id: string): Promise<void> {
   const database = await getDb();
   await database.execute("DELETE FROM documents WHERE id = $1", [id]);
+}
+
+/**
+ * Mark documents as successfully persisted to the cloud: stamps synced_at and
+ * clears the dirty flag. Called after a successful Firestore write (syncToCloud)
+ * and for docs confirmed present in the cloud (syncFromCloud). The deletion
+ * reconciliation relies on synced_at to avoid deleting never-uploaded local docs.
+ */
+export async function markDocumentsSynced(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const database = await getDb();
+  const now = Date.now();
+  for (const id of ids) {
+    try {
+      await database.execute(
+        "UPDATE documents SET synced_at = $1, is_dirty = 0 WHERE id = $2",
+        [now, id],
+      );
+    } catch (e) {
+      // Non-fatal: a failure here only means the doc may be re-evaluated next
+      // sync; it must never abort the sync cycle.
+      console.error(`[db] markDocumentsSynced failed for ${id}:`, e);
+    }
+  }
+}
+
+/**
+ * Purge EVERY locally-cached document and its derived tables. SQLite here is a
+ * single per-device cache with NO per-user scoping, so when a DIFFERENT account
+ * signs in on the same device the previous user's PRIVATE documents would
+ * otherwise remain in the sidebar (a data-isolation / privacy defect). This
+ * clears documents + versions + snapshots + delete-tombstones, and resets the
+ * per-user sync bookkeeping (lastSyncAt so the new user's docs upload; folders,
+ * which are per-user). Device-level prefs (theme, editor settings) are KEPT.
+ */
+export async function clearAllLocalDocuments(): Promise<void> {
+  const database = await getDb();
+  await database.execute("DELETE FROM documents");
+  await database.execute("DELETE FROM versions");
+  await database.execute("DELETE FROM document_snapshots_v2");
+  await database.execute("DELETE FROM deleted_docs");
+  // Per-user bookkeeping that must not carry across accounts. Deleted per-key so
+  // the in-memory adapter (equality-WHERE only) handles it too.
+  for (const key of ["lastSyncAt", "folders", "versions_backfill_v2_done"]) {
+    await database.execute("DELETE FROM settings WHERE key = $1", [key]);
+  }
 }
 
 export async function getSetting(key: string): Promise<string | null> {

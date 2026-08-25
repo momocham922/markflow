@@ -4,7 +4,12 @@
  * Provides browser-native fallbacks for Tauri APIs.
  * Used when running as a web app (iOS, PWA, or dev without Tauri).
  */
-import type { PlatformAdapter, OgpData, SaveFileOptions, OpenFileOptions } from "./types";
+import type {
+  PlatformAdapter,
+  OgpData,
+  SaveFileOptions,
+  OpenFileOptions,
+} from "./types";
 
 export const webAdapter: PlatformAdapter = {
   isTauri: false,
@@ -30,7 +35,9 @@ export const webAdapter: PlatformAdapter = {
       input.onchange = () => {
         if (input.files && input.files.length > 0) {
           // For web, we return object URLs that can be fetched
-          const urls = Array.from(input.files).map((f) => URL.createObjectURL(f));
+          const urls = Array.from(input.files).map((f) =>
+            URL.createObjectURL(f),
+          );
           resolve(urls);
         } else {
           resolve(null);
@@ -74,10 +81,18 @@ export const webAdapter: PlatformAdapter = {
   },
 
   async uploadImageFromPath(): Promise<string> {
-    throw new Error("uploadImageFromPath is not available on web. Use uploadImageFromBase64.");
+    throw new Error(
+      "uploadImageFromPath is not available on web. Use uploadImageFromBase64.",
+    );
   },
 
-  async uploadImageFromBase64(data: string, ext: string, uid: string, token: string, bucket: string): Promise<string> {
+  async uploadImageFromBase64(
+    data: string,
+    ext: string,
+    uid: string,
+    token: string,
+    bucket: string,
+  ): Promise<string> {
     // Web fallback: upload directly via Firebase Storage REST API
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
     const uuid = crypto.randomUUID();
@@ -97,7 +112,7 @@ export const webAdapter: PlatformAdapter = {
     return `${uploadUrl}?alt=media`;
   },
 
-  async startOAuthListener(): Promise<number> {
+  async startOAuthListener(_expectedState?: string): Promise<number> {
     // Web: OAuth uses redirect flow, no local listener needed
     return 0;
   },

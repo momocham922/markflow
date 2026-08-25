@@ -9,6 +9,7 @@ import {
   DatabaseZap,
   Sparkles,
   CreditCard,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -18,6 +19,7 @@ import {
   BILLING_ENABLED,
 } from "@/stores/entitlement-store";
 import { isMobile } from "@/platform";
+import { DeleteAccountDialog } from "@/components/DeleteAccountDialog";
 
 function UserAvatar({
   user,
@@ -82,6 +84,7 @@ export function UserMenu() {
     (effectivePlan === "pro" || effectivePlan === "team");
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const syncMenuRef = useRef<HTMLDivElement>(null);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
 
@@ -279,8 +282,22 @@ export function UserMenu() {
               <LogOut className="h-4 w-4" />
               サインアウト
             </button>
+            <button
+              className={cn(menuItem, "text-destructive")}
+              onClick={() => {
+                setMobileMenuOpen(false);
+                setDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-4 w-4" />
+              アカウントを削除
+            </button>
           </div>
         )}
+        <DeleteAccountDialog
+          open={deleteDialogOpen}
+          onOpenChange={setDeleteDialogOpen}
+        />
       </div>
     );
   }
@@ -362,6 +379,20 @@ export function UserMenu() {
               <DatabaseZap className="h-3 w-3" />
               クラウドリセット＆再同期
             </button>
+            <div className="my-1 border-t border-border" />
+            <button
+              className={cn(
+                "flex w-full items-center gap-2 rounded-sm px-3 hover:bg-accent text-left text-destructive",
+                isMobile ? "py-2.5 text-sm" : "py-1.5 text-xs",
+              )}
+              onClick={() => {
+                setSyncMenuOpen(false);
+                setDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-3 w-3" />
+              アカウントを削除
+            </button>
           </div>
         )}
       </div>
@@ -382,6 +413,10 @@ export function UserMenu() {
       >
         <LogOut className={iconSize} />
       </Button>
+      <DeleteAccountDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+      />
     </div>
   );
 }

@@ -1,9 +1,22 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    // Images: authenticated users can upload to their own folder
+    // Images: authenticated users can upload to their own folder.
+    //
+    // read is split into get/list on purpose:
+    //  - get:  if true — object names are random UUIDs, so the URL is an
+    //    unguessable capability (same model as Firebase download tokens).
+    //    We CANNOT restrict get to the owner: images render in <img> tags that
+    //    carry no Firebase auth header, and published pages (markflow.jp/p/{id})
+    //    and shared documents must display the owner's images to unauthenticated
+    //    or non-owner viewers. Some URLs are also token-less (web upload path),
+    //    which would 403 for everyone — including the owner — under owner-only.
+    //  - list: if false — blocks enumeration of images/{uid}/ so an attacker who
+    //    knows a uid still cannot discover the random object names. The client
+    //    never lists images; deletion goes through the Admin SDK (bypasses rules).
     match /images/{uid}/{fileName} {
-      allow read: if true;
+      allow get: if true;
+      allow list: if false;
       allow write: if request.auth != null && request.auth.uid == uid;
     }
 
@@ -15,10 +28,15 @@ service firebase.storage {
                    && request.resource.contentType.matches('audio/.*');
     }
 
-    // Published HTML pages: authenticated users can write, anyone can read
+    // Published HTML pages: NO direct client access. Writes go through the
+    // ai-proxy /v1/publish endpoint (which verifies document ownership, caps
+    // size, and enforces the Pro+ gate) and serving goes through ai-proxy's
+    // service account (bypasses these rules). A bare `request.auth != null`
+    // write rule previously let any signed-in user overwrite, delete, or inflate
+    // ANY published page — closed here.
     match /published/{fileName} {
-      allow read: if true;
-      allow write: if request.auth != null;
+      allow read: if false;
+      allow write: if false;
     }
   }
 }

@@ -42,8 +42,10 @@ UIDS=(
   "ZeBRcujqF0NTuqT2Lbz2oMIrCZJ3"  # staff-07
   "WkG0ditPu2NOIUGwgLsVRw4S0sf1"  # staff-08 (corp)
   "RHyQXRfPouf9dHI9nI9D4Q652ER2"  # staff-08 (personal)
-  "GmlVWUd6j0QksScUCK8aPOmHS913"  # test-sync-a (test account)
-  "D7OFKHqxQtTqdIQzoJP95VLkCV42"  # test-sync-b (test account)
+  # NOTE: the E2E test accounts (test-sync-a/b) were removed from this list —
+  # they must NEVER hold `internal` (unlimited, cost-uncapped) entitlements, since
+  # their credentials are shared for CI. Any internal entitlement already written
+  # for those uids must be revoked in Firestore (see revoke-test-entitlements).
 )
 
 # Optional untracked override: one uid per line (# comments allowed). Lets staff

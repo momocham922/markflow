@@ -65,6 +65,13 @@ interface AppState {
   addDocument: (doc: Document) => Promise<void>;
   updateDocument: (id: string, updates: Partial<Document>) => void;
   deleteDocument: (id: string) => Promise<void>;
+  /**
+   * Clear the IN-MEMORY document cache (sidebar) without touching SQLite. Used
+   * on logout and on account switch so the previous account's documents never
+   * remain visible. Also cancels pending debounced saves/cloud-syncs so a late
+   * timer can't resurrect a just-cleared doc after the switch wipe.
+   */
+  resetLocalDocuments: () => void;
 
   // Folder management
   folders: string[];
@@ -393,6 +400,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch {}
       set({ themeSettings, initialized: true });
     }
+  },
+
+  resetLocalDocuments: () => {
+    // Cancel pending debounced local saves + cloud sync so a timer firing after
+    // an account-switch wipe can't re-insert the previous user's doc into SQLite.
+    for (const [id, t] of saveTimers) {
+      clearTimeout(t);
+      saveTimers.delete(id);
+    }
+    pendingDocs.clear();
+    if (cloudSyncTimer) {
+      clearTimeout(cloudSyncTimer);
+      cloudSyncTimer = null;
+    }
+    set({ documents: [], activeDocId: null, folders: ["/"] });
   },
 
   addDocument: async (doc) => {

@@ -174,6 +174,9 @@ export interface PlayFacts {
   eventTimeMs?: unknown;
   /** Idempotency id: RTDN messageId or purchaseToken. */
   eventId: unknown;
+  /** True when Play marks this a License-tester test purchase (subscriptionsv2
+   *  `testPurchase` present). index.ts rejects it unless IAP_ALLOW_SANDBOX. */
+  test?: boolean;
 }
 
 export type IapIntentResult =
@@ -362,6 +365,8 @@ export function playFactsFromPurchaseV2(
     expiryTimeMs: isoToMs(li0.expiryTime),
     eventTimeMs: toNum(ctx.eventTimeMs) || isoToMs(purchase.startTime),
     eventId: String(ctx.eventId ?? "").trim() || token,
+    // `testPurchase` is present (an object) ONLY for License-tester purchases.
+    test: purchase.testPurchase != null,
   };
 }
 

@@ -48,6 +48,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { aiProxyHeaders } from "@/services/ai-proxy";
 import { onLocalEdit } from "@/lib/local-edit-signal";
 import TurndownService from "turndown";
 import { marked } from "marked";
@@ -794,23 +795,35 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         });
       }
 
-      // Step 2: Upload HTML to Firebase Storage
-      const { invoke } = await import("@tauri-apps/api/core");
+      // Step 2: Upload HTML via the ai-proxy /v1/publish endpoint. The server
+      // verifies we OWN this document, caps the size, enforces the Pro+ gate, and
+      // writes published/{docId}.html with its own service account. Clients can no
+      // longer write Storage directly (storage.rules denies published/*). The
+      // clean custom-domain URL (markflow.jp/p/{docId}) is served by ai-proxy from
+      // the same object.
       const token = await user.getIdToken();
-      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
-      if (!bucket)
-        throw new Error("VITE_FIREBASE_STORAGE_BUCKET is not configured");
-      // Upload to Storage (published/{docId}.html). We ignore the raw
-      // firebasestorage URL it returns and expose a clean custom-domain URL
-      // (markflow.jp/p/{docId}) served by ai-proxy from the same object. Old
-      // firebasestorage links stay valid (object unchanged), so already-
-      // published docs don't break after the switch.
-      await invoke<string>("upload_html_cloud", {
-        html,
-        docId: doc.id,
-        token,
-        bucket,
+      const proxyBase = import.meta.env.VITE_AI_PROXY_URL || "";
+      const pubRes = await fetch(`${proxyBase}/v1/publish`, {
+        method: "POST",
+        headers: aiProxyHeaders(token),
+        body: JSON.stringify({ docId: doc.id, html }),
       });
+      if (!pubRes.ok) {
+        const bodyText = await pubRes.text().catch(() => "");
+        let errCode = "";
+        try {
+          errCode = JSON.parse(bodyText)?.error || "";
+        } catch {}
+        if (pubRes.status === 402 || errCode === "plan_required") {
+          throw new Error("Web公開はProプラン以上の機能です。");
+        }
+        if (pubRes.status === 403) {
+          throw new Error("このドキュメントのオーナーではありません");
+        }
+        throw new Error(
+          `公開に失敗しました (HTTP ${pubRes.status})${errCode ? `: ${errCode}` : ""}`,
+        );
+      }
       const publishBase =
         import.meta.env.VITE_PUBLISH_BASE_URL || "https://markflow.jp";
       const url = `${publishBase}/p/${doc.id}`;
@@ -844,19 +857,25 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
     if (!doc || !user) return;
     setPublishing(true);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
       const token = await user.getIdToken();
-      const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
-      await invoke<void>("delete_published_html", {
-        docId: doc.id,
-        token,
-        bucket,
+      const proxyBase = import.meta.env.VITE_AI_PROXY_URL || "";
+      const res = await fetch(`${proxyBase}/v1/unpublish`, {
+        method: "POST",
+        headers: aiProxyHeaders(token),
+        body: JSON.stringify({ docId: doc.id }),
       });
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => "");
+        throw new Error(
+          `公開停止に失敗しました (HTTP ${res.status}) ${bodyText}`,
+        );
+      }
       const { setPublishUrl: saveUrl } = await import("@/services/firebase");
       await saveUrl(doc.id, null);
       setPublishUrl(null);
     } catch (e) {
       console.error("Unpublish failed:", e);
+      setPublishError(e instanceof Error ? e.message : String(e));
     } finally {
       setPublishing(false);
     }

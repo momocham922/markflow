@@ -3,10 +3,14 @@ rules_version = '2';
 // Helper function to check if user is a member of a team
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users can read/write their own user document
-    // Other authenticated users can read (for email lookup)
+    // Users can read/write ONLY their own user document. Previously ANY signed-in
+    // user could read the ENTIRE users collection ("for email lookup"), exposing
+    // every user's email / displayName / photo and enabling bulk directory
+    // enumeration. Email->uid resolution for invites now runs server-side
+    // (ai-proxy /v1/users/resolve via the Admin SDK, one email at a time), so the
+    // client never needs to read anyone else's profile.
     match /users/{userId} {
-      allow read: if request.auth != null;
+      allow read: if request.auth != null && request.auth.uid == userId;
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 
@@ -20,7 +24,29 @@ service cloud.firestore {
           && request.auth.uid in get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.memberUids;
       }
 
-      allow create: if request.auth != null;
+      // Anti-abuse ceiling on the per-doc collaborators map. This is NOT the
+      // per-plan monetization cap (Free 0 / Pro 3 / Team ∞): that is plan-aware
+      // and MUST be enforced in the ai-proxy at billing GO, because `internal`
+      // (staff/owner during the dark period) is derived from a server-only env
+      // allowlist that Firestore rules cannot see — a plan-reading rule would
+      // wrongly block ALL collaboration for everyone right now. This ceiling only
+      // bounds pathological growth (a scripted client adding thousands of entries
+      // → doc bloat, sync cost, 1MB-doc crash). Legit per-doc guest sharing never
+      // approaches it; team docs share via teamId, not this map.
+      function collabWithinCeiling() {
+        return request.resource.data.get('collaborators', {}).size() <= 500
+          // never trap an already-over-limit doc: allow shrinking / not growing.
+          || request.resource.data.get('collaborators', {}).size()
+             <= resource.data.get('collaborators', {}).size();
+      }
+
+      // Create: the caller MUST be the owner of the doc they create. Without
+      // this, any signed-in user could inject a document carrying a VICTIM's
+      // ownerId (phishing title/content surfaces in the victim's sidebar) or
+      // seed collaborator/team fields they don't control.
+      allow create: if request.auth != null
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.get('collaborators', {}).size() <= 500;
       // Check collaborator access via map keys or collaboratorUids array
       function isCollaborator() {
         return request.auth.uid in resource.data.collaborators.keys()
@@ -41,11 +67,26 @@ service cloud.firestore {
         isTeamMember() ||
         (resource.data.shareLink != null && resource.data.shareLink.enabled == true)
       );
-      allow update: if request.auth != null && (
-        resource.data.ownerId == request.auth.uid ||
-        isEditor() ||
-        isTeamMember()
-      );
+      // Update: the OWNER has full control (incl. sharing fields). An editor or
+      // team member may edit CONTENT but MUST NOT alter ownership/sharing —
+      // otherwise an editor could set ownerId to themselves (takeover), promote
+      // themselves via `collaborators`, move the doc into a team they control, or
+      // flip `shareLink` on. Those fields are frozen (unchanged-or-absent) on any
+      // non-owner update. (Live content editing of shared/team docs flows through
+      // the collab server's Admin SDK, which bypasses these rules.)
+      allow update: if request.auth != null
+        && collabWithinCeiling()
+        && (
+          resource.data.ownerId == request.auth.uid ||
+          (
+            (isEditor() || isTeamMember())
+            && request.resource.data.ownerId == resource.data.ownerId
+            && request.resource.data.get('collaborators', {}) == resource.data.get('collaborators', {})
+            && request.resource.data.get('collaboratorUids', []) == resource.data.get('collaboratorUids', [])
+            && request.resource.data.get('teamId', null) == resource.data.get('teamId', null)
+            && request.resource.data.get('shareLink', null) == resource.data.get('shareLink', null)
+          )
+        );
       allow delete: if request.auth != null && (
         resource.data.ownerId == request.auth.uid
       );
@@ -108,8 +149,16 @@ service cloud.firestore {
         && !('seatAssignments' in request.resource.data);
       allow read: if request.auth != null &&
         request.auth.uid in resource.data.memberUids;
+      // Update: a member may edit the team doc, but ownerId is FROZEN (no client
+      // takeover — ownership transfer would be a server op) and the owner must
+      // remain in memberUids (a member cannot lock the owner out). billing and
+      // seatAssignments stay server-only (forge/seat-theft guard). Membership
+      // list changes remain client-writable by design (managers manage members
+      // in-app); the money/access-critical fields above are all fenced.
       allow update: if request.auth != null
         && request.auth.uid in resource.data.memberUids
+        && request.resource.data.ownerId == resource.data.ownerId
+        && resource.data.ownerId in request.resource.data.memberUids
         && request.resource.data.get('billing', null) == resource.data.get('billing', null)
         && request.resource.data.get('seatAssignments', null) == resource.data.get('seatAssignments', null);
       allow delete: if request.auth != null &&
@@ -135,10 +184,14 @@ service cloud.firestore {
         resource.data.ownerId == request.auth.uid;
     }
 
-    // Error logs: any authenticated user can create, only own logs readable
+    // Error logs: a user may write ONLY logs stamped with their own uid, and may
+    // read ONLY their own. The prior `read: if request.auth != null` let any
+    // signed-in user read EVERY user's error logs (paths, messages, metadata).
     match /error_logs/{logId} {
-      allow create: if request.auth != null;
-      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.uid == request.auth.uid;
     }
 
     // Entitlements: server-write-only source of truth for paid plan status.

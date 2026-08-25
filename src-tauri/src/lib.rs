@@ -423,9 +423,18 @@ async fn fetch_ogp(url: String) -> Result<OgpData, String> {
 }
 
 #[tauri::command]
-async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, String> {
+async fn oauth_listen(
+    app: tauri::AppHandle,
+    ios: Option<bool>,
+    state: Option<String>,
+) -> Result<u16, String> {
     let port: u16 = 19847;
     let is_ios = ios.unwrap_or(false);
+    // Expected OAuth `state` for this sign-in. When present, a callback whose
+    // state does not match is rejected as CSRF / auth-code injection (an attacker
+    // navigating the browser to our loopback callback with THEIR code can't guess
+    // this random value). None disables the check (older callers only).
+    let expected_state = state;
     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .map_err(|e| format!("Failed to bind port {}: {}", port, e))?;
 
@@ -444,6 +453,7 @@ async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, S
                         let query_str = &query_part[..end];
                         let mut code = None;
                         let mut error = None;
+                        let mut returned_state = None;
                         for param in query_str.split('&') {
                             let mut kv = param.splitn(2, '=');
                             match (kv.next(), kv.next()) {
@@ -453,7 +463,20 @@ async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, S
                                 (Some("error"), Some(v)) => {
                                     error = Some(urlencoding::decode(v).unwrap_or_default().to_string())
                                 }
+                                (Some("state"), Some(v)) => {
+                                    returned_state = Some(urlencoding::decode(v).unwrap_or_default().to_string())
+                                }
                                 _ => {}
+                            }
+                        }
+
+                        // CSRF guard: if we expected a state, the callback MUST echo
+                        // it exactly. A mismatch (or missing state) means this is not
+                        // the flow we started — drop the code and surface an error.
+                        if let Some(ref expected) = expected_state {
+                            if returned_state.as_deref() != Some(expected.as_str()) {
+                                code = None;
+                                error = Some("state_mismatch".to_string());
                             }
                         }
 
@@ -748,105 +771,6 @@ async fn upload_image_from_path(
     let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
 
     upload_image_cloud(data, ext, uid, token, bucket).await
-}
-
-/// Upload HTML string to Firebase Storage for publishing.
-/// Stores at `published/{doc_id}.html` with public download URL.
-#[tauri::command]
-async fn upload_html_cloud(
-    html: String,
-    doc_id: String,
-    token: String,
-    bucket: String,
-) -> Result<String, String> {
-    let object_path = format!("published/{}.html", doc_id);
-    let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
-        bucket,
-        urlencoding::encode(&object_path),
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client
-        .post(&upload_url)
-        .header("Authorization", format!("Firebase {}", token))
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("X-Goog-Upload-Protocol", "raw")
-        .header("X-Goog-Upload-Command", "upload, finalize")
-        .body(html.into_bytes())
-        .send()
-        .await
-        .map_err(|e| format!("Upload request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Upload failed (HTTP {}): {}", status, body));
-    }
-
-    let body = resp.text().await.unwrap_or_default();
-    let encoded_path = urlencoding::encode(&object_path);
-
-    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
-                bucket, encoded_path, dl_token
-            )
-        } else {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-                bucket, encoded_path
-            )
-        }
-    } else {
-        format!(
-            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-            bucket, encoded_path
-        )
-    };
-
-    Ok(download_url)
-}
-
-/// Delete a published HTML from Firebase Storage.
-#[tauri::command]
-async fn delete_published_html(
-    doc_id: String,
-    token: String,
-    bucket: String,
-) -> Result<(), String> {
-    let object_path = format!("published/{}.html", doc_id);
-    let delete_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}",
-        bucket,
-        urlencoding::encode(&object_path),
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client
-        .delete(&delete_url)
-        .header("Authorization", format!("Firebase {}", token))
-        .send()
-        .await
-        .map_err(|e| format!("Delete request failed: {}", e))?;
-
-    // 404 = already deleted, treat as success
-    if !resp.status().is_success() && resp.status().as_u16() != 404 {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Delete failed (HTTP {}): {}", status, body));
-    }
-
-    Ok(())
 }
 
 /// Upload image from base64 string — avoids massive JSON number array over IPC.
@@ -2589,7 +2513,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
