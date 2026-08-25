@@ -5,7 +5,7 @@ on:
     branches:
       - release/beta
     paths:
-      - 'package.json'
+      - "package.json"
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,11 @@ permissions:
 env:
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+  # Crash reporting (GlitchTip). PUBLIC ingest DSN — safe to inline (a DSN only
+  # permits SENDING events, never reading them). The local .env is gitignored so
+  # it is absent in CI; without this, Windows builds would ship crash reporting
+  # DARK while macOS/iOS/Android (built locally, which load .env) would not.
+  VITE_GLITCHTIP_DSN: https://57410cbbd65b489784e43f0eff1e91bc@crash.markflow.jp/1
 
 jobs:
   build-and-release:
