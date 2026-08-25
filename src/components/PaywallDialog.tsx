@@ -13,6 +13,7 @@ import { isMobile } from "@/platform";
 import {
   useEntitlementStore,
   featureLabel,
+  BILLING_ENABLED,
   type BillingInterval,
   type ViewAsPlan,
 } from "@/stores/entitlement-store";
@@ -224,10 +225,15 @@ export function PaywallDialog() {
   // the buyer picks the team + seats and drives the seat-aware checkout.
   const goToTeamManage = () => openTeamManage();
 
-  // Anti-steering: Apple/Google forbid routing IN-APP users to an external
-  // web purchase. On mobile we show the plans for information only (IAP is a
-  // separate, later track); the actual purchase happens on desktop/web.
-  const purchasable = !isMobile;
+  // Pro is purchasable on every platform: desktop/web via Stripe, mobile via
+  // native IAP (StoreKit/Play). Mobile only lights up once billing is live
+  // (BILLING_ENABLED) so pre-GO builds still show "近日対応予定". Team is per-seat
+  // and sold on desktop/web only — there is no mobile Team SKU — so it is never
+  // purchasable on mobile. Anti-steering compliant: the mobile Pro CTA drives the
+  // native IAP sheet (startCheckout → purchaseMobileSubscription), never an
+  // external web page (hence no external-link glyph on mobile).
+  const proPurchasable = !isMobile || BILLING_ENABLED;
+  const teamPurchasable = !isMobile;
 
   return (
     <Dialog open={paywallOpen} onOpenChange={(o) => !o && closePaywall()}>
@@ -281,7 +287,8 @@ export function PaywallDialog() {
             busy={billingBusy}
             onSubscribe={(p) => startCheckout(p, interval)}
             onManage={openBillingPortal}
-            purchasable={purchasable}
+            purchasable={proPurchasable}
+            ctaShowsExternal={!isMobile}
           />
           <PlanCard
             plan="team"
@@ -291,7 +298,7 @@ export function PaywallDialog() {
             // Team purchase + seat management both live in the team dialog.
             onSubscribe={goToTeamManage}
             onManage={goToTeamManage}
-            purchasable={purchasable}
+            purchasable={teamPurchasable}
             ctaLabel="チームを設定して購入"
             manageLabel="チーム席を管理"
             ctaShowsExternal={false}
@@ -303,9 +310,11 @@ export function PaywallDialog() {
         )}
 
         <p className="text-center text-[11px] text-muted-foreground">
-          {purchasable
+          {!isMobile
             ? "お支払いはStripeの安全な決済ページで行われます。いつでもキャンセルできます。"
-            : "モバイルアプリでのご購入は近日対応予定です。デスクトップ版またはWebからアップグレードいただけます。"}
+            : proPurchasable
+              ? "Proプランはアプリ内課金でご購入いただけます。Teamプランはデスクトップ版またはWebからご購入ください。"
+              : "モバイルアプリでのご購入は近日対応予定です。デスクトップ版またはWebからアップグレードいただけます。"}
         </p>
       </DialogContent>
     </Dialog>
