@@ -22,7 +22,9 @@ test.describe("Theme toggle", () => {
       await page.waitForTimeout(500);
       // Look for theme-related UI (preview theme selector, CSS editor, etc.)
       const dialog = page.locator('[role="dialog"], [class*="Dialog"]').first();
-      const isOpen = await dialog.isVisible({ timeout: 2_000 }).catch(() => false);
+      const isOpen = await dialog
+        .isVisible({ timeout: 2_000 })
+        .catch(() => false);
       if (isOpen) {
         await expect(dialog).toBeVisible();
       }
@@ -35,17 +37,21 @@ test.describe("Command palette", () => {
     await waitForAppReady(page);
     await page.keyboard.press("Meta+k");
     // Command palette should appear (cmdk dialog)
-    const palette = page.locator('[cmdk-root], [cmdk-dialog], [role="dialog"]').first();
+    const palette = page
+      .locator('[cmdk-root], [cmdk-dialog], [role="dialog"]')
+      .first();
     await expect(palette).toBeVisible({ timeout: 3_000 });
   });
 
   test("command palette shows items", async ({ page }) => {
     await waitForAppReady(page);
     await page.keyboard.press("Meta+k");
-    const palette = page.locator('[cmdk-root], [cmdk-dialog], [role="dialog"]').first();
+    const palette = page
+      .locator('[cmdk-root], [cmdk-dialog], [role="dialog"]')
+      .first();
     await expect(palette).toBeVisible({ timeout: 3_000 });
     // Should show command items
-    const items = page.locator('[cmdk-item]');
+    const items = page.locator("[cmdk-item]");
     const count = await items.count();
     expect(count).toBeGreaterThan(0);
   });
@@ -53,7 +59,9 @@ test.describe("Command palette", () => {
   test("command palette can be dismissed with Escape", async ({ page }) => {
     await waitForAppReady(page);
     await page.keyboard.press("Meta+k");
-    const palette = page.locator('[cmdk-root], [cmdk-dialog], [role="dialog"]').first();
+    const palette = page
+      .locator('[cmdk-root], [cmdk-dialog], [role="dialog"]')
+      .first();
     await expect(palette).toBeVisible({ timeout: 3_000 });
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden({ timeout: 2_000 });
@@ -62,13 +70,15 @@ test.describe("Command palette", () => {
   test("command palette filters by search", async ({ page }) => {
     await waitForAppReady(page);
     await page.keyboard.press("Meta+k");
-    const palette = page.locator('[cmdk-root], [cmdk-dialog], [role="dialog"]').first();
+    const palette = page
+      .locator('[cmdk-root], [cmdk-dialog], [role="dialog"]')
+      .first();
     await expect(palette).toBeVisible({ timeout: 3_000 });
     // Type to filter
     await page.keyboard.type("export");
     await page.waitForTimeout(300);
     // Items should be filtered
-    const items = page.locator('[cmdk-item]');
+    const items = page.locator("[cmdk-item]");
     const count = await items.count();
     // Should show export-related items (or 0 if no match)
     expect(count).toBeGreaterThanOrEqual(0);
@@ -93,10 +103,16 @@ test.describe("View modes", () => {
     // Canvas view should load (may show "Loading canvas..." briefly)
     await page.waitForTimeout(1_000);
     // Either canvas is visible or loading message
-    const canvas = page.locator('[class*="react-flow"], [class*="canvas"]').first();
+    const canvas = page
+      .locator('[class*="react-flow"], [class*="canvas"]')
+      .first();
     const loading = page.locator("text=Loading canvas...");
-    const hasCanvas = await canvas.isVisible({ timeout: 3_000 }).catch(() => false);
-    const hasLoading = await loading.isVisible({ timeout: 1_000 }).catch(() => false);
+    const hasCanvas = await canvas
+      .isVisible({ timeout: 3_000 })
+      .catch(() => false);
+    const hasLoading = await loading
+      .isVisible({ timeout: 1_000 })
+      .catch(() => false);
     // At least the view should have switched
     expect(hasCanvas || hasLoading || true).toBeTruthy();
   });
@@ -118,7 +134,7 @@ test.describe("Panel toggles", () => {
   test("AI panel toggles on/off", async ({ page }) => {
     await waitForAppReady(page);
     await createNewDocument(page);
-    const aiBtn = page.locator('button[title="Claude AI"]');
+    const aiBtn = page.locator('button[title="MarkFlow AI"]');
     await aiBtn.click();
     await page.waitForTimeout(500);
     // Panel should be visible — look for AI panel content

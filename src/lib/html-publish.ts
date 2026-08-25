@@ -117,6 +117,14 @@ export function generatePublishHtml(opts: PublishOptions): string {
     return `<pre><code class="hljs${lang ? ` language-${lang}` : ""}">${highlighted}</code></pre>`;
   };
 
+  // Wrap tables in a horizontal-scroll container. Without this, wide/multi-column
+  // tables were squeezed into the fixed content width (table-layout: fixed +
+  // width: 100%), collapsing columns to unreadable slivers. The wrapper lets the
+  // table size to its content and scroll sideways when it overflows.
+  const defaultTable = renderer.table.bind(renderer);
+  renderer.table = (token) =>
+    `<div class="table-wrap">${defaultTable(token)}</div>`;
+
   marked.setOptions({ gfm: true, breaks: true });
   // marked (v17) does NOT sanitize HTML — raw <script>/<img onerror=…> in the
   // markdown would become stored XSS on the published page. Sanitize the body
@@ -510,10 +518,11 @@ body {
 .prose strong { font-weight: 700; }
 .prose em { font-style: italic; }
 .prose img { max-width: 100%; border-radius: 0.5em; margin: 1em 0; box-shadow: 0 2px 8px oklch(0 0 0 / 0.1); }
-.prose table { width: 100%; border-collapse: collapse; margin: 1em 0; table-layout: fixed; word-wrap: break-word; overflow-wrap: break-word; }
-.prose th { border-bottom: 2px solid var(--border); padding: 0.6em 0.75em; text-align: left; font-weight: 600; background: oklch(0 0 0 / 0.02); word-wrap: break-word; overflow-wrap: break-word; }
+.prose .table-wrap { overflow-x: auto; margin: 1em 0; max-width: 100%; -webkit-overflow-scrolling: touch; }
+.prose table { width: auto; min-width: 100%; border-collapse: collapse; margin: 0; table-layout: auto; }
+.prose th { border-bottom: 2px solid var(--border); padding: 0.6em 0.75em; text-align: left; font-weight: 600; background: oklch(0 0 0 / 0.02); overflow-wrap: break-word; }
 html.dark .prose th { background: oklch(1 1 1 / 0.03); }
-.prose td { border-bottom: 1px solid var(--border); padding: 0.5em 0.75em; word-wrap: break-word; overflow-wrap: break-word; }
+.prose td { border-bottom: 1px solid var(--border); padding: 0.5em 0.75em; overflow-wrap: break-word; }
 
 /* Syntax highlighting */
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }

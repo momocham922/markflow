@@ -17,7 +17,14 @@ import {
   type BillingInterval,
   type ViewAsPlan,
 } from "@/stores/entitlement-store";
-import { PRICING, yen } from "@/lib/pricing";
+import {
+  PRICING,
+  yen,
+  formatMoney,
+  MOBILE_PRICING,
+  type ResolvedPricing,
+} from "@/lib/pricing";
+import { fetchProPrices } from "@/services/mobile-billing";
 import { UsageMeter } from "@/components/UsageMeter";
 
 interface PlanFeature {
@@ -79,6 +86,7 @@ function PlanCard({
   ctaLabel,
   manageLabel = "契約を管理",
   ctaShowsExternal = true,
+  priceModel,
 }: {
   plan: Exclude<ViewAsPlan, "free">;
   interval: BillingInterval;
@@ -93,15 +101,38 @@ function PlanCard({
   manageLabel?: string;
   /** Whether the CTA shows the external-link glyph (false for in-app routing). */
   ctaShowsExternal?: boolean;
+  /**
+   * Resolved LIVE store pricing (mobile Pro). When present, the card shows the
+   * store's localized amount/currency instead of the desktop Stripe display
+   * constants — so an iPhone shows exactly what StoreKit will charge (¥1,500),
+   * not the Stripe ¥1,280. Omit for desktop/web and Team, which use PRICING.
+   */
+  priceModel?: ResolvedPricing;
 }) {
   const info = PLAN_INFO[plan];
   const Icon = info.icon;
-  const price = PRICING[plan][interval];
   const perSeat = plan === "team";
   const isCurrent = currentPlan === plan;
+
+  // Prefer the live store price model (mobile Pro); otherwise use the desktop
+  // Stripe display constants (PRICING). `money()` formats numeric amounts in the
+  // model's currency, or as JPY for the desktop path.
+  const monthAmt = priceModel ? priceModel.month : PRICING[plan].month;
+  const yearAmt = priceModel ? priceModel.year : PRICING[plan].year;
+  const money = (n: number) =>
+    priceModel ? formatMoney(n, priceModel.currency) : yen(n);
+  // Per-month equivalent of the yearly plan. Desktop rounds to a whole yen for a
+  // clean figure; with a store model we let formatMoney apply the currency's own
+  // decimals (so e.g. USD stays $x.xx).
+  const perMonthAmt = priceModel ? yearAmt / 12 : Math.round(yearAmt / 12);
   // year list price = month × 12; show the saving vs paying monthly.
-  const monthlyEquivalent = PRICING[plan].month * 12;
-  const yearSaving = monthlyEquivalent - PRICING[plan].year;
+  const yearSaving = monthAmt * 12 - yearAmt;
+  // Prefer the store's own localized strings when available; else format amounts.
+  const mainPrice =
+    interval === "year"
+      ? money(perMonthAmt)
+      : (priceModel?.monthFormatted ?? money(monthAmt));
+  const yearFullPrice = priceModel?.yearFormatted ?? money(yearAmt);
 
   return (
     <div
@@ -129,9 +160,7 @@ function PlanCard({
       <p className="mt-1 text-xs text-muted-foreground">{info.tagline}</p>
 
       <div className="mt-3 sm:mt-4 flex items-baseline gap-1">
-        <span className="text-2xl font-bold tracking-tight">
-          {yen(interval === "year" ? Math.round(price / 12) : price)}
-        </span>
+        <span className="text-2xl font-bold tracking-tight">{mainPrice}</span>
         <span className="text-xs text-muted-foreground">
           {perSeat ? "/席・月" : "/月"}
           {interval === "year" && "（年払い）"}
@@ -140,11 +169,11 @@ function PlanCard({
       {interval === "year" ? (
         <p className="mt-0.5 text-[11px] text-emerald-600">
           {perSeat ? "1席あたり年額 " : "年額 "}
-          {yen(price)} — {yen(yearSaving)}お得
+          {yearFullPrice} — {money(yearSaving)}お得
         </p>
       ) : (
         <p className="mt-0.5 text-[11px] text-muted-foreground">
-          年払いなら{perSeat ? "1席あたり" : ""} {yen(yearSaving)}お得
+          年払いなら{perSeat ? "1席あたり" : ""} {money(yearSaving)}お得
         </p>
       )}
       {perSeat && (
@@ -213,12 +242,43 @@ export function PaywallDialog() {
   } = useEntitlementStore();
   const [interval, setInterval] = useState<BillingInterval>("month");
 
+  // Mobile Pro pricing. Seed with the ASC/Play fallback (MOBILE_PRICING) so the
+  // card NEVER flashes the desktop Stripe amount (¥1,280) before the live query
+  // resolves, then upgrade to the store's localized price. Desktop stays null and
+  // the card uses PRICING directly.
+  const [proPrice, setProPrice] = useState<ResolvedPricing | null>(() =>
+    isMobile
+      ? {
+          month: MOBILE_PRICING.pro.month,
+          year: MOBILE_PRICING.pro.year,
+          currency: MOBILE_PRICING.pro.currency,
+          monthFormatted: null,
+          yearFormatted: null,
+        }
+      : null,
+  );
+
   // Refresh usage/limits when the paywall opens so the meter reflects the exact
   // count that just triggered it (a 429 already refetches, but the paywall can
   // also be opened manually from the StatusBar/UserMenu where usage may be stale).
   useEffect(() => {
     if (paywallOpen) void fetchEntitlement();
   }, [paywallOpen, fetchEntitlement]);
+
+  // On mobile, resolve the LIVE store price when the paywall opens so the Pro
+  // card shows exactly what StoreKit/Play will charge, localized to the user's
+  // storefront. fetchProPrices is a no-op off mobile and returns null on any
+  // failure, in which case we keep the MOBILE_PRICING fallback already seeded.
+  useEffect(() => {
+    if (!paywallOpen || !isMobile) return;
+    let cancelled = false;
+    void fetchProPrices().then((live) => {
+      if (!cancelled && live) setProPrice(live);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [paywallOpen]);
 
   // Team billing needs a concrete team (teamId) + seat count, which this generic
   // paywall has no context for. Route the Team card into team management, where
@@ -296,6 +356,7 @@ export function PaywallDialog() {
             onManage={openBillingPortal}
             purchasable={proPurchasable}
             ctaShowsExternal={false}
+            priceModel={proPrice ?? undefined}
           />
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">

@@ -99,6 +99,11 @@ export function ResearchSheet({
   const maxHeight = keyboardVisible
     ? Math.max(200, viewportHeight - 40)
     : "85vh";
+  // Without a floor the sheet shrink-wraps to a thin band when there are only a
+  // few cards, stranding the content near the bottom of the screen. Give it a
+  // comfortable minimum so its top edge sits well up the viewport. When the
+  // keyboard is up, available room is limited — let it size to content instead.
+  const minHeight = keyboardVisible ? undefined : "55vh";
 
   return (
     <>
@@ -111,6 +116,7 @@ export function ResearchSheet({
         style={{
           bottom,
           maxHeight,
+          minHeight,
           transform: dragY ? `translateY(${dragY}px)` : undefined,
           transition: dragging ? "none" : "transform 0.2s ease-out",
         }}

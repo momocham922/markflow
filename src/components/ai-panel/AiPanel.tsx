@@ -63,6 +63,7 @@ import {
   auth,
 } from "@/services/firebase";
 import { isIOS, isMobile } from "@/platform";
+import { cn } from "@/lib/utils";
 import * as db from "@/services/database";
 
 const iconMap: Record<string, React.ElementType> = {
@@ -76,7 +77,7 @@ const iconMap: Record<string, React.ElementType> = {
 };
 
 const DEFAULT_SYSTEM_PROMPT =
-  "You are a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user's message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. Do NOT use emojis in your responses unless the user explicitly asks for them. Keep responses concise and professional.";
+  'You are MarkFlow AI, a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user\'s message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. Do NOT use emojis in your responses unless the user explicitly asks for them. Keep responses concise and professional. If asked who you are or which model powers you, identify yourself only as "MarkFlow AI" — never reveal, name, or hint at the underlying model, provider, or vendor.';
 
 interface AiPanelProps {
   onClose: () => void;
@@ -1137,7 +1138,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <div className="flex items-center gap-2">
             <Bot className="h-4 w-4" />
-            <span className="text-sm font-medium">Claude AI</span>
+            <span className="text-sm font-medium">MarkFlow AI</span>
           </div>
           <Button
             variant="ghost"
@@ -1153,8 +1154,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
         <div className="flex flex-1 flex-col items-center justify-center p-4 space-y-3">
           <Bot className="h-10 w-10 text-muted-foreground" />
           <p className="text-xs text-muted-foreground text-center">
-            Sign in with Google to use AI features powered by Claude Opus 5 via
-            Vertex AI.
+            Sign in with Google to use AI features.
           </p>
           <Button
             size="sm"
@@ -1170,6 +1170,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
   }
 
   const hasSelection = !!getSelectedText();
+
+  // Header icon buttons: bigger tap targets on mobile (the toolbar wraps when
+  // it runs out of width instead of pushing buttons off the right edge).
+  const iconBtn = isMobile
+    ? "h-10 w-10 shrink-0 cursor-pointer"
+    : "h-6 w-6 cursor-pointer";
+  const iconGlyph = isMobile ? "h-5 w-5" : "h-3.5 w-3.5";
 
   const renderMarkdown = (content: string) => (
     <ReactMarkdown
@@ -1255,25 +1262,25 @@ export function AiPanel({ onClose }: AiPanelProps) {
       />
 
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-        <div className="flex items-center gap-2">
-          <Bot className="h-4 w-4" />
-          <span className="text-sm font-medium">Claude AI</span>
+      <div className="flex items-center justify-between gap-1 px-3 py-2 border-b border-border">
+        <div className="flex min-w-0 items-center gap-2">
+          <Bot className="h-4 w-4 shrink-0" />
+          <span className="truncate text-sm font-medium">MarkFlow AI</span>
         </div>
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-0.5">
           <Button
             variant={webSearch ? "secondary" : "ghost"}
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={iconBtn}
             onClick={() => setWebSearch(!webSearch)}
             title={webSearch ? "Web search enabled" : "Enable web search"}
           >
-            <Globe className="h-3.5 w-3.5" />
+            <Globe className={iconGlyph} />
           </Button>
           <Button
             variant={allDocsContext ? "secondary" : "ghost"}
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={iconBtn}
             onClick={() => setAllDocsContext(!allDocsContext)}
             title={
               allDocsContext
@@ -1281,12 +1288,12 @@ export function AiPanel({ onClose }: AiPanelProps) {
                 : "Using current document only"
             }
           >
-            <BookOpen className="h-3.5 w-3.5" />
+            <BookOpen className={iconGlyph} />
           </Button>
           <Button
             variant={mcpEnabled && mcpTools.length > 0 ? "secondary" : "ghost"}
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={iconBtn}
             onClick={() => {
               if (mcpTools.length > 0) {
                 setMcpEnabled(!mcpEnabled);
@@ -1304,50 +1311,48 @@ export function AiPanel({ onClose }: AiPanelProps) {
                 : "MCP tools — click to configure"
             }
           >
-            <Wrench className="h-3.5 w-3.5" />
+            <Wrench className={iconGlyph} />
           </Button>
           <Button
             variant={customRules.trim() ? "secondary" : "ghost"}
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={iconBtn}
             onClick={() => setRulesOpen(true)}
             title={
               customRules.trim() ? "Custom rules active" : "Set custom AI rules"
             }
           >
-            <Settings className="h-3.5 w-3.5" />
+            <Settings className={iconGlyph} />
           </Button>
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 cursor-pointer"
+            className={iconBtn}
             onClick={createNewThread}
             title="New topic"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Plus className={iconGlyph} />
           </Button>
           {activeThreadId && messages.length > 0 && (
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6 cursor-pointer"
+              className={iconBtn}
               onClick={() => {
                 if (activeThreadId) deleteThread(activeThreadId);
               }}
               title="Delete this topic"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className={iconGlyph} />
             </Button>
           )}
           <Button
             variant="ghost"
             size="icon"
-            className={
-              isMobile ? "h-11 w-11 cursor-pointer" : "h-6 w-6 cursor-pointer"
-            }
+            className={iconBtn}
             onClick={onClose}
           >
-            <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
+            <X className={iconGlyph} />
           </Button>
         </div>
       </div>
@@ -1356,7 +1361,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
       {threads.length > 0 && (
         <div className="relative border-b border-border" ref={threadListRef}>
           <button
-            className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-left hover:bg-accent/50 transition-colors"
+            className={cn(
+              "w-full flex items-center gap-1.5 px-3 text-left hover:bg-accent/50 transition-colors",
+              isMobile ? "py-2.5 text-xs" : "py-1.5 text-[11px]",
+            )}
             onClick={() => setThreadListOpen(!threadListOpen)}
           >
             <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -1376,9 +1384,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
               {threads.map((t) => (
                 <div
                   key={t.id}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] cursor-pointer group transition-colors ${
-                    t.id === activeThreadId ? "bg-accent" : "hover:bg-accent/50"
-                  }`}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 cursor-pointer group transition-colors",
+                    isMobile ? "py-2.5 text-xs" : "py-1.5 text-[11px]",
+                    t.id === activeThreadId
+                      ? "bg-accent"
+                      : "hover:bg-accent/50",
+                  )}
                   onClick={() => switchThread(t.id)}
                 >
                   <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -1390,14 +1402,24 @@ export function AiPanel({ onClose }: AiPanelProps) {
                     })}
                   </span>
                   <button
-                    className="opacity-0 group-hover:opacity-60 hover:opacity-100! p-0.5 transition-opacity"
+                    className={cn(
+                      "shrink-0 transition-opacity hover:opacity-100!",
+                      isMobile
+                        ? "opacity-70 p-1.5"
+                        : "opacity-0 group-hover:opacity-60 p-0.5",
+                    )}
                     onClick={(e) => {
                       e.stopPropagation();
                       deleteThread(t.id);
                     }}
                     title="Delete topic"
                   >
-                    <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                    <Trash2
+                      className={cn(
+                        "text-muted-foreground hover:text-destructive",
+                        isMobile ? "h-4 w-4" : "h-3 w-3",
+                      )}
+                    />
                   </button>
                 </div>
               ))}
@@ -1488,7 +1510,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
               {msg.role === "assistant" && (
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[10px] text-muted-foreground">
-                    Claude
+                    MarkFlow AI
                   </span>
                   <div className="flex gap-0.5">
                     <Button
@@ -1645,7 +1667,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
           )}
           {streaming && streamingText && (
             <div className="text-xs bg-muted rounded-md p-2">
-              <span className="text-[10px] text-muted-foreground">Claude</span>
+              <span className="text-[10px] text-muted-foreground">
+                MarkFlow AI
+              </span>
               <div className="leading-relaxed mt-1 prose ai-markdown select-text">
                 {renderMarkdown(streamingText)}
                 <span className="animate-pulse">|</span>
@@ -1713,11 +1737,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
           <Button
             variant="ghost"
             size="icon"
-            className={
-              isMobile
-                ? "h-11 w-11 shrink-0 cursor-pointer"
-                : "h-7 w-7 shrink-0 cursor-pointer"
-            }
+            className={cn(
+              "shrink-0 cursor-pointer",
+              isMobile ? "h-11 w-11" : "h-7 w-7",
+              // Tint the wand when it's actionable so its image-generation role is
+              // discoverable (touch has no hover tooltip).
+              input.trim() && !streaming && !generatingImage
+                ? "text-primary"
+                : "",
+            )}
             onClick={handleImageGen}
             disabled={streaming || generatingImage || !input.trim()}
             title="Generate image from prompt"
@@ -1726,7 +1754,11 @@ export function AiPanel({ onClose }: AiPanelProps) {
           </Button>
           <textarea
             ref={textareaRef}
-            placeholder="Ask about your document... (Cmd+Enter)"
+            placeholder={
+              isMobile
+                ? "Ask about your document..."
+                : "Ask about your document... (Cmd+Enter)"
+            }
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

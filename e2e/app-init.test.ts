@@ -4,7 +4,9 @@ import { waitForAppReady } from "./helpers";
 test.describe("App initialization", () => {
   test("shows loading screen then main UI", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("text=Loading...")).toBeHidden({ timeout: 15_000 });
+    await expect(page.locator("text=Loading...")).toBeHidden({
+      timeout: 15_000,
+    });
   });
 
   test("renders top bar with view mode toggle", async ({ page }) => {
@@ -41,7 +43,7 @@ test.describe("App initialization", () => {
 
   test("AI panel button is visible", async ({ page }) => {
     await waitForAppReady(page);
-    await expect(page.locator('button[title="Claude AI"]')).toBeVisible();
+    await expect(page.locator('button[title="MarkFlow AI"]')).toBeVisible();
   });
 
   test("version history button is visible", async ({ page }) => {

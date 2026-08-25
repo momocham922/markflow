@@ -23,6 +23,7 @@
 // =====================================================================
 import { auth } from "@/services/firebase";
 import { isIOS, isAndroid } from "@/platform";
+import type { ResolvedPricing } from "@/lib/pricing";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
@@ -46,6 +47,76 @@ function playBasePlanId(interval: Interval): string {
 
 export type MobilePurchaseOutcome =
   { ok: true; plan: string; status: string } | { ok: false; error: string };
+
+/**
+ * Query the LIVE App Store / Play price for Pro so the paywall shows exactly what
+ * the store will charge, localized to the user's storefront (¥ in JP, $ in US, …).
+ * NEVER derive mobile pricing from the desktop Stripe display constants — those
+ * are a different amount and currency (see MOBILE_PRICING in lib/pricing).
+ *
+ * Returns numeric amounts in MAJOR units (priceAmountMicros / 1e6) plus the
+ * store's own localized strings, or null on any failure so the caller can fall
+ * back to MOBILE_PRICING. Safe to call unconditionally: it is platform-gated and
+ * dynamic-imports the native plugin, so it is a no-op off mobile. This is a
+ * read-only product query — independent of BILLING_ENABLED / the purchase gate.
+ */
+export async function fetchProPrices(): Promise<ResolvedPricing | null> {
+  if (!isIOS && !isAndroid) return null;
+  try {
+    const iap = await import("@choochmeque/tauri-plugin-iap-api");
+
+    if (isIOS) {
+      const monthlyId = appleProductId("pro", "month");
+      const yearlyId = appleProductId("pro", "year");
+      const { products } = await iap.getProducts([monthlyId, yearlyId], "subs");
+      const m = products.find((p) => p.productId === monthlyId);
+      const y = products.find((p) => p.productId === yearlyId);
+      if (!m?.priceAmountMicros || !y?.priceAmountMicros) return null;
+      return {
+        month: m.priceAmountMicros / 1e6,
+        year: y.priceAmountMicros / 1e6,
+        currency: m.priceCurrencyCode || y.priceCurrencyCode || "JPY",
+        monthFormatted: m.formattedPrice ?? null,
+        yearFormatted: y.formattedPrice ?? null,
+      };
+    }
+
+    // Android: one subscription product carries a base plan per interval, each
+    // with pricing phases. The ongoing charge is the INFINITE_RECURRING phase
+    // (recurrenceMode === 1); fall back to the last paid phase, then the last.
+    const productId = playProductId("pro");
+    const { products } = await iap.getProducts([productId], "subs");
+    const prod = products.find((p) => p.productId === productId);
+    const offers = prod?.subscriptionOfferDetails ?? [];
+    const resolve = (interval: Interval) => {
+      const offer = offers.find(
+        (o) => o.basePlanId === playBasePlanId(interval),
+      );
+      const phases = offer?.pricingPhases ?? [];
+      if (phases.length === 0) return null;
+      const base =
+        phases.find(
+          (ph) => ph.recurrenceMode === 1 && ph.priceAmountMicros > 0,
+        ) ??
+        [...phases].reverse().find((ph) => ph.priceAmountMicros > 0) ??
+        phases[phases.length - 1];
+      return base && base.priceAmountMicros > 0 ? base : null;
+    };
+    const m = resolve("month");
+    const y = resolve("year");
+    if (!m || !y) return null;
+    return {
+      month: m.priceAmountMicros / 1e6,
+      year: y.priceAmountMicros / 1e6,
+      currency: m.priceCurrencyCode || y.priceCurrencyCode || "JPY",
+      monthFormatted: m.formattedPrice ?? null,
+      yearFormatted: y.formattedPrice ?? null,
+    };
+  } catch (err) {
+    console.error("[iap] fetchProPrices failed:", err);
+    return null;
+  }
+}
 
 /**
  * Run a native subscription purchase for `plan`/`interval`, then hand the signed

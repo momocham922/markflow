@@ -366,10 +366,32 @@ export function Sidebar() {
     return folders.filter((f) => !teamFolderPaths.has(f));
   }, [folders, teams]);
 
-  const tree = useMemo(
-    () => buildTree(personalFolders, filteredDocs),
-    [personalFolders, filteredDocs],
-  );
+  // When a tag filter is active, collect every folder that holds a matching doc
+  // plus its ancestor chain. Used to (a) hide folders with no matches and
+  // (b) auto-expand the ones that do, so matching docs buried in collapsed
+  // subfolders actually surface. Null when no filter is active.
+  const tagFolderPaths = useMemo(() => {
+    if (!selectedTag) return null;
+    const paths = new Set<string>(["/"]);
+    for (const doc of filteredDocs) {
+      const folder = doc.folder || "/";
+      if (folder === "/") continue;
+      const parts = folder.split("/").filter(Boolean);
+      let cur = "";
+      for (const part of parts) {
+        cur += "/" + part;
+        paths.add(cur);
+      }
+    }
+    return paths;
+  }, [selectedTag, filteredDocs]);
+
+  const tree = useMemo(() => {
+    const treeFolders = tagFolderPaths
+      ? personalFolders.filter((f) => tagFolderPaths.has(f))
+      : personalFolders;
+    return buildTree(treeFolders, filteredDocs);
+  }, [personalFolders, filteredDocs, tagFolderPaths]);
 
   const toggleFolder = useCallback((path: string) => {
     setExpandedFolders((prev) => {
@@ -775,7 +797,7 @@ export function Sidebar() {
       }}
       className={cn(
         "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
+        isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -870,7 +892,11 @@ export function Sidebar() {
   };
 
   const renderFolder = (node: FolderNode, depth = 0) => {
-    const isExpanded = expandedFolders.has(node.path);
+    // Auto-expand folders that contain a tag match (without mutating the user's
+    // manual expand state — this only holds while the filter is active).
+    const isExpanded =
+      expandedFolders.has(node.path) ||
+      (tagFolderPaths?.has(node.path) ?? false);
     const isRoot = node.path === "/";
     const hasContent = node.docs.length > 0 || node.children.length > 0;
     const isDragOver = dragOverFolder === node.path;
@@ -1118,7 +1144,7 @@ export function Sidebar() {
           }}
           className={cn(
             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
+            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -1844,7 +1870,7 @@ export function Sidebar() {
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
                             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors",
-                            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
+                            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",

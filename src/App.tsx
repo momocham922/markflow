@@ -1348,7 +1348,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                       )}
                       onClick={() => togglePanel("ai")}
                       disabled={!activeDocId}
-                      title="Claude AI"
+                      title="MarkFlow AI"
                     >
                       <Bot className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
                     </Button>

@@ -44,7 +44,7 @@ describe("AI panel", () => {
   });
 
   it("can open AI panel", async () => {
-    const aiBtn = await $('button[title="Claude AI"]');
+    const aiBtn = await $('button[title="MarkFlow AI"]');
     await aiBtn.waitForExist({ timeout: 5000 });
     await aiBtn.click();
     await browser.pause(500);
@@ -57,7 +57,7 @@ describe("AI panel", () => {
   });
 
   it("AI panel has input field", async () => {
-    const aiBtn = await $('button[title="Claude AI"]');
+    const aiBtn = await $('button[title="MarkFlow AI"]');
     await aiBtn.click();
     await browser.pause(500);
 
@@ -68,7 +68,7 @@ describe("AI panel", () => {
   });
 
   it("MCP tools button exists", async () => {
-    const aiBtn = await $('button[title="Claude AI"]');
+    const aiBtn = await $('button[title="MarkFlow AI"]');
     await aiBtn.click();
     await browser.pause(500);
 

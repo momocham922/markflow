@@ -35,12 +35,21 @@ export function useIOSKeyboard() {
       const vvHeight = Math.round(vv.height);
       const diff = window.innerHeight - vvHeight;
       const kbVisible = diff > 100;
-      setKeyboardVisible(kbVisible);
+      // Only push state when it actually changes. visualViewport fires `scroll`
+      // continuously while the keyboard animates and while a focused field grows;
+      // re-rendering on every tick is what makes the input wobble on iOS.
+      setKeyboardVisible((prev) => (prev === kbVisible ? prev : kbVisible));
       // When keyboard is hidden, use innerHeight (avoids mismatch with safe areas)
       // When keyboard is visible, use visualViewport height (actual visible area)
-      setViewportHeight(kbVisible ? vvHeight : window.innerHeight);
-      // Prevent iOS from scrolling the page when keyboard opens
-      window.scrollTo(0, 0);
+      const nextHeight = kbVisible ? vvHeight : window.innerHeight;
+      setViewportHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+      // Keep iOS from scrolling the layout viewport when the keyboard opens — but
+      // only correct it when it has actually drifted. Calling scrollTo(0,0) on
+      // every `scroll` event re-enters this handler and fights the browser's own
+      // focus-scroll, which is the root of the focus jank.
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0);
+      }
     };
 
     update();

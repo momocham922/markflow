@@ -12,6 +12,7 @@ import {
   Trash2,
   MessageSquareWarning,
   BarChart3,
+  Github,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -24,6 +25,11 @@ import { isMobile } from "@/platform";
 import { DeleteAccountDialog } from "@/components/DeleteAccountDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { useTelemetryStore } from "@/stores/telemetry-store";
+
+// GitHub sign-in is gated on the OAuth client id being present at build time.
+// Without it, signInWithGitHub() can't complete, so we hide the entry point
+// rather than ship a button that dead-ends.
+const GITHUB_LOGIN_ENABLED = !!import.meta.env.VITE_GITHUB_CLIENT_ID;
 
 function UserAvatar({
   user,
@@ -187,6 +193,20 @@ export function UserMenu() {
           <LogIn className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           {!isMobile && "Sign in"}
         </Button>
+        {/* GitHub sign-in — only rendered when the OAuth client id is configured
+            at build time, so an unconfigured build never ships a dead button. */}
+        {GITHUB_LOGIN_ENABLED && (
+          <Button
+            variant="ghost"
+            size={isMobile ? "icon" : "sm"}
+            className={isMobile ? "h-11 w-11" : "gap-2 text-xs"}
+            onClick={() => login("github")}
+            title="Sign in with GitHub"
+          >
+            <Github className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
+            {!isMobile && "GitHub"}
+          </Button>
+        )}
       </div>
     );
   }

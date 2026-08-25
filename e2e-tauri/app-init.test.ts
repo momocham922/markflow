@@ -32,7 +32,7 @@ describe("App initialization", () => {
   });
 
   it("AI panel button is visible", async () => {
-    const aiBtn = await $('button[title="Claude AI"]');
+    const aiBtn = await $('button[title="MarkFlow AI"]');
     await aiBtn.waitForExist({ timeout: 5000 });
     expect(await aiBtn.isDisplayed()).toBe(true);
   });
