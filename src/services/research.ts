@@ -2,7 +2,19 @@ import { auth } from "./firebase";
 import { aiProxyHeaders, reportIfQuota } from "./ai-proxy";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
-const REQUEST_TIMEOUT_MS = 30_000;
+
+// The Research Director model (opus-5) generates the analyze JSON at ~60 tok/s,
+// and a full brief (0-3 searches + speaker questions) runs ~2000-2800 output
+// tokens, so a real analyze call takes 40-47s end-to-end (measured live against
+// Vertex on 2026-08-25: 41,107ms). The previous shared 30s ceiling aborted
+// EVERY analyze before it returned: fetchWithTimeout's AbortController fired at
+// 30s, analyzeTranscript threw AbortError, and the pipeline never reached
+// grounded-search — so cards stayed stuck as loading placeholders and the panel
+// looked broken while the server (which kept running to completion) logged a
+// healthy 200 with "N searches". Give analyze generous headroom; grounded-search
+// (Gemini grounded web search, faster) keeps a tighter bound.
+const ANALYZE_TIMEOUT_MS = 90_000;
+const SEARCH_TIMEOUT_MS = 60_000;
 
 async function getToken(): Promise<string> {
   const user = auth.currentUser;
@@ -13,14 +25,17 @@ async function getToken(): Promise<string> {
 /**
  * fetch with a hard timeout. Without this, a stalled request leaves the
  * pipeline's `pendingRef` stuck true forever, silently killing all further
- * research analysis for the rest of a long recording session.
+ * research analysis for the rest of a long recording session. The timeout MUST
+ * exceed the real upstream latency (see ANALYZE_TIMEOUT_MS above) — too short a
+ * bound turns a slow-but-successful response into a fatal AbortError.
  */
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
+  timeoutMs: number = SEARCH_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -74,11 +89,15 @@ export async function analyzeTranscript(params: {
   questions?: AnalyzeQuestions | null;
 }> {
   const token = await getToken();
-  const res = await fetchWithTimeout(`${AI_PROXY_URL}/v1/research/analyze`, {
-    method: "POST",
-    headers: aiProxyHeaders(token),
-    body: JSON.stringify(params),
-  });
+  const res = await fetchWithTimeout(
+    `${AI_PROXY_URL}/v1/research/analyze`,
+    {
+      method: "POST",
+      headers: aiProxyHeaders(token),
+      body: JSON.stringify(params),
+    },
+    ANALYZE_TIMEOUT_MS,
+  );
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
     reportIfQuota(res.status, bodyText);
