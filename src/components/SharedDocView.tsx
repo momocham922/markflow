@@ -14,6 +14,7 @@ import hljs from "highlight.js";
 import mermaid from "mermaid";
 import DOMPurify from "dompurify";
 import { useAppStore } from "@/stores/app-store";
+import { MERMAID_FONT, resolveMermaidConfig } from "@/lib/mermaid-theme";
 
 function escapeHtml(s: string): string {
   return s
@@ -55,19 +56,16 @@ sharedRenderer.link = function ({
 };
 sharedMarked.use({ renderer: sharedRenderer });
 
+// Neutral safety-net init; the real brand palette is applied per render pass.
 mermaid.initialize({
   startOnLoad: false,
-  theme: "default",
-  themeVariables: {
-    fontFamily:
-      'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif',
-    fontSize: "14px",
-  },
+  theme: "base",
+  themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
   flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
   sequence: { useMaxWidth: true },
 });
 
-function fixMermaidSvg(el: HTMLElement, dark: boolean) {
+function fixMermaidSvg(el: HTMLElement) {
   const svg = el.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
 
@@ -134,42 +132,7 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
     modified = true;
   }
 
-  if (dark) {
-    let mainBg: Element | null = null;
-    let maxArea = 0;
-    for (const r of allRects) {
-      if (sectionRects.includes(r)) continue;
-      const a =
-        parseFloat(r.getAttribute("width") || "0") *
-        parseFloat(r.getAttribute("height") || "0");
-      if (a > maxArea) {
-        maxArea = a;
-        mainBg = r;
-      }
-    }
-    if (mainBg) {
-      mainBg.setAttribute("fill", "transparent");
-      modified = true;
-    }
-    for (const r of sectionRects) {
-      const fill = r.getAttribute("fill") || "";
-      const m = fill.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (m) {
-        r.setAttribute(
-          "fill",
-          `rgba(${Math.round(Number(m[1]) * 0.25)}, ${Math.round(Number(m[2]) * 0.25)}, ${Math.round(Number(m[3]) * 0.25)}, 0.6)`,
-        );
-      }
-      const stroke = r.getAttribute("stroke") || "";
-      const sm = stroke.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (sm) {
-        r.setAttribute(
-          "stroke",
-          `rgba(${Math.round(Number(sm[1]) * 0.35)}, ${Math.round(Number(sm[2]) * 0.35)}, ${Math.round(Number(sm[3]) * 0.35)}, 0.5)`,
-        );
-      }
-    }
-  }
+  // Diagram colors are driven natively by the Mermaid `base` themeVariables.
 
   if (modified) {
     try {
@@ -209,6 +172,7 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const editPreviewRef = useRef<HTMLDivElement>(null);
+  const prevMermaidSigRef = useRef<string>("");
 
   useEffect(() => {
     setLoading(true);
@@ -248,14 +212,45 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
   useEffect(() => {
     const container = contentRef.current || editPreviewRef.current;
     if (!container) return;
-    const isDark = theme === "dark";
+    // The shared viewer renders with the default (GitHub) prose styling, so the
+    // diagrams follow the default brand palette + the viewer's light/dark mode.
+    const cfg = resolveMermaidConfig("github", theme === "dark");
+    // On a light/dark switch the surrounding HTML is unchanged, so already-drawn
+    // SVGs must be cleared to re-render with the new palette.
+    if (
+      prevMermaidSigRef.current &&
+      prevMermaidSigRef.current !== cfg.signature
+    ) {
+      container.querySelectorAll<HTMLElement>(".mermaid").forEach((el) => {
+        el.innerHTML = "";
+        el.removeAttribute("data-mermaid-processed");
+      });
+    }
+    prevMermaidSigRef.current = cfg.signature;
+    // Signature this effect renders under. `mermaid.initialize` mutates one global
+    // config, so a light/dark toggle mid-render could otherwise let an in-flight
+    // (old-palette) render resolve after the wipe and stick. We abort any batch
+    // whose palette no longer matches the live one.
+    const sig = cfg.signature;
     const renderDiagrams = () => {
       const divs = Array.from(
         container.querySelectorAll<HTMLElement>(".mermaid"),
       ).filter((el) => !el.querySelector("svg"));
       if (divs.length === 0) return;
+      try {
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: "base",
+          themeVariables: cfg.themeVariables,
+          flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
+          sequence: { useMaxWidth: true },
+        });
+      } catch {
+        /* keep last-good config */
+      }
       (async () => {
         for (const el of divs) {
+          if (prevMermaidSigRef.current !== sig) return; // palette moved on
           if (!el.isConnected || el.querySelector("svg")) continue;
           const source = el.getAttribute("data-mermaid-source") || "";
           if (!source) continue;
@@ -265,11 +260,13 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
               `mermaid-${Math.random().toString(36).slice(2)}`,
               source,
             );
+            // Palette may have changed while awaiting — this SVG is stale.
+            if (prevMermaidSigRef.current !== sig) return;
             if (!el.isConnected) continue;
             el.innerHTML = svg;
             bindFunctions?.(el);
             try {
-              fixMermaidSvg(el, isDark);
+              fixMermaidSvg(el);
             } catch {
               /* OK */
             }
@@ -288,7 +285,10 @@ export function SharedDocView({ token, onBack }: SharedDocViewProps) {
       clearTimeout(t2);
       clearTimeout(t3);
     };
-  }, [previewHtml, theme]);
+    // `editing` re-runs the effect against the freshly-mounted edit-preview
+    // container even when the body text (and thus previewHtml) is unchanged, so
+    // its diagrams render instead of staying blank.
+  }, [previewHtml, theme, editing]);
 
   const handleCopy = async () => {
     if (!doc) return;

@@ -26,6 +26,7 @@ import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
 import { buildThemeVarLines } from "@/lib/theme-css";
+import { MERMAID_FONT, resolveMermaidConfig } from "@/lib/mermaid-theme";
 import { emitLocalEdit } from "@/lib/local-edit-signal";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
 import {
@@ -163,13 +164,12 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
 
 marked.use({ renderer });
 
-const MERMAID_FONT =
-  'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
-
+// Neutral safety-net init at module load. The real brand palette is applied
+// per render pass from the active preview theme (see mermaidCfg below).
 function initMermaid() {
   mermaid.initialize({
     startOnLoad: false,
-    theme: "default",
+    theme: "base",
     themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
     flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
     sequence: { useMaxWidth: true },
@@ -181,7 +181,7 @@ initMermaid();
 // Module-level cache — survives component remounts
 const mermaidSvgCache = new Map<string, string>();
 
-function fixMermaidSvg(el: HTMLElement, dark: boolean) {
+function fixMermaidSvg(el: HTMLElement) {
   const svg = el.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
 
@@ -254,45 +254,9 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
     modified = true;
   }
 
-  // --- Dark mode: transparent main bg + darken section colors ---
-  if (dark) {
-    // Make the largest rect (main background) transparent
-    let mainBg: Element | null = null;
-    let maxArea = 0;
-    for (const r of allRects) {
-      if (sectionRects.includes(r)) continue;
-      const a =
-        parseFloat(r.getAttribute("width") || "0") *
-        parseFloat(r.getAttribute("height") || "0");
-      if (a > maxArea) {
-        maxArea = a;
-        mainBg = r;
-      }
-    }
-    if (mainBg) {
-      mainBg.setAttribute("fill", "transparent");
-      modified = true;
-    }
-
-    for (const r of sectionRects) {
-      const fill = r.getAttribute("fill") || "";
-      const m = fill.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (m) {
-        r.setAttribute(
-          "fill",
-          `rgba(${Math.round(Number(m[1]) * 0.25)}, ${Math.round(Number(m[2]) * 0.25)}, ${Math.round(Number(m[3]) * 0.25)}, 0.6)`,
-        );
-      }
-      const stroke = r.getAttribute("stroke") || "";
-      const sm = stroke.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (sm) {
-        r.setAttribute(
-          "stroke",
-          `rgba(${Math.round(Number(sm[1]) * 0.35)}, ${Math.round(Number(sm[2]) * 0.35)}, ${Math.round(Number(sm[3]) * 0.35)}, 0.5)`,
-        );
-      }
-    }
-  }
+  // Diagram colors (nodes / edges / text / dark mode) are now driven natively by
+  // the Mermaid `base` themeVariables resolved from the active preview theme, so
+  // no manual per-element re-tinting is needed here.
 
   // --- Update viewBox only if elements were expanded AND getBBox is valid ---
   if (modified) {
@@ -607,11 +571,25 @@ export function Editor() {
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
-  const prevThemeRef = useRef(theme);
+
+  // Brand Mermaid palette derived from the active preview theme × light/dark.
+  // The signature encodes theme id + mode + resolved colors, so it doubles as
+  // the render-cache key (re-renders exactly when the palette changes).
+  const mermaidCfg = useMemo(
+    () =>
+      resolveMermaidConfig(
+        themeSettings.previewTheme,
+        theme === "dark",
+        customPreviewThemes,
+      ),
+    [themeSettings.previewTheme, theme, customPreviewThemes],
+  );
+  const mermaidSig = mermaidCfg.signature;
+  const prevSigRef = useRef(mermaidSig);
 
   const restoreMermaidFromCache = useCallback(
     (container: HTMLElement) => {
-      const prefix = theme === "dark" ? "d:" : "l:";
+      const prefix = mermaidSig + ":";
       const divs = container.querySelectorAll<HTMLElement>(".mermaid");
       for (const el of Array.from(divs)) {
         const source = el.getAttribute("data-mermaid-source") || "";
@@ -627,7 +605,7 @@ export function Editor() {
         }
       }
     },
-    [theme],
+    [mermaidSig],
   );
 
   const previewVisible = previewMode !== "edit" && previewMode !== "mindmap";
@@ -636,34 +614,56 @@ export function Editor() {
     if (!previewVisible) return;
     const container = previewRef.current;
     if (!container) return;
-    const themeChanged = prevThemeRef.current !== theme;
-    prevThemeRef.current = theme;
-    if (themeChanged) {
+    const paletteChanged = prevSigRef.current !== mermaidSig;
+    prevSigRef.current = mermaidSig;
+    if (paletteChanged) {
       container
         .querySelectorAll<HTMLElement>(".mermaid[data-mermaid-processed]")
         .forEach((el) => {
           el.removeAttribute("data-mermaid-processed");
           el.innerHTML = "";
         });
+      // Immediately restore from the NEW palette's cache (if present) so a theme
+      // switch back to a previously-rendered palette shows the diagram in the
+      // same synchronous frame instead of flashing an empty box.
+      restoreMermaidFromCache(container);
       return;
     }
     restoreMermaidFromCache(container);
-  }, [previewHtml, theme, previewVisible, restoreMermaidFromCache]);
+  }, [previewHtml, mermaidSig, previewVisible, restoreMermaidFromCache]);
 
   const renderMermaidRef = useRef<(() => void) | null>(null);
   renderMermaidRef.current = () => {
     const container = previewRef.current;
     if (!container) return;
-    const isDark = theme === "dark";
-    const prefix = isDark ? "d:" : "l:";
+    // Signature this batch renders under. `mermaid.initialize` mutates a single
+    // global config, so if the palette changes mid-batch (prevSigRef advances to
+    // the new sig) an in-flight render would produce a wrong-palette SVG. We
+    // abort the batch the moment the live palette no longer matches, so a stale
+    // SVG is never written to the DOM or cached under this (now-wrong) key.
+    const batchSig = mermaidSig;
+    const prefix = batchSig + ":";
     const divs = container.querySelectorAll<HTMLElement>(".mermaid");
     const needsRender = Array.from(divs).filter((el) => {
       if (el.querySelector("svg")) return false;
       return true;
     });
     if (needsRender.length === 0) return;
+    // Apply the current brand palette before rendering this batch.
+    try {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "base",
+        themeVariables: mermaidCfg.themeVariables,
+        flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
+        sequence: { useMaxWidth: true },
+      });
+    } catch {
+      /* keep last-good config */
+    }
     (async () => {
       for (const el of needsRender) {
+        if (prevSigRef.current !== batchSig) return; // palette moved on — abort
         if (!el.isConnected || el.querySelector("svg")) continue;
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
@@ -678,12 +678,15 @@ export function Editor() {
             `mermaid-${Math.random().toString(36).slice(2)}`,
             source,
           );
+          // The palette may have changed while awaiting; if so this SVG was
+          // rendered under a now-stale global config — discard it entirely.
+          if (prevSigRef.current !== batchSig) return;
           mermaidSvgCache.set(prefix + source, svg);
           if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
           try {
-            fixMermaidSvg(el, isDark);
+            fixMermaidSvg(el);
             mermaidSvgCache.set(prefix + source, el.innerHTML);
           } catch {
             /* fixMermaidSvg failed — cache still has raw SVG */
@@ -707,7 +710,7 @@ export function Editor() {
       clearTimeout(t2);
       clearTimeout(t3);
     };
-  }, [previewHtml, theme, previewVisible]);
+  }, [previewHtml, mermaidSig, previewVisible]);
 
   useEffect(() => {
     if (!previewVisible) return;
