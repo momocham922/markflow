@@ -20,15 +20,15 @@ import {
   Paperclip,
   Settings,
   Image as ImageIcon,
-  ImagePlus,
+  WandSparkles,
   Wrench,
   Plus,
   MessageSquare,
   ChevronDown,
-  FileInput,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly";
 import rehypeHighlight from "rehype-highlight";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -88,17 +88,22 @@ const DEFAULT_SYSTEM_PROMPT =
 const MCP_UI_ENABLED = false;
 
 // Built-in tool that lets the AI write Markdown straight into the user's current
-// document (e.g. "この内容をまとめてドキュメントに流し込んでおいて"). Only offered when
-// the "write to document" toggle is on and a document is open. The executor
-// enforces content protection (never writes empty text) and falls back to a
-// queued pendingInsert when the editor view isn't live (mobile / offscreen).
+// document (e.g. "この内容をまとめてドキュメントに流し込んでおいて"). Always offered when a
+// document is open; the AI decides autonomously when an edit is warranted, and
+// every write is surfaced to the user as an approve/reject proposal before it is
+// applied. The executor enforces content protection (never writes empty text)
+// and falls back to a queued pendingInsert when the editor view isn't live
+// (mobile / offscreen).
 const WRITE_DOC_TOOL: CustomTool = {
   name: "write_document",
   description:
     "Write Markdown content directly into the user's CURRENT document in the editor. " +
-    "Use this ONLY when the user explicitly asks you to put, insert, write, or inject " +
-    'content into their document (e.g. "まとめてドキュメントに流し込んでおいて", ' +
-    '"add this to the doc", "write it into the document", "本文に追記して"). ' +
+    "Call this WHENEVER the user asks you to add, append, insert, write, inject, " +
+    "summarize-into, rewrite, restructure, or translate-in-place their document " +
+    '(e.g. "まとめてドキュメントに流し込んでおいて", "本文に追記して", "この章を書き直して", ' +
+    '"add this to the doc", "rewrite the intro"). Decide autonomously — you do NOT ' +
+    "need to ask for permission first, because the user reviews every edit with an " +
+    "approve/reject prompt before it is applied. " +
     "Do NOT call this for ordinary answers the user only wants to read in chat. " +
     "Provide the exact, final Markdown in `content` (never empty).",
   input_schema: {
@@ -133,14 +138,30 @@ const WRITE_DOC_TOOL: CustomTool = {
 const WRITE_DOC_SYSTEM_ADDENDUM =
   "\n\n--- Document Writing ---\n" +
   'You can write directly into the user\'s current document with the "write_document" tool. ' +
-  "When the user asks you to put/insert/summarize-into/inject content into their document, call " +
-  "write_document with the final Markdown and an appropriate mode (prefer 'append' unless the user " +
-  "asks to replace a selection or the whole document). After writing, briefly confirm what you did " +
-  "in the same language as the user. For questions the user only wants answered in chat, do NOT call " +
-  "the tool — just reply normally.";
+  "Decide AUTONOMOUSLY when an edit is warranted: whenever the user asks you to add, append, insert, " +
+  "summarize-into, inject, rewrite, restructure, or translate-in-place their document, call " +
+  "write_document with the final Markdown and an appropriate mode (prefer 'append' for new content; " +
+  "use 'replace_document' only when the user clearly wants the whole document rewritten, and " +
+  "'replace_selection' when they refer to the current selection). You do NOT need to ask for " +
+  "permission first — every write is shown to the user as an approve/reject proposal before it is " +
+  "applied, so just call the tool with your best edit. After the tool returns, briefly confirm the " +
+  "outcome in the user's language (mention it if they rejected the edit). For questions the user only " +
+  "wants answered in chat, do NOT call the tool — just reply normally.";
+
+// Human-readable labels for the write_document modes, shown on the approve/
+// reject proposal card so the user knows exactly what the AI is about to do.
+const WRITE_MODE_LABELS: Record<string, string> = {
+  append: "Append to end of document",
+  insert_at_cursor: "Insert at cursor",
+  replace_selection: "Replace selected text",
+  replace_document: "Rewrite the entire document",
+};
 
 interface AiPanelProps {
   onClose: () => void;
+  // iOS soft-keyboard state (mobile overlay only). When the keyboard is up we
+  // drop the bottom safe-area padding so no phantom gap opens under the input.
+  keyboardVisible?: boolean;
 }
 
 interface ChatMessage {
@@ -226,7 +247,7 @@ function RulesEditor({
   );
 }
 
-export function AiPanel({ onClose }: AiPanelProps) {
+export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   const { activeDocId, documents } = useAppStore();
   const user = useAuthStore((s) => s.user);
   const activeDoc = documents.find((d) => d.id === activeDocId);
@@ -248,10 +269,16 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [allDocsContext, setAllDocsContext] = useState(false);
-  const [webSearch, setWebSearch] = useState(false);
-  // When on, the AI may write straight into the current document via the
-  // write_document tool. Opt-in because it modifies the user's content.
-  const [writeToDoc, setWriteToDoc] = useState(false);
+  // Web search defaults ON — most questions benefit from up-to-date grounding.
+  const [webSearch, setWebSearch] = useState(true);
+  // Pending write proposal: when the AI decides to edit the document via the
+  // write_document tool, the edit is held here and shown as an approve/reject
+  // card. `writeResolverRef` unblocks the awaiting tool executor on the choice.
+  const [writeProposal, setWriteProposal] = useState<{
+    content: string;
+    mode: string;
+  } | null>(null);
+  const writeResolverRef = useRef<((approved: boolean) => void) | null>(null);
   const [customRules, setCustomRules] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<
@@ -275,6 +302,17 @@ export function AiPanel({ onClose }: AiPanelProps) {
         if (val) setCustomRules(val);
       })
       .catch(() => {});
+  }, []);
+
+  // If the panel unmounts while a write proposal is pending, reject it so the
+  // awaiting tool executor resolves instead of leaking a hung Promise.
+  useEffect(() => {
+    return () => {
+      if (writeResolverRef.current) {
+        writeResolverRef.current(false);
+        writeResolverRef.current = null;
+      }
+    };
   }, []);
 
   // Auto-connect MCP servers on mount
@@ -888,6 +926,17 @@ export function AiPanel({ onClose }: AiPanelProps) {
       if (!content.trim()) {
         return "Error: `content` was empty. Provide the non-empty Markdown to write; nothing was changed.";
       }
+      // Surface the edit as an approve/reject proposal and block here until the
+      // user decides. Nothing touches the document unless they approve.
+      const approved = await new Promise<boolean>((resolve) => {
+        writeResolverRef.current = resolve;
+        setWriteProposal({ content, mode });
+      });
+      writeResolverRef.current = null;
+      setWriteProposal(null);
+      if (!approved) {
+        return "The user REVIEWED and REJECTED the proposed document edit. Nothing was written. Do not silently retry the same edit; ask what they'd like changed, or continue the conversation.";
+      }
       // iOS: the CodeMirror view sits behind this full-screen overlay and is
       // non-focused, so a direct dispatch doesn't reliably apply the edit.
       // Mirror the manual insert buttons — queue via pendingInsert, close the
@@ -978,7 +1027,10 @@ export function AiPanel({ onClose }: AiPanelProps) {
   } => {
     const list: CustomTool[] = [];
     let system = getSystemPrompt();
-    if (writeToDoc && activeDoc) {
+    // Always give the AI the ability to write into the open document; it decides
+    // autonomously when to use it, and every edit is gated behind the user's
+    // approve/reject card (handleWriteDocTool).
+    if (activeDoc) {
       list.push(WRITE_DOC_TOOL);
       system += WRITE_DOC_SYSTEM_ADDENDUM;
     }
@@ -1354,13 +1406,16 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   const renderMarkdown = (content: string) => (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      // remark-cjk-friendly makes **bold**/_italic_ work when the delimiters sit
+      // flush against CJK characters (e.g. これは**太字**です), which CommonMark
+      // otherwise renders as literal asterisks.
+      remarkPlugins={[remarkGfm, remarkCjkFriendly]}
       rehypePlugins={[rehypeHighlight]}
       components={{
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         pre: ({ node, ...props }) => (
           <pre
-            className="bg-background/50 rounded p-2 overflow-x-auto my-1 text-[11px]"
+            className="bg-background/50 rounded p-2 overflow-x-auto max-w-full my-1 text-[11px]"
             {...props}
           />
         ),
@@ -1465,19 +1520,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
             }
           >
             <BookOpen className={iconGlyph} />
-          </Button>
-          <Button
-            variant={writeToDoc ? "secondary" : "ghost"}
-            size="icon"
-            className={iconBtn}
-            onClick={() => setWriteToDoc(!writeToDoc)}
-            title={
-              writeToDoc
-                ? "AI can write into your document — click to disable"
-                : "Let AI write into your document (e.g. まとめてドキュメントに流し込んで)"
-            }
-          >
-            <FileInput className={iconGlyph} />
           </Button>
           {MCP_UI_ENABLED && (
             <Button
@@ -1651,7 +1693,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
       {/* Status indicators */}
       {(allDocsContext ||
         webSearch ||
-        (writeToDoc && !!activeDoc) ||
         (mcpEnabled && mcpTools.length > 0) ||
         toolStatus) && (
         <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-2 flex-wrap">
@@ -1659,12 +1700,6 @@ export function AiPanel({ onClose }: AiPanelProps) {
             <span className="flex items-center gap-1">
               <BookOpen className="h-3 w-3" />
               {documents.length} docs
-            </span>
-          )}
-          {writeToDoc && activeDoc && (
-            <span className="flex items-center gap-1">
-              <FileInput className="h-3 w-3" />
-              Can edit document
             </span>
           )}
           {webSearch && (
@@ -1849,22 +1884,65 @@ export function AiPanel({ onClose }: AiPanelProps) {
               </div>
             </div>
           ))}
-          {/* Thinking / loading indicator */}
-          {(streaming || generatingImage) && !streamingText && (
-            <div className="text-xs bg-muted rounded-md p-2">
-              <div className="flex items-center gap-2">
-                <div className="flex gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
-                </div>
-                <span className="text-[10px] text-muted-foreground">
-                  {toolStatus ||
-                    (generatingImage ? "Generating image..." : "Thinking...")}
-                </span>
+          {/* Write-to-document proposal — the AI decided to edit the doc; apply
+              only on explicit approval. */}
+          {writeProposal && (
+            <div className="rounded-md border border-primary/40 bg-primary/5 p-2 text-xs">
+              <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground">
+                <FileText className="h-3.5 w-3.5 shrink-0 text-primary" />
+                <span>AIがドキュメントを編集しようとしています</span>
+              </div>
+              <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                {WRITE_MODE_LABELS[writeProposal.mode] || writeProposal.mode}
+              </div>
+              <pre className="mb-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-2 text-[11px] leading-snug">
+                {writeProposal.content}
+              </pre>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className={cn(
+                    "flex-1 gap-1 cursor-pointer",
+                    isMobile ? "h-9 text-sm" : "h-7 text-xs",
+                  )}
+                  onClick={() => writeResolverRef.current?.(true)}
+                >
+                  <Check className={isMobile ? "h-4 w-4" : "h-3 w-3"} />
+                  承認
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={cn(
+                    "flex-1 gap-1 cursor-pointer",
+                    isMobile ? "h-9 text-sm" : "h-7 text-xs",
+                  )}
+                  onClick={() => writeResolverRef.current?.(false)}
+                >
+                  <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} />
+                  拒否
+                </Button>
               </div>
             </div>
           )}
+          {/* Thinking / loading indicator */}
+          {(streaming || generatingImage) &&
+            !streamingText &&
+            !writeProposal && (
+              <div className="text-xs bg-muted rounded-md p-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
+                  </div>
+                  <span className="text-[10px] text-muted-foreground">
+                    {toolStatus ||
+                      (generatingImage ? "Generating image..." : "Thinking...")}
+                  </span>
+                </div>
+              </div>
+            )}
           {streaming && streamingText && (
             <div className="text-xs bg-muted rounded-md p-2">
               <span className="text-[10px] text-muted-foreground">
@@ -1917,30 +1995,42 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
       {/* Input — textarea, Cmd+Enter to send */}
       <div
-        className={`border-t border-border ${isIOS ? "pt-2 pb-7 px-5" : "p-2"}`}
+        className={cn(
+          "border-t border-border",
+          // iOS: keep the home-indicator safe-area padding only when the
+          // keyboard is DOWN. With the keyboard up there's no indicator, so the
+          // padding would open a phantom gap under the field.
+          isIOS
+            ? keyboardVisible
+              ? "pt-2 pb-2 px-5"
+              : "pt-2 pb-7 px-5"
+            : "p-2",
+        )}
       >
         <div className={cn("flex items-end", isMobile ? "gap-1.5" : "gap-1")}>
           <Button
             variant="ghost"
             size="icon"
-            className={
-              isMobile
-                ? "h-11 w-9 shrink-0 cursor-pointer"
-                : "h-7 w-7 shrink-0 cursor-pointer"
-            }
+            // All three input-row buttons are the SAME compact square (h-9 w-9
+            // on mobile) so the row reads as one tidy unit and the textarea no
+            // longer has to match a tall 44px control.
+            className={cn(
+              "shrink-0 cursor-pointer",
+              isMobile ? "h-9 w-9" : "h-7 w-7",
+            )}
             onClick={handleImageAttach}
             disabled={streaming || generatingImage}
             title="Attach image"
           >
-            <Paperclip className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
+            <Paperclip className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
           <Button
             variant="ghost"
             size="icon"
             className={cn(
               "shrink-0 cursor-pointer",
-              isMobile ? "h-11 w-9" : "h-7 w-7",
-              // Tint the image icon when it's actionable so its image-generation
+              isMobile ? "h-9 w-9" : "h-7 w-7",
+              // Tint the wand when it's actionable so its AI-image-generation
               // role is discoverable (touch has no hover tooltip).
               input.trim() && !streaming && !generatingImage
                 ? "text-primary"
@@ -1948,9 +2038,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
             )}
             onClick={handleImageGen}
             disabled={streaming || generatingImage || !input.trim()}
-            title="Generate image from prompt"
+            title="Generate AI image from prompt"
           >
-            <ImagePlus className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
+            <WandSparkles className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
           <textarea
             ref={textareaRef}
@@ -1972,21 +2062,19 @@ export function AiPanel({ onClose }: AiPanelProps) {
             disabled={streaming}
             className={cn(
               "flex-1 rounded-md border border-input bg-background outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border",
-              // Mobile: min-h matches the 44px buttons (kills the jagged offset
-              // vs. the autosized textarea) and text-base(16px) prevents iOS
-              // focus-zoom. Desktop keeps the compact sizing.
+              // Mobile: min-h matches the compact 36px buttons and text-base
+              // (16px) prevents iOS focus-zoom. Desktop keeps the compact sizing.
               isMobile
-                ? "min-h-11 px-3 py-2.5 text-base"
+                ? "min-h-9 px-3 py-1.5 text-base leading-tight"
                 : "px-2 py-1.5 text-xs",
             )}
           />
           <Button
             size="icon"
-            className={
-              isMobile
-                ? "h-11 w-11 shrink-0 cursor-pointer"
-                : "h-7 w-7 shrink-0 cursor-pointer"
-            }
+            className={cn(
+              "shrink-0 cursor-pointer",
+              isMobile ? "h-9 w-9" : "h-7 w-7",
+            )}
             onClick={handleChat}
             disabled={
               streaming ||
@@ -1994,7 +2082,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
               (!input.trim() && attachedImages.length === 0)
             }
           >
-            <Send className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
+            <Send className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
           </Button>
         </div>
       </div>

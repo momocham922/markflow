@@ -14,59 +14,64 @@ import { countWords } from "@/lib/editor-utils";
 import * as db from "@/services/database";
 
 export function StatusBar() {
+  // isMobile is a module-level constant, so exactly one of these mounts for the
+  // lifetime of the app. Splitting the two layouts into separate components
+  // keeps every hook unconditional (no rules-of-hooks violation from the old
+  // `if (isMobile) return` sitting above the desktop-only hooks).
+  return isMobile ? <MobileStatusBar /> : <DesktopStatusBar />;
+}
+
+// Mobile: ultra-compact bar + safe area spacer
+function MobileStatusBar() {
   const { theme, toggleTheme } = useAppStore();
   const { user, isOnline, syncing } = useAuthStore();
-
-  // Mobile: ultra-compact bar + safe area spacer
-  if (isMobile) {
-    return (
-      <div
-        className={cn(
-          "flex items-center justify-between border-t border-border bg-background text-[10px] text-muted-foreground shrink-0",
-          isIOS ? "pb-7 px-6 pt-2" : "px-4",
-        )}
-        style={
-          !isIOS
-            ? {
-                paddingTop: "0.5rem",
-                paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)",
-              }
-            : undefined
-        }
+  return (
+    <div
+      className={cn(
+        "flex items-center justify-between border-t border-border bg-background text-[10px] text-muted-foreground shrink-0",
+        isIOS ? "pb-7 px-6 pt-2" : "px-4",
+      )}
+      style={
+        !isIOS
+          ? {
+              paddingTop: "0.5rem",
+              paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)",
+            }
+          : undefined
+      }
+    >
+      <span className="flex items-center gap-1">
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            !user ? "bg-zinc-400" : isOnline ? "bg-emerald-500" : "bg-amber-500"
+          }`}
+        />
+        {!user
+          ? "Local"
+          : syncing
+            ? "Sync..."
+            : isOnline
+              ? "Online"
+              : "Offline"}
+      </span>
+      <button
+        className="flex items-center justify-center text-muted-foreground"
+        onClick={toggleTheme}
       >
-        <span className="flex items-center gap-1">
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              !user
-                ? "bg-zinc-400"
-                : isOnline
-                  ? "bg-emerald-500"
-                  : "bg-amber-500"
-            }`}
-          />
-          {!user
-            ? "Local"
-            : syncing
-              ? "Sync..."
-              : isOnline
-                ? "Online"
-                : "Offline"}
-        </span>
-        <button
-          className="flex items-center justify-center text-muted-foreground"
-          onClick={toggleTheme}
-        >
-          {theme === "light" ? (
-            <Moon className="h-3.5 w-3.5" />
-          ) : (
-            <Sun className="h-3.5 w-3.5" />
-          )}
-        </button>
-      </div>
-    );
-  }
+        {theme === "light" ? (
+          <Moon className="h-3.5 w-3.5" />
+        ) : (
+          <Sun className="h-3.5 w-3.5" />
+        )}
+      </button>
+    </div>
+  );
+}
 
-  // Desktop: full layout
+// Desktop: full layout
+function DesktopStatusBar() {
+  const { theme, toggleTheme } = useAppStore();
+  const { user, isOnline, syncing } = useAuthStore();
   const { activeDocId, documents } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const { isOwner, effectivePlan, viewAs, setViewAs, openPaywall } =

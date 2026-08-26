@@ -1,7 +1,8 @@
 import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
-export type MindMapThemeId = "lavender" | "ocean" | "forest" | "sunset" | "mono";
+export type MindMapThemeId =
+  "lavender" | "ocean" | "forest" | "sunset" | "mono";
 
 export type NodeShape = "pill" | "rounded" | "rect" | "underline";
 export type EdgeStyle = "bezier" | "straight" | "step";
@@ -109,12 +110,12 @@ export interface MindMapNodeData {
 }
 
 export const levelSizes = [
-  "text-sm font-semibold px-5 py-2",     // root
+  "text-sm font-semibold px-5 py-2", // root
   "text-[13px] font-medium px-4 py-1.5", // h1
-  "text-xs font-medium px-3.5 py-1.5",   // h2
-  "text-[11px] px-3 py-1",               // h3
-  "text-[11px] px-3 py-1",               // h4
-  "text-[10px] px-2.5 py-0.5",           // h5+
+  "text-xs font-medium px-3.5 py-1.5", // h2
+  "text-[11px] px-3 py-1", // h3
+  "text-[11px] px-3 py-1", // h4
+  "text-[10px] px-2.5 py-0.5", // h5+
 ];
 
 export const MindMapNode = memo(function MindMapNode({
@@ -122,7 +123,13 @@ export const MindMapNode = memo(function MindMapNode({
   selected,
 }: NodeProps) {
   const nodeData = data as unknown as MindMapNodeData;
-  const theme = mindMapThemes[nodeData.themeId ?? "lavender"];
+  // `?? "lavender"` only guards null/undefined. A stored themeId that is a
+  // non-empty but unknown string (e.g. a theme renamed/removed in a later
+  // build, or a corrupted setting) would otherwise index to `undefined` and
+  // make `theme.nodeColors` throw — which unmounts the tree into a black
+  // screen on mobile. Fall back to lavender for any unknown id.
+  const theme =
+    mindMapThemes[nodeData.themeId ?? "lavender"] ?? mindMapThemes.lavender;
   const colorIdx = Math.min(nodeData.level, theme.nodeColors.length - 1);
   const shape = shapeClass[theme.nodeShape];
   const isUnderline = theme.nodeShape === "underline";
@@ -130,7 +137,11 @@ export const MindMapNode = memo(function MindMapNode({
   return (
     <div
       className={`${shape} ${isUnderline ? "" : "shadow-sm"} ${theme.nodeColors[colorIdx]} ${levelSizes[Math.min(nodeData.level, levelSizes.length - 1)]} ${
-        selected ? (isUnderline ? "ring-1 ring-current/30 bg-current/5!" : "ring-2 ring-white/50 shadow-md scale-105") : ""
+        selected
+          ? isUnderline
+            ? "ring-1 ring-current/30 bg-current/5!"
+            : "ring-2 ring-white/50 shadow-md scale-105"
+          : ""
       }`}
     >
       <Handle
@@ -138,7 +149,11 @@ export const MindMapNode = memo(function MindMapNode({
         position={Position.Left}
         className="bg-transparent! w-0! h-0! min-w-0! min-h-0! border-0! -left-px!"
       />
-      <span className={`whitespace-nowrap ${nodeData.editing ? "opacity-0" : ""}`}>{nodeData.label}</span>
+      <span
+        className={`whitespace-nowrap ${nodeData.editing ? "opacity-0" : ""}`}
+      >
+        {nodeData.label}
+      </span>
       <Handle
         type="source"
         position={Position.Right}

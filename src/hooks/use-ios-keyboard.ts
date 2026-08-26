@@ -10,6 +10,11 @@ import { isIOS } from "@/platform";
 export function useIOSKeyboard() {
   const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  // How far the visual viewport has been pushed down inside the layout viewport.
+  // When iOS scrolls a focused field into view it offsets the visual viewport
+  // rather than the (position:fixed) layout, so a fixed overlay pinned at top:0
+  // appears to drift upward. Fixed overlays counter this by using top:offsetTop.
+  const [offsetTop, setOffsetTop] = useState(0);
 
   // Lock body position on iOS to prevent viewport scrolling
   useEffect(() => {
@@ -43,6 +48,10 @@ export function useIOSKeyboard() {
       // When keyboard is visible, use visualViewport height (actual visible area)
       const nextHeight = kbVisible ? vvHeight : window.innerHeight;
       setViewportHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+      // Track the visual-viewport offset so fixed overlays can re-pin to the
+      // actually-visible region instead of drifting when iOS shifts it.
+      const nextOffset = kbVisible ? Math.round(vv.offsetTop) : 0;
+      setOffsetTop((prev) => (prev === nextOffset ? prev : nextOffset));
       // Keep iOS from scrolling the layout viewport when the keyboard opens — but
       // only correct it when it has actually drifted. Calling scrollTo(0,0) on
       // every `scroll` event re-enters this handler and fights the browser's own
@@ -62,5 +71,5 @@ export function useIOSKeyboard() {
     };
   }, []);
 
-  return { viewportHeight, keyboardVisible };
+  return { viewportHeight, keyboardVisible, offsetTop };
 }

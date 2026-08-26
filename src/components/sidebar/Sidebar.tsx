@@ -797,7 +797,7 @@ export function Sidebar() {
       }}
       className={cn(
         "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
+        isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -908,12 +908,11 @@ export function Sidebar() {
           <div
             data-folder-path={node.path}
             className={cn(
-              // Match the document row's box (w-full + pr-2 + same py) so folders
-              // and docs share width AND vertical rhythm on mobile — the folder
-              // list looked cramped/narrower than docs before, and docs must stay
-              // compact (py-px on mobile), so folders follow the doc padding.
-              "group flex w-full items-center gap-1.5 rounded-md pr-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
-              isMobile ? "py-px" : "py-1.5",
+              // Match the document row's box (w-full + pr-2 + py-1.5) so folders
+              // and docs share the SAME width AND vertical rhythm on mobile.
+              // Unified with the comfortable doc-to-doc spacing (py-1.5) across
+              // every row type (docs/folders/teams/shared) per owner request.
+              "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1148,7 +1147,7 @@ export function Sidebar() {
           }}
           className={cn(
             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
+            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -1237,9 +1236,9 @@ export function Sidebar() {
             data-team-id={team.id}
             className={cn(
               // Same box as document rows (see personal folder header) so team
-              // folders and docs line up at the same width AND padding on mobile.
-              "group flex w-full items-center gap-1.5 rounded-md pr-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
-              isMobile ? "py-px" : "py-1.5",
+              // folders and docs line up at the same width AND padding on mobile
+              // — unified with the comfortable doc-to-doc spacing (py-1.5).
+              "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1621,17 +1620,25 @@ export function Sidebar() {
                       )}
                     />
                   </span>
-                  {!isMobile && (
-                    <span
-                      title="New mind map"
-                      onClick={() => {
-                        handleNew("/", "mindmap");
-                        setMyDocsExpanded(true);
-                      }}
-                    >
-                      <Network className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-pointer" />
-                    </span>
-                  )}
+                  <span
+                    title="New mind map"
+                    className={
+                      isMobile
+                        ? "flex items-center justify-center rounded-md p-1.5 -my-1 active:bg-accent"
+                        : ""
+                    }
+                    onClick={() => {
+                      handleNew("/", "mindmap");
+                      setMyDocsExpanded(true);
+                    }}
+                  >
+                    <Network
+                      className={cn(
+                        "text-muted-foreground hover:text-foreground cursor-pointer",
+                        isMobile ? "h-5 w-5" : "h-3.5 w-3.5",
+                      )}
+                    />
+                  </span>
                   <span
                     title="New folder"
                     className={
@@ -1749,8 +1756,7 @@ export function Sidebar() {
                             <div className="flex items-center">
                               <button
                                 className={cn(
-                                  "flex flex-1 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors",
-                                  isMobile ? "py-px" : "py-1.5",
+                                  "flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors",
                                 )}
                                 onClick={() =>
                                   setExpandedTeams((prev) => {
@@ -1899,7 +1905,7 @@ export function Sidebar() {
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
                             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors",
-                            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
+                            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",

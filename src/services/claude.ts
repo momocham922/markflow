@@ -74,6 +74,12 @@ async function callClaudeApi(
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
     let fullText = "";
+    // Assemble the full content-block list while streaming so the tool loop can
+    // detect client `tool_use` blocks AND still push live text deltas to the UI.
+    // Blocks are index-keyed because the SSE interleaves start/delta/stop events.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const blocks: Record<number, any> = {};
+    const jsonBuf: Record<number, string> = {};
 
     if (!reader) throw new Error("No response body");
 
@@ -88,25 +94,68 @@ async function callClaudeApi(
         lineBuf = lines.pop() || "";
 
         for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6);
-            if (data === "[DONE]") continue;
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.type === "content_block_delta" && parsed.delta?.text) {
-                fullText += parsed.delta.text;
-                onChunk(fullText);
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data);
+            const idx = parsed.index ?? 0;
+            switch (parsed.type) {
+              case "content_block_start": {
+                const cb = parsed.content_block ?? {};
+                blocks[idx] =
+                  cb.type === "text" ? { type: "text", text: "" } : { ...cb };
+                if (cb.type === "tool_use" || cb.type === "server_tool_use") {
+                  jsonBuf[idx] = "";
+                  blocks[idx].input = cb.input ?? {};
+                }
+                break;
               }
-            } catch {
-              // Skip unparseable lines
+              case "content_block_delta": {
+                const d = parsed.delta ?? {};
+                if (d.type === "text_delta" && typeof d.text === "string") {
+                  fullText += d.text;
+                  if (blocks[idx])
+                    blocks[idx].text = (blocks[idx].text || "") + d.text;
+                  else blocks[idx] = { type: "text", text: d.text };
+                  onChunk(fullText);
+                } else if (
+                  d.type === "input_json_delta" &&
+                  typeof d.partial_json === "string"
+                ) {
+                  jsonBuf[idx] = (jsonBuf[idx] || "") + d.partial_json;
+                } else if (typeof d.text === "string") {
+                  // Backward-compat with any delta shape that only carries text.
+                  fullText += d.text;
+                  onChunk(fullText);
+                }
+                break;
+              }
+              case "content_block_stop": {
+                if (jsonBuf[idx] !== undefined && blocks[idx]) {
+                  try {
+                    blocks[idx].input = JSON.parse(jsonBuf[idx] || "{}");
+                  } catch {
+                    /* keep whatever was parsed at start */
+                  }
+                }
+                break;
+              }
             }
+          } catch {
+            // Skip unparseable lines
           }
         }
       }
     } finally {
       reader.releaseLock();
     }
-    return fullText;
+
+    const content = Object.keys(blocks)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((k) => blocks[k]);
+    return { text: fullText, content };
   }
 
   return await response.json();
@@ -173,7 +222,7 @@ export async function sendToClaude(
       controller.signal,
     );
 
-    if (onChunk) return result as string;
+    if (onChunk) return (result as { text: string }).text;
 
     // Extract text from response
     if (Array.isArray(result.content)) {
@@ -224,38 +273,44 @@ export async function sendWithToolLoop(
         system: systemPrompt,
         messages: conversationMessages,
         max_tokens: 4096,
-        stream: false,
+        // Stream every iteration so ordinary chat (and the final answer after a
+        // tool call) shows live text. The SSE assembler in callClaudeApi still
+        // reconstructs the full content-block list so tool_use is detectable.
+        stream: true,
       };
       if (toolsList && !isLastChance) body.tools = toolsList;
 
-      const data = await callClaudeApi(
+      const streamed = (await callClaudeApi(
         idToken,
         body,
-        undefined,
+        (text) => onChunk?.(text),
         controller.signal,
-      );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      )) as { text: string; content: any[] };
 
-      if (!Array.isArray(data.content)) {
-        return data.content?.[0]?.text || "";
-      }
+      const content = Array.isArray(streamed?.content) ? streamed.content : [];
 
-      // Check for tool_use blocks
-      const toolUseBlocks = data.content.filter(
-        (b: { type: string }) => b.type === "tool_use",
+      // Check for client tool_use blocks (server tools like web_search are
+      // resolved by the API and never surface here).
+      const toolUseBlocks = content.filter(
+        (b: { type: string }) => b?.type === "tool_use",
       );
 
       if (toolUseBlocks.length === 0 || isLastChance) {
-        // No tool use — extract text. If there's an onChunk, send the final text through it.
-        const text = data.content
-          .filter((b: { type: string }) => b.type === "text")
-          .map((b: { text: string }) => b.text)
-          .join("");
+        // No tool use — extract text (already streamed via onChunk).
+        const text =
+          content
+            .filter((b: { type: string }) => b?.type === "text")
+            .map((b: { text: string }) => b.text || "")
+            .join("") ||
+          streamed?.text ||
+          "";
         if (onChunk) onChunk(text);
         return text;
       }
 
       // Add assistant response to conversation
-      conversationMessages.push({ role: "assistant", content: data.content });
+      conversationMessages.push({ role: "assistant", content });
 
       // Execute all tool calls and add results
       const toolResults: ContentBlock[] = [];

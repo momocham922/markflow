@@ -607,11 +607,41 @@ input::selection {
   line-height: 1.6 !important;
   word-break: break-word !important;
   overflow-wrap: break-word !important;
+  max-width: 100% !important;
+  overflow-x: hidden !important;
 }
 
 /* AI panel scrollbar — slightly narrower */
 .ai-panel-scroll [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
   width: 4px;
+}
+
+/* Force the AI panel's ScrollArea content to wrap to the container width.
+   Radix renders the viewport's child as `display: table; min-width: 100%`,
+   which sizes to intrinsic content — a long code line / wide table then makes
+   the whole message column overflow to the right. Forcing block layout pins the
+   content to the available width so overflow is confined to each pre/table. */
+.ai-panel-scroll [data-slot="scroll-area-viewport"] > div {
+  display: block !important;
+}
+
+/* Code blocks: never widen the column — scroll horizontally inside their box. */
+.ai-markdown.prose pre {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+}
+
+/* Tables: scroll inside their own box instead of stretching the column. */
+.ai-markdown.prose table {
+  display: block !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+}
+
+/* Images (e.g. generated / pasted) never exceed the column width. */
+.ai-markdown.prose img {
+  max-width: 100% !important;
+  height: auto !important;
 }
 
 /* Research panel: force ScrollArea content to wrap to the container width.
@@ -927,6 +957,17 @@ input::selection {
   padding-bottom: 40vh !important;
   font-size: 11px !important;
   line-height: 1.5 !important;
+}
+
+/* ---- Preview pane paper ---- */
+/* Each preview theme supplies its own signature ground via --prose-bg (injected
+   at :root by the preview <style>). This is what makes Dracula's plum, Solarized's
+   cream, Nord's polar-night, etc. feel authentic instead of floating text on the
+   app background. Falls back to the app background so neutral themes (GitHub) and
+   custom themes without a --prose-bg stay transparent. Scoped to the preview
+   scroll container so the AI panel and editor pane are untouched. */
+.preview-scroll {
+  background: var(--prose-bg, var(--background));
 }
 
 /* ---- Mobile preview ---- */

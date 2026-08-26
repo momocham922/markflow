@@ -144,7 +144,7 @@ function App() {
   const researchCardCount = useResearchStore((s) => s.cards.length);
   const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
   const researchAnalyzing = useResearchStore((s) => s.analyzing);
-  const { viewportHeight, keyboardVisible } = useIOSKeyboard();
+  const { viewportHeight, keyboardVisible, offsetTop } = useIOSKeyboard();
   const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(
     sidebarOpen,
     toggleSidebar,
@@ -1441,7 +1441,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           <div
             className="fixed z-40 flex flex-col safe-top bg-background"
             style={{
-              top: 0,
+              // Pin to the visual-viewport top (offsetTop) when the keyboard is
+              // up so the overlay tracks the visible region instead of drifting
+              // as iOS scrolls the focused input into view.
+              top: keyboardVisible ? offsetTop : 0,
               left: 0,
               right: 0,
               ...(keyboardVisible
@@ -1457,7 +1460,10 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               />
             )}
             {rightPanel === "ai" && (
-              <AiPanel onClose={() => setRightPanel("none")} />
+              <AiPanel
+                onClose={() => setRightPanel("none")}
+                keyboardVisible={keyboardVisible}
+              />
             )}
           </div>
         )}

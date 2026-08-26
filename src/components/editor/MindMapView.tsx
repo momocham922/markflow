@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   ReactFlow,
   Controls,
@@ -9,8 +9,16 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { MindMapNode, type MindMapNodeData, mindMapThemes, type MindMapThemeId, type EdgeStyle } from "./MindMapNode";
+import { Palette } from "lucide-react";
+import {
+  MindMapNode,
+  type MindMapNodeData,
+  mindMapThemes,
+  type MindMapThemeId,
+  type EdgeStyle,
+} from "./MindMapNode";
 import { useAppStore } from "@/stores/app-store";
+import { isMobile } from "@/platform";
 
 const nodeTypes = { mindmap: MindMapNode };
 
@@ -27,7 +35,13 @@ interface HeadingNode {
  * Returns a root node whose children are the top-level headings.
  */
 function parseHeadings(content: string, docTitle: string): HeadingNode {
-  const root: HeadingNode = { id: "root", label: docTitle || "Document", level: 0, lineNumber: 0, children: [] };
+  const root: HeadingNode = {
+    id: "root",
+    label: docTitle || "Document",
+    level: 0,
+    lineNumber: 0,
+    children: [],
+  };
   const lines = content.split("\n");
 
   const stack: HeadingNode[] = [root];
@@ -70,11 +84,12 @@ function countWideChars(text: string): number {
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     if (
-      (cp >= 0x3000 && cp <= 0x9FFF) ||
-      (cp >= 0xF900 && cp <= 0xFAFF) ||
-      (cp >= 0xFF01 && cp <= 0xFF60) ||
-      (cp >= 0xAC00 && cp <= 0xD7AF)
-    ) count++;
+      (cp >= 0x3000 && cp <= 0x9fff) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xff01 && cp <= 0xff60) ||
+      (cp >= 0xac00 && cp <= 0xd7af)
+    )
+      count++;
   }
   return count;
 }
@@ -84,7 +99,10 @@ function estimateNodeWidth(label: string, level: number): number {
   const charW = LEVEL_CHAR_WIDTHS[idx];
   const wide = countWideChars(label);
   const narrow = label.length - wide;
-  return Math.max(narrow * charW + wide * charW * 1.8 + LEVEL_PADDING_X[idx], 60);
+  return Math.max(
+    narrow * charW + wide * charW * 1.8 + LEVEL_PADDING_X[idx],
+    60,
+  );
 }
 
 // Estimate node height per level
@@ -95,14 +113,17 @@ function estimateNodeHeight(level: number): number {
 }
 
 // Layout constants
-const H_GAP = 60;    // horizontal gap between node edge and child node start
-const V_GAP = 24;    // vertical gap between sibling nodes
+const H_GAP = 60; // horizontal gap between node edge and child node start
+const V_GAP = 24; // vertical gap between sibling nodes
 
 /**
  * Compute tree layout positions with dynamic sizing.
  * Returns flat arrays of nodes and edges for ReactFlow.
  */
-function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { nodes: Node[]; edges: Edge[] } {
+function layoutTree(
+  root: HeadingNode,
+  themeId: MindMapThemeId = "lavender",
+): { nodes: Node[]; edges: Edge[] } {
   const themeObj = mindMapThemes[themeId] ?? mindMapThemes.lavender;
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -127,17 +148,21 @@ function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { 
       id: node.id,
       type: "mindmap",
       position: { x, y: yCenter - nodeH / 2 },
-      data: { label: node.label, level: node.level, themeId, lineNumber: node.lineNumber } satisfies MindMapNodeData,
+      data: {
+        label: node.label,
+        level: node.level,
+        themeId,
+        lineNumber: node.lineNumber,
+      } satisfies MindMapNodeData,
     });
 
     if (node.children.length === 0) return;
 
     const nodeW = estimateNodeWidth(node.label, node.level);
     const childX = x + nodeW + H_GAP;
-    const totalChildHeight = node.children.reduce(
-      (sum, c) => sum + subtreeHeight(c),
-      0,
-    ) + (node.children.length - 1) * V_GAP;
+    const totalChildHeight =
+      node.children.reduce((sum, c) => sum + subtreeHeight(c), 0) +
+      (node.children.length - 1) * V_GAP;
 
     let childY = yCenter - totalChildHeight / 2;
 
@@ -145,13 +170,20 @@ function layoutTree(root: HeadingNode, themeId: MindMapThemeId = "lavender"): { 
       const h = subtreeHeight(child);
       const childYEnd = childY + h;
 
-      const edgeTypeMap: Record<EdgeStyle, string> = { bezier: "default", straight: "straight", step: "smoothstep" };
+      const edgeTypeMap: Record<EdgeStyle, string> = {
+        bezier: "default",
+        straight: "straight",
+        step: "smoothstep",
+      };
       edges.push({
         id: `${node.id}-${child.id}`,
         source: node.id,
         target: child.id,
         type: edgeTypeMap[themeObj.edgeStyle] ?? "default",
-        style: { stroke: themeObj.edgeColor, strokeWidth: themeObj.edgeStyle === "step" ? 2 : 1.5 },
+        style: {
+          stroke: themeObj.edgeColor,
+          strokeWidth: themeObj.edgeStyle === "step" ? 2 : 1.5,
+        },
       });
 
       layout(child, childX, childY, childYEnd);
@@ -172,17 +204,26 @@ interface MindMapViewProps {
 }
 
 export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
-  const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) || "lavender") as MindMapThemeId;
+  const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) ||
+    "lavender") as MindMapThemeId;
+  const setThemeSettings = useAppStore((s) => s.setThemeSettings);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const { nodes, edges } = useMemo(() => {
     const tree = parseHeadings(content, title);
     if (tree.children.length === 0) {
       return {
-        nodes: [{
-          id: "root",
-          type: "mindmap",
-          position: { x: 200, y: 200 },
-          data: { label: title || "Document", level: 0, themeId: mindMapTheme } satisfies MindMapNodeData,
-        }],
+        nodes: [
+          {
+            id: "root",
+            type: "mindmap",
+            position: { x: 200, y: 200 },
+            data: {
+              label: title || "Document",
+              level: 0,
+              themeId: mindMapTheme,
+            } satisfies MindMapNodeData,
+          },
+        ],
         edges: [],
       };
     }
@@ -190,7 +231,48 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
   }, [content, title, mindMapTheme]);
 
   return (
-    <div className="h-full w-full">
+    <div className="relative h-full w-full">
+      {/* Floating theme picker — the mind-map preview mode had no way to change
+          its theme on either desktop or mobile. This overlays a Palette control
+          in the top-right that writes themeSettings.mindMapTheme. */}
+      <div className="absolute right-3 top-3 z-10">
+        <button
+          className={`flex items-center gap-1.5 rounded-md border border-border bg-card/90 text-foreground shadow-sm backdrop-blur transition-colors hover:bg-accent ${
+            isMobile ? "px-3 py-2 text-sm" : "px-2.5 py-1.5 text-xs"
+          }`}
+          onClick={() => setThemeMenuOpen((v) => !v)}
+          title="Change mind map theme"
+        >
+          <Palette className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
+          Theme
+        </button>
+        {themeMenuOpen && (
+          <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-border bg-card p-2 shadow-lg">
+            {(Object.keys(mindMapThemes) as MindMapThemeId[]).map((id) => (
+              <button
+                key={id}
+                className={`flex w-full items-center gap-2 rounded-md px-2.5 transition-colors ${
+                  isMobile ? "py-2 text-sm" : "py-1.5 text-xs"
+                } ${
+                  mindMapTheme === id
+                    ? "bg-accent font-medium"
+                    : "hover:bg-accent/50"
+                }`}
+                onClick={() => {
+                  setThemeSettings({ mindMapTheme: id });
+                  setThemeMenuOpen(false);
+                }}
+              >
+                <span
+                  className="h-3 w-3 shrink-0 rounded-full"
+                  style={{ backgroundColor: mindMapThemes[id].swatch }}
+                />
+                {mindMapThemes[id].name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -202,10 +284,18 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={!!onNodeClick}
-        onNodeClick={onNodeClick ? (_event, node) => {
-          const data = node.data as unknown as MindMapNodeData;
-          if (data.lineNumber != null) onNodeClick({ lineNumber: data.lineNumber, text: data.label });
-        } : undefined}
+        onNodeClick={
+          onNodeClick
+            ? (_event, node) => {
+                const data = node.data as unknown as MindMapNodeData;
+                if (data.lineNumber != null)
+                  onNodeClick({
+                    lineNumber: data.lineNumber,
+                    text: data.label,
+                  });
+              }
+            : undefined
+        }
         panOnDrag
         zoomOnScroll
         className="bg-background"
@@ -214,7 +304,12 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
           showInteractive={false}
           className="bg-card! border-border! shadow-sm! [&>button]:bg-card! [&>button]:border-border! [&>button]:text-foreground!"
         />
-        <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border)" />
+        <Background
+          variant={BackgroundVariant.Dots}
+          gap={24}
+          size={1}
+          color="var(--border)"
+        />
       </ReactFlow>
     </div>
   );
