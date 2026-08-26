@@ -83,6 +83,10 @@ const turndown = new TurndownService({
 type ViewMode = "editor" | "canvas" | "visualization";
 type RightPanel = "none" | "versions" | "ai";
 
+// 放射状ドキュメントビュー（Visualization）は未完成のため非表示。
+// 完成させて再公開する際に true に戻す。
+const VISUALIZATION_ENABLED = false;
+
 function App() {
   const {
     sidebarOpen,
@@ -1218,49 +1222,50 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   </Button>
                 )}
                 {/* View mode toggle */}
-                {isMobile ? (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-11 w-11"
-                    onClick={() => {
-                      const modes: ViewMode[] = ["editor", "visualization"];
-                      setViewMode(
-                        modes[(modes.indexOf(viewMode) + 1) % modes.length],
-                      );
-                    }}
-                    title={viewMode === "editor" ? "Editor" : "Visualization"}
-                  >
-                    {viewMode === "editor" ? (
-                      <PenLine className="h-5 w-5" />
-                    ) : (
-                      <Network className="h-5 w-5" />
-                    )}
-                  </Button>
-                ) : (
-                  <div className="flex items-center rounded-md border border-border p-0.5">
+                {VISUALIZATION_ENABLED &&
+                  (isMobile ? (
                     <Button
-                      variant={viewMode === "editor" ? "secondary" : "ghost"}
+                      variant="ghost"
                       size="icon"
-                      className="h-6 w-6"
-                      onClick={() => setViewMode("editor")}
-                      title="Editor"
+                      className="h-11 w-11"
+                      onClick={() => {
+                        const modes: ViewMode[] = ["editor", "visualization"];
+                        setViewMode(
+                          modes[(modes.indexOf(viewMode) + 1) % modes.length],
+                        );
+                      }}
+                      title={viewMode === "editor" ? "Editor" : "Visualization"}
                     >
-                      <PenLine className="h-3.5 w-3.5" />
+                      {viewMode === "editor" ? (
+                        <PenLine className="h-5 w-5" />
+                      ) : (
+                        <Network className="h-5 w-5" />
+                      )}
                     </Button>
-                    <Button
-                      variant={
-                        viewMode === "visualization" ? "secondary" : "ghost"
-                      }
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => setViewMode("visualization")}
-                      title="Visualization"
-                    >
-                      <Network className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                )}
+                  ) : (
+                    <div className="flex items-center rounded-md border border-border p-0.5">
+                      <Button
+                        variant={viewMode === "editor" ? "secondary" : "ghost"}
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => setViewMode("editor")}
+                        title="Editor"
+                      >
+                        <PenLine className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant={
+                          viewMode === "visualization" ? "secondary" : "ghost"
+                        }
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => setViewMode("visualization")}
+                        title="Visualization"
+                      >
+                        <Network className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  ))}
                 {/* Import markdown — desktop only */}
                 {!isMobile && (
                   <Button
@@ -1493,7 +1498,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           onOpenChange={setShortcutsOpen}
         />
         <CommandPalette
-          onViewChange={setViewMode}
           onTogglePanel={togglePanel}
           onShare={() => setShareOpen(true)}
           onExportHtml={exportHtml}

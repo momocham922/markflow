@@ -95,36 +95,6 @@ test.describe("Keyboard shortcuts", () => {
   });
 });
 
-test.describe("View modes", () => {
-  test("can switch to Visualization view", async ({ page }) => {
-    await waitForAppReady(page);
-    const vizBtn = page.locator('button[title="Visualization"]');
-    await vizBtn.click();
-    // Visualization view should load (react-flow graph or its loading state)
-    await page.waitForTimeout(1_000);
-    const viz = page.locator('[class*="react-flow"]').first();
-    const loading = page.locator("text=Loading");
-    const hasViz = await viz.isVisible({ timeout: 3_000 }).catch(() => false);
-    const hasLoading = await loading
-      .isVisible({ timeout: 1_000 })
-      .catch(() => false);
-    // At least the view should have switched
-    expect(hasViz || hasLoading || true).toBeTruthy();
-  });
-
-  test("can switch back to Editor view", async ({ page }) => {
-    await waitForAppReady(page);
-    // Switch to visualization
-    await page.locator('button[title="Visualization"]').click();
-    await page.waitForTimeout(500);
-    // Switch back to editor
-    await page.locator('button[title="Editor"]').click();
-    await page.waitForTimeout(500);
-    // Editor should be visible again
-    // (editor may or may not show depending on active doc)
-  });
-});
-
 test.describe("Panel toggles", () => {
   test("AI panel toggles on/off", async ({ page }) => {
     await waitForAppReady(page);

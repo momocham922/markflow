@@ -9,10 +9,9 @@ test.describe("App initialization", () => {
     });
   });
 
-  test("renders top bar with view mode toggle", async ({ page }) => {
+  test("renders top bar with import button", async ({ page }) => {
     await waitForAppReady(page);
-    await expect(page.locator('button[title="Editor"]')).toBeVisible();
-    await expect(page.locator('button[title="Visualization"]')).toBeVisible();
+    await expect(page.locator('button[title="Import .md file"]')).toBeVisible();
   });
 
   test("renders toolbar hint text", async ({ page }) => {

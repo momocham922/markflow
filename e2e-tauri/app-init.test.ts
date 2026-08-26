@@ -5,16 +5,10 @@ describe("App initialization", () => {
     await waitForAppReady();
   });
 
-  it("renders view mode toggle", async () => {
-    const editorBtn = await $('button[title="Editor"]');
-    await editorBtn.waitForExist({ timeout: 5000 });
-    expect(await editorBtn.isDisplayed()).toBe(true);
-  });
-
-  it("renders visualization button", async () => {
-    const vizBtn = await $('button[title="Visualization"]');
-    await vizBtn.waitForExist({ timeout: 5000 });
-    expect(await vizBtn.isDisplayed()).toBe(true);
+  it("renders import button in top bar", async () => {
+    const importBtn = await $('button[title="Import .md file"]');
+    await importBtn.waitForExist({ timeout: 5000 });
+    expect(await importBtn.isDisplayed()).toBe(true);
   });
 
   it("renders search input", async () => {

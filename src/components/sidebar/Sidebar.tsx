@@ -797,7 +797,7 @@ export function Sidebar() {
       }}
       className={cn(
         "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
+        isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -908,10 +908,12 @@ export function Sidebar() {
           <div
             data-folder-path={node.path}
             className={cn(
-              // Match the document row's box (w-full + pr-2 + py-1.5) so folders
-              // and docs are the same width and vertical rhythm on mobile — the
-              // folder list looked cramped and narrower than the doc list before.
-              "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              // Match the document row's box (w-full + pr-2 + same py) so folders
+              // and docs share width AND vertical rhythm on mobile — the folder
+              // list looked cramped/narrower than docs before, and docs must stay
+              // compact (py-px on mobile), so folders follow the doc padding.
+              "group flex w-full items-center gap-1.5 rounded-md pr-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile ? "py-px" : "py-1.5",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1146,7 +1148,7 @@ export function Sidebar() {
           }}
           className={cn(
             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
+            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -1235,8 +1237,9 @@ export function Sidebar() {
             data-team-id={team.id}
             className={cn(
               // Same box as document rows (see personal folder header) so team
-              // folders and docs line up at the same width on mobile.
-              "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              // folders and docs line up at the same width AND padding on mobile.
+              "group flex w-full items-center gap-1.5 rounded-md pr-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile ? "py-px" : "py-1.5",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1747,7 +1750,7 @@ export function Sidebar() {
                               <button
                                 className={cn(
                                   "flex flex-1 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors",
-                                  isMobile ? "py-1" : "py-1.5",
+                                  isMobile ? "py-px" : "py-1.5",
                                 )}
                                 onClick={() =>
                                   setExpandedTeams((prev) => {
@@ -1786,19 +1789,35 @@ export function Sidebar() {
                                   {allTeamDocs.length}
                                 </span>
                               </button>
-                              <div className="flex gap-0.5 pr-1">
-                                <Plus
-                                  className={cn(
-                                    "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer",
-                                    isMobile ? "h-4.5 w-4.5" : "h-3 w-3",
-                                  )}
+                              <div
+                                className={cn(
+                                  "flex pr-1",
+                                  isMobile ? "gap-1" : "gap-0.5",
+                                )}
+                              >
+                                <span
+                                  title="New team document"
+                                  className={
+                                    isMobile
+                                      ? "flex items-center justify-center rounded-md p-1.5 -my-1 active:bg-accent"
+                                      : ""
+                                  }
                                   onClick={() => handleCreateTeamDoc(team)}
-                                />
-                                <FolderPlus
-                                  className={cn(
-                                    "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer",
-                                    isMobile ? "h-4.5 w-4.5" : "h-3 w-3",
-                                  )}
+                                >
+                                  <Plus
+                                    className={cn(
+                                      "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer",
+                                      isMobile ? "h-5 w-5" : "h-3 w-3",
+                                    )}
+                                  />
+                                </span>
+                                <span
+                                  title="New team folder"
+                                  className={
+                                    isMobile
+                                      ? "flex items-center justify-center rounded-md p-1.5 -my-1 active:bg-accent"
+                                      : ""
+                                  }
                                   onClick={() => {
                                     setCreatingTeamFolderIn({
                                       teamId: team.id,
@@ -1809,7 +1828,14 @@ export function Sidebar() {
                                       (prev) => new Set([...prev, team.id]),
                                     );
                                   }}
-                                />
+                                >
+                                  <FolderPlus
+                                    className={cn(
+                                      "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer",
+                                      isMobile ? "h-5 w-5" : "h-3 w-3",
+                                    )}
+                                  />
+                                </span>
                               </div>
                             </div>
                             {isExpanded && (
@@ -1873,7 +1899,7 @@ export function Sidebar() {
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
                             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors",
-                            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
+                            isMobile ? "pl-3 py-px" : "pl-2.5 py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",

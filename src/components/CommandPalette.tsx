@@ -13,8 +13,6 @@ import {
   Plus,
   Moon,
   Sun,
-  PenLine,
-  LayoutGrid,
   History,
   Bot,
   Share2,
@@ -30,7 +28,6 @@ import { useAppStore, type Document } from "@/stores/app-store";
 import { track } from "@/services/telemetry";
 
 interface CommandPaletteProps {
-  onViewChange: (view: "editor" | "canvas") => void;
   onTogglePanel: (panel: "versions" | "ai") => void;
   onShare: () => void;
   onExportHtml: () => void;
@@ -46,7 +43,6 @@ interface CommandPaletteProps {
 }
 
 export function CommandPalette({
-  onViewChange,
   onTogglePanel,
   onShare,
   onExportHtml,
@@ -163,23 +159,6 @@ export function CommandPalette({
                 {doc.title}
               </CommandItem>
             ))}
-          </CommandGroup>
-
-          <CommandSeparator />
-
-          <CommandGroup heading="Views">
-            <CommandItem
-              onSelect={() => handleSelect(() => onViewChange("editor"))}
-            >
-              <PenLine className="mr-2 h-4 w-4" />
-              Editor View
-            </CommandItem>
-            <CommandItem
-              onSelect={() => handleSelect(() => onViewChange("canvas"))}
-            >
-              <LayoutGrid className="mr-2 h-4 w-4" />
-              Canvas View
-            </CommandItem>
           </CommandGroup>
 
           <CommandSeparator />

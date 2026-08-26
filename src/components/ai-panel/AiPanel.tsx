@@ -888,6 +888,22 @@ export function AiPanel({ onClose }: AiPanelProps) {
       if (!content.trim()) {
         return "Error: `content` was empty. Provide the non-empty Markdown to write; nothing was changed.";
       }
+      // iOS: the CodeMirror view sits behind this full-screen overlay and is
+      // non-focused, so a direct dispatch doesn't reliably apply the edit.
+      // Mirror the manual insert buttons — queue via pendingInsert, close the
+      // panel, and let Editor.tsx flush into the (now focused) editor.
+      // (Same fix as the manual Replace/Append buttons, commit 756df07.)
+      if (isIOS) {
+        const pmode =
+          mode === "replace_document"
+            ? "replaceAll"
+            : mode === "replace_selection"
+              ? "replace"
+              : "append";
+        setPendingInsert({ text: content, mode: pmode });
+        onClose();
+        return `Queued ${content.length} characters to the document (mode: ${mode}); the editor reopened and applied it. Confirm briefly to the user.`;
+      }
       let applied = false;
       let queued = false;
       switch (mode) {
@@ -936,6 +952,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
       insertAtCursor,
       appendToDoc,
       setPendingInsert,
+      onClose,
     ],
   );
 
@@ -1902,13 +1919,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
       <div
         className={`border-t border-border ${isIOS ? "pt-2 pb-7 px-5" : "p-2"}`}
       >
-        <div className="flex gap-1 items-end">
+        <div className={cn("flex items-end", isMobile ? "gap-1.5" : "gap-1")}>
           <Button
             variant="ghost"
             size="icon"
             className={
               isMobile
-                ? "h-11 w-11 shrink-0 cursor-pointer"
+                ? "h-11 w-9 shrink-0 cursor-pointer"
                 : "h-7 w-7 shrink-0 cursor-pointer"
             }
             onClick={handleImageAttach}
@@ -1922,7 +1939,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
             size="icon"
             className={cn(
               "shrink-0 cursor-pointer",
-              isMobile ? "h-11 w-11" : "h-7 w-7",
+              isMobile ? "h-11 w-9" : "h-7 w-7",
               // Tint the image icon when it's actionable so its image-generation
               // role is discoverable (touch has no hover tooltip).
               input.trim() && !streaming && !generatingImage
@@ -1953,7 +1970,15 @@ export function AiPanel({ onClose }: AiPanelProps) {
             onPaste={handlePaste}
             rows={1}
             disabled={streaming}
-            className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border"
+            className={cn(
+              "flex-1 rounded-md border border-input bg-background outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border",
+              // Mobile: min-h matches the 44px buttons (kills the jagged offset
+              // vs. the autosized textarea) and text-base(16px) prevents iOS
+              // focus-zoom. Desktop keeps the compact sizing.
+              isMobile
+                ? "min-h-11 px-3 py-2.5 text-base"
+                : "px-2 py-1.5 text-xs",
+            )}
           />
           <Button
             size="icon"

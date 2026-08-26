@@ -1046,7 +1046,7 @@ export function VoicePanel({
           </div>
         )}
 
-        {isDesktop && <div className="flex-1" />}
+        <div className="flex-1" />
 
         {isTauri && isDesktop && !isRecording && (
           <Button
