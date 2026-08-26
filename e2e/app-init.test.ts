@@ -12,7 +12,7 @@ test.describe("App initialization", () => {
   test("renders top bar with view mode toggle", async ({ page }) => {
     await waitForAppReady(page);
     await expect(page.locator('button[title="Editor"]')).toBeVisible();
-    await expect(page.locator('button[title="Canvas"]')).toBeVisible();
+    await expect(page.locator('button[title="Visualization"]')).toBeVisible();
   });
 
   test("renders toolbar hint text", async ({ page }) => {

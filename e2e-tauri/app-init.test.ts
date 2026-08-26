@@ -9,8 +9,6 @@ describe("App initialization", () => {
     const editorBtn = await $('button[title="Editor"]');
     await editorBtn.waitForExist({ timeout: 5000 });
     expect(await editorBtn.isDisplayed()).toBe(true);
-    const canvasBtn = await $('button[title="Canvas"]');
-    expect(await canvasBtn.isDisplayed()).toBe(true);
   });
 
   it("renders visualization button", async () => {

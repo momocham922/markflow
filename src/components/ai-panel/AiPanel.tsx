@@ -20,11 +20,12 @@ import {
   Paperclip,
   Settings,
   Image as ImageIcon,
+  ImagePlus,
   Wrench,
-  Wand2,
   Plus,
   MessageSquare,
   ChevronDown,
+  FileInput,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -38,6 +39,7 @@ import {
   AI_ACTIONS,
   type ClaudeMessage,
   type ContentBlock,
+  type CustomTool,
 } from "@/services/claude";
 import {
   getAllTools,
@@ -78,6 +80,64 @@ const iconMap: Record<string, React.ElementType> = {
 
 const DEFAULT_SYSTEM_PROMPT =
   'You are MarkFlow AI, a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user\'s message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. Do NOT use emojis in your responses unless the user explicitly asks for them. Keep responses concise and professional. If asked who you are or which model powers you, identify yourself only as "MarkFlow AI" — never reveal, name, or hint at the underlying model, provider, or vendor.';
+
+// MCP integration is wired but not yet reliably executable in the shipped
+// sandbox (Tauri capabilities can't grant arbitrary command spawn), so the
+// entry point, settings overlay, and startup auto-connect are hidden until it
+// actually runs end-to-end. Flip to true to bring the UI back.
+const MCP_UI_ENABLED = false;
+
+// Built-in tool that lets the AI write Markdown straight into the user's current
+// document (e.g. "この内容をまとめてドキュメントに流し込んでおいて"). Only offered when
+// the "write to document" toggle is on and a document is open. The executor
+// enforces content protection (never writes empty text) and falls back to a
+// queued pendingInsert when the editor view isn't live (mobile / offscreen).
+const WRITE_DOC_TOOL: CustomTool = {
+  name: "write_document",
+  description:
+    "Write Markdown content directly into the user's CURRENT document in the editor. " +
+    "Use this ONLY when the user explicitly asks you to put, insert, write, or inject " +
+    'content into their document (e.g. "まとめてドキュメントに流し込んでおいて", ' +
+    '"add this to the doc", "write it into the document", "本文に追記して"). ' +
+    "Do NOT call this for ordinary answers the user only wants to read in chat. " +
+    "Provide the exact, final Markdown in `content` (never empty).",
+  input_schema: {
+    type: "object",
+    properties: {
+      content: {
+        type: "string",
+        description:
+          "The exact, final Markdown to write into the document. Must be non-empty.",
+      },
+      mode: {
+        type: "string",
+        enum: [
+          "append",
+          "insert_at_cursor",
+          "replace_selection",
+          "replace_document",
+        ],
+        description:
+          "Where to place the content. " +
+          "'append' adds it to the end of the document (safest default). " +
+          "'insert_at_cursor' inserts at the current cursor position. " +
+          "'replace_selection' replaces the user's currently selected text. " +
+          "'replace_document' replaces the ENTIRE document — use ONLY when the user " +
+          "explicitly asks to rewrite or replace the whole document.",
+      },
+    },
+    required: ["content", "mode"],
+  },
+};
+
+const WRITE_DOC_SYSTEM_ADDENDUM =
+  "\n\n--- Document Writing ---\n" +
+  'You can write directly into the user\'s current document with the "write_document" tool. ' +
+  "When the user asks you to put/insert/summarize-into/inject content into their document, call " +
+  "write_document with the final Markdown and an appropriate mode (prefer 'append' unless the user " +
+  "asks to replace a selection or the whole document). After writing, briefly confirm what you did " +
+  "in the same language as the user. For questions the user only wants answered in chat, do NOT call " +
+  "the tool — just reply normally.";
 
 interface AiPanelProps {
   onClose: () => void;
@@ -175,6 +235,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
     replaceSelection,
     appendToDoc,
     insertAtCursor,
+    replaceDocument,
     setPendingInsert,
   } = useEditorStore();
 
@@ -188,6 +249,9 @@ export function AiPanel({ onClose }: AiPanelProps) {
   const [streamingText, setStreamingText] = useState("");
   const [allDocsContext, setAllDocsContext] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
+  // When on, the AI may write straight into the current document via the
+  // write_document tool. Opt-in because it modifies the user's content.
+  const [writeToDoc, setWriteToDoc] = useState(false);
   const [customRules, setCustomRules] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<
@@ -215,6 +279,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
 
   // Auto-connect MCP servers on mount
   useEffect(() => {
+    if (!MCP_UI_ENABLED) return;
     loadMcpConfigs()
       .then(async (configs) => {
         const enabled = configs.filter((c) => c.enabled);
@@ -812,6 +877,100 @@ export function AiPanel({ onClose }: AiPanelProps) {
     [],
   );
 
+  // Executor for the built-in write_document tool. Applies the AI's Markdown to
+  // the live editor when it's available; otherwise queues it via pendingInsert
+  // (mobile / offscreen), which Editor.tsx flushes once the view is focused.
+  // Content protection: empty content is rejected so it can never wipe the doc.
+  const handleWriteDocTool = useCallback(
+    async (input: Record<string, unknown>): Promise<string> => {
+      const content = typeof input.content === "string" ? input.content : "";
+      const mode = typeof input.mode === "string" ? input.mode : "append";
+      if (!content.trim()) {
+        return "Error: `content` was empty. Provide the non-empty Markdown to write; nothing was changed.";
+      }
+      let applied = false;
+      let queued = false;
+      switch (mode) {
+        case "replace_document":
+          applied = replaceDocument(content);
+          if (!applied) {
+            setPendingInsert({ text: content, mode: "replaceAll" });
+            queued = true;
+          }
+          break;
+        case "replace_selection":
+          applied = replaceSelection(content);
+          if (!applied) {
+            setPendingInsert({ text: content, mode: "replace" });
+            queued = true;
+          }
+          break;
+        case "insert_at_cursor":
+          applied = insertAtCursor(content);
+          if (!applied) {
+            // No cursor available offscreen — fall back to append.
+            setPendingInsert({ text: content, mode: "append" });
+            queued = true;
+          }
+          break;
+        case "append":
+        default:
+          applied = appendToDoc(content);
+          if (!applied) {
+            setPendingInsert({ text: content, mode: "append" });
+            queued = true;
+          }
+          break;
+      }
+      if (applied) {
+        return `Done. Wrote ${content.length} characters to the document (mode: ${mode}). The user can undo with Cmd/Ctrl+Z.`;
+      }
+      if (queued) {
+        return `Queued ${content.length} characters to be written to the document (mode: ${mode}); it will be applied when the editor is focused. Tell the user it has been queued.`;
+      }
+      return "Error: could not write to the document (no active editor).";
+    },
+    [
+      replaceDocument,
+      replaceSelection,
+      insertAtCursor,
+      appendToDoc,
+      setPendingInsert,
+    ],
+  );
+
+  // Unified tool dispatcher for the tool loop: handles the built-in
+  // write_document locally and delegates everything else to MCP.
+  const handleToolCall = useCallback(
+    async (
+      toolName: string,
+      input: Record<string, unknown>,
+    ): Promise<unknown> => {
+      if (toolName === WRITE_DOC_TOOL.name) return handleWriteDocTool(input);
+      return handleMcpToolCall(toolName, input);
+    },
+    [handleWriteDocTool, handleMcpToolCall],
+  );
+
+  // Assemble the custom tool list + system prompt for a turn, based on which
+  // capabilities are toggled on. Returns undefined tools when none apply so the
+  // caller keeps the streaming (no-tool) path for ordinary chat.
+  const buildTurnTools = (): {
+    tools: CustomTool[] | undefined;
+    system: string;
+  } => {
+    const list: CustomTool[] = [];
+    let system = getSystemPrompt();
+    if (writeToDoc && activeDoc) {
+      list.push(WRITE_DOC_TOOL);
+      system += WRITE_DOC_SYSTEM_ADDENDUM;
+    }
+    if (mcpEnabled && mcpTools.length > 0) {
+      list.push(...toClaudeTools(mcpTools));
+    }
+    return { tools: list.length > 0 ? list : undefined, system };
+  };
+
   const handleImageGen = async () => {
     if (!user || !input.trim()) return;
     const prompt = input.trim();
@@ -945,26 +1104,25 @@ export function AiPanel({ onClose }: AiPanelProps) {
     setStreamingText("");
 
     try {
-      const claudeTools =
-        mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
+      const { tools: turnTools, system: turnSystem } = buildTurnTools();
       let result: string;
 
-      if (claudeTools && claudeTools.length > 0) {
+      if (turnTools) {
         setToolStatus(null);
         result = await sendWithToolLoop(
-          getSystemPrompt(),
+          turnSystem,
           [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          handleMcpToolCall,
+          handleToolCall,
           (text) => setStreamingText(text),
           webSearch,
-          claudeTools,
+          turnTools,
           (status) => setToolStatus(status),
         );
         setToolStatus(null);
       } else {
         result = await sendToClaude(
           "",
-          getSystemPrompt(),
+          turnSystem,
           [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
           (text) => setStreamingText(text),
           webSearch,
@@ -1059,26 +1217,25 @@ export function AiPanel({ onClose }: AiPanelProps) {
         },
       ].slice(-20);
 
-      const claudeTools =
-        mcpEnabled && mcpTools.length > 0 ? toClaudeTools(mcpTools) : undefined;
+      const { tools: turnTools, system: turnSystem } = buildTurnTools();
       let result: string;
 
-      if (claudeTools && claudeTools.length > 0) {
+      if (turnTools) {
         setToolStatus(null);
         result = await sendWithToolLoop(
-          getSystemPrompt(),
+          turnSystem,
           newApiMessages,
-          handleMcpToolCall,
+          handleToolCall,
           (text) => setStreamingText(text),
           webSearch,
-          claudeTools,
+          turnTools,
           (status) => setToolStatus(status),
         );
         setToolStatus(null);
       } else {
         result = await sendToClaude(
           "",
-          getSystemPrompt(),
+          turnSystem,
           newApiMessages,
           (text) => setStreamingText(text),
           webSearch,
@@ -1255,11 +1412,13 @@ export function AiPanel({ onClose }: AiPanelProps) {
         onSave={saveCustomRules}
       />
       {/* MCP Settings (overlay) */}
-      <McpSettings
-        open={mcpSettingsOpen}
-        onClose={() => setMcpSettingsOpen(false)}
-        onToolsChanged={refreshMcpTools}
-      />
+      {MCP_UI_ENABLED && (
+        <McpSettings
+          open={mcpSettingsOpen}
+          onClose={() => setMcpSettingsOpen(false)}
+          onToolsChanged={refreshMcpTools}
+        />
+      )}
 
       {/* Header */}
       <div className="flex items-center justify-between gap-1 px-3 py-2 border-b border-border">
@@ -1291,28 +1450,45 @@ export function AiPanel({ onClose }: AiPanelProps) {
             <BookOpen className={iconGlyph} />
           </Button>
           <Button
-            variant={mcpEnabled && mcpTools.length > 0 ? "secondary" : "ghost"}
+            variant={writeToDoc ? "secondary" : "ghost"}
             size="icon"
             className={iconBtn}
-            onClick={() => {
-              if (mcpTools.length > 0) {
-                setMcpEnabled(!mcpEnabled);
-              } else {
-                setMcpSettingsOpen(true);
-              }
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setMcpSettingsOpen(true);
-            }}
+            onClick={() => setWriteToDoc(!writeToDoc)}
             title={
-              mcpEnabled && mcpTools.length > 0
-                ? `MCP active (${mcpTools.length} tools) — right-click to configure`
-                : "MCP tools — click to configure"
+              writeToDoc
+                ? "AI can write into your document — click to disable"
+                : "Let AI write into your document (e.g. まとめてドキュメントに流し込んで)"
             }
           >
-            <Wrench className={iconGlyph} />
+            <FileInput className={iconGlyph} />
           </Button>
+          {MCP_UI_ENABLED && (
+            <Button
+              variant={
+                mcpEnabled && mcpTools.length > 0 ? "secondary" : "ghost"
+              }
+              size="icon"
+              className={iconBtn}
+              onClick={() => {
+                if (mcpTools.length > 0) {
+                  setMcpEnabled(!mcpEnabled);
+                } else {
+                  setMcpSettingsOpen(true);
+                }
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMcpSettingsOpen(true);
+              }}
+              title={
+                mcpEnabled && mcpTools.length > 0
+                  ? `MCP active (${mcpTools.length} tools) — right-click to configure`
+                  : "MCP tools — click to configure"
+              }
+            >
+              <Wrench className={iconGlyph} />
+            </Button>
+          )}
           <Button
             variant={customRules.trim() ? "secondary" : "ghost"}
             size="icon"
@@ -1458,6 +1634,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
       {/* Status indicators */}
       {(allDocsContext ||
         webSearch ||
+        (writeToDoc && !!activeDoc) ||
         (mcpEnabled && mcpTools.length > 0) ||
         toolStatus) && (
         <div className="px-3 py-1 bg-accent/50 text-[10px] text-muted-foreground flex items-center gap-2 flex-wrap">
@@ -1465,6 +1642,12 @@ export function AiPanel({ onClose }: AiPanelProps) {
             <span className="flex items-center gap-1">
               <BookOpen className="h-3 w-3" />
               {documents.length} docs
+            </span>
+          )}
+          {writeToDoc && activeDoc && (
+            <span className="flex items-center gap-1">
+              <FileInput className="h-3 w-3" />
+              Can edit document
             </span>
           )}
           {webSearch && (
@@ -1740,8 +1923,8 @@ export function AiPanel({ onClose }: AiPanelProps) {
             className={cn(
               "shrink-0 cursor-pointer",
               isMobile ? "h-11 w-11" : "h-7 w-7",
-              // Tint the wand when it's actionable so its image-generation role is
-              // discoverable (touch has no hover tooltip).
+              // Tint the image icon when it's actionable so its image-generation
+              // role is discoverable (touch has no hover tooltip).
               input.trim() && !streaming && !generatingImage
                 ? "text-primary"
                 : "",
@@ -1750,7 +1933,7 @@ export function AiPanel({ onClose }: AiPanelProps) {
             disabled={streaming || generatingImage || !input.trim()}
             title="Generate image from prompt"
           >
-            <Wand2 className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
+            <ImagePlus className={isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5"} />
           </Button>
           <textarea
             ref={textareaRef}

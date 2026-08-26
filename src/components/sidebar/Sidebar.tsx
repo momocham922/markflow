@@ -908,8 +908,10 @@ export function Sidebar() {
           <div
             data-folder-path={node.path}
             className={cn(
-              "group flex items-center gap-1.5 rounded-md px-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
-              isMobile ? "py-1" : "py-1.5",
+              // Match the document row's box (w-full + pr-2 + py-1.5) so folders
+              // and docs are the same width and vertical rhythm on mobile — the
+              // folder list looked cramped and narrower than the doc list before.
+              "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1232,8 +1234,9 @@ export function Sidebar() {
             data-folder-path={node.path}
             data-team-id={team.id}
             className={cn(
-              "group flex items-center gap-1.5 rounded-md px-2 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
-              isMobile ? "py-1" : "py-1.5",
+              // Same box as document rows (see personal folder header) so team
+              // folders and docs line up at the same width on mobile.
+              "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}

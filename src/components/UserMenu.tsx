@@ -26,10 +26,11 @@ import { DeleteAccountDialog } from "@/components/DeleteAccountDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { useTelemetryStore } from "@/stores/telemetry-store";
 
-// GitHub sign-in is gated on the OAuth client id being present at build time.
-// Without it, signInWithGitHub() can't complete, so we hide the entry point
-// rather than ship a button that dead-ends.
-const GITHUB_LOGIN_ENABLED = !!import.meta.env.VITE_GITHUB_CLIENT_ID;
+// GitHub sign-in is wired end-to-end (firebase signInWithGitHub + ai-proxy
+// token exchange) but not yet production-ready (OAuth app + secrets pending),
+// so the entry point is hidden entirely until it actually works. Re-enable by
+// restoring the env gate: `!!import.meta.env.VITE_GITHUB_CLIENT_ID`.
+const GITHUB_LOGIN_ENABLED = false;
 
 function UserAvatar({
   user,

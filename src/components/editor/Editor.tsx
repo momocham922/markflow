@@ -913,6 +913,17 @@ export function Editor() {
       if (pendingInsert.mode === "replace") {
         const { from, to } = view.state.selection.main;
         view.dispatch({ changes: { from, to, insert: pendingInsert.text } });
+      } else if (pendingInsert.mode === "replaceAll") {
+        // Content protection: don't wipe a non-empty doc with empty text.
+        if (pendingInsert.text.trim() || view.state.doc.length === 0) {
+          view.dispatch({
+            changes: {
+              from: 0,
+              to: view.state.doc.length,
+              insert: pendingInsert.text,
+            },
+          });
+        }
       } else {
         const len = view.state.doc.length;
         view.dispatch({

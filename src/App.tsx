@@ -44,7 +44,6 @@ import {
   PanelLeft,
   History,
   PenLine,
-  LayoutGrid,
   Bot,
   Share2,
   ArrowLeft,
@@ -1225,27 +1224,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                     size="icon"
                     className="h-11 w-11"
                     onClick={() => {
-                      const modes: ViewMode[] = [
-                        "editor",
-                        "canvas",
-                        "visualization",
-                      ];
+                      const modes: ViewMode[] = ["editor", "visualization"];
                       setViewMode(
                         modes[(modes.indexOf(viewMode) + 1) % modes.length],
                       );
                     }}
-                    title={
-                      viewMode === "editor"
-                        ? "Editor"
-                        : viewMode === "canvas"
-                          ? "Canvas"
-                          : "Visualization"
-                    }
+                    title={viewMode === "editor" ? "Editor" : "Visualization"}
                   >
                     {viewMode === "editor" ? (
                       <PenLine className="h-5 w-5" />
-                    ) : viewMode === "canvas" ? (
-                      <LayoutGrid className="h-5 w-5" />
                     ) : (
                       <Network className="h-5 w-5" />
                     )}
@@ -1260,15 +1247,6 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                       title="Editor"
                     >
                       <PenLine className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant={viewMode === "canvas" ? "secondary" : "ghost"}
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => setViewMode("canvas")}
-                      title="Canvas"
-                    >
-                      <LayoutGrid className="h-3.5 w-3.5" />
                     </Button>
                     <Button
                       variant={
