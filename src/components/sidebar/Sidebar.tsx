@@ -746,6 +746,12 @@ export function Sidebar() {
         color: "var(--muted-foreground, #888)",
         minWidth: isMobile ? 32 : undefined,
         minHeight: isMobile ? 32 : undefined,
+        // Keep the 32px touch target but don't let it stretch the row. The
+        // text-xs row box is 16px; a 32px control adds +16px unless we bleed
+        // the extra into negative margins (same trick as the header's -my-1
+        // buttons). This is what makes mobile doc rows match the desktop 28px.
+        marginTop: isMobile ? -8 : undefined,
+        marginBottom: isMobile ? -8 : undefined,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -805,11 +811,11 @@ export function Sidebar() {
     >
       {doc.docType === "mindmap" ? (
         <Network
-          className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"}
+          className={isMobile ? "h-4 w-4 shrink-0" : "h-3.5 w-3.5 shrink-0"}
         />
       ) : (
         <FileText
-          className={isMobile ? "h-4.5 w-4.5 shrink-0" : "h-3.5 w-3.5 shrink-0"}
+          className={isMobile ? "h-4 w-4 shrink-0" : "h-3.5 w-3.5 shrink-0"}
         />
       )}
       {renamingDocId === doc.id ? (
@@ -958,14 +964,14 @@ export function Sidebar() {
               <FolderOpen
                 className={cn(
                   "shrink-0 text-muted-foreground",
-                  isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
+                  isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
                 )}
               />
             ) : (
               <Folder
                 className={cn(
                   "shrink-0 text-muted-foreground",
-                  isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
+                  isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
                 )}
               />
             )}
@@ -1154,7 +1160,7 @@ export function Sidebar() {
           )}
         >
           <FileText
-            className={cn("shrink-0", isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5")}
+            className={cn("shrink-0", isMobile ? "h-4 w-4" : "h-3.5 w-3.5")}
           />
           {renamingDocId === td.id ? (
             <input
@@ -1263,14 +1269,14 @@ export function Sidebar() {
               <FolderOpen
                 className={cn(
                   "shrink-0 text-muted-foreground",
-                  isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
+                  isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
                 )}
               />
             ) : (
               <Folder
                 className={cn(
                   "shrink-0 text-muted-foreground",
-                  isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
+                  isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
                 )}
               />
             )}
@@ -1620,25 +1626,10 @@ export function Sidebar() {
                       )}
                     />
                   </span>
-                  <span
-                    title="New mind map"
-                    className={
-                      isMobile
-                        ? "flex items-center justify-center rounded-md p-1.5 -my-1 active:bg-accent"
-                        : ""
-                    }
-                    onClick={() => {
-                      handleNew("/", "mindmap");
-                      setMyDocsExpanded(true);
-                    }}
-                  >
-                    <Network
-                      className={cn(
-                        "text-muted-foreground hover:text-foreground cursor-pointer",
-                        isMobile ? "h-5 w-5" : "h-3.5 w-3.5",
-                      )}
-                    />
-                  </span>
+                  {/* Standalone mind-map creation is hidden until the
+                      dedicated MindMapEditor is refined. Existing standalone
+                      mind-map docs still open; only the entry point is gated.
+                      Re-enable by restoring this <span title="New mind map">. */}
                   <span
                     title="New folder"
                     className={
@@ -1914,7 +1905,7 @@ export function Sidebar() {
                           <FileText
                             className={cn(
                               "shrink-0",
-                              isMobile ? "h-4.5 w-4.5" : "h-3.5 w-3.5",
+                              isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
                             )}
                           />
                           <span className="flex-1 truncate">{sd.title}</span>

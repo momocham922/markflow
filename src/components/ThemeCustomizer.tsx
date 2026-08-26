@@ -10,6 +10,10 @@ import { Button } from "@/components/ui/button";
 import { useAppStore, type CustomPreviewTheme } from "@/stores/app-store";
 import { previewThemeList } from "@/styles/preview-themes";
 import { editorThemeList } from "@/styles/editor-themes";
+import {
+  mindMapThemes,
+  type MindMapThemeId,
+} from "@/components/editor/MindMapNode";
 import { Check, Upload, Download, X } from "lucide-react";
 import { getPlatform } from "@/platform";
 import { isValidThemeVarMap } from "@/lib/theme-css";
@@ -262,6 +266,35 @@ export function ThemeCustomizer({ open, onOpenChange }: ThemeCustomizerProps) {
                   >
                     {t.name}
                     {themeSettings.editorTheme === t.id && (
+                      <Check className="absolute top-1 right-1 h-3 w-3 text-primary" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Mind map theme */}
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                マインドマップテーマ
+              </label>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {(Object.keys(mindMapThemes) as MindMapThemeId[]).map((id) => (
+                  <button
+                    key={id}
+                    onClick={() => setThemeSettings({ mindMapTheme: id })}
+                    className={`relative flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors ${
+                      themeSettings.mindMapTheme === id
+                        ? "border-primary bg-primary/5 text-foreground"
+                        : "border-border text-muted-foreground hover:border-foreground/30"
+                    }`}
+                  >
+                    <span
+                      className="h-3 w-3 shrink-0 rounded-full"
+                      style={{ backgroundColor: mindMapThemes[id].swatch }}
+                    />
+                    {mindMapThemes[id].name}
+                    {themeSettings.mindMapTheme === id && (
                       <Check className="absolute top-1 right-1 h-3 w-3 text-primary" />
                     )}
                   </button>

@@ -144,7 +144,7 @@ function App() {
   const researchCardCount = useResearchStore((s) => s.cards.length);
   const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
   const researchAnalyzing = useResearchStore((s) => s.analyzing);
-  const { viewportHeight, keyboardVisible, offsetTop } = useIOSKeyboard();
+  const { viewportHeight, keyboardVisible } = useIOSKeyboard();
   const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(
     sidebarOpen,
     toggleSidebar,
@@ -1441,10 +1441,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           <div
             className="fixed z-40 flex flex-col safe-top bg-background"
             style={{
-              // Pin to the visual-viewport top (offsetTop) when the keyboard is
-              // up so the overlay tracks the visible region instead of drifting
-              // as iOS scrolls the focused input into view.
-              top: keyboardVisible ? offsetTop : 0,
+              // Fixed overlays pin to the visible-viewport top in this WKWebView
+              // (identical to the app-root shell above and ResearchSheet). Sizing
+              // to viewportHeight (= visualViewport.height) shrinks the box to the
+              // area ABOVE the keyboard so the input row + last message stay
+              // visible. Do NOT add visualViewport.offsetTop here — it double-
+              // shifts the box down and hides the bottom behind the keyboard
+              // (the beta.46 offsetTop over-correction; the app-root shell proves
+              // top:0 is correct on real devices).
+              top: 0,
               left: 0,
               right: 0,
               ...(keyboardVisible
@@ -1455,8 +1460,17 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             {rightPanel === "versions" && (
               <VersionPanel
                 onClose={() => setRightPanel("none")}
-                onViewDiff={setDiffState}
-                onRestore={setPendingRestoreContent}
+                // On mobile the versions panel is a full-screen opaque overlay,
+                // so the diff view / restored editor render BEHIND it. Close the
+                // panel on either action so the result is actually visible.
+                onViewDiff={(d) => {
+                  setDiffState(d);
+                  setRightPanel("none");
+                }}
+                onRestore={(c) => {
+                  setPendingRestoreContent(c);
+                  setRightPanel("none");
+                }}
               />
             )}
             {rightPanel === "ai" && (

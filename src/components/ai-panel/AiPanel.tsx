@@ -267,6 +267,9 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   const [threadListOpen, setThreadListOpen] = useState(false);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  // Track textarea focus so mobile can collapse the quick-actions / topic bar
+  // and give the message list + input row more room while typing.
+  const [inputFocused, setInputFocused] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [allDocsContext, setAllDocsContext] = useState(false);
   // Web search defaults ON — most questions benefit from up-to-date grounding.
@@ -1356,6 +1359,12 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     if (streamingText) scrollToBottom(true);
   }, [streamingText, scrollToBottom]);
 
+  // The keyboard shrinks the scroll viewport; re-pin the latest message above it
+  // so the newest content stays visible instead of hiding behind the keyboard.
+  useEffect(() => {
+    if (keyboardVisible) scrollToBottom(true);
+  }, [keyboardVisible, scrollToBottom]);
+
   if (!user) {
     return (
       <div
@@ -1396,6 +1405,13 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   }
 
   const hasSelection = !!getSelectedText();
+
+  // On mobile, while the input is focused (iOS = keyboardVisible; Android/Web =
+  // inputFocused) collapse the quick-actions and topic-selector bars so the
+  // message list + input row get the full height. The outer overlay height is
+  // fixed by App.tsx, so the reclaimed space flows into the flex-1 ScrollArea —
+  // this does not affect the ISSUE-2 keyboard geometry.
+  const collapseForKeyboard = isMobile && (keyboardVisible || inputFocused);
 
   // Header icon buttons: bigger tap targets on mobile (the toolbar wraps when
   // it runs out of width instead of pushing buttons off the right edge).
@@ -1502,7 +1518,16 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           <Button
             variant={webSearch ? "secondary" : "ghost"}
             size="icon"
-            className={iconBtn}
+            // Touch has no hover tooltip and the `secondary` tint is nearly
+            // invisible next to the other ghost icons, so on mobile give the ON
+            // state a solid primary fill + ring — otherwise users assume web
+            // search is OFF (it defaults ON) and tap it, turning it off.
+            className={cn(
+              iconBtn,
+              isMobile &&
+                webSearch &&
+                "bg-primary text-primary-foreground hover:bg-primary/90 ring-1 ring-primary",
+            )}
             onClick={() => setWebSearch(!webSearch)}
             title={webSearch ? "Web search enabled" : "Enable web search"}
           >
@@ -1593,7 +1618,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       </div>
 
       {/* Thread selector bar */}
-      {threads.length > 0 && (
+      {threads.length > 0 && !collapseForKeyboard && (
         <div className="relative border-b border-border" ref={threadListRef}>
           <button
             className={cn(
@@ -1663,32 +1688,36 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         </div>
       )}
 
-      {/* Quick actions */}
-      <div className="p-2 space-y-1">
-        <p className="px-1 text-[10px] text-muted-foreground uppercase tracking-wider">
-          Quick Actions {hasSelection ? "(on selection)" : "(on document)"}
-        </p>
-        <div className="grid grid-cols-2 gap-1">
-          {AI_ACTIONS.map((action) => {
-            const Icon = iconMap[action.icon] || Sparkles;
-            return (
-              <Button
-                key={action.id}
-                variant="ghost"
-                size="sm"
-                className="justify-start gap-1.5 text-[11px] h-7 cursor-pointer"
-                onClick={() => handleAction(action.id)}
-                disabled={streaming || !activeDoc}
-              >
-                <Icon className="h-3 w-3 shrink-0" />
-                {action.label}
-              </Button>
-            );
-          })}
-        </div>
-      </div>
+      {/* Quick actions — hidden while typing on mobile to free up height. */}
+      {!collapseForKeyboard && (
+        <>
+          <div className="p-2 space-y-1">
+            <p className="px-1 text-[10px] text-muted-foreground uppercase tracking-wider">
+              Quick Actions {hasSelection ? "(on selection)" : "(on document)"}
+            </p>
+            <div className="grid grid-cols-2 gap-1">
+              {AI_ACTIONS.map((action) => {
+                const Icon = iconMap[action.icon] || Sparkles;
+                return (
+                  <Button
+                    key={action.id}
+                    variant="ghost"
+                    size="sm"
+                    className="justify-start gap-1.5 text-[11px] h-7 cursor-pointer"
+                    onClick={() => handleAction(action.id)}
+                    disabled={streaming || !activeDoc}
+                  >
+                    <Icon className="h-3 w-3 shrink-0" />
+                    {action.label}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
 
-      <Separator />
+          <Separator />
+        </>
+      )}
 
       {/* Status indicators */}
       {(allDocsContext ||
@@ -1703,9 +1732,14 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             </span>
           )}
           {webSearch && (
-            <span className="flex items-center gap-1">
+            <span
+              className={cn(
+                "flex items-center gap-1",
+                isMobile && "font-medium text-primary",
+              )}
+            >
               <Globe className="h-3 w-3" />
-              Web search
+              Web search{isMobile ? " ON" : ""}
             </span>
           )}
           {mcpEnabled && mcpTools.length > 0 && (
@@ -2058,6 +2092,8 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
               }
             }}
             onPaste={handlePaste}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
             rows={1}
             disabled={streaming}
             className={cn(

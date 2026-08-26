@@ -17,7 +17,10 @@ import { DiffView } from "./DiffView";
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import * as db from "@/services/database";
-import { syncVersionToCloud, fetchVersionsFromCloud } from "@/services/firebase";
+import {
+  syncVersionToCloud,
+  fetchVersionsFromCloud,
+} from "@/services/firebase";
 
 interface Version {
   id: string;
@@ -42,7 +45,11 @@ interface VersionPanelProps {
   onRestore?: (content: string) => void;
 }
 
-export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelProps) {
+export function VersionPanel({
+  onClose,
+  onViewDiff,
+  onRestore,
+}: VersionPanelProps) {
   const { activeDocId, documents, updateDocument } = useAppStore();
   const activeDoc = documents.find((d) => d.id === activeDocId);
   const [versions, setVersions] = useState<Version[]>([]);
@@ -110,25 +117,36 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
     return () => clearInterval(interval);
   }, [loadVersions]);
 
-  const handleSave = async () => {
+  // Shared snapshot writer — used both for the current document and for
+  // promoting any historical version into a new named snapshot.
+  const saveSnapshot = async (
+    content: string,
+    title: string,
+    message: string | null,
+  ) => {
     if (!activeDoc) return;
     setSaving(true);
     const versionId = crypto.randomUUID();
     const versionData = {
       id: versionId,
       documentId: activeDoc.id,
-      content: activeDoc.content,
-      title: activeDoc.title,
-      message: snapshotMsg.trim() || null,
+      content,
+      title,
+      message,
     };
     try {
       await db.createVersion(versionData);
       // Sync to cloud
       if (user) {
-        syncVersionToCloud(activeDoc.id, {
-          ...versionData,
-          createdAt: Date.now(),
-        }, user.uid, user.displayName || user.email || "Unknown").catch((err) => {
+        syncVersionToCloud(
+          activeDoc.id,
+          {
+            ...versionData,
+            createdAt: Date.now(),
+          },
+          user.uid,
+          user.displayName || user.email || "Unknown",
+        ).catch((err) => {
           console.warn("[versions] Cloud sync failed:", err);
         });
       }
@@ -140,6 +158,23 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
       setSaving(false);
     }
   };
+
+  const handleSave = () => {
+    if (!activeDoc) return;
+    saveSnapshot(
+      activeDoc.content,
+      activeDoc.title,
+      snapshotMsg.trim() || null,
+    );
+  };
+
+  // Snapshot a specific historical version's content (not just the current doc).
+  const handleSnapshotFrom = (v: Version) =>
+    saveSnapshot(
+      v.content,
+      v.title,
+      snapshotMsg.trim() || `Snapshot of ${v.message || v.title}`,
+    );
 
   const handleRestore = async (version: Version) => {
     if (!activeDocId || !activeDoc) return;
@@ -160,10 +195,15 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
     }
     // Sync backup to cloud
     if (user) {
-      syncVersionToCloud(activeDoc.id, {
-        ...backupData,
-        createdAt: Date.now(),
-      }, user.uid, user.displayName || user.email || "Unknown").catch(() => {});
+      syncVersionToCloud(
+        activeDoc.id,
+        {
+          ...backupData,
+          createdAt: Date.now(),
+        },
+        user.uid,
+        user.displayName || user.email || "Unknown",
+      ).catch(() => {});
     }
 
     // Restore via callback (handles Y.Doc for collab) or direct store update
@@ -196,7 +236,12 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
     if (diffMin < 60) return `${diffMin}m ago`;
     const diffH = Math.floor(diffMin / 60);
     if (diffH < 24) return `${diffH}h ago`;
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   };
 
   return (
@@ -207,7 +252,12 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
           <History className="h-4 w-4" />
           <span className="text-sm font-medium">Versions</span>
         </div>
-        <Button variant="ghost" size="icon" className={isMobile ? "h-11 w-11" : "h-6 w-6"} onClick={onClose}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={isMobile ? "h-11 w-11" : "h-6 w-6"}
+          onClick={onClose}
+        >
           <X className={isMobile ? "h-5 w-5" : "h-3.5 w-3.5"} />
         </Button>
       </div>
@@ -221,7 +271,9 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
           onChange={(e) => setSnapshotMsg(e.target.value)}
           onCompositionStart={ime.onCompositionStart}
           onCompositionEnd={ime.onCompositionEnd}
-          onKeyDown={(e) => { if (!ime.isComposing() && e.key === "Enter") handleSave(); }}
+          onKeyDown={(e) => {
+            if (!ime.isComposing() && e.key === "Enter") handleSave();
+          }}
         />
         <Button
           variant="outline"
@@ -238,13 +290,15 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
       <Separator />
 
       {/* Version list */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-2 space-y-1">
           {versions.length === 0 && (
             <p className="px-2 py-4 text-center text-xs text-muted-foreground">
               No versions saved yet.
               <br />
-              <span className="text-[10px]">Save a snapshot to track changes.</span>
+              <span className="text-[10px]">
+                Save a snapshot to track changes.
+              </span>
             </p>
           )}
           {versions.map((v, idx) => {
@@ -274,11 +328,15 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
                     <div className="font-medium truncate">
                       {v.message || v.title}
                       {!v.message && (
-                        <span className="ml-1 text-[9px] text-muted-foreground font-normal">(auto)</span>
+                        <span className="ml-1 text-[9px] text-muted-foreground font-normal">
+                          (auto)
+                        </span>
                       )}
                     </div>
                     <div className="text-[10px] text-muted-foreground">
-                      {v.ownerName && <span className="mr-1">{v.ownerName}</span>}
+                      {v.ownerName && (
+                        <span className="mr-1">{v.ownerName}</span>
+                      )}
                       {formatTime(v.createdAt)}
                     </div>
                   </div>
@@ -287,7 +345,7 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
                 {isExpanded && (
                   <div className="mt-2">
                     <DiffView oldText={oldContent} newText={v.content} />
-                    <div className="mt-2 flex gap-1">
+                    <div className="mt-2 flex flex-wrap gap-1">
                       {onViewDiff && (
                         <Button
                           variant="outline"
@@ -318,6 +376,20 @@ export function VersionPanel({ onClose, onViewDiff, onRestore }: VersionPanelPro
                       >
                         <RotateCcw className="h-3 w-3" />
                         Restore
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 gap-1 text-[10px]"
+                        disabled={saving}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSnapshotFrom(v);
+                        }}
+                        title="Save this version as a new snapshot"
+                      >
+                        <Save className="h-3 w-3" />
+                        Snapshot
                       </Button>
                     </div>
                   </div>

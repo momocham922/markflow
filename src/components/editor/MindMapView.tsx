@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   ReactFlow,
   Controls,
@@ -9,7 +9,6 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Palette } from "lucide-react";
 import {
   MindMapNode,
   type MindMapNodeData,
@@ -18,7 +17,6 @@ import {
   type EdgeStyle,
 } from "./MindMapNode";
 import { useAppStore } from "@/stores/app-store";
-import { isMobile } from "@/platform";
 
 const nodeTypes = { mindmap: MindMapNode };
 
@@ -206,8 +204,6 @@ interface MindMapViewProps {
 export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
   const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) ||
     "lavender") as MindMapThemeId;
-  const setThemeSettings = useAppStore((s) => s.setThemeSettings);
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const { nodes, edges } = useMemo(() => {
     const tree = parseHeadings(content, title);
     if (tree.children.length === 0) {
@@ -232,47 +228,9 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
 
   return (
     <div className="relative h-full w-full">
-      {/* Floating theme picker — the mind-map preview mode had no way to change
-          its theme on either desktop or mobile. This overlays a Palette control
-          in the top-right that writes themeSettings.mindMapTheme. */}
-      <div className="absolute right-3 top-3 z-10">
-        <button
-          className={`flex items-center gap-1.5 rounded-md border border-border bg-card/90 text-foreground shadow-sm backdrop-blur transition-colors hover:bg-accent ${
-            isMobile ? "px-3 py-2 text-sm" : "px-2.5 py-1.5 text-xs"
-          }`}
-          onClick={() => setThemeMenuOpen((v) => !v)}
-          title="Change mind map theme"
-        >
-          <Palette className={isMobile ? "h-4 w-4" : "h-3.5 w-3.5"} />
-          Theme
-        </button>
-        {themeMenuOpen && (
-          <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-border bg-card p-2 shadow-lg">
-            {(Object.keys(mindMapThemes) as MindMapThemeId[]).map((id) => (
-              <button
-                key={id}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 transition-colors ${
-                  isMobile ? "py-2 text-sm" : "py-1.5 text-xs"
-                } ${
-                  mindMapTheme === id
-                    ? "bg-accent font-medium"
-                    : "hover:bg-accent/50"
-                }`}
-                onClick={() => {
-                  setThemeSettings({ mindMapTheme: id });
-                  setThemeMenuOpen(false);
-                }}
-              >
-                <span
-                  className="h-3 w-3 shrink-0 rounded-full"
-                  style={{ backgroundColor: mindMapThemes[id].swatch }}
-                />
-                {mindMapThemes[id].name}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      {/* Mind-map theme is chosen from the shared Theme dialog (Paintbrush in the
+          editor toolbar), alongside the preview/editor themes — no separate
+          floating picker here. */}
       <ReactFlow
         nodes={nodes}
         edges={edges}
