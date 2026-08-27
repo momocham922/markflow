@@ -240,26 +240,44 @@ export function MindMapView({
   const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) ||
     "lavender") as MindMapThemeId;
 
-  // Fail-safe against the mobile "black screen": the bloom entrance starts nodes
-  // at opacity:0, and if the CSS animation never fires (slow WebView, backgrounded
-  // tab, prefers-reduced-motion edge cases) they'd stay invisible forever. After
-  // the bloom's worst-case duration we add `bloom-settled`, which force-shows
-  // every node/edge regardless of animation state. Re-armed on each doc switch.
+  // The bloom entrance is MEASUREMENT-driven, not mount-driven. React Flow lays
+  // nodes out around the origin and only centers them on-screen once it has
+  // measured every node and run fitView — signalled by onInit (which fires when
+  // the viewport is initialized). On a slow mobile WebView that lands well after
+  // mount, so a mount-triggered CSS animation plays out entirely OFF-SCREEN
+  // before fitView and the user never sees it (desktop is usually fast enough
+  // that it doesn't). So we keep nodes hidden (opacity:0 in CSS) until `bloomArmed`
+  // is set by onInit, and only then let the keyframe run — guaranteeing the burst
+  // plays while the map is actually visible. Re-armed on each doc switch.
+  const [bloomArmed, setBloomArmed] = useState(false);
+  // Fail-safe: nodes start at opacity:0, so if the animation never fires (onInit
+  // never arrives, backgrounded tab) they'd stay invisible. `bloom-settled`
+  // force-shows every node/edge regardless of animation state.
   const [bloomSettled, setBloomSettled] = useState(false);
   // Reset DURING render (not in a passive effect) when the doc changes. This
   // component persists across doc switches — only the inner ReactFlow is keyed
-  // by docId — so bloomSettled survives. A passive useEffect reset fires AFTER
+  // by docId — so these flags survive. A passive useEffect reset fires AFTER
   // paint, letting the remounted ReactFlow paint its first frame carrying the
-  // stale `bloom-settled` class from the previous doc: the new map would flash
-  // fully-formed, then collapse and re-bloom. React's "adjust state during
-  // render" pattern applies the reset before paint, so no stale frame ships.
+  // stale classes from the previous doc: the new map would flash fully-formed,
+  // then collapse and re-bloom. React's "adjust state during render" pattern
+  // applies the reset before paint, so no stale frame ships.
   const [prevDocId, setPrevDocId] = useState(docId);
   if (docId !== prevDocId) {
     setPrevDocId(docId);
+    setBloomArmed(false);
     setBloomSettled(false);
   }
+  // Once armed, settle to a plain static state after the bloom's worst-case
+  // duration (0.42s keyframe + level stagger + edge fade).
   useEffect(() => {
-    const t = setTimeout(() => setBloomSettled(true), 1400);
+    if (!bloomArmed) return;
+    const t = setTimeout(() => setBloomSettled(true), 1200);
+    return () => clearTimeout(t);
+  }, [bloomArmed]);
+  // Absolute fallback: if onInit somehow never fires, force-show the map anyway
+  // so it can never stay invisible.
+  useEffect(() => {
+    const t = setTimeout(() => setBloomSettled(true), 4000);
     return () => clearTimeout(t);
   }, [docId]);
 
@@ -300,6 +318,9 @@ export function MindMapView({
         connectionLineType={ConnectionLineType.Bezier}
         fitView
         fitViewOptions={{ padding: 0.3 }}
+        // Arm the bloom only once the viewport is initialized (all nodes measured
+        // + fitView applied), so the entrance never plays off-screen on mobile.
+        onInit={() => setBloomArmed(true)}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}
@@ -318,7 +339,7 @@ export function MindMapView({
         }
         panOnDrag
         zoomOnScroll
-        className={`bg-background mindmap-bloom${bloomSettled ? " bloom-settled" : ""}`}
+        className={`bg-background mindmap-bloom${bloomArmed ? " bloom-armed" : ""}${bloomSettled ? " bloom-settled" : ""}`}
       >
         <Controls
           showInteractive={false}

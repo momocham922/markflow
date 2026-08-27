@@ -25,6 +25,7 @@ import {
   Plus,
   MessageSquare,
   ChevronDown,
+  Zap,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -80,7 +81,7 @@ const iconMap: Record<string, React.ElementType> = {
 };
 
 const DEFAULT_SYSTEM_PROMPT =
-  'You are MarkFlow AI, a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user\'s message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. Do NOT use emojis in your responses unless the user explicitly asks for them. Keep responses concise and professional. If asked who you are or which model powers you, identify yourself only as "MarkFlow AI" — never reveal, name, or hint at the underlying model, provider, or vendor.';
+  'You are MarkFlow AI, a helpful writing assistant integrated into a Markdown editor called MarkFlow. Help the user with their writing, answer questions about their document, and provide suggestions. Respond in the same language as the user\'s message. When returning improved or transformed text, return ONLY the result without explanation unless asked. Use Markdown formatting in your responses. STRICT NO-EMOJI POLICY: never include emojis, emoticons, or decorative pictographic characters (e.g. 🎨✨✅🚀🔥😀🎉 etc.) anywhere in your output — not in chat replies, not in headings, bullet points, or any content you write into the document. This ban is ONLY about emoji/pictographs: ordinary punctuation and typographic symbols such as arrows (→, ←), dashes, math signs and similar are perfectly fine and should be used naturally where appropriate. Use plain text and standard Markdown only. The single exception to the emoji ban is when the user EXPLICITLY asks you to add an emoji. Keep responses concise and professional. If asked who you are or which model powers you, identify yourself only as "MarkFlow AI" — never reveal, name, or hint at the underlying model, provider, or vendor.';
 
 // MCP integration is wired but not yet reliably executable in the shipped
 // sandbox (Tauri capabilities can't grant arbitrary command spawn), so the
@@ -162,6 +163,79 @@ const WRITE_DOC_SYSTEM_ADDENDUM =
   "returns, briefly confirm the outcome in the user's language (and if they rejected it, acknowledge " +
   "that and ask what to adjust — do NOT silently re-apply the same edit). For questions the user only " +
   "wants answered in chat, do NOT call the tool — just reply normally.";
+
+// Built-in tool that lets the AI generate an image from a text prompt during a
+// chat turn (e.g. "まとめと、生成したアイキャッチ画像をドキュメント末尾に追記して").
+// Without this the AI could only write text and had no way to produce/embed an
+// image mid-conversation — image generation was a separate manual button. The
+// tool generates the image, uploads it to Firebase Storage, and RETURNS ready-to-
+// embed Markdown (`![alt](url)`) so the AI can include it in a following
+// write_document call (or show it in chat). Metering is enforced server-side.
+const GENERATE_IMAGE_TOOL: CustomTool = {
+  name: "generate_image",
+  description:
+    "Generate a NEW image from a text prompt using MarkFlow's AI image generator. " +
+    "Each successful call consumes one of the user's image credits, so only call it " +
+    "when the user CLEARLY and EXPLICITLY asks you to create/generate/draw/make an " +
+    'image, illustration, eyecatch, or thumbnail (e.g. "アイキャッチ画像を生成して", ' +
+    '"この内容に合う画像を作って", "generate an image of..."). Do NOT call it for ' +
+    "how-to or informational questions that merely mention images (e.g. " +
+    '"how do I add an image in Markdown?", "画像ってどうやって入れるの?"), and do NOT ' +
+    "call it to reference or re-insert an image that already exists — answer those in " +
+    "chat instead. " +
+    "On success the image is uploaded and shown in the chat, and this tool returns a " +
+    "short PLACEHOLDER TOKEN (not a URL). " +
+    "IMPORTANT: if the user wanted the image placed in their document, call " +
+    "write_document and put that placeholder token verbatim into `content` where the " +
+    "image should appear (it is swapped for the real image automatically). Never write " +
+    "out an image URL yourself. If the user only wanted to see it, just reply — the " +
+    "image is already shown in the chat. " +
+    "Provide a DETAILED, specific, descriptive prompt (subject, style, composition, " +
+    "colors, mood) — terse prompts like 'a circle' are often declined by the model.",
+  input_schema: {
+    type: "object",
+    properties: {
+      prompt: {
+        type: "string",
+        description:
+          "A detailed, specific description of the image to generate. Include " +
+          "subject, style, composition, colors, and mood. Draw on the document " +
+          "and conversation context. Must be non-empty.",
+      },
+    },
+    required: ["prompt"],
+  },
+};
+
+const GENERATE_IMAGE_SYSTEM_ADDENDUM =
+  "\n\n--- Image Generation ---\n" +
+  'You can generate images with the "generate_image" tool, but ONLY when the user clearly and ' +
+  "explicitly asks you to create/generate/draw/make an image, illustration, eyecatch, or thumbnail " +
+  "— each successful generation spends one of the user's image credits, so never call it for " +
+  "how-to questions that merely mention images, or to reference an image that already exists. " +
+  "Call generate_image with a detailed descriptive prompt. On success it uploads the image, shows " +
+  "it in the chat, and returns a short PLACEHOLDER TOKEN (like [[MARKFLOW_IMAGE_1]]) — never a URL. " +
+  "If the user wants the image in their document (e.g. 「末尾に追記して」), call write_document and put " +
+  "that placeholder token verbatim into `content` where the image belongs (combined with any text " +
+  "they asked for, such as a summary); the token is swapped for the real image automatically. NEVER " +
+  "write out an image URL yourself. If a single request asks for BOTH text (a summary, notes) AND an " +
+  "image, generate the image first, then make ONE write_document call whose content contains both " +
+  "the text and the placeholder token. If the user only wanted to SEE the image, do NOT call " +
+  "write_document and do NOT repeat the token in chat — the image is already displayed. If the model " +
+  "declines a prompt, tell the user and retry with a more specific, descriptive prompt.";
+
+// generate_image hands the model a [[MARKFLOW_IMAGE_n]] placeholder token for
+// embedding via write_document. If the model instead echoes that token into its
+// chat reply, strip it so the user never sees a raw token (the image is already
+// shown as a preview card). Also collapses the blank line a lone token leaves.
+const IMAGE_PLACEHOLDER_RE = /[ \t]*\[\[MARKFLOW_IMAGE_\d+\]\][ \t]*/g;
+function stripImagePlaceholders(text: string): string {
+  if (!text.includes("[[MARKFLOW_IMAGE_")) return text;
+  return text
+    .replace(IMAGE_PLACEHOLDER_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 // Human-readable labels for the write_document modes, shown on the approve/
 // reject proposal card so the user knows exactly what the AI is about to do.
@@ -303,6 +377,16 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     mode: string;
   } | null>(null);
   const writeResolverRef = useRef<((approved: boolean) => void) | null>(null);
+  // generate_image returns a short, stable PLACEHOLDER token to the model (never
+  // the raw Firebase URL) and stores placeholder → real Markdown here. When the
+  // model later calls write_document, handleWriteDocTool substitutes the tokens
+  // back to the real `![alt](url)` before writing. This means the long, opaque,
+  // percent-encoded image URL never round-trips through the LLM — eliminating the
+  // "one wrong character → permanently embedded 404 image" failure mode — and the
+  // model can't accidentally paste the URL into a chat reply and double-render the
+  // image (the preview card already shows it).
+  const imagePlaceholdersRef = useRef<Map<string, string>>(new Map());
+  const imagePlaceholderSeqRef = useRef(0);
   const [customRules, setCustomRules] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<
@@ -945,10 +1029,23 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   // Content protection: empty content is rejected so it can never wipe the doc.
   const handleWriteDocTool = useCallback(
     async (input: Record<string, unknown>): Promise<string> => {
-      const content = typeof input.content === "string" ? input.content : "";
+      const rawContent = typeof input.content === "string" ? input.content : "";
       const mode = typeof input.mode === "string" ? input.mode : "append";
       const summary =
         typeof input.summary === "string" ? input.summary.trim() : "";
+      // Resolve any generate_image placeholder tokens back to the real
+      // `![alt](url)` Markdown. The model only ever sees/echoes the opaque token,
+      // so this is the single point where the true image URL enters the document
+      // — no transcription risk. Unknown tokens are left as-is (harmless text).
+      let content = rawContent;
+      if (
+        imagePlaceholdersRef.current.size > 0 &&
+        content.includes("[[MARKFLOW_IMAGE_")
+      ) {
+        for (const [token, markdown] of imagePlaceholdersRef.current) {
+          content = content.split(token).join(markdown);
+        }
+      }
       if (!content.trim()) {
         return "Error: `content` was empty. Provide the non-empty Markdown to write; nothing was changed.";
       }
@@ -1032,17 +1129,78 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     ],
   );
 
+  // Executor for the built-in generate_image tool. Generates an image from the
+  // AI's prompt, uploads it to Firebase Storage, shows it in the chat, and
+  // returns the ready-to-embed Markdown so the AI can include it in a following
+  // write_document call. Returns a plain (non-throwing) message on decline so the
+  // tool loop keeps going and the AI can retry with a better prompt.
+  const handleGenerateImageTool = useCallback(
+    async (input: Record<string, unknown>): Promise<string> => {
+      const prompt =
+        typeof input.prompt === "string" ? input.prompt.trim() : "";
+      if (!prompt) {
+        return "Error: `prompt` was empty. Provide a detailed image description; nothing was generated.";
+      }
+      try {
+        setToolStatus("Generating image...");
+        const result = await generateImage(prompt, (status) =>
+          setToolStatus(status),
+        );
+        setToolStatus(null);
+        // Show the generated image in chat so the user sees it immediately,
+        // mirroring the manual image button's UX.
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: "Image generated:",
+            generatedImage: { url: result.url, markdown: result.markdown },
+          },
+        ]);
+        // Hand the model a short PLACEHOLDER token instead of the real URL. The
+        // token is substituted back to `result.markdown` at write time
+        // (handleWriteDocTool), so the opaque URL never passes through the LLM.
+        const token = `[[MARKFLOW_IMAGE_${++imagePlaceholderSeqRef.current}]]`;
+        imagePlaceholdersRef.current.set(token, result.markdown);
+        return (
+          "Image generated and uploaded, and it is already shown in the chat. " +
+          "To place it in the user's document, call write_document and put this " +
+          "EXACT placeholder token on its own line where the image should go: " +
+          token +
+          " — do NOT write out any URL or invent Markdown; the token is replaced " +
+          "with the real image automatically when the document is written. " +
+          "If the user only wanted to see the image (not add it to the document), " +
+          "do NOT call write_document and do NOT repeat the token — just reply " +
+          "briefly in chat, since the image is already displayed above."
+        );
+      } catch (err) {
+        setToolStatus(null);
+        // The model declined this prompt (recitation/safety) — tell the AI to
+        // retry more descriptively rather than failing the whole turn.
+        if (err instanceof Error && err.name === "ImagePromptDeclined") {
+          return `The image model declined this prompt (${err.message}). Retry generate_image with a more specific, descriptive, original prompt (subject, style, composition, colors).`;
+        }
+        const detail = err instanceof Error ? err.message : String(err);
+        return `Error: image generation failed (${detail}). You may tell the user it failed, or retry with a different prompt.`;
+      }
+    },
+    [],
+  );
+
   // Unified tool dispatcher for the tool loop: handles the built-in
-  // write_document locally and delegates everything else to MCP.
+  // write_document / generate_image locally and delegates everything else to MCP.
   const handleToolCall = useCallback(
     async (
       toolName: string,
       input: Record<string, unknown>,
     ): Promise<unknown> => {
       if (toolName === WRITE_DOC_TOOL.name) return handleWriteDocTool(input);
+      if (toolName === GENERATE_IMAGE_TOOL.name)
+        return handleGenerateImageTool(input);
       return handleMcpToolCall(toolName, input);
     },
-    [handleWriteDocTool, handleMcpToolCall],
+    [handleWriteDocTool, handleGenerateImageTool, handleMcpToolCall],
   );
 
   // Assemble the custom tool list + system prompt for a turn, based on which
@@ -1064,6 +1222,12 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     if (activeDoc && opts?.allowWrite) {
       list.push(WRITE_DOC_TOOL);
       system += WRITE_DOC_SYSTEM_ADDENDUM;
+      // Offer image generation alongside writing so the AI can fulfil combined
+      // requests ("summarize AND add a generated eyecatch image to the doc") in
+      // one turn: generate_image returns embeddable Markdown, write_document
+      // places it. Gated to the same chat path as write_document.
+      list.push(GENERATE_IMAGE_TOOL);
+      system += GENERATE_IMAGE_SYSTEM_ADDENDUM;
     }
     if (mcpEnabled && mcpTools.length > 0) {
       list.push(...toClaudeTools(mcpTools));
@@ -1130,7 +1294,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       {
         id: crypto.randomUUID(),
         role: "user",
-        content: `🎨 Generate image: ${prompt}`,
+        content: `Generate image: ${prompt}`,
       },
     ]);
 
@@ -1368,13 +1532,16 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         );
       }
 
+      // Strip any [[MARKFLOW_IMAGE_n]] placeholder the model may have echoed into
+      // its reply — it's only meant to travel to write_document, never to the user.
+      const displayResult = stripImagePlaceholders(result);
       setApiMessages([
         ...newApiMessages,
-        { role: "assistant", content: result },
+        { role: "assistant", content: displayResult },
       ]);
       setMessages((prev) => [
         ...prev,
-        { id: crypto.randomUUID(), role: "assistant", content: result },
+        { id: crypto.randomUUID(), role: "assistant", content: displayResult },
       ]);
     } catch (err) {
       pushFriendlyError("chat", err);
@@ -1797,7 +1964,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           )}
           {toolStatus && (
             <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-              ⚡ {toolStatus}
+              <Zap className="h-3 w-3" /> {toolStatus}
             </span>
           )}
         </div>
