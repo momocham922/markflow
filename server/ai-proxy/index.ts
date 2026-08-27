@@ -87,8 +87,10 @@ const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
 // endpoint below (Gemini/image/STT have their own locations).
 const GCP_REGION = process.env.GCP_REGION || "global";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-5";
-const NANOBANANA_MODEL =
-  process.env.NANOBANANA_MODEL || "gemini-3.1-flash-image-preview";
+// Nano Banana Pro (Gemini 3 Pro Image), served from the global endpoint. The
+// old `gemini-3.1-flash-image-preview` was retired and now 404s on Vertex,
+// which broke all image generation.
+const NANOBANANA_MODEL = process.env.NANOBANANA_MODEL || "gemini-3-pro-image";
 const STT_LOCATION = process.env.STT_LOCATION || "asia-northeast1";
 const STT_MODEL = process.env.STT_MODEL || "chirp_3";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
@@ -4373,23 +4375,52 @@ const server = http.createServer(async (req, res) => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const geminiData = (await geminiRes.json()) as any;
-      const parts = geminiData.candidates?.[0]?.content?.parts;
-      if (!parts || !Array.isArray(parts)) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "No image generated" }));
-        return;
-      }
+      const candidate = geminiData.candidates?.[0];
+      const parts = candidate?.content?.parts;
 
-      // Find the image part (inlineData)
-      const imagePart = parts.find(
-        (p: { inlineData?: { mimeType: string; data: string } }) =>
-          p.inlineData,
-      );
-      if (!imagePart?.inlineData) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "No image in response" }));
+      // gemini-3-pro-image can return HTTP 200 with NO image when it declines
+      // the prompt (finishReason IMAGE_RECITATION / PROHIBITED_CONTENT / SAFETY).
+      // Surface the model's own finishMessage so the user knows to rephrase —
+      // never mask this as a generic 500 (サイレントフォールバック禁止).
+      const findImage = (
+        ps: unknown,
+      ): { mimeType: string; data: string } | undefined =>
+        Array.isArray(ps)
+          ? ps.find(
+              (p: { inlineData?: { mimeType: string; data: string } }) =>
+                p.inlineData,
+            )?.inlineData
+          : undefined;
+      const inlineData = findImage(parts);
+      if (!inlineData) {
+        const finishReason: string | undefined = candidate?.finishReason;
+        const finishMessage: string | undefined = candidate?.finishMessage;
+        const declined =
+          finishReason === "IMAGE_RECITATION" ||
+          finishReason === "PROHIBITED_CONTENT" ||
+          finishReason === "SAFETY" ||
+          finishReason === "RECITATION" ||
+          finishReason === "BLOCKLIST" ||
+          finishReason === "SPII";
+        const message =
+          finishMessage ||
+          (declined
+            ? "The model declined to generate an image for this prompt. Try rephrasing with more descriptive, original wording."
+            : "No image was returned by the model.");
+        // 422 = we reached the model but it produced no usable image (prompt
+        // issue), distinct from 5xx infra failures.
+        res.writeHead(declined ? 422 : 500, {
+          "Content-Type": "application/json",
+        });
+        res.end(
+          JSON.stringify({
+            error: message,
+            finishReason: finishReason || null,
+          }),
+        );
         return;
       }
+      const imagePart = { inlineData };
 
       committed = true;
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -4548,11 +4579,13 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         },
         body: JSON.stringify({
           anthropic_version: "vertex-2023-10-16",
-          // Headroom for opus-5's default `thinking` tokens PLUS the JSON brief:
-          // with thinking on, a 3072 ceiling can be spent before the JSON is
-          // emitted, truncating it ("no JSON found"). The ceiling is a cap, not a
-          // charge — we still only pay for tokens actually produced.
-          max_tokens: 8192,
+          // Generous headroom for opus-5's default `thinking` tokens PLUS the
+          // JSON brief: with thinking on, a low ceiling can be spent before the
+          // JSON is emitted, truncating it ("no JSON found"). The ceiling is a
+          // cap, not a charge. Kept below the 128K streaming max because this
+          // call is non-streaming (stream:false) and a huge cap would widen the
+          // HTTP-timeout window; the JSON brief is small and finishes early.
+          max_tokens: 32000,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
           stream: false,
@@ -4798,7 +4831,10 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
     // Build Vertex AI request (model is in URL, not body)
     const vertexBody: Record<string, unknown> = {
       anthropic_version: "vertex-2023-10-16",
-      max_tokens: parsed.max_tokens || 16000,
+      // Fallback ceiling when the client doesn't send one. Streaming gets the
+      // full 128K output max (safe, cap-not-charge); non-streaming stays lower
+      // to avoid widening the HTTP-timeout window on a huge response.
+      max_tokens: parsed.max_tokens || (isStream ? 128000 : 16000),
       messages: stripThinkingBlocks(parsed.messages || []),
       stream: isStream,
     };

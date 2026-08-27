@@ -1063,7 +1063,11 @@ input::selection {
   transform-origin: left center;
   animation: mm-bloom 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: var(--mm-delay, 0ms);
-  will-change: transform, opacity;
+  /* NOTE: no `will-change` here. A permanent will-change:transform promotes every
+     node to its own GPU layer, rasterized once at the initial (fit-to-view,
+     often <1) scale — so zooming in stretches that low-res texture and the nodes
+     look pixelated. React Flow zooms via the viewport transform and re-rasterizes
+     crisply as long as nodes aren't force-promoted. */
 }
 /* Edges fade in just behind the nodes so connectors don't dangle in mid-air. */
 .mindmap-bloom .react-flow__edge {
@@ -1075,4 +1079,19 @@ input::selection {
   .mindmap-bloom .react-flow__edge {
     animation: none;
   }
+}
+/* Failsafe against a black MindMap. The bloom keyframe starts at opacity:0 and
+   uses fill-mode:both, so if it never runs (or stalls before the first frame) on
+   a slow mobile WebView, every node would stay invisible on the near-black
+   canvas. MindMapView adds `bloom-settled` a beat after mount to force all nodes
+   fully visible regardless of animation state — the animation still plays on
+   capable devices, but visibility never depends on it. */
+.mindmap-bloom.bloom-settled .react-flow__node .mm-node {
+  opacity: 1 !important;
+  transform: none !important;
+  animation: none !important;
+}
+.mindmap-bloom.bloom-settled .react-flow__edge {
+  opacity: 1 !important;
+  animation: none !important;
 }

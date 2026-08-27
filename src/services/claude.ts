@@ -204,10 +204,13 @@ export async function sendToClaude(
   const body: Record<string, unknown> = {
     system: systemPrompt,
     messages,
-    // 16k so long answers (Expand, full-doc rewrites, detailed explanations)
-    // don't get truncated mid-sentence. opus-5 handles far more; this is a
-    // safe streaming-chat ceiling.
-    max_tokens: 16000,
+    // Max out the ceiling so nothing ever truncates mid-sentence. max_tokens is
+    // only a CAP (we pay for tokens actually produced), and opus-5's adaptive
+    // `thinking` spends from this same budget — a low cap can be eaten by
+    // thinking before the answer starts. Streaming can safely use the model's
+    // full 128K output limit; non-streaming (summarize/image-prompt) must stay
+    // lower or it risks an HTTP timeout on a very long response.
+    max_tokens: onChunk ? 128000 : 32000,
     stream: !!onChunk,
   };
   if (toolsList) body.tools = toolsList;
@@ -275,9 +278,10 @@ export async function sendWithToolLoop(
       const body: Record<string, unknown> = {
         system: systemPrompt,
         messages: conversationMessages,
-        // 16k so tool-loop answers (esp. the final synthesized reply) aren't
-        // cut off mid-sentence. Matches sendToClaude.
-        max_tokens: 16000,
+        // Full 128K output ceiling — tool-loop answers (esp. the final
+        // synthesized reply) never get cut off. Always streamed, so 128K is
+        // safe. It's a cap, not a charge; opus-5 thinking also draws from it.
+        max_tokens: 128000,
         // Stream every iteration so ordinary chat (and the final answer after a
         // tool call) shows live text. The SSE assembler in callClaudeApi still
         // reconstructs the full content-block list so tool_use is detectable.

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ReactFlow,
   Controls,
@@ -162,6 +162,14 @@ function layoutTree(
       id: node.id,
       type: "mindmap",
       position: { x, y: nodeY },
+      // Give React Flow up-front dimensions. Without them it renders each node
+      // wrapper with `visibility:hidden` until its ResizeObserver measures the
+      // box — but CSS animations keep running while hidden, so on a slow mobile
+      // WebView the whole bloom plays out invisibly and nodes just pop in. With
+      // initial sizes the wrapper is visible from first paint, so the bloom is
+      // actually seen; the observer still refines to the measured size after.
+      initialWidth: estimateNodeWidth(node.label, node.level),
+      initialHeight: nodeH,
       data: {
         label: node.label,
         level: node.level,
@@ -231,6 +239,30 @@ export function MindMapView({
 }: MindMapViewProps) {
   const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) ||
     "lavender") as MindMapThemeId;
+
+  // Fail-safe against the mobile "black screen": the bloom entrance starts nodes
+  // at opacity:0, and if the CSS animation never fires (slow WebView, backgrounded
+  // tab, prefers-reduced-motion edge cases) they'd stay invisible forever. After
+  // the bloom's worst-case duration we add `bloom-settled`, which force-shows
+  // every node/edge regardless of animation state. Re-armed on each doc switch.
+  const [bloomSettled, setBloomSettled] = useState(false);
+  // Reset DURING render (not in a passive effect) when the doc changes. This
+  // component persists across doc switches — only the inner ReactFlow is keyed
+  // by docId — so bloomSettled survives. A passive useEffect reset fires AFTER
+  // paint, letting the remounted ReactFlow paint its first frame carrying the
+  // stale `bloom-settled` class from the previous doc: the new map would flash
+  // fully-formed, then collapse and re-bloom. React's "adjust state during
+  // render" pattern applies the reset before paint, so no stale frame ships.
+  const [prevDocId, setPrevDocId] = useState(docId);
+  if (docId !== prevDocId) {
+    setPrevDocId(docId);
+    setBloomSettled(false);
+  }
+  useEffect(() => {
+    const t = setTimeout(() => setBloomSettled(true), 1400);
+    return () => clearTimeout(t);
+  }, [docId]);
+
   const { nodes, edges } = useMemo(() => {
     const tree = parseHeadings(content, title);
     if (tree.children.length === 0) {
@@ -240,6 +272,8 @@ export function MindMapView({
             id: "root",
             type: "mindmap",
             position: { x: 200, y: 200 },
+            initialWidth: estimateNodeWidth(title || "Document", 0),
+            initialHeight: estimateNodeHeight(0),
             data: {
               label: title || "Document",
               level: 0,
@@ -284,7 +318,7 @@ export function MindMapView({
         }
         panOnDrag
         zoomOnScroll
-        className="bg-background mindmap-bloom"
+        className={`bg-background mindmap-bloom${bloomSettled ? " bloom-settled" : ""}`}
       >
         <Controls
           showInteractive={false}

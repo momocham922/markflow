@@ -426,9 +426,9 @@ export function VoicePanel({
         body: JSON.stringify({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
-          // Opus 5 supports up to 128K output tokens (streaming). 64K gives
-          // long meetings headroom while keeping cost/latency reasonable.
-          max_tokens: 64000,
+          // Max out at opus-5's full 128K streaming ceiling so even very long
+          // meetings never truncate. It's a cap, not a charge.
+          max_tokens: 128000,
           stream: true,
         }),
       });
@@ -768,9 +768,9 @@ export function VoicePanel({
         body: JSON.stringify({
           system: refineSystemPrompt,
           messages: [{ role: "user", content: refineUserContent }],
-          // Opus 5 supports up to 128K output tokens (streaming). 64K gives
-          // long meetings headroom while keeping cost/latency reasonable.
-          max_tokens: 64000,
+          // Max out at opus-5's full 128K streaming ceiling so even very long
+          // meetings never truncate. It's a cap, not a charge.
+          max_tokens: 128000,
           stream: true,
         }),
         signal: abortController.signal,

@@ -291,7 +291,14 @@ export function ShareDialog({
     if (!activeDocId) return;
     try {
       await removeCollaborator(activeDocId, collab);
-      setCollaborators((prev) => prev.filter((c) => c.email !== collab.email));
+      const remaining = collaborators.filter((c) => c.email !== collab.email);
+      setCollaborators(remaining);
+      // Clear the "shared" badge immediately once the last collaborator is gone
+      // (and it's not a team doc). Otherwise it lingers until the next full sync
+      // re-derives isShared. A share link alone no longer counts as shared.
+      if (remaining.length === 0 && !activeDoc?.teamId) {
+        useAppStore.getState().updateDocument(activeDocId, { isShared: false });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to remove");
     }
@@ -368,10 +375,7 @@ export function ShareDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Send className="h-4 w-4" />
-            Share "{activeDoc?.title || "Untitled"}"
-          </DialogTitle>
+          <DialogTitle>Share "{activeDoc?.title || "Untitled"}"</DialogTitle>
           <DialogDescription>
             Manage access, invite collaborators, and set up notifications
           </DialogDescription>

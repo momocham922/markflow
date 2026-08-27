@@ -710,7 +710,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             const hasCollaborators =
               cloudDoc.collaborators &&
               Object.keys(cloudDoc.collaborators).length > 0;
-            const hasShareLink = cloudDoc.shareLink?.enabled === true;
             const newDoc: Document = {
               id: cloudDoc.id,
               title: cloudDoc.title,
@@ -720,7 +719,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               folder: cloudDoc.folder ?? "/",
               tags: cloudDoc.tags ?? [],
               ownerId: user.uid,
-              isShared: hasCollaborators || hasShareLink,
+              // "Shared" (sidebar badge + yCollab gate) means real collaborators
+              // or a team doc — NOT a mere share link. Link recipients edit via
+              // SharedDocView (direct Firestore write), so a link alone doesn't
+              // make the owner's copy collaborative and shouldn't show the badge.
+              isShared: hasCollaborators || !!cloudDoc.teamId,
               docType: (cloudDoc.docType as DocType) || "markdown",
               voiceTranscript: cloudDoc.voiceTranscript ?? null,
               voiceGcsUri: cloudDoc.voiceGcsUri ?? null,
@@ -732,11 +735,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             const hasCollaborators =
               cloudDoc.collaborators &&
               Object.keys(cloudDoc.collaborators).length > 0;
-            const hasShareLink = cloudDoc.shareLink?.enabled === true;
             const cloudUpdatedAt = cloudDoc.updatedAt?.toMillis() ?? 0;
             const updates: Partial<Document> = {
               ownerId: user.uid,
-              isShared: hasCollaborators || hasShareLink,
+              // See note above: a share link alone is not "shared" for the badge.
+              isShared: hasCollaborators || !!cloudDoc.teamId,
             };
             if (
               cloudDoc.folder &&

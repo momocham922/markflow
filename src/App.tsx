@@ -145,9 +145,20 @@ function App() {
   const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
   const researchAnalyzing = useResearchStore((s) => s.analyzing);
   const { viewportHeight, keyboardVisible } = useIOSKeyboard();
+  // The mobile file sidebar belongs only to the three editor screens
+  // (editor / preview / mindmap) — i.e. the plain <Editor /> with nothing
+  // overlaying it. When the AI panel, version panel, diff view, or research
+  // sheet is up, the swipe gesture and toggle must be inert so the sidebar
+  // can't slide in over those full-screen surfaces.
+  const onSidebarScreen =
+    viewMode === "editor" &&
+    rightPanel === "none" &&
+    !mobileSheetOpen &&
+    !diffState;
   const { sidebarTranslateX, swiping, backdropOpacity } = useSwipeSidebar(
     sidebarOpen,
     toggleSidebar,
+    onSidebarScreen,
   );
   const [shareToken, setShareToken] = useState<string | null>(() => {
     const match = window.location.hash.match(/^#\/share\/(.+)$/);
@@ -1160,7 +1171,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         )}
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar — swipeable overlay on iOS, inline on desktop */}
-          {isMobile && (sidebarOpen || swiping) && (
+          {isMobile && onSidebarScreen && (sidebarOpen || swiping) && (
             <div
               className="fixed inset-0 z-40"
               style={{
@@ -1170,7 +1181,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
             />
           )}
           {isMobile
-            ? (sidebarOpen || swiping) && (
+            ? onSidebarScreen &&
+              (sidebarOpen || swiping) && (
                 <div
                   className="fixed inset-y-0 left-0 z-50 safe-top shadow-xl bg-background overflow-hidden"
                   style={{
@@ -1211,7 +1223,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
               {...(!isMobile ? { "data-tauri-drag-region": true } : {})}
             >
               <div className="flex items-center gap-1">
-                {!sidebarOpen && (
+                {!sidebarOpen && (!isMobile || onSidebarScreen) && (
                   <Button
                     variant="ghost"
                     size="icon"

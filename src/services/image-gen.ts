@@ -46,9 +46,23 @@ export async function generateImage(
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    reportIfQuota(response.status, error);
-    throw new Error(`Image generation failed: ${response.status} ${error}`);
+    const raw = await response.text();
+    reportIfQuota(response.status, raw);
+    // The proxy returns { error, finishReason? } as JSON. Surface the plain
+    // message (e.g. the model's "try rephrasing" note) instead of dumping the
+    // raw JSON blob at the user. 422 = model reached but declined the prompt.
+    let message = raw;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.error === "string") message = parsed.error;
+    } catch {
+      /* raw was not JSON — keep as-is */
+    }
+    const error = new Error(message);
+    // 422 = model reached but declined this prompt (recitation/safety). The UI
+    // shows an actionable "rephrase" hint for this, not a generic failure.
+    if (response.status === 422) error.name = "ImagePromptDeclined";
+    throw error;
   }
 
   const result = await response.json();

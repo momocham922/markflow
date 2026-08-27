@@ -13,7 +13,14 @@ interface SwipeSidebarState {
   swiping: boolean;
 }
 
-export function useSwipeSidebar(isOpen: boolean, toggle: () => void) {
+export function useSwipeSidebar(
+  isOpen: boolean,
+  toggle: () => void,
+  // When false (AI panel / diff / research sheet is up) the swipe gesture is
+  // detached so the file sidebar can't slide in over those surfaces. Only the
+  // three editor screens (editor / preview / mindmap) enable it.
+  enabled: boolean = true,
+) {
   const [state, setState] = useState<SwipeSidebarState>({
     offset: isOpen ? SIDEBAR_WIDTH : 0,
     swiping: false,
@@ -134,7 +141,7 @@ export function useSwipeSidebar(isOpen: boolean, toggle: () => void) {
     // Only the mobile layout renders the sidebar as a swipeable overlay. On
     // desktop / touch-capable laptops these global listeners (with a
     // preventDefault on touchmove) would hijack horizontal touch gestures.
-    if (!isMobile) return;
+    if (!isMobile || !enabled) return;
     document.addEventListener("touchstart", onTouchStart, { passive: true });
     document.addEventListener("touchmove", onTouchMove, { passive: false });
     document.addEventListener("touchend", onTouchEnd, { passive: true });
@@ -145,7 +152,7 @@ export function useSwipeSidebar(isOpen: boolean, toggle: () => void) {
       document.removeEventListener("touchend", onTouchEnd);
       document.removeEventListener("touchcancel", onTouchCancel);
     };
-  }, [onTouchStart, onTouchMove, onTouchEnd, onTouchCancel]);
+  }, [enabled, onTouchStart, onTouchMove, onTouchEnd, onTouchCancel]);
 
   return {
     sidebarTranslateX: state.offset - SIDEBAR_WIDTH, // -280 = hidden, 0 = visible

@@ -5,7 +5,6 @@ import {
   X,
   Sparkles,
   FileText,
-  FilePen,
   Languages,
   Check,
   Minimize,
@@ -107,10 +106,20 @@ const WRITE_DOC_TOOL: CustomTool = {
     "need to ask for permission first, because the user reviews every edit with an " +
     "approve/reject prompt before it is applied. " +
     "Do NOT call this for ordinary answers the user only wants to read in chat. " +
-    "Provide the exact, final Markdown in `content` (never empty).",
+    "Provide the exact, final Markdown in `content` (never empty), and a short " +
+    "`summary` (in the user's language) that states WHAT you will change and HOW " +
+    "— this is shown to the user on the approve/reject card.",
   input_schema: {
     type: "object",
     properties: {
+      summary: {
+        type: "string",
+        description:
+          "One short sentence, in the USER'S LANGUAGE, stating what you are about " +
+          "to change and how (e.g. 「議事録を要約して本文末尾に追記します」, " +
+          '"Rewrite the intro paragraph to be more concise"). Shown to the user on ' +
+          "the approval card before the edit is applied. Must be non-empty.",
+      },
       content: {
         type: "string",
         description:
@@ -133,7 +142,7 @@ const WRITE_DOC_TOOL: CustomTool = {
           "explicitly asks to rewrite or replace the whole document.",
       },
     },
-    required: ["content", "mode"],
+    required: ["summary", "content", "mode"],
   },
 };
 
@@ -144,10 +153,14 @@ const WRITE_DOC_SYSTEM_ADDENDUM =
   "summarize-into, inject, rewrite, restructure, or translate-in-place their document, call " +
   "write_document with the final Markdown and an appropriate mode (prefer 'append' for new content; " +
   "use 'replace_document' only when the user clearly wants the whole document rewritten, and " +
-  "'replace_selection' when they refer to the current selection). You do NOT need to ask for " +
-  "permission first — every write is shown to the user as an approve/reject proposal before it is " +
-  "applied, so just call the tool with your best edit. After the tool returns, briefly confirm the " +
-  "outcome in the user's language (mention it if they rejected the edit). For questions the user only " +
+  "'replace_selection' when they refer to the current selection). Do NOT add an explicit opt-in " +
+  "question like 'shall I edit the document?' — just judge for yourself. But ALWAYS state your intent: " +
+  "put a one-sentence `summary`, in the user's language, describing WHAT you will change and HOW " +
+  "(e.g. 「会議メモを3点に要約して本文末尾に追記します」). The user reviews every write with an " +
+  "approve/reject card (your summary is shown on it) before anything is applied, so you never need to " +
+  "ask first — but the summary is REQUIRED so they know exactly what they're approving. After the tool " +
+  "returns, briefly confirm the outcome in the user's language (and if they rejected it, acknowledge " +
+  "that and ask what to adjust — do NOT silently re-apply the same edit). For questions the user only " +
   "wants answered in chat, do NOT call the tool — just reply normally.";
 
 // Human-readable labels for the write_document modes, shown on the approve/
@@ -276,15 +289,16 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   const [allDocsContext, setAllDocsContext] = useState(false);
   // Web search defaults ON — most questions benefit from up-to-date grounding.
   const [webSearch, setWebSearch] = useState(true);
-  // Document editing defaults OFF. The AI can only write into the open document
-  // when the user explicitly opts in with this toggle ("ドキュメント編集は明示的な
-  // 指示をもって発動"). Quick actions NEVER write regardless of this flag; even in
-  // chat, every write still goes through the approve/reject card as a last guard.
-  const [writeToDoc, setWriteToDoc] = useState(false);
+  // Document editing has NO manual toggle. In chat the AI decides autonomously
+  // whether an edit is warranted (the write_document tool is always offered) and
+  // states what/how it will edit; the user then approves or rejects it on the
+  // card below. Quick actions still NEVER write (they pass allowWrite:false).
   // Pending write proposal: when the AI decides to edit the document via the
   // write_document tool, the edit is held here and shown as an approve/reject
-  // card. `writeResolverRef` unblocks the awaiting tool executor on the choice.
+  // card. `summary` is the AI's own statement of what/how. `writeResolverRef`
+  // unblocks the awaiting tool executor on the choice.
   const [writeProposal, setWriteProposal] = useState<{
+    summary: string;
     content: string;
     mode: string;
   } | null>(null);
@@ -933,14 +947,17 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     async (input: Record<string, unknown>): Promise<string> => {
       const content = typeof input.content === "string" ? input.content : "";
       const mode = typeof input.mode === "string" ? input.mode : "append";
+      const summary =
+        typeof input.summary === "string" ? input.summary.trim() : "";
       if (!content.trim()) {
         return "Error: `content` was empty. Provide the non-empty Markdown to write; nothing was changed.";
       }
       // Surface the edit as an approve/reject proposal and block here until the
-      // user decides. Nothing touches the document unless they approve.
+      // user decides. Nothing touches the document unless they approve. The
+      // summary (the AI's stated intent) is shown on the card.
       const approved = await new Promise<boolean>((resolve) => {
         writeResolverRef.current = resolve;
-        setWriteProposal({ content, mode });
+        setWriteProposal({ summary, content, mode });
       });
       writeResolverRef.current = null;
       setWriteProposal(null);
@@ -1039,10 +1056,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   } => {
     const list: CustomTool[] = [];
     let system = getSystemPrompt();
-    // The write_document tool is offered ONLY when the caller explicitly allows
-    // it — i.e. chat with the user's "write to document" toggle ON. Quick actions
-    // pass allowWrite:false so they can never edit the document unprompted. Every
-    // write is still gated behind the approve/reject card (handleWriteDocTool).
+    // The write_document tool is offered to CHAT (allowWrite:true) so the AI can
+    // autonomously decide to edit when the user's request calls for it. Quick
+    // actions pass allowWrite:false so they can never edit the document — their
+    // result is applied only via the manual Replace/Append buttons. Every write
+    // is still gated behind the approve/reject card (handleWriteDocTool).
     if (activeDoc && opts?.allowWrite) {
       list.push(WRITE_DOC_TOOL);
       system += WRITE_DOC_SYSTEM_ADDENDUM;
@@ -1070,7 +1088,12 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       friendly =
         "AIの利用回数が上限に達しました。プランをご確認のうえ、時間をおいて再度お試しください。";
     } else if (where === "image_gen") {
-      friendly = "画像の生成に失敗しました。もう一度お試しください。";
+      // The model declined this specific prompt (recitation/safety) — tell the
+      // user to rephrase rather than implying a system failure.
+      friendly =
+        err instanceof Error && err.name === "ImagePromptDeclined"
+          ? "このプロンプトでは画像を生成できませんでした。より具体的で独自性のある表現に変えて、もう一度お試しください。"
+          : "画像の生成に失敗しました。もう一度お試しください。";
     } else {
       friendly = "AIの応答に失敗しました。もう一度お試しください。";
     }
@@ -1316,10 +1339,10 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         },
       ].slice(-20);
 
-      // Chat may write into the document only when the user has explicitly
-      // enabled the "write to document" toggle (writeToDoc).
+      // Chat always offers the write_document tool; the AI decides on its own
+      // whether to edit, and every edit is confirmed on the approve/reject card.
       const { tools: turnTools, system: turnSystem } = buildTurnTools({
-        allowWrite: writeToDoc,
+        allowWrite: true,
       });
       let result: string;
 
@@ -1557,30 +1580,6 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           >
             <Globe className={iconGlyph} />
           </Button>
-          {activeDoc && (
-            <Button
-              variant={writeToDoc ? "secondary" : "ghost"}
-              size="icon"
-              // Explicit opt-in for letting the AI edit the document. Default OFF
-              // so nothing is written unprompted; when ON, edits still go through
-              // the approve/reject card. Emphasize the ON state on mobile (no
-              // hover tooltip) so it reads clearly as active.
-              className={cn(
-                iconBtn,
-                isMobile &&
-                  writeToDoc &&
-                  "bg-primary text-primary-foreground hover:bg-primary/90 ring-1 ring-primary",
-              )}
-              onClick={() => setWriteToDoc(!writeToDoc)}
-              title={
-                writeToDoc
-                  ? "AI can edit the document (you approve each change)"
-                  : "Let the AI edit the document"
-              }
-            >
-              <FilePen className={iconGlyph} />
-            </Button>
-          )}
           <Button
             variant={allDocsContext ? "secondary" : "ghost"}
             size="icon"
@@ -1974,6 +1973,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
                 <FileText className="h-3.5 w-3.5 shrink-0 text-primary" />
                 <span>AIがドキュメントを編集しようとしています</span>
               </div>
+              {writeProposal.summary && (
+                <p className="mb-2 text-[11px] leading-snug text-foreground/90">
+                  {writeProposal.summary}
+                </p>
+              )}
               <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
                 {WRITE_MODE_LABELS[writeProposal.mode] || writeProposal.mode}
               </div>
