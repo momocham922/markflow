@@ -78,6 +78,7 @@ import {
   buildInsertRows,
   type BigQueryInsertRow,
 } from "./telemetry";
+import { stripThinkingBlocks } from "./thinking";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
@@ -4797,8 +4798,8 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
     // Build Vertex AI request (model is in URL, not body)
     const vertexBody: Record<string, unknown> = {
       anthropic_version: "vertex-2023-10-16",
-      max_tokens: parsed.max_tokens || 4096,
-      messages: parsed.messages || [],
+      max_tokens: parsed.max_tokens || 16000,
+      messages: stripThinkingBlocks(parsed.messages || []),
       stream: isStream,
     };
     if (parsed.system) {

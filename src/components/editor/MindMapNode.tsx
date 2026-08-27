@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type CSSProperties } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 export type MindMapThemeId =
@@ -107,6 +107,14 @@ export interface MindMapNodeData {
   themeId?: MindMapThemeId;
   editing?: boolean;
   lineNumber?: number;
+  // Bloom entrance: offset (canvas px) from this node toward its parent, plus a
+  // depth-based delay. The CSS keyframe (globals.css `mm-bloom`) starts the node
+  // at translate(dx,dy) scale(0.4) — i.e. sitting on top of its parent — then
+  // springs it out to its real position, so children appear to burst from the
+  // root outward. Undefined → no offset (the empty-tree single root node).
+  dx?: number;
+  dy?: number;
+  delay?: number;
 }
 
 export const levelSizes = [
@@ -134,31 +142,60 @@ export const MindMapNode = memo(function MindMapNode({
   const shape = shapeClass[theme.nodeShape];
   const isUnderline = theme.nodeShape === "underline";
 
+  // Outer wrapper carries the bloom entrance animation (scoped to MindMapView
+  // via the `.mindmap-bloom` ancestor in globals.css — MindMapEditor reuses this
+  // node but has no such ancestor, so it never animates). The animation lives on
+  // this wrapper, NOT the styled inner div, because the keyframe uses
+  // fill-mode:both and would otherwise clobber the `selected` scale-105.
+  const bloomVars = {
+    "--mm-dx": `${nodeData.dx ?? 0}px`,
+    "--mm-dy": `${nodeData.dy ?? 0}px`,
+    "--mm-delay": `${nodeData.delay ?? 0}ms`,
+  } as CSSProperties;
+
+  // The <Handle>s live OUTSIDE the animated .mm-node (as siblings within
+  // React Flow's .react-flow__node), NOT inside it. Reason: the bloom keyframe
+  // puts a `transform` on .mm-node, and a transformed element becomes the
+  // containing block for its abs-positioned descendants. React Flow measures
+  // handle positions once at mount via getBoundingClientRect (transform-
+  // dependent) and caches them forever. If the handles were inside .mm-node,
+  // that one measurement lands mid-bloom (scale 0.4 / mid-translate), so every
+  // parent's outgoing edge would stay anchored inside the node after the
+  // animation settles. As siblings they anchor to .react-flow__node (whose own
+  // positioning transform cancels in getHandleBounds), so they're always
+  // measured un-transformed. Handles are w-0/transparent, so not blooming with
+  // the body is invisible; edges fade in via `mm-edge-fade` anyway. This is a
+  // no-op for MindMapEditor, where .mm-node has no transform and the handles
+  // already anchored to .react-flow__node.
   return (
-    <div
-      className={`${shape} ${isUnderline ? "" : "shadow-sm"} ${theme.nodeColors[colorIdx]} ${levelSizes[Math.min(nodeData.level, levelSizes.length - 1)]} ${
-        selected
-          ? isUnderline
-            ? "ring-1 ring-current/30 bg-current/5!"
-            : "ring-2 ring-white/50 shadow-md scale-105"
-          : ""
-      }`}
-    >
+    <>
       <Handle
         type="target"
         position={Position.Left}
         className="bg-transparent! w-0! h-0! min-w-0! min-h-0! border-0! -left-px!"
       />
-      <span
-        className={`whitespace-nowrap ${nodeData.editing ? "opacity-0" : ""}`}
-      >
-        {nodeData.label}
-      </span>
+      <div className="mm-node" style={bloomVars}>
+        <div
+          className={`${shape} ${isUnderline ? "" : "shadow-sm"} ${theme.nodeColors[colorIdx]} ${levelSizes[Math.min(nodeData.level, levelSizes.length - 1)]} ${
+            selected
+              ? isUnderline
+                ? "ring-1 ring-current/30 bg-current/5!"
+                : "ring-2 ring-white/50 shadow-md scale-105"
+              : ""
+          }`}
+        >
+          <span
+            className={`whitespace-nowrap ${nodeData.editing ? "opacity-0" : ""}`}
+          >
+            {nodeData.label}
+          </span>
+        </div>
+      </div>
       <Handle
         type="source"
         position={Position.Right}
         className="bg-transparent! w-0! h-0! min-w-0! min-h-0! border-0! -right-px!"
       />
-    </div>
+    </>
   );
 });

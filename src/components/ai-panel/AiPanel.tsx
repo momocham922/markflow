@@ -5,6 +5,7 @@ import {
   X,
   Sparkles,
   FileText,
+  FilePen,
   Languages,
   Check,
   Minimize,
@@ -66,6 +67,7 @@ import {
 } from "@/services/firebase";
 import { isIOS, isMobile } from "@/platform";
 import { cn } from "@/lib/utils";
+import { track } from "@/services/telemetry";
 import * as db from "@/services/database";
 
 const iconMap: Record<string, React.ElementType> = {
@@ -274,6 +276,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   const [allDocsContext, setAllDocsContext] = useState(false);
   // Web search defaults ON — most questions benefit from up-to-date grounding.
   const [webSearch, setWebSearch] = useState(true);
+  // Document editing defaults OFF. The AI can only write into the open document
+  // when the user explicitly opts in with this toggle ("ドキュメント編集は明示的な
+  // 指示をもって発動"). Quick actions NEVER write regardless of this flag; even in
+  // chat, every write still goes through the approve/reject card as a last guard.
+  const [writeToDoc, setWriteToDoc] = useState(false);
   // Pending write proposal: when the AI decides to edit the document via the
   // write_document tool, the edit is held here and shown as an approve/reject
   // card. `writeResolverRef` unblocks the awaiting tool executor on the choice.
@@ -1024,16 +1031,19 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   // Assemble the custom tool list + system prompt for a turn, based on which
   // capabilities are toggled on. Returns undefined tools when none apply so the
   // caller keeps the streaming (no-tool) path for ordinary chat.
-  const buildTurnTools = (): {
+  const buildTurnTools = (opts?: {
+    allowWrite?: boolean;
+  }): {
     tools: CustomTool[] | undefined;
     system: string;
   } => {
     const list: CustomTool[] = [];
     let system = getSystemPrompt();
-    // Always give the AI the ability to write into the open document; it decides
-    // autonomously when to use it, and every edit is gated behind the user's
-    // approve/reject card (handleWriteDocTool).
-    if (activeDoc) {
+    // The write_document tool is offered ONLY when the caller explicitly allows
+    // it — i.e. chat with the user's "write to document" toggle ON. Quick actions
+    // pass allowWrite:false so they can never edit the document unprompted. Every
+    // write is still gated behind the approve/reject card (handleWriteDocTool).
+    if (activeDoc && opts?.allowWrite) {
       list.push(WRITE_DOC_TOOL);
       system += WRITE_DOC_SYSTEM_ADDENDUM;
     }
@@ -1041,6 +1051,33 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       list.push(...toClaudeTools(mcpTools));
     }
     return { tools: list.length > 0 ? list : undefined, system };
+  };
+
+  // Surface AI failures with a friendly, localized message — NEVER the raw error
+  // string, which can leak model/provider/endpoint/stack details (security). The
+  // real detail goes only to the console and telemetry for debugging.
+  const pushFriendlyError = (
+    where: "chat" | "quick_action" | "image_gen",
+    err: unknown,
+  ) => {
+    // A user-initiated abort (stop button / unmount) isn't a failure.
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[AiPanel] ${where} failed:`, detail);
+    track("ai_error", { where, detail: detail.slice(0, 300) });
+    let friendly: string;
+    if (detail.includes("quota_exceeded")) {
+      friendly =
+        "AIの利用回数が上限に達しました。プランをご確認のうえ、時間をおいて再度お試しください。";
+    } else if (where === "image_gen") {
+      friendly = "画像の生成に失敗しました。もう一度お試しください。";
+    } else {
+      friendly = "AIの応答に失敗しました。もう一度お試しください。";
+    }
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "assistant", content: friendly },
+    ]);
   };
 
   const handleImageGen = async () => {
@@ -1126,14 +1163,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         },
       ]);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `Image generation failed: ${err instanceof Error ? err.message : String(err)}`,
-        },
-      ]);
+      pushFriendlyError("image_gen", err);
     } finally {
       setGeneratingImage(false);
       setToolStatus(null);
@@ -1176,7 +1206,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     setStreamingText("");
 
     try {
-      const { tools: turnTools, system: turnSystem } = buildTurnTools();
+      // Quick actions never edit the document — the user applies the result via
+      // the Replace/Append buttons on the answer instead.
+      const { tools: turnTools, system: turnSystem } = buildTurnTools({
+        allowWrite: false,
+      });
       let result: string;
 
       if (turnTools) {
@@ -1207,14 +1241,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `Error: ${err instanceof Error ? err.message : "Unknown error"}`,
-        },
-      ]);
+      pushFriendlyError("quick_action", err);
     } finally {
       setStreaming(false);
       setStreamingText("");
@@ -1289,7 +1316,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         },
       ].slice(-20);
 
-      const { tools: turnTools, system: turnSystem } = buildTurnTools();
+      // Chat may write into the document only when the user has explicitly
+      // enabled the "write to document" toggle (writeToDoc).
+      const { tools: turnTools, system: turnSystem } = buildTurnTools({
+        allowWrite: writeToDoc,
+      });
       let result: string;
 
       if (turnTools) {
@@ -1323,14 +1354,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         { id: crypto.randomUUID(), role: "assistant", content: result },
       ]);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `Error: ${err instanceof Error ? err.message : "Unknown error"}`,
-        },
-      ]);
+      pushFriendlyError("chat", err);
     } finally {
       setStreaming(false);
       setStreamingText("");
@@ -1533,6 +1557,30 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           >
             <Globe className={iconGlyph} />
           </Button>
+          {activeDoc && (
+            <Button
+              variant={writeToDoc ? "secondary" : "ghost"}
+              size="icon"
+              // Explicit opt-in for letting the AI edit the document. Default OFF
+              // so nothing is written unprompted; when ON, edits still go through
+              // the approve/reject card. Emphasize the ON state on mobile (no
+              // hover tooltip) so it reads clearly as active.
+              className={cn(
+                iconBtn,
+                isMobile &&
+                  writeToDoc &&
+                  "bg-primary text-primary-foreground hover:bg-primary/90 ring-1 ring-primary",
+              )}
+              onClick={() => setWriteToDoc(!writeToDoc)}
+              title={
+                writeToDoc
+                  ? "AI can edit the document (you approve each change)"
+                  : "Let the AI edit the document"
+              }
+            >
+              <FilePen className={iconGlyph} />
+            </Button>
+          )}
           <Button
             variant={allDocsContext ? "secondary" : "ghost"}
             size="icon"

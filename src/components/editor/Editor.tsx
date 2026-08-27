@@ -1255,6 +1255,7 @@ export function Editor() {
         {previewMode === "mindmap" && (
           <div className="flex-1">
             <MindMapView
+              docId={activeDocId ?? undefined}
               content={activeDoc.content || ""}
               title={activeDoc.title}
               onNodeClick={({ text }) => {

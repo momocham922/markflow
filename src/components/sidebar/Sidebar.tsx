@@ -803,7 +803,7 @@ export function Sidebar() {
       }}
       className={cn(
         "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-        isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
+        isMobile ? "pl-3 py-2" : "pl-2.5 py-1.5",
         activeDocId === doc.id
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -916,9 +916,11 @@ export function Sidebar() {
             className={cn(
               // Match the document row's box (w-full + pr-2 + py-1.5) so folders
               // and docs share the SAME width AND vertical rhythm on mobile.
-              // Unified with the comfortable doc-to-doc spacing (py-1.5) across
-              // every row type (docs/folders/teams/shared) per owner request.
+              // Unified with the comfortable doc-to-doc spacing across every row
+              // type (docs/folders/teams/shared) per owner request. Mobile gets a
+              // touch more breathing room (py-2) to match the doc rows.
               "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile && "py-2",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1153,7 +1155,7 @@ export function Sidebar() {
           }}
           className={cn(
             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors cursor-pointer",
-            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
+            isMobile ? "pl-3 py-2" : "pl-2.5 py-1.5",
             activeDocId === td.id
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -1243,8 +1245,9 @@ export function Sidebar() {
             className={cn(
               // Same box as document rows (see personal folder header) so team
               // folders and docs line up at the same width AND padding on mobile
-              // — unified with the comfortable doc-to-doc spacing (py-1.5).
+              // — unified with the comfortable doc-to-doc spacing (py-2 mobile).
               "group flex w-full items-center gap-1.5 rounded-md pr-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors",
+              isMobile && "py-2",
               isDragOver && "bg-sidebar-accent/70 ring-1 ring-primary/30",
             )}
             style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -1748,6 +1751,7 @@ export function Sidebar() {
                               <button
                                 className={cn(
                                   "flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors",
+                                  isMobile && "py-2",
                                 )}
                                 onClick={() =>
                                   setExpandedTeams((prev) => {
@@ -1896,7 +1900,7 @@ export function Sidebar() {
                           onClick={() => openTeamOrSharedDoc(sd.id)}
                           className={cn(
                             "group flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-xs transition-colors",
-                            isMobile ? "pl-3 py-1.5" : "pl-2.5 py-1.5",
+                            isMobile ? "pl-3 py-2" : "pl-2.5 py-1.5",
                             activeDocId === sd.id
                               ? "bg-sidebar-accent text-sidebar-accent-foreground"
                               : "text-sidebar-foreground hover:bg-sidebar-accent/50",

@@ -12,6 +12,7 @@ COPY iap.ts iap.ts
 COPY apple-root-certs.ts apple-root-certs.ts
 COPY feedback.ts feedback.ts
 COPY telemetry.ts telemetry.ts
+COPY thinking.ts thinking.ts
 
 # Transpile TypeScript to JavaScript at build time (esbuild bundles the local
 # ./gating, ./metering, ./billing, ./iap, ./apple-root-certs, ./feedback,

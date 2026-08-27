@@ -204,7 +204,10 @@ export async function sendToClaude(
   const body: Record<string, unknown> = {
     system: systemPrompt,
     messages,
-    max_tokens: 4096,
+    // 16k so long answers (Expand, full-doc rewrites, detailed explanations)
+    // don't get truncated mid-sentence. opus-5 handles far more; this is a
+    // safe streaming-chat ceiling.
+    max_tokens: 16000,
     stream: !!onChunk,
   };
   if (toolsList) body.tools = toolsList;
@@ -272,7 +275,9 @@ export async function sendWithToolLoop(
       const body: Record<string, unknown> = {
         system: systemPrompt,
         messages: conversationMessages,
-        max_tokens: 4096,
+        // 16k so tool-loop answers (esp. the final synthesized reply) aren't
+        // cut off mid-sentence. Matches sendToClaude.
+        max_tokens: 16000,
         // Stream every iteration so ordinary chat (and the final answer after a
         // tool call) shows live text. The SSE assembler in callClaudeApi still
         // reconstructs the full content-block list so tool_use is detectable.

@@ -54,3 +54,4 @@ tsconfig.tsbuildinfo
 # Local Claude runtime state
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+.claude/settings.json

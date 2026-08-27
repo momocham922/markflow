@@ -992,7 +992,20 @@ input::selection {
   display: block !important;
   overflow-x: auto !important;
   max-width: 100% !important;
+  width: max-content !important;
   font-size: 0.8rem !important;
+  -webkit-overflow-scrolling: touch;
+}
+/* Keep cells on a single line so text-heavy cells stay readable instead of
+   char-stacking to squeeze into the viewport width. The table itself
+   (display:block + overflow-x:auto above) then scrolls horizontally. Only
+   explicit <br> breaks a cell — matches the owner request "明示的な改行以外は
+   改行しない". Resets the inherited break-word from .mobile-preview.prose. */
+.mobile-preview.prose th,
+.mobile-preview.prose td {
+  white-space: nowrap !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
 }
 .mobile-preview.prose .youtube-embed {
   max-width: 100% !important;
@@ -1012,4 +1025,54 @@ input::selection {
 }
 .mobile-preview.prose h3 {
   font-size: 1.1em !important;
+}
+
+/* ── Mind map bloom entrance ────────────────────────────────────────────────
+   When the MindMap View opens, child nodes burst outward from the root
+   ("最上位ノードからぶわっと下位ノードが吹き出す"). Each node starts sitting on
+   its parent (translated by its --mm-dx/--mm-dy, scaled down) and springs to
+   its real spot; the --mm-delay staggers deeper levels so the wave ripples out
+   from the root. Scoped to `.mindmap-bloom` (MindMapView only) so MindMapEditor,
+   which reuses MindMapNode, never animates. The animation is on the .mm-node
+   wrapper — not the styled inner div — so fill-mode:both can't clobber the
+   `selected` scale. */
+@keyframes mm-bloom {
+  from {
+    opacity: 0;
+    transform: translate(var(--mm-dx, 0), var(--mm-dy, 0)) scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+@keyframes mm-edge-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.mindmap-bloom .react-flow__node .mm-node {
+  display: inline-block;
+  /* Kill the inline-block baseline descender so .react-flow__node hugs the node
+     box exactly — otherwise the extra sub-baseline space would inflate node
+     height and nudge the vertically-centered edge handles off-center. */
+  vertical-align: top;
+  transform-origin: left center;
+  animation: mm-bloom 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--mm-delay, 0ms);
+  will-change: transform, opacity;
+}
+/* Edges fade in just behind the nodes so connectors don't dangle in mid-air. */
+.mindmap-bloom .react-flow__edge {
+  animation: mm-edge-fade 0.5s ease both;
+  animation-delay: 0.12s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mindmap-bloom .react-flow__node .mm-node,
+  .mindmap-bloom .react-flow__edge {
+    animation: none;
+  }
 }

@@ -114,6 +114,10 @@ function estimateNodeHeight(level: number): number {
 const H_GAP = 60; // horizontal gap between node edge and child node start
 const V_GAP = 24; // vertical gap between sibling nodes
 
+// Bloom entrance: each deeper tree level starts this many ms later, so the
+// animation ripples outward from the root ("ぶわっと吹き出す").
+const BLOOM_STAGGER = 55;
+
 /**
  * Compute tree layout positions with dynamic sizing.
  * Returns flat arrays of nodes and edges for ReactFlow.
@@ -137,20 +141,35 @@ function layoutTree(
     return total;
   }
 
-  // Second pass: assign positions
-  function layout(node: HeadingNode, x: number, yStart: number, yEnd: number) {
+  // Second pass: assign positions.
+  // `depth` is the distance from the root (0 = root) and drives the bloom
+  // stagger. `parentPos` is the parent node's top-left in canvas space; the
+  // child's bloom offset (dx,dy) is the vector from the child back to the
+  // parent, so the entrance keyframe starts the child sitting on its parent.
+  function layout(
+    node: HeadingNode,
+    x: number,
+    yStart: number,
+    yEnd: number,
+    depth: number,
+    parentPos?: { x: number; y: number },
+  ) {
     const nodeH = estimateNodeHeight(node.level);
     const yCenter = (yStart + yEnd) / 2;
+    const nodeY = yCenter - nodeH / 2;
 
     nodes.push({
       id: node.id,
       type: "mindmap",
-      position: { x, y: yCenter - nodeH / 2 },
+      position: { x, y: nodeY },
       data: {
         label: node.label,
         level: node.level,
         themeId,
         lineNumber: node.lineNumber,
+        dx: parentPos ? parentPos.x - x : 0,
+        dy: parentPos ? parentPos.y - nodeY : 0,
+        delay: depth * BLOOM_STAGGER,
       } satisfies MindMapNodeData,
     });
 
@@ -184,13 +203,13 @@ function layoutTree(
         },
       });
 
-      layout(child, childX, childY, childYEnd);
+      layout(child, childX, childY, childYEnd, depth + 1, { x, y: nodeY });
       childY = childYEnd + V_GAP;
     }
   }
 
   const totalH = subtreeHeight(root);
-  layout(root, 50, -totalH / 2, totalH / 2);
+  layout(root, 50, -totalH / 2, totalH / 2, 0);
 
   return { nodes, edges };
 }
@@ -199,9 +218,17 @@ interface MindMapViewProps {
   content: string;
   title: string;
   onNodeClick?: (info: { lineNumber: number; text: string }) => void;
+  // Remounts ReactFlow when the doc changes so the bloom entrance replays on
+  // every open / doc switch (CSS animations only fire on mount).
+  docId?: string;
 }
 
-export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
+export function MindMapView({
+  content,
+  title,
+  onNodeClick,
+  docId,
+}: MindMapViewProps) {
   const mindMapTheme = (useAppStore((s) => s.themeSettings.mindMapTheme) ||
     "lavender") as MindMapThemeId;
   const { nodes, edges } = useMemo(() => {
@@ -232,6 +259,7 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
           editor toolbar), alongside the preview/editor themes — no separate
           floating picker here. */}
       <ReactFlow
+        key={docId}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
@@ -256,7 +284,7 @@ export function MindMapView({ content, title, onNodeClick }: MindMapViewProps) {
         }
         panOnDrag
         zoomOnScroll
-        className="bg-background"
+        className="bg-background mindmap-bloom"
       >
         <Controls
           showInteractive={false}
