@@ -19,6 +19,22 @@ env:
   # it is absent in CI; without this, Windows builds would ship crash reporting
   # DARK while macOS/iOS/Android (built locally, which load .env) would not.
   VITE_GLITCHTIP_DSN: https://57410cbbd65b489784e43f0eff1e91bc@crash.markflow.jp/1
+  # Cloud config (Firebase / AI proxy / Yjs / Google OAuth). Read at BUILD time
+  # from import.meta.env.VITE_* (src/services/firebase.ts). The local .env is
+  # gitignored so it is absent in CI — WITHOUT these, CI-built Windows binaries
+  # ship with EMPTY config: no login, no Firestore sync, no image upload, no AI,
+  # no realtime collaboration (regression that shipped silently since v0.4.0).
+  # These are client-side public config (Firebase web keys / OAuth client id /
+  # public URLs), stored as repo Secrets to avoid hardcoding them in source.
+  VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+  VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+  VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+  VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+  VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+  VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+  VITE_AI_PROXY_URL: ${{ secrets.VITE_AI_PROXY_URL }}
+  VITE_YJS_WEBSOCKET_URL: ${{ secrets.VITE_YJS_WEBSOCKET_URL }}
+  VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
 
 jobs:
   build-and-release:
@@ -45,6 +61,19 @@ jobs:
 
       - name: Build (Windows x64)
         run: pnpm tauri build --bundles nsis
+
+      # Fail-closed: prove the cloud config was actually baked into the bundle.
+      # If a VITE_* secret is missing/renamed, Firebase config would be empty and
+      # the app would ship with cloud DARK — surface that as a hard build failure
+      # here instead of silently publishing a broken Windows binary.
+      - name: Assert cloud config baked into bundle
+        shell: bash
+        run: |
+          if ! grep -rq "firebaseapp.com" dist/assets/*.js; then
+            echo "::error::Firebase config is MISSING from the built bundle — VITE_* secrets not injected. Refusing to publish a cloud-dark Windows build."
+            exit 1
+          fi
+          echo "OK: Firebase config present in bundle."
 
       - name: Get version and artifacts
         id: info
