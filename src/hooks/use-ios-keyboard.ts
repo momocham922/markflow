@@ -1,11 +1,21 @@
 import { useEffect, useState } from "react";
-import { isIOS } from "@/platform";
+import { isIOS, isAndroid } from "@/platform";
 
 /**
- * Track the iOS visual viewport height to handle soft keyboard.
- * When the keyboard opens, visualViewport.height shrinks while
- * window.innerHeight stays constant. We use this to dynamically
- * resize the app container so the editor and toolbar remain visible.
+ * Track the mobile soft-keyboard so the app container can shrink to the visible
+ * area (keeping the editor, toolbar, and input rows above the keyboard).
+ *
+ * iOS: driven by window.visualViewport (height shrinks while innerHeight stays).
+ *
+ * Android: window.visualViewport is unreliable in the WebView (Tauri #10631) and
+ * env(safe-area) never reports the keyboard, so MainActivity measures the IME
+ * WindowInsets natively and pushes --android-ime-bottom (CSS px) + a
+ * `markflow-android-insets` DOM event. We reconcile that keyboard height with the
+ * WebView's own window.innerHeight so the layout is correct WHETHER OR NOT the
+ * framework resizes the WebView under enforced edge-to-edge:
+ *   visible = min(innerHeight, fullHeight - kbHeight)
+ *   - view resized  → innerHeight already dropped → min picks it (no double-shift)
+ *   - view NOT resized → innerHeight full → min picks fullHeight - kbHeight
  */
 export function useIOSKeyboard() {
   const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
@@ -68,6 +78,53 @@ export function useIOSKeyboard() {
     return () => {
       vv.removeEventListener("resize", update);
       vv.removeEventListener("scroll", update);
+    };
+  }, []);
+
+  // Android soft-keyboard, driven by the natively-measured --android-ime-bottom
+  // (see MainActivity). No visualViewport / body-position-lock here — the app
+  // shell is already position:fixed and the height shrink is the sole correction.
+  useEffect(() => {
+    if (!isAndroid) return;
+
+    // Last known keyboard-DOWN inner height. innerHeight is the reliable measure
+    // of the WebView's own size on Android; re-baseline it whenever the keyboard
+    // is down so an intervening rotation / resize is picked up.
+    let fullHeight = window.innerHeight;
+
+    const readKb = (): number => {
+      const raw = getComputedStyle(document.documentElement)
+        .getPropertyValue("--android-ime-bottom")
+        .trim();
+      const px = parseInt(raw, 10);
+      return Number.isFinite(px) && px > 0 ? px : 0;
+    };
+
+    const update = () => {
+      const kb = readKb();
+      const inner = window.innerHeight;
+      if (kb <= 0) {
+        // Keyboard down: innerHeight is the true full height — re-baseline.
+        fullHeight = inner;
+        setKeyboardVisible((prev) => (prev === false ? prev : false));
+        setViewportHeight((prev) => (prev === inner ? prev : inner));
+        return;
+      }
+      // Keyboard up. min() reconciles the two possible framework behaviours:
+      // if the WebView resized, `inner` already excludes the keyboard; if it did
+      // not, `fullHeight - kb` shrinks the shell to sit above the keyboard.
+      const visible = Math.min(inner, fullHeight - kb);
+      setKeyboardVisible((prev) => (prev === true ? prev : true));
+      setViewportHeight((prev) => (prev === visible ? prev : visible));
+    };
+
+    update();
+    document.addEventListener("markflow-android-insets", update);
+    window.addEventListener("resize", update);
+
+    return () => {
+      document.removeEventListener("markflow-android-insets", update);
+      window.removeEventListener("resize", update);
     };
   }, []);
 

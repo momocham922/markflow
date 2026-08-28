@@ -57,7 +57,7 @@ import { aiProxyHeaders } from "@/services/ai-proxy";
 import { onLocalEdit } from "@/lib/local-edit-signal";
 import TurndownService from "turndown";
 import { marked } from "marked";
-import { getPlatform, isIOS, isMobile, isMac } from "@/platform";
+import { getPlatform, isMobile, isMac } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
 import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
 
@@ -963,7 +963,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                   top: 0,
                   left: 0,
                   right: 0,
-                  ...(isIOS && keyboardVisible
+                  ...(keyboardVisible
                     ? { bottom: "auto", height: viewportHeight }
                     : { bottom: 0 }),
                 }
@@ -1002,7 +1002,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
                 top: 0,
                 left: 0,
                 right: 0,
-                ...(isIOS && keyboardVisible
+                ...(keyboardVisible
                   ? { bottom: "auto", height: viewportHeight }
                   : { bottom: 0 }),
               }

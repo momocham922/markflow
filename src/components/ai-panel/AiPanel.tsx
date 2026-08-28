@@ -2263,11 +2263,18 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
               ? "px-2 pt-2"
               : "p-2",
         )}
-        // Android: lift the input row above the OS navigation bar. iOS handles
-        // this via its own pb-* branch above; desktop needs no inset.
+        // Android: lift the input row above the OS navigation bar. When the
+        // keyboard is up the keyboard covers the nav bar, so the nav-bar inset
+        // would open a phantom gap between the field and the keyboard top —
+        // drop it to the base padding then. iOS handles this via its own pb-*
+        // branch above; desktop needs no inset.
         style={
           !isIOS && isMobile
-            ? { paddingBottom: "max(var(--safe-area-bottom), 0.5rem)" }
+            ? {
+                paddingBottom: keyboardVisible
+                  ? "0.5rem"
+                  : "max(var(--safe-area-bottom), 0.5rem)",
+              }
             : undefined
         }
       >
