@@ -321,6 +321,9 @@ function App() {
           const initialUrls = await getCurrent();
           if (initialUrls && initialUrls.length > 0) {
             for (const url of initialUrls) {
+              // OAuth return deep link (Android): its only job is to foreground
+              // the app; the auth code arrives via the oauth-callback event.
+              if (url.startsWith("markflow://oauth")) continue;
               if (handleBillingReturn(url)) break;
               const token = parseShareToken(url);
               if (token) {
@@ -333,6 +336,8 @@ function App() {
         // Listen for subsequent deep link events while app is running
         unlisten = await onOpenUrl((urls) => {
           for (const url of urls) {
+            // OAuth return deep link (Android): foreground-only, no payload.
+            if (url.startsWith("markflow://oauth")) continue;
             if (handleBillingReturn(url)) break;
             const token = parseShareToken(url);
             if (token) {

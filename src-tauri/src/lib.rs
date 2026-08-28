@@ -82,6 +82,18 @@ static FRONTEND_ALIVE: AtomicBool = AtomicBool::new(false);
 /// Pending OAuth code from iOS in-webview flow
 static PENDING_OAUTH_CODE: Mutex<Option<String>> = Mutex::new(None);
 
+/// Android OAuth "return to app" page served by the loopback callback. The
+/// system browser opens as a separate task, so we bounce back into the app via
+/// the markflow:// deep link (routed to the singleTask MainActivity by its
+/// BROWSABLE intent-filter). Auto navigation to a custom scheme is gesture-gated
+/// in Chrome, so the visible tap button is the guaranteed path. Dark theme,
+/// Japanese copy, no emoji — mirrors hosting/checkout/success/index.html.
+const OAUTH_ANDROID_RETURN_HTML: &str = r#"<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>サインイン - MarkFlow</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}.card{max-width:460px;padding:3rem;text-align:center}.logo{font-size:1.75rem;font-weight:700;margin-bottom:1.5rem}h1{font-size:1.25rem;margin-bottom:.75rem}p{color:#a1a1aa;font-size:.95rem;line-height:1.7;margin-bottom:1.5rem}.btn{display:inline-block;padding:.7rem 1.75rem;border-radius:.5rem;font-size:.95rem;font-weight:500;text-decoration:none;background:#6366f1;color:#fff}.hint{margin-top:1rem;font-size:.8rem;color:#71717a}</style><script>(function(){try{window.location.href="markflow://oauth"}catch(e){}})();</script></head><body><div class="card"><div class="logo">MarkFlow</div><h1>サインインが完了しました</h1><p>アプリに戻ってください。自動的に戻らない場合は、下のボタンをタップしてください。</p><a class="btn" href="markflow://oauth">アプリに戻る</a><p class="hint">このタブは閉じていただいて構いません。</p></div></body></html>"#;
+
+/// Android OAuth error page (loopback callback). `{{ERR}}` is replaced with the
+/// HTML-escaped provider error code before serving.
+const OAUTH_ANDROID_ERROR_HTML: &str = r#"<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>サインイン - MarkFlow</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}.card{max-width:460px;padding:3rem;text-align:center}.logo{font-size:1.75rem;font-weight:700;margin-bottom:1.5rem}h1{font-size:1.25rem;margin-bottom:.75rem}p{color:#a1a1aa;font-size:.95rem;line-height:1.7;margin-bottom:1.5rem}.code{color:#71717a;font-size:.8rem;margin-bottom:1.5rem}.btn{display:inline-block;padding:.7rem 1.75rem;border-radius:.5rem;font-size:.95rem;font-weight:500;text-decoration:none;background:#6366f1;color:#fff}</style></head><body><div class="card"><div class="logo">MarkFlow</div><h1>サインインに失敗しました</h1><p>もう一度お試しください。問題が続く場合は時間をおいて再度お試しください。</p><p class="code">{{ERR}}</p><a class="btn" href="markflow://oauth">アプリに戻る</a></div></body></html>"#;
+
 /// Open SFSafariViewController on iOS using ObjC runtime
 #[cfg(target_os = "ios")]
 static SAFARI_VC: Mutex<Option<usize>> = Mutex::new(None);
@@ -426,10 +438,20 @@ async fn fetch_ogp(url: String) -> Result<OgpData, String> {
 async fn oauth_listen(
     app: tauri::AppHandle,
     ios: Option<bool>,
+    android: Option<bool>,
     state: Option<String>,
 ) -> Result<u16, String> {
     let port: u16 = 19847;
     let is_ios = ios.unwrap_or(false);
+    // Android has no in-app browser sheet to dismiss (unlike iOS's SFSafariVC):
+    // the system browser opens as a SEPARATE task, so after it hits our loopback
+    // socket nothing brings MarkFlow back to the foreground. We instead serve a
+    // "return to app" page that bounces to the markflow:// deep link (the OS then
+    // foregrounds the singleTask activity via its BROWSABLE intent-filter). Auto
+    // navigation to a custom scheme is gesture-gated in Chrome, so the visible
+    // tap button is the guaranteed path; the auth code is already delivered
+    // out-of-band via the oauth-callback event, so sign-in completes regardless.
+    let is_android = android.unwrap_or(false);
     // Expected OAuth `state` for this sign-in. When present, a callback whose
     // state does not match is rejected as CSRF / auth-code injection (an attacker
     // navigating the browser to our loopback callback with THEIR code can't guess
@@ -500,6 +522,18 @@ async fn oauth_listen(
                                         }
                                     }
                                 }
+                            } else if is_android {
+                                // Android: system browser is a separate task; serve a page
+                                // that bounces to markflow://oauth so the OS foregrounds the
+                                // app (auto-nav best-effort + mandatory tap fallback).
+                                let html = OAUTH_ANDROID_RETURN_HTML;
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-callback", auth_code);
                             } else {
                                 // Desktop: show success page and emit event
                                 let html = r#"<!DOCTYPE html><html><head><style>
@@ -535,6 +569,24 @@ p{color:#666;margin:0;font-size:0.95em;}
                                         }
                                     }
                                 }
+                            } else if is_android {
+                                // Android: error page also offers a return-to-app button so the
+                                // user isn't stranded in the browser. Escape the reflected error
+                                // (defense-in-depth; err is a provider code but the page is served
+                                // over the loopback socket).
+                                let safe_err = err
+                                    .replace('&', "&amp;")
+                                    .replace('<', "&lt;")
+                                    .replace('>', "&gt;")
+                                    .replace('"', "&quot;");
+                                let html = OAUTH_ANDROID_ERROR_HTML.replace("{{ERR}}", &safe_err);
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-error", err);
                             } else {
                                 let html = format!(
                                     "<!DOCTYPE html><html><body><p>Authentication error: {}</p></body></html>", err

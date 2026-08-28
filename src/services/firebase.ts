@@ -128,7 +128,8 @@ export async function checkPendingOAuthCode(): Promise<User | null> {
 }
 
 export async function signInWithGoogle(): Promise<User | null> {
-  const { getPlatform, isMobile } = await import("@/platform");
+  const { getPlatform, isMobile, isIOS, isAndroid } =
+    await import("@/platform");
   const platform = await getPlatform();
 
   const port = 19847;
@@ -141,9 +142,16 @@ export async function signInWithGoogle(): Promise<User | null> {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
-    // Start localhost callback server (iOS mode) with the CSRF state to verify.
+    // Start localhost callback server with the CSRF state to verify. The
+    // platform flags tell Rust which callback page to serve: iOS dismisses the
+    // in-app SFSafariVC; Android serves a markflow:// return-to-app page (the
+    // system browser is a separate task with nothing to dismiss).
     const oauthState = generateOAuthState();
-    await invoke<number>("oauth_listen", { ios: true, state: oauthState });
+    await invoke<number>("oauth_listen", {
+      ios: isIOS,
+      android: isAndroid,
+      state: oauthState,
+    });
 
     const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
@@ -199,16 +207,13 @@ export async function signInWithGoogle(): Promise<User | null> {
         }
       }, 300000);
 
-      // Open system browser for OAuth
-      import("@/platform")
-        .then(({ isIOS: isIOSPlatform }) => {
-          if (isIOSPlatform) {
-            invoke("open_safari_vc", { url: authUrl }).catch(fail);
-          } else {
-            invoke("open_external_url", { url: authUrl }).catch(fail);
-          }
-        })
-        .catch(fail);
+      // Open system browser for OAuth. iOS uses the in-app SFSafariVC; Android
+      // and other mobile use the external browser.
+      if (isIOS) {
+        invoke("open_safari_vc", { url: authUrl }).catch(fail);
+      } else {
+        invoke("open_external_url", { url: authUrl }).catch(fail);
+      }
     });
 
     // Exchange code for tokens (server-side; client_secret stays on the proxy)
@@ -290,7 +295,8 @@ export async function signInWithGoogle(): Promise<User | null> {
 }
 
 export async function signInWithGitHub(): Promise<User | null> {
-  const { getPlatform, isMobile } = await import("@/platform");
+  const { getPlatform, isMobile, isIOS, isAndroid } =
+    await import("@/platform");
   const platform = await getPlatform();
 
   const port = 19847;
@@ -306,7 +312,11 @@ export async function signInWithGitHub(): Promise<User | null> {
     const { listen } = await import("@tauri-apps/api/event");
 
     const oauthState = generateOAuthState();
-    await invoke<number>("oauth_listen", { ios: true, state: oauthState });
+    await invoke<number>("oauth_listen", {
+      ios: isIOS,
+      android: isAndroid,
+      state: oauthState,
+    });
 
     const params = new URLSearchParams({
       client_id: GITHUB_CLIENT_ID,
@@ -354,15 +364,11 @@ export async function signInWithGitHub(): Promise<User | null> {
           reject(new Error("Authentication timed out"));
         }
       }, 300000);
-      import("@/platform")
-        .then(({ isIOS: isIOSPlatform }) => {
-          if (isIOSPlatform) {
-            invoke("open_safari_vc", { url: authUrl }).catch(fail);
-          } else {
-            invoke("open_external_url", { url: authUrl }).catch(fail);
-          }
-        })
-        .catch(fail);
+      if (isIOS) {
+        invoke("open_safari_vc", { url: authUrl }).catch(fail);
+      } else {
+        invoke("open_external_url", { url: authUrl }).catch(fail);
+      }
     });
 
     const tokens = await exchangeOAuthCode("github", authCode, redirectUri);
