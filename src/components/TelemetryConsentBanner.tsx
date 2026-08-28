@@ -43,8 +43,16 @@ export function TelemetryConsentBanner() {
     <div
       className={cn(
         "fixed inset-x-0 z-90 flex justify-center px-3",
-        isMobile ? "bottom-3 safe-left safe-right" : "bottom-4",
+        isMobile ? "safe-left safe-right" : "bottom-4",
       )}
+      // Mobile: lift the banner above the OS navigation bar (Android) / home
+      // indicator (iOS) using the measured safe-area inset, same as the other
+      // bottom-anchored surfaces.
+      style={
+        isMobile
+          ? { bottom: "calc(0.75rem + var(--safe-area-bottom))" }
+          : undefined
+      }
       role="region"
       aria-live="polite"
       aria-label="プライバシー設定"

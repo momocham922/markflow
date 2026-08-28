@@ -35,7 +35,7 @@ function MobileStatusBar() {
         !isIOS
           ? {
               paddingTop: "0.5rem",
-              paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0.5rem)",
+              paddingBottom: "max(var(--safe-area-bottom), 0.5rem)",
             }
           : undefined
       }

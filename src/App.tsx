@@ -1451,7 +1451,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         {/* Right panels — fullscreen overlay on iOS */}
         {isMobile && viewMode === "editor" && rightPanel !== "none" && (
           <div
-            className="fixed z-40 flex flex-col safe-top bg-background"
+            className="fixed z-40 flex flex-col overflow-hidden safe-top bg-background"
             style={{
               // Fixed overlays pin to the visible-viewport top in this WKWebView
               // (identical to the app-root shell above and ResearchSheet). Sizing

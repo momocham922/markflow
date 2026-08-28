@@ -164,12 +164,24 @@
     -webkit-user-select: none;
   }
 
+  /* Safe-area single source of truth. iOS/WebKit report OS insets through
+     env(safe-area-inset-*). Android's WebView does NOT report the navigation
+     bar that way (env() returns 0), so MainActivity injects the measured
+     WindowInsets value into --android-safe-bottom. That var is unset on
+     iOS/web/desktop, so var() transparently falls back to env(). */
+  :root {
+    --safe-area-bottom: var(
+      --android-safe-bottom,
+      env(safe-area-inset-bottom, 0px)
+    );
+  }
+
   /* iOS safe area — viewport-fit=cover */
   .safe-top {
     padding-top: env(safe-area-inset-top, 0px);
   }
   .safe-bottom {
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-area-bottom);
   }
   .safe-left {
     padding-left: env(safe-area-inset-left, 0px);
@@ -611,18 +623,19 @@ input::selection {
   overflow-x: hidden !important;
 }
 
-/* AI panel scrollbar — slightly narrower */
-.ai-panel-scroll [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
+/* AI panel scrollbar — slightly narrower. The panel scrolls with a native
+   overflow-y div (not Radix ScrollArea) so touch-scroll works reliably inside
+   the mobile WebView and never drags the surrounding chrome. */
+.ai-panel-scroll::-webkit-scrollbar {
   width: 4px;
 }
 
-/* Force the AI panel's ScrollArea content to wrap to the container width.
-   Radix renders the viewport's child as `display: table; min-width: 100%`,
-   which sizes to intrinsic content — a long code line / wide table then makes
-   the whole message column overflow to the right. Forcing block layout pins the
-   content to the available width so overflow is confined to each pre/table. */
-.ai-panel-scroll [data-slot="scroll-area-viewport"] > div {
+/* Pin the AI panel's message content to the container width so a long code line
+   / wide table is confined to each pre/table (which scroll internally) instead
+   of widening the whole message column. */
+.ai-panel-scroll > div {
   display: block !important;
+  max-width: 100%;
 }
 
 /* Code blocks: never widen the column — scroll horizontally inside their box. */

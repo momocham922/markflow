@@ -375,7 +375,12 @@ export function ShareDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
-          <DialogTitle>Share "{activeDoc?.title || "Untitled"}"</DialogTitle>
+          {/* Cap at 2 centered lines with symmetric horizontal clearance so a
+              long document title never crams edge-to-edge or runs under the X;
+              short titles stay cleanly centered. */}
+          <DialogTitle className="line-clamp-2 px-6 leading-snug">
+            Share "{activeDoc?.title || "Untitled"}"
+          </DialogTitle>
           <DialogDescription>
             Manage access, invite collaborators, and set up notifications
           </DialogDescription>

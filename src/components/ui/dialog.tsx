@@ -4,6 +4,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { isMobile } from "@/platform";
 
 function Dialog({
   ...props
@@ -72,7 +73,15 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+            className={cn(
+              "absolute opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+              // Mobile: a 44px tap target (Material/HIG minimum) with the glyph
+              // optically centered on the p-6 (24px) content inset. Desktop keeps
+              // the original compact corner X (unchanged across all dialogs).
+              isMobile
+                ? "top-0.5 right-0.5 flex size-11 items-center justify-center rounded-md hover:bg-accent"
+                : "top-4 right-4 rounded-xs",
+            )}
           >
             <XIcon />
             <span className="sr-only">Close</span>

@@ -32,7 +32,6 @@ import remarkGfm from "remark-gfm";
 import remarkCjkFriendly from "remark-cjk-friendly";
 import rehypeHighlight from "rehype-highlight";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   sendToClaude,
@@ -1552,11 +1551,9 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     }
   };
 
-  // Scroll to bottom within the ScrollArea viewport only
+  // Scroll to bottom within the native scroll container only
   const scrollToBottom = useCallback((instant?: boolean) => {
-    const viewport = scrollAreaRef.current?.querySelector(
-      "[data-slot='scroll-area-viewport']",
-    );
+    const viewport = scrollAreaRef.current;
     if (viewport) {
       viewport.scrollTo({
         top: viewport.scrollHeight,
@@ -1970,10 +1967,15 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         </div>
       )}
 
-      {/* Messages */}
-      <ScrollArea
+      {/* Messages — native overflow scroll so touch-scroll works inside the
+          mobile WebView and stays contained (never drags the outer UI frame). */}
+      <div
         ref={scrollAreaRef}
-        className="ai-panel-scroll flex-1 min-h-0 p-3"
+        className="ai-panel-scroll min-h-0 flex-1 overflow-y-auto p-3"
+        style={{
+          WebkitOverflowScrolling: "touch",
+          overscrollBehavior: "contain",
+        }}
       >
         <div className="space-y-3">
           {messages.length === 0 && !streaming && (
@@ -2208,7 +2210,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Attached images preview */}
       {attachedImages.length > 0 && (
@@ -2257,8 +2259,17 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             ? keyboardVisible
               ? "pt-2 pb-2 px-5"
               : "pt-2 pb-7 px-5"
-            : "p-2",
+            : isMobile
+              ? "px-2 pt-2"
+              : "p-2",
         )}
+        // Android: lift the input row above the OS navigation bar. iOS handles
+        // this via its own pb-* branch above; desktop needs no inset.
+        style={
+          !isIOS && isMobile
+            ? { paddingBottom: "max(var(--safe-area-bottom), 0.5rem)" }
+            : undefined
+        }
       >
         <div className={cn("flex items-end", isMobile ? "gap-1.5" : "gap-1")}>
           <Button
