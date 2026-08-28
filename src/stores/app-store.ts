@@ -247,8 +247,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
 
   activeDocId: null,
-  setActiveDocId: (id) =>
-    set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) }),
+  setActiveDocId: (id) => {
+    set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) });
+    // Persist the open document. On mobile the WebView can be reloaded or the
+    // process recreated when backgrounded (e.g. screen-off during a long voice
+    // recording); without this the app boots with activeDocId=null and the
+    // document the user was in appears "closed". Restored in loadDocuments only
+    // if the id still exists locally. Fire-and-forget; never blocks navigation.
+    db.setSetting("activeDocId", id ?? "").catch(() => {});
+  },
 
   documents: [],
   folders: ["/"],
@@ -376,6 +383,21 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
 
+      // Restore the last-open document so a mobile WebView reload / process
+      // recreation (common after backgrounding) reopens the same document
+      // instead of dropping to an empty editor. Guarded: only restore if the id
+      // still exists locally. Foreign/stale ids are further nulled by
+      // dropForeignDocuments once auth resolves.
+      let restoredActiveId: string | null = null;
+      try {
+        const savedActiveId = await db.getSetting("activeDocId");
+        if (savedActiveId && documents.some((d) => d.id === savedActiveId)) {
+          restoredActiveId = savedActiveId;
+        }
+      } catch {
+        /* ignore */
+      }
+
       if (savedTheme === "light" || savedTheme === "dark") {
         document.documentElement.classList.toggle(
           "dark",
@@ -387,6 +409,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           theme: savedTheme,
           themeSettings,
           customPreviewThemes,
+          activeDocId: restoredActiveId,
           initialized: true,
         });
       } else {
@@ -395,6 +418,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           folders,
           themeSettings,
           customPreviewThemes,
+          activeDocId: restoredActiveId,
           initialized: true,
         });
       }
@@ -423,6 +447,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       cloudSyncTimer = null;
     }
     set({ documents: [], activeDocId: null, folders: ["/"] });
+    // Drop the persisted open-document pointer too, so a post-wipe reload can't
+    // resurrect the previous user's document as "active".
+    db.setSetting("activeDocId", "").catch(() => {});
   },
 
   dropForeignDocuments: (uid: string) => {

@@ -2,6 +2,7 @@ package com.markflow.editor
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -37,8 +38,8 @@ class MainActivity : TauriActivity() {
   // not the framework resizes the WebView. Hidden keyboard → 0.
   private var imeBottomPx = 0
 
-  private val requestPermissionLauncher = registerForActivityResult(
-    ActivityResultContracts.RequestPermission()
+  private val requestPermissionsLauncher = registerForActivityResult(
+    ActivityResultContracts.RequestMultiplePermissions()
   ) { _ -> }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,9 +54,21 @@ class MainActivity : TauriActivity() {
     window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     audioCapture = AudioCapture(this)
 
+    // Request microphone (always) and, on Android 13+, notification permission so
+    // the microphone foreground service's mandatory ongoing notification can show
+    // while recording in the background.
+    val needed = mutableListOf<String>()
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
         != PackageManager.PERMISSION_GRANTED) {
-      requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+      needed.add(Manifest.permission.RECORD_AUDIO)
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+        != PackageManager.PERMISSION_GRANTED) {
+      needed.add(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    if (needed.isNotEmpty()) {
+      requestPermissionsLauncher.launch(needed.toTypedArray())
     }
 
     // Measure the real system-bar insets (measure-then-derive: derived from the

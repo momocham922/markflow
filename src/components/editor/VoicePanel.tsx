@@ -247,6 +247,33 @@ export function VoicePanel({
     });
   }, []);
 
+  // Background-gap notice (mobile). While the app is backgrounded / screen-off,
+  // the WebView's JS timers freeze, so the LIVE transcript can't advance — but
+  // native capture keeps recording the full session into the Refine archive
+  // (iOS AVAudioEngine / Android microphone foreground service). On return, make
+  // that explicit rather than leaving a silent gap: the audio was preserved and
+  // "Refine" re-transcribes + structures the whole recording. Active only while
+  // recording; the listener is removed as soon as recording stops.
+  useEffect(() => {
+    if (!isMobile || !isRecording) return;
+    let hiddenAt = 0;
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+      } else if (hiddenAt) {
+        const gapSec = Math.round((Date.now() - hiddenAt) / 1000);
+        hiddenAt = 0;
+        if (gapSec >= 5) {
+          setVoiceInfo(
+            `バックグラウンド中の約${gapSec}秒はライブ表示に反映されませんが、音声は録音され続けています。停止後に「Refine」で全体を文字起こし・構造化できます。`,
+          );
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [isRecording]);
+
   useEffect(() => {
     if (isRecording) {
       setHasArchive(true);
