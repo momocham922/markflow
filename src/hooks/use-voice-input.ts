@@ -7,6 +7,13 @@ const CHUNK_MS = 25000; // 25 second chunks: longer context = better accuracy
 const MAX_DURATION_SECONDS = 4 * 60 * 60; // 4 hours hard limit
 const MAX_SEND_RETRIES = 2;
 
+// Shown (calmly, in amber) when a LIVE segment can't be transcribed but the
+// audio is safe: native capture keeps the full recording and Refine re-runs it.
+// This is explicit surfacing, not a silent fallback — the miss AND the remedy
+// are made visible so the user isn't alarmed by a raw status code.
+const LIVE_SEGMENT_RECOVERABLE_MSG =
+  "この区間はライブ表示に取り込めませんでしたが、録音は継続しています。停止後に「Refine」で全体を文字起こし・構造化できます。";
+
 import { isAndroid } from "@/platform";
 
 const isTauri =
@@ -52,6 +59,36 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+
+// Split a base64 LINEAR16 (16-bit PCM, mono) buffer into base64 segments each
+// ≤ maxSeconds. On Android the native mic bridge keeps recording while the app
+// is backgrounded, but the WebView's JS timers freeze — so the first tick after
+// returning to the foreground hands back the ENTIRE accumulated buffer (minutes
+// of audio) in one getChunk(). The synchronous STT endpoint rejects over-length
+// inline audio (~60s → 400 INVALID_ARGUMENT), so we cap each request here,
+// mirroring the desktop/Rust path (get_voice_chunk's ~25s cap + drain loop).
+// Boundaries stay on 2-byte sample edges (maxBytes is even). Returns the input
+// unchanged when already within the limit — the common foreground case pays no
+// decode/re-encode cost. Exported for unit testing.
+export function splitLinear16Base64(
+  base64: string,
+  maxSeconds: number,
+  sampleRate: number,
+): string[] {
+  const maxBytes = Math.floor(maxSeconds) * sampleRate * 2; // 2 bytes/sample
+  let binary: string;
+  try {
+    binary = atob(base64);
+  } catch {
+    return [base64];
+  }
+  if (binary.length <= maxBytes) return [base64];
+  const segments: string[] = [];
+  for (let off = 0; off < binary.length; off += maxBytes) {
+    segments.push(btoa(binary.slice(off, off + maxBytes)));
+  }
+  return segments;
 }
 
 export function useVoiceInput({
@@ -168,7 +205,7 @@ export function useVoiceInput({
           if (!res.ok) {
             const errText = await res.text();
             console.error("[voice] Transcription failed:", res.status, errText);
-            reportIfQuota(res.status, errText);
+            const wasQuota = reportIfQuota(res.status, errText);
             if (res.status >= 500 && attempt < MAX_SEND_RETRIES) {
               console.log(
                 `[voice] Retrying (${attempt + 1}/${MAX_SEND_RETRIES})...`,
@@ -176,7 +213,18 @@ export function useVoiceInput({
               await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
               continue;
             }
-            onErrorRef.current?.(`Transcription error: ${res.status}`);
+            if (wasQuota) return; // quota upsell banner speaks — don't double-message
+            // A dropped LIVE segment is recoverable on native platforms: capture
+            // keeps the full recording and Refine re-transcribes it. For an
+            // over-length request (400 — e.g. a buffer accumulated while
+            // backgrounded) or a transient upstream failure (5xx), surface this
+            // calmly instead of a raw status code. Not silent: the miss and the
+            // remedy are both shown (amber Info).
+            if (isTauri && (res.status === 400 || res.status >= 500)) {
+              onInfoRef.current?.(LIVE_SEGMENT_RECOVERABLE_MSG);
+            } else {
+              onErrorRef.current?.(`Transcription error: ${res.status}`);
+            }
             return;
           }
 
@@ -262,14 +310,19 @@ export function useVoiceInput({
           console.error("[voice] Transcription error:", err);
           // Retries are exhausted. The AbortController here is fired ONLY by the
           // 60s timeout above (there is no external/intentional abort of this
-          // fetch), so an abort at this point means this live segment was lost —
-          // surface it instead of dropping it silently, so the user knows a
-          // portion may be missing (Refine re-transcribes the full audio later).
-          onErrorRef.current?.(
-            isAbort
-              ? "音声区間の文字起こしがタイムアウトしました。この区間は取り込めていない可能性があります（録音停止後の「Refine」で全体を再文字起こしできます）。"
-              : `Transcription error: ${err}`,
-          );
+          // fetch), so an abort at this point means this live segment was lost.
+          // On native platforms the full recording is archived and Refine
+          // re-transcribes it, so surface it calmly (amber) rather than as a
+          // hard error — explicitly, never silently.
+          if (isTauri) {
+            onInfoRef.current?.(LIVE_SEGMENT_RECOVERABLE_MSG);
+          } else {
+            onErrorRef.current?.(
+              isAbort
+                ? "音声区間の文字起こしがタイムアウトしました。この区間は取り込めていない可能性があります。"
+                : `Transcription error: ${err}`,
+            );
+          }
           return;
         }
       }
@@ -334,10 +387,28 @@ export function useVoiceInput({
           try {
             const chunk = bridge.getChunk();
             if (chunk) {
-              await sendChunk(chunk, {
-                encoding: "LINEAR16",
-                sampleRate: 16000,
-              });
+              // A single getChunk() can span far more than CHUNK_MS when JS
+              // timers were frozen (app backgrounded): the bridge returns the
+              // whole accumulated buffer on the first foreground tick. Split it
+              // into ≤CHUNK_MS segments so an over-length request never hits the
+              // synchronous STT limit (would 400). Foreground ticks are already
+              // within the limit → returned as-is (single send).
+              const segments = splitLinear16Base64(
+                chunk,
+                CHUNK_MS / 1000,
+                16000,
+              );
+              if (segments.length > 1) {
+                console.log(
+                  `[voice] Android background catchup: split into ${segments.length} segments`,
+                );
+              }
+              for (const seg of segments) {
+                await sendChunk(seg, {
+                  encoding: "LINEAR16",
+                  sampleRate: 16000,
+                });
+              }
             }
           } catch (e) {
             console.error("[voice] Android chunk error:", e);

@@ -202,6 +202,7 @@ export function VoicePanel({
   const sttVocabRef = useRef<Set<string>>(new Set());
   const onVoiceDataChangeRef = useRef(onVoiceDataChange);
   const savedVoiceGcsUriRef = useRef(savedVoiceGcsUri);
+  const hasArchiveRef = useRef(false);
 
   const {
     isRecording,
@@ -317,6 +318,9 @@ export function VoicePanel({
   useEffect(() => {
     fullTranscriptRef.current = fullTranscript;
   }, [fullTranscript]);
+  useEffect(() => {
+    hasArchiveRef.current = hasArchive;
+  }, [hasArchive]);
   useEffect(() => {
     structuringRef.current = structuring;
   }, [structuring]);
@@ -570,7 +574,18 @@ export function VoicePanel({
 
   const doRefine = useCallback(async () => {
     const transcript = fullTranscriptRef.current;
-    if (!transcript.trim() || refiningRef.current) return;
+    if (refiningRef.current) return;
+    // Refine re-transcribes the recording from its native archive, so it does
+    // NOT require a live transcript: a fully-backgrounded session has an empty
+    // live transcript (JS timers were frozen) but the complete audio was still
+    // captured. Proceed whenever an archive — or a previously uploaded URI —
+    // exists, even with no live text.
+    if (
+      !transcript.trim() &&
+      !hasArchiveRef.current &&
+      !savedVoiceGcsUriRef.current
+    )
+      return;
 
     const abortController = new AbortController();
     refineAbortRef.current = abortController;
@@ -1140,26 +1155,23 @@ export function VoicePanel({
           Structure
         </Button>
 
-        {isTauri &&
-          !isRecording &&
-          fullTranscript.trim() &&
-          (hasArchive || !!savedVoiceGcsUri) && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1 text-xs shrink-0"
-              onClick={() => doRefine()}
-              disabled={refining || structuring}
-              title="Refine"
-            >
-              {refining ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Wand2 className="h-3.5 w-3.5" />
-              )}
-              Refine
-            </Button>
-          )}
+        {isTauri && !isRecording && (hasArchive || !!savedVoiceGcsUri) && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 text-xs shrink-0"
+            onClick={() => doRefine()}
+            disabled={refining || structuring}
+            title="Refine"
+          >
+            {refining ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="h-3.5 w-3.5" />
+            )}
+            Refine
+          </Button>
+        )}
 
         <Button
           variant="ghost"

@@ -55,3 +55,6 @@ tsconfig.tsbuildinfo
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
 .claude/settings.json
+
+# Local demo/verification artifacts (not for commit)
+artifacts/
