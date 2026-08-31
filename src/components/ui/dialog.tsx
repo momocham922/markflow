@@ -5,10 +5,16 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { isMobile } from "@/platform";
+import { useBackClose } from "@/hooks/use-back-close";
 
 function Dialog({
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  // Route the Android hardware Back button to close a controlled dialog instead
+  // of exiting the app. Covers every app dialog (Share/Paywall/Team/Feedback/
+  // Shortcuts/Theme/Command/…) since they all render through this wrapper with a
+  // controlled `open`/`onOpenChange`. No-op off mobile or for uncontrolled use.
+  useBackClose(!!props.open, () => props.onOpenChange?.(false));
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;
 }
 

@@ -60,6 +60,7 @@ import { marked } from "marked";
 import { getPlatform, isMobile, isMac } from "@/platform";
 import { useIOSKeyboard } from "@/hooks/use-ios-keyboard";
 import { useSwipeSidebar } from "@/hooks/use-swipe-sidebar";
+import { useBackClose } from "@/hooks/use-back-close";
 
 const CanvasView = lazy(() =>
   import("@/components/canvas/CanvasView").then((m) => ({
@@ -165,6 +166,22 @@ function App() {
     return match ? match[1] : null;
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Android hardware Back → dismiss the topmost open surface instead of exiting
+  // the app (see lib/back-button.ts). Dialogs are handled inside the shared
+  // Dialog wrapper; here we cover the non-dialog surfaces. Each is registered in
+  // its natural stacking order, so Back peels them off top-first. No-op off
+  // mobile. The mobile sidebar is a drawer overlay only while onSidebarScreen.
+  useBackClose(isMobile && sidebarOpen && onSidebarScreen, () =>
+    toggleSidebar(),
+  );
+  useBackClose(rightPanel !== "none", () => setRightPanel("none"));
+  useBackClose(mobileSheetOpen, () => setMobileSheetOpen(false));
+  useBackClose(diffState !== null, () => setDiffState(null));
+  useBackClose(!!shareToken, () => {
+    window.location.hash = "";
+    setShareToken(null);
+  });
 
   // Resizable panel widths
   const [sidebarWidth, setSidebarWidth] = useState(240);

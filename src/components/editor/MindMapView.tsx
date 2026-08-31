@@ -320,7 +320,25 @@ export function MindMapView({
         fitViewOptions={{ padding: 0.3 }}
         // Arm the bloom only once the viewport is initialized (all nodes measured
         // + fitView applied), so the entrance never plays off-screen on mobile.
-        onInit={() => setBloomArmed(true)}
+        onInit={(instance) => {
+          setBloomArmed(true);
+          // The `fitView` PROP runs a single fit at viewport init, but on a slow
+          // mobile WebView the pane often has no measured size and the node
+          // ResizeObserver hasn't reported yet at that instant — so the one-shot
+          // fit lands on wrong bounds and the tree stays clipped (root off the
+          // left, deep labels off the right) and off-center. Re-fit once layout
+          // settles (mirrors VisualizationView): rAF waits for the pane's real
+          // dimensions, the timeouts cover async node measurement. duration:0 so
+          // it snaps rather than animating over the bloom entrance.
+          requestAnimationFrame(() =>
+            instance.fitView({ padding: 0.3, duration: 0 }),
+          );
+          setTimeout(() => instance.fitView({ padding: 0.3, duration: 0 }), 80);
+          setTimeout(
+            () => instance.fitView({ padding: 0.3, duration: 0 }),
+            350,
+          );
+        }}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}

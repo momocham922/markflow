@@ -2142,7 +2142,11 @@ export function Sidebar() {
                       color: "#ef4444",
                     }}
                     onClick={() => {
-                      onDelete(contextMenu.docId);
+                      // Deleting a document also removes it from the cloud and
+                      // is not undoable — confirm first, matching folder delete.
+                      if (confirm(`「${title}」を削除しますか？`)) {
+                        onDelete(contextMenu.docId);
+                      }
                       setContextMenu(null);
                     }}
                   >
