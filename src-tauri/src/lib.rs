@@ -377,6 +377,60 @@ async fn send_slack_webhook(webhook_url: String, body: String) -> Result<String,
     }
 }
 
+#[derive(serde::Serialize)]
+struct OAuthExchangeResponse {
+    status: u16,
+    body: String,
+}
+
+/// Exchange an OAuth authorization `code` for tokens via the ai-proxy BFF, using
+/// the native reqwest/rustls stack instead of the WebView's `fetch`. On mobile
+/// the WebView's TLS handshake to Cloud Run intermittently dies *before any
+/// response arrives* (surfaces in JS as "Failed to fetch") yet a later attempt
+/// succeeds — same class of WebView network fragility that forced
+/// `upload_image_cloud`. reqwest is far more robust and reports real error text.
+///
+/// Retry policy (critical): the auth `code` is single-use and is spent
+/// server-side (the proxy holds the client_secret). We retry ONLY when `send()`
+/// fails — no HTTP response means the request never reached the proxy, so the
+/// code is untouched and retrying is safe. Once any HTTP response is received we
+/// return it verbatim and never retry (a retry would double-spend the code →
+/// invalid_grant). The caller inspects `status` to decide success vs. error.
+#[tauri::command]
+async fn exchange_oauth_code(url: String, body: String) -> Result<OAuthExchangeResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let backoff_ms: [u64; 4] = [0, 400, 1000, 2000];
+    let mut last_err = String::new();
+    for delay in backoff_ms {
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Ok(OAuthExchangeResponse { status, body: text });
+            }
+            Err(e) => {
+                // Transport failure before any response → code untouched → retry.
+                last_err = e.to_string();
+                continue;
+            }
+        }
+    }
+    Err(format!("network error after retries: {last_err}"))
+}
+
 #[tauri::command]
 async fn fetch_ogp(url: String) -> Result<OgpData, String> {
     let client = reqwest::Client::builder()
@@ -2565,7 +2619,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

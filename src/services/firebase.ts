@@ -74,11 +74,48 @@ async function exchangeOAuthCode(
   const url = `${AI_PROXY_URL}/v1/auth/oauth/exchange`;
   const body = JSON.stringify({ provider, code, redirectUri });
 
-  // The mobile WebView's fetch/TLS stack intermittently fails the HTTPS
-  // handshake to Cloud Run *before any response arrives* (surfaces as
-  // "Failed to fetch" / "Load failed"), yet a later attempt succeeds — testers
-  // hit it 数回 then it "suddenly worked". So we retry the transport for the
-  // user instead of making them tap Login again.
+  // On native (Tauri: desktop + mobile) run the HTTPS exchange in Rust
+  // (reqwest/rustls) instead of the WebView's fetch. The mobile WebView's TLS
+  // handshake to Cloud Run intermittently dies *before any response arrives*
+  // (surfaces as "Failed to fetch") yet a later attempt succeeds — the same
+  // WebView network fragility that forced `upload_image_cloud`. reqwest is far
+  // more robust and reports real error text. Retry lives in Rust and only fires
+  // when no HTTP response came back (the auth `code` is single-use / spent
+  // server-side, so retrying after a response would double-spend it).
+  const nativeHost =
+    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (nativeHost) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    let resp: { status: number; body: string };
+    try {
+      resp = await invoke<{ status: number; body: string }>(
+        "exchange_oauth_code",
+        { url, body },
+      );
+    } catch (e) {
+      // Rust exhausted its transport retries with no HTTP response.
+      throw new Error(
+        `Failed to fetch: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+      let detail = "";
+      try {
+        detail = (JSON.parse(resp.body) as { error?: string })?.error || "";
+      } catch {
+        /* body not JSON */
+      }
+      throw new Error(`Token exchange failed: ${resp.status} ${detail}`.trim());
+    }
+    return JSON.parse(resp.body) as {
+      id_token?: string;
+      access_token?: string;
+    };
+  }
+
+  // Web fallback: fetch with the same retry discipline. The mobile WebView's
+  // fetch/TLS stack intermittently fails the HTTPS handshake before any
+  // response arrives, so we retry the transport for the user.
   //
   // CRITICAL: retry ONLY when NO HTTP response was received. The authorization
   // `code` is single-use and is spent server-side (the proxy holds the
