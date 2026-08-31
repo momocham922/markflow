@@ -71,21 +71,67 @@ async function exchangeOAuthCode(
   code: string,
   redirectUri: string,
 ): Promise<{ id_token?: string; access_token?: string }> {
-  const res = await fetch(`${AI_PROXY_URL}/v1/auth/oauth/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, code, redirectUri }),
-  });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = ((await res.json()) as { error?: string })?.error || "";
-    } catch {
-      /* body not JSON */
+  const url = `${AI_PROXY_URL}/v1/auth/oauth/exchange`;
+  const body = JSON.stringify({ provider, code, redirectUri });
+
+  // The mobile WebView's fetch/TLS stack intermittently fails the HTTPS
+  // handshake to Cloud Run *before any response arrives* (surfaces as
+  // "Failed to fetch" / "Load failed"), yet a later attempt succeeds — testers
+  // hit it 数回 then it "suddenly worked". So we retry the transport for the
+  // user instead of making them tap Login again.
+  //
+  // CRITICAL: retry ONLY when NO HTTP response was received. The authorization
+  // `code` is single-use and is spent server-side (the proxy holds the
+  // client_secret and calls the provider). A thrown fetch means the request
+  // never reached the proxy, so the code is untouched and retrying is safe.
+  // But once we get any HTTP response, the code may already be consumed —
+  // retrying then would fail with invalid_grant, so we surface that error.
+  const backoffMs = [0, 400, 1000, 2000];
+  const perAttemptTimeoutMs = 20000;
+  let lastNetworkErr: unknown;
+
+  for (let attempt = 0; attempt < backoffMs.length; attempt++) {
+    if (backoffMs[attempt] > 0) {
+      await new Promise((r) => setTimeout(r, backoffMs[attempt]));
     }
-    throw new Error(`Token exchange failed: ${res.status} ${detail}`.trim());
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), perAttemptTimeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      // No response arrived (TLS/DNS/connection failure or a hung request that
+      // hit perAttemptTimeoutMs) → the code was never spent → retry.
+      lastNetworkErr = e;
+      clearTimeout(timer);
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // An HTTP response came back: never retry (the code may be consumed now).
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = ((await res.json()) as { error?: string })?.error || "";
+      } catch {
+        /* body not JSON */
+      }
+      throw new Error(`Token exchange failed: ${res.status} ${detail}`.trim());
+    }
+    return res.json();
   }
-  return res.json();
+
+  // Every attempt failed at the network layer before any response.
+  throw lastNetworkErr instanceof Error
+    ? lastNetworkErr
+    : new Error("Failed to fetch");
 }
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);

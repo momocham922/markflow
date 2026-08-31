@@ -191,7 +191,9 @@ function friendlyLoginError(raw: string): string {
     s.includes("network error") ||
     s.includes("network-request-failed") ||
     s.includes("load failed") ||
-    s.includes("token exchange failed")
+    s.includes("token exchange failed") ||
+    s.includes("aborted") ||
+    s.includes("abort")
   ) {
     return "サーバーに接続できませんでした。社内ネットワークやVPN・プロキシをご利用の場合はブロックされていることがあります。モバイル回線など別のネットワークで再度お試しください。改善しない場合は端末の日時設定が自動になっているかご確認のうえ、IT管理者にご相談ください。";
   }
