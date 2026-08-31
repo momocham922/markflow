@@ -177,6 +177,33 @@ export function markCollabInactive(docId: string) {
   collabActiveDocIds.delete(docId);
 }
 
+// Map raw login errors to actionable Japanese guidance. A bare "Failed to fetch"
+// (fetch TypeError) or Firebase "auth/network-request-failed" means the device
+// could not reach our HTTPS backend — almost always a corporate proxy/VPN
+// (e.g. VeronaSASE-style TLS inspection without the corp root CA on the device),
+// a wrong device clock breaking TLS, or no connectivity — NOT an app/server bug.
+// Surfacing the raw English string leaves testers stuck; give them the next step.
+function friendlyLoginError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (
+    s.includes("failed to fetch") ||
+    s.includes("networkerror") ||
+    s.includes("network error") ||
+    s.includes("network-request-failed") ||
+    s.includes("load failed") ||
+    s.includes("token exchange failed")
+  ) {
+    return "サーバーに接続できませんでした。社内ネットワークやVPN・プロキシをご利用の場合はブロックされていることがあります。モバイル回線など別のネットワークで再度お試しください。改善しない場合は端末の日時設定が自動になっているかご確認のうえ、IT管理者にご相談ください。";
+  }
+  if (s.includes("timed out") || s.includes("timeout")) {
+    return "ログインがタイムアウトしました。ネットワークの状態をご確認のうえ、もう一度お試しください。";
+  }
+  if (s.includes("popup") && s.includes("closed")) {
+    return "ログイン画面が閉じられました。もう一度お試しください。";
+  }
+  return raw;
+}
+
 interface AuthState {
   user: User | null;
   loading: boolean;
@@ -392,9 +419,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const { track } = await import("@/services/telemetry");
       track("sign_in", { provider });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
+      const raw = error instanceof Error ? error.message : String(error);
       console.error("Login failed:", error);
-      set({ loginError: msg });
+      set({ loginError: friendlyLoginError(raw) });
     }
   },
 
