@@ -166,17 +166,25 @@ function DesktopStatusBar() {
           </label>
         )}
         {/* Plan badge for general users (and owner while previewing a plan).
-            When billing is live, a Free badge is a click-to-upgrade entry. */}
+            When billing is live it is a click-to-open entry: Free → upgrade,
+            Pro/Team → the same dialog doubles as the usage meter + subscription
+            management surface ("契約を管理"), so paying users can always reach it. */}
         {user &&
           effectivePlan &&
           (viewAs !== null || effectivePlan !== "internal") &&
-          (BILLING_ENABLED && effectivePlan === "free" ? (
+          (BILLING_ENABLED && effectivePlan !== "internal" ? (
             <button
               className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
-              title="プランをアップグレード"
+              title={
+                effectivePlan === "free"
+                  ? "プランをアップグレード"
+                  : "利用状況・契約の管理"
+              }
               onClick={() => openPaywall()}
             >
-              Free · アップグレード
+              {effectivePlan === "free"
+                ? "Free · アップグレード"
+                : planLabel(effectivePlan)}
             </button>
           ) : (
             <span

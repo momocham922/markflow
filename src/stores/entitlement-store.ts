@@ -144,6 +144,8 @@ function billingErrorMessage(code: string): string {
       return "アプリ内課金は現在準備中です。しばらくお待ちください。";
     case "sandbox_not_allowed":
       return "サンドボックス（テスト）購入は現在このアカウントでは有効化されていません。";
+    case "owned_by_other_account":
+      return "この端末のサブスクリプションは別のアカウントで登録済みです。購入時のアカウントでログインしてご利用ください。";
     case "no_receipt":
     case "no_purchase_token":
     case "missing_jws":
@@ -153,6 +155,8 @@ function billingErrorMessage(code: string): string {
     case "unknown_status":
     case "unmapped_product":
       return "この購入を確認できませんでした。時間をおいて再度お試しください。";
+    case "verify_retry":
+      return "購入の確認に一時的に失敗しました。通信状況を確認して、もう一度お試しください。";
     case "unsupported_platform":
       return "このプラットフォームではアプリ内課金を利用できません。";
     case "team_mobile_unavailable":

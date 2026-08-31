@@ -1494,23 +1494,24 @@ export function Sidebar() {
 
   return (
     <div className="flex h-full w-full flex-col border-r border-border bg-sidebar-background">
-      {/* Header */}
+      {/* Header. On mobile the sidebar is a drawer — it closes by tapping the
+          backdrop, swiping, or the hardware back button — so the explicit close
+          button is redundant clutter and is shown on desktop only (where it is
+          the collapse control). */}
       <div className="flex items-center justify-between px-3 pt-2 pb-2">
         <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">
           MarkFlow
         </span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className={
-            isMobile
-              ? "h-11 w-11 text-sidebar-foreground"
-              : "h-7 w-7 text-sidebar-foreground"
-          }
-          onClick={toggleSidebar}
-        >
-          <PanelLeftClose className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
-        </Button>
+        {!isMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-sidebar-foreground"
+            onClick={toggleSidebar}
+          >
+            <PanelLeftClose className="h-4 w-4" />
+          </Button>
+        )}
       </div>
 
       {/* Search */}

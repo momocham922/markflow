@@ -33,7 +33,9 @@ DRY_RUN="${DRY_RUN:-0}"
 # 済み・1 行 1 uid・# 以降コメント可）を置けばそちらを優先して読む。
 UIDS=(
   "BqYnuaZy3GQ2jWDcpeEitfxFR173"  # staff-01 (owner / personal)
-  "9ff2wglT9QRmAyLqjrYJgPxIVb73"  # staff-01 (owner / corp)
+  # staff-01 (owner / corp) 9ff2wglT9QRmAyLqjrYJgPxIVb73 は課金テスト用の一般ユーザー
+  # (Free) として運用するため internal から除外（2026-08-31）。再seed で internal に
+  # 戻さないこと。復帰が必要なら scripts/internal-uids.local で一時的に追加する。
   "A0lwZ2pMv7TPPpJuLJKXcOSLJwf1"  # staff-02
   "CsNoefEnZLVz3i1eoOBkciKj6uw2"  # staff-03 (corp)
   "DC7LviMTDZMO5hVcUMkwQnGD4nG3"  # staff-04

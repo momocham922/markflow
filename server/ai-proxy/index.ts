@@ -621,6 +621,14 @@ async function markIapEventProcessed(eventId: string): Promise<void> {
     .create({ at: FieldValue.serverTimestamp() });
 }
 
+/**
+ * Sentinel returned by bindIapCustomer when ownership cannot be proven (the
+ * owner read failed, or create() failed leaving no binding on record). Callers
+ * MUST treat it as "cannot verify → do not grant" and return a retryable error,
+ * never as this uid owning the sub (fail closed — no silent grant).
+ */
+const IAP_OWNER_UNVERIFIABLE = "__iap_owner_unverifiable__";
+
 /** iapCustomers doc for a store subscription id (Firestore ids cannot hold "/"). */
 function iapCustomerRef(subId: string) {
   return getFirestore()
@@ -628,27 +636,57 @@ function iapCustomerRef(subId: string) {
     .doc(subId.replace(/\//g, "_"));
 }
 /**
- * Bind a store subscription id → firebase uid, CREATE-ONCE (first claimant wins).
- * A different uid claiming an already-bound subId is an anomaly (account transfer
- * / abuse) and is refused + logged — never silently reassigned.
+ * Bind a store subscription id → firebase uid, CREATE-ONCE (first claimant wins),
+ * and return the EFFECTIVE owner uid the subId is bound to. A different uid
+ * claiming an already-bound subId is an anomaly (a second app account signing in
+ * on the same device's Apple ID / Play account, or abuse) and is refused + logged
+ * — never silently reassigned. Returning the owner lets /iap/verify refuse to
+ * grant Pro to a NON-owner, so one paid store subscription can never leak Pro to
+ * multiple Firebase accounts (越境課金防止).
  */
 async function bindIapCustomer(
   subId: string,
   uid: string,
   meta: Record<string, unknown> = {},
-): Promise<void> {
-  if (!subId || !uid) return;
+): Promise<string | null> {
+  if (!subId || !uid) return null;
   const ref = iapCustomerRef(subId);
   try {
     await ref.create({ uid, ...meta, createdAt: FieldValue.serverTimestamp() });
-  } catch {
-    const snap = await ref.get();
+    return uid; // first claimant wins → this uid now owns the subId
+  } catch (createErr) {
+    // create() failed — normally ALREADY_EXISTS (someone already claimed this
+    // subId). Read the existing owner to decide. If the READ also fails, or the
+    // create failed for a NON-exists reason and left no binding on record, we
+    // CANNOT prove ownership — fail CLOSED (never grant on an unverifiable
+    // binding) rather than returning this uid and leaking Pro across accounts.
+    let snap;
+    try {
+      snap = await ref.get();
+    } catch (readErr) {
+      console.error(
+        `[iap] bindIapCustomer ${subId} owner read failed:`,
+        readErr,
+      );
+      return IAP_OWNER_UNVERIFIABLE;
+    }
     const existing = snap.exists ? String(snap.data()?.uid || "") : "";
-    if (existing && existing !== uid) {
+    if (!existing) {
+      // No binding recorded but create() failed → transient/unverifiable, not a
+      // real first-claim. Fail closed instead of granting to this uid.
+      console.error(
+        `[iap] bindIapCustomer ${subId} create failed with no record:`,
+        createErr,
+      );
+      return IAP_OWNER_UNVERIFIABLE;
+    }
+    if (existing !== uid) {
       console.error(
         `[iap] subId ${subId} already bound to ${existing}; refused ${uid}`,
       );
+      return existing; // subId belongs to a DIFFERENT account
     }
+    return existing; // same uid re-verifying (idempotent restore)
   }
 }
 async function lookupIapCustomer(subId: string): Promise<string | null> {
@@ -3532,10 +3570,44 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ error: result.reason }));
           return;
         }
-        await bindIapCustomer(result.intent.subId!, uid, {
+        // Strongest cross-account guard: the store-recorded buyer id (Apple
+        // appAccountToken) is the firebase uid stamped at purchase time. When
+        // present it is STABLE regardless of any subId churn, so an account that
+        // did not buy this sub can never claim it. (Today the iOS client omits
+        // appAccountToken — StoreKit requires a UUID — so result.uid is usually
+        // empty and this is a no-op; the originalTransactionId guard below is the
+        // active iOS check. Kept for defense-in-depth + future-proofing.)
+        if (result.uid && result.uid !== uid) {
+          console.warn(
+            `[iap] verify/ios buyer-id mismatch uid=${uid} buyer=${result.uid} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
+        const iosOwner = await bindIapCustomer(result.intent.subId!, uid, {
           source: "app_store",
           productId: result.intent.productId,
         });
+        if (iosOwner === IAP_OWNER_UNVERIFIABLE) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "verify_retry" }));
+          return;
+        }
+        // The Apple subscription is owned by the DEVICE's Apple ID, not the app
+        // account. If a different Firebase account than the original buyer signs
+        // in on the same device and restores/re-purchases, StoreKit returns the
+        // EXISTING transaction — granting on it would hand one paid subscription
+        // to multiple accounts (越境課金). originalTransactionId is stable across
+        // resubscribe, so this binding scopes ownership. Only the owner may apply.
+        if (iosOwner && iosOwner !== uid) {
+          console.warn(
+            `[iap] verify/ios owned_by_other uid=${uid} owner=${iosOwner} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
         await applyIapIntent(uid, result, "verify/ios");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -3600,10 +3672,41 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ error: result.reason }));
           return;
         }
-        await bindIapCustomer(result.intent.subId!, uid, {
+        // PRIMARY Play cross-account guard: the store-recorded buyer id
+        // (obfuscatedExternalAccountId) is the firebase uid the client stamped at
+        // purchase time (mobile-billing.ts sets obfuscatedAccountId: user.uid).
+        // Unlike the purchaseToken subId — which Google ROTATES on
+        // upgrade/downgrade/resubscribe/resume, leaving the new token unbound —
+        // this id is STABLE across the whole lineage. So a second Firebase
+        // account restoring a rotated token (subId guard would miss it, brand-new
+        // token → fresh binding → leak) is caught here (越境課金防止).
+        if (result.uid && result.uid !== uid) {
+          console.warn(
+            `[iap] verify/android buyer-id mismatch uid=${uid} buyer=${result.uid} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
+        const playOwner = await bindIapCustomer(result.intent.subId!, uid, {
           source: "play",
           productId: result.intent.productId,
         });
+        if (playOwner === IAP_OWNER_UNVERIFIABLE) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "verify_retry" }));
+          return;
+        }
+        // Secondary guard (defense-in-depth): the purchaseToken binding. Scopes
+        // ownership when obfuscatedExternalAccountId is absent (older purchases).
+        if (playOwner && playOwner !== uid) {
+          console.warn(
+            `[iap] verify/android owned_by_other uid=${uid} owner=${playOwner} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
         await applyIapIntent(uid, result, "verify/android");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
