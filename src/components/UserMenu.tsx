@@ -89,14 +89,18 @@ export function UserMenu() {
   // Show the upgrade entry to Free users; the manage entry to paying users.
   // internal (staff/owner real plan) sees neither — they don't buy.
   const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
+  const isPaidPlan = effectivePlan === "pro" || effectivePlan === "team";
   // Anti-steering (Apple/Google): mobile app users must NOT be routed to the
-  // external Stripe billing portal to manage/cancel their subscription. They
-  // manage it on the web/desktop instead. PaywallDialog is already
-  // anti-steering-safe (purchasable=!isMobile), so showUpgrade stays as-is.
-  const showManage =
-    BILLING_ENABLED &&
-    !isMobile &&
-    (effectivePlan === "pro" || effectivePlan === "team");
+  // external Stripe billing portal directly. On desktop, paying users get a
+  // one-tap shortcut straight to the Stripe customer portal.
+  const showManage = BILLING_ENABLED && !isMobile && isPaidPlan;
+  // On mobile there is no StatusBar plan badge, so once a user is Pro/Team the
+  // upgrade entry (Free-only) disappears and — because showManage excludes
+  // mobile — they have NO way left to reopen the plan screen. Give paying mobile
+  // users a menu entry that opens the PaywallDialog: it renders the usage meter
+  // (利用料確認) and a "契約を管理" button that routes an IAP subscriber to the
+  // OS store's subscription manager via openBillingPortal (anti-steering-safe).
+  const showPlanMobile = BILLING_ENABLED && isMobile && isPaidPlan;
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -275,6 +279,18 @@ export function UserMenu() {
               <button className={menuItem} onClick={handleManageSubscription}>
                 <CreditCard className="h-4 w-4" />
                 契約を管理
+              </button>
+            )}
+            {showPlanMobile && (
+              <button
+                className={menuItem}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openPaywall();
+                }}
+              >
+                <CreditCard className="h-4 w-4" />
+                利用状況・プラン
               </button>
             )}
             <button
