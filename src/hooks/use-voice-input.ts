@@ -1,9 +1,18 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useAuthStore } from "@/stores/auth-store";
+import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 25000; // 25 second chunks: longer context = better accuracy
 const MAX_DURATION_SECONDS = 4 * 60 * 60; // 4 hours hard limit
+const MAX_SEND_RETRIES = 2;
+
+// Shown (calmly, in amber) when a LIVE segment can't be transcribed but the
+// audio is safe: native capture keeps the full recording and Refine re-runs it.
+// This is explicit surfacing, not a silent fallback — the miss AND the remedy
+// are made visible so the user isn't alarmed by a raw status code.
+const LIVE_SEGMENT_RECOVERABLE_MSG =
+  "この区間はライブ表示に取り込めませんでしたが、録音は継続しています。停止後に「Refine」で全体を文字起こし・構造化できます。";
 
 import { isAndroid } from "@/platform";
 
@@ -24,6 +33,8 @@ export interface UseVoiceInputOptions {
   getHints?: () => string[];
   preferDiarization?: boolean;
   onMaxDuration?: () => void;
+  initialTranscript?: string;
+  onTranscriptUpdate?: (fullTranscript: string) => void;
 }
 
 export interface UseVoiceInputReturn {
@@ -50,6 +61,36 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+// Split a base64 LINEAR16 (16-bit PCM, mono) buffer into base64 segments each
+// ≤ maxSeconds. On Android the native mic bridge keeps recording while the app
+// is backgrounded, but the WebView's JS timers freeze — so the first tick after
+// returning to the foreground hands back the ENTIRE accumulated buffer (minutes
+// of audio) in one getChunk(). The synchronous STT endpoint rejects over-length
+// inline audio (~60s → 400 INVALID_ARGUMENT), so we cap each request here,
+// mirroring the desktop/Rust path (get_voice_chunk's ~25s cap + drain loop).
+// Boundaries stay on 2-byte sample edges (maxBytes is even). Returns the input
+// unchanged when already within the limit — the common foreground case pays no
+// decode/re-encode cost. Exported for unit testing.
+export function splitLinear16Base64(
+  base64: string,
+  maxSeconds: number,
+  sampleRate: number,
+): string[] {
+  const maxBytes = Math.floor(maxSeconds) * sampleRate * 2; // 2 bytes/sample
+  let binary: string;
+  try {
+    binary = atob(base64);
+  } catch {
+    return [base64];
+  }
+  if (binary.length <= maxBytes) return [base64];
+  const segments: string[] = [];
+  for (let off = 0; off < binary.length; off += maxBytes) {
+    segments.push(btoa(binary.slice(off, off + maxBytes)));
+  }
+  return segments;
+}
+
 export function useVoiceInput({
   language = "ja-JP",
   deviceName,
@@ -60,17 +101,12 @@ export function useVoiceInput({
   getHints,
   preferDiarization,
   onMaxDuration,
+  initialTranscript,
+  onTranscriptUpdate,
 }: UseVoiceInputOptions = {}): UseVoiceInputReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [interimText, setInterimText] = useState("");
-  const savedTranscript = (() => {
-    try {
-      return localStorage.getItem("voice_transcript") || "";
-    } catch {
-      return "";
-    }
-  })();
-  const [fullTranscript, setFullTranscript] = useState(savedTranscript);
+  const [fullTranscript, setFullTranscript] = useState(initialTranscript || "");
   const [duration, setDuration] = useState(0);
 
   const isSupported = typeof navigator !== "undefined";
@@ -84,8 +120,10 @@ export function useVoiceInput({
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const transcriptRef = useRef(savedTranscript);
+  const startTimeRef = useRef(0);
+  const transcriptRef = useRef(initialTranscript || "");
   const onTranscriptRef = useRef(onTranscript);
+  const onTranscriptUpdateRef = useRef(onTranscriptUpdate);
   const onErrorRef = useRef(onError);
   const onInfoRef = useRef(onInfo);
   const getHintsRef = useRef(getHints);
@@ -106,6 +144,9 @@ export function useVoiceInput({
   useEffect(() => {
     onMaxDurationRef.current = onMaxDuration;
   }, [onMaxDuration]);
+  useEffect(() => {
+    onTranscriptUpdateRef.current = onTranscriptUpdate;
+  }, [onTranscriptUpdate]);
 
   const sendChunk = useCallback(
     async (
@@ -118,120 +159,172 @@ export function useVoiceInput({
         if (input.size < 200) return;
       }
 
-      try {
-        const user = useAuthStore.getState().user;
-        if (!user) {
-          console.warn(
-            "[voice] No authenticated user — skipping transcription",
-          );
-          return;
-        }
-        const token = await user.getIdToken();
+      const user = useAuthStore.getState().user;
+      if (!user) {
+        console.warn("[voice] No authenticated user — skipping transcription");
+        return;
+      }
 
-        const base64 =
-          typeof input === "string" ? input : await blobToBase64(input);
-        if (!base64) return;
+      const base64 =
+        typeof input === "string" ? input : await blobToBase64(input);
+      if (!base64) return;
 
-        const byteLen = Math.round((base64.length * 3) / 4);
-        console.log(
-          `[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`,
-        );
+      const byteLen = Math.round((base64.length * 3) / 4);
+      console.log(
+        `[voice] Sending chunk: ${byteLen} bytes, encoding=${meta?.encoding}, rate=${meta?.sampleRate}`,
+      );
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 60_000);
-        const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            audio: base64,
-            language,
-            ...(meta
-              ? {
-                  encoding: meta.encoding,
-                  sampleRate: meta.sampleRate,
-                  channels: 1,
-                }
-              : {}),
-            ...(!preferDiarization && getHintsRef.current
-              ? { hints: getHintsRef.current() }
-              : {}),
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
+      const requestBody = JSON.stringify({
+        audio: base64,
+        language,
+        ...(meta
+          ? {
+              encoding: meta.encoding,
+              sampleRate: meta.sampleRate,
+              channels: 1,
+            }
+          : {}),
+        ...(!preferDiarization && getHintsRef.current
+          ? { hints: getHintsRef.current() }
+          : {}),
+      });
 
-        if (!res.ok) {
-          const errText = await res.text();
-          console.error("[voice] Transcription failed:", res.status, errText);
-          onErrorRef.current?.(`Transcription error: ${res.status}`);
-          return;
-        }
+      for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
+        try {
+          const token = await user.getIdToken();
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 60_000);
+          const res = await fetch(`${AI_PROXY_URL}/v1/voice/transcribe`, {
+            method: "POST",
+            headers: aiProxyHeaders(token),
+            body: requestBody,
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
 
-        const data = await res.json();
-        console.log("[voice] STT response:", JSON.stringify(data));
-        const text = data.text?.trim();
-        if (text) {
-          // Multi-pattern hallucination suppression
-          const isHallucination = (() => {
-            // 1. Entire text is a repeated short phrase (3+ occurrences)
-            if (/^(.{1,5}[、。,.!？\s]*)\1{2,}$/.test(text)) return true;
-            // 2. Single filler character repeated with punctuation
-            if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
-            // 3. Common STT silence hallucinations (Japanese)
-            if (
-              /^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(
-                text,
-              )
-            )
-              return true;
-            // 4. Only numbers/punctuation (noise artifacts)
-            if (/^[\d、。,.\s-]+$/.test(text)) return true;
-            // 5. Very short text (1-2 chars) that's just a filler
-            if (
-              text.length <= 2 &&
-              /^[えあうんはへほおいのでがをにと]$/.test(text)
-            )
-              return true;
-            // 6. Standalone backchannel responses (相槌・接続詞)
-            if (
-              /^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお|それで|それから|でも|だから|けど|ただ|まあ)[、。.!？\s]*$/.test(
-                text,
-              )
-            )
-              return true;
-            // 7. Repeated common words with varied punctuation
-            if (
-              text.length <= 30 &&
-              /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(
-                text,
-              ) &&
-              !/[ぁ-ん]{3,}/.test(
-                text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""),
-              )
-            )
-              return true;
-            // 8. A short phrase repeated 4+ times covers >50% of text (allows prefix)
-            const repMatch = text.match(/(.{2,8}[、。,.!？\s]*)\1{3,}/);
-            if (repMatch && repMatch[0].length > text.length * 0.5) return true;
-            return false;
-          })();
-          if (isHallucination) {
-            console.warn("[voice] Suppressed hallucination:", text);
-          } else {
-            const displayText = data.taggedText || text;
-            transcriptRef.current +=
-              (transcriptRef.current ? "\n---\n" : "") + displayText;
-            setFullTranscript(transcriptRef.current);
-            setInterimText(text);
-            onTranscriptRef.current?.(text);
+          if (!res.ok) {
+            const errText = await res.text();
+            console.error("[voice] Transcription failed:", res.status, errText);
+            const wasQuota = reportIfQuota(res.status, errText);
+            if (res.status >= 500 && attempt < MAX_SEND_RETRIES) {
+              console.log(
+                `[voice] Retrying (${attempt + 1}/${MAX_SEND_RETRIES})...`,
+              );
+              await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+              continue;
+            }
+            if (wasQuota) return; // quota upsell banner speaks — don't double-message
+            // A dropped LIVE segment is recoverable on native platforms: capture
+            // keeps the full recording and Refine re-transcribes it. For an
+            // over-length request (400 — e.g. a buffer accumulated while
+            // backgrounded) or a transient upstream failure (5xx), surface this
+            // calmly instead of a raw status code. Not silent: the miss and the
+            // remedy are both shown (amber Info).
+            if (isTauri && (res.status === 400 || res.status >= 500)) {
+              onInfoRef.current?.(LIVE_SEGMENT_RECOVERABLE_MSG);
+            } else {
+              onErrorRef.current?.(`Transcription error: ${res.status}`);
+            }
+            return;
           }
+
+          const data = await res.json();
+          console.log("[voice] STT response:", JSON.stringify(data));
+          const text = data.text?.trim();
+          if (text) {
+            const isHallucination = (() => {
+              if (/^(.{1,5}[、。,.!？\s]*)\1{2,}$/.test(text)) return true;
+              if (/^[えあうんはへほ、。\s]{2,}$/.test(text)) return true;
+              if (
+                /^(ご視聴ありがとうございました|チャンネル登録|字幕|おやすみなさい)[。.]?$/.test(
+                  text,
+                )
+              )
+                return true;
+              if (/^[\d、。,.\s-]+$/.test(text)) return true;
+              if (
+                text.length <= 2 &&
+                /^[えあうんはへほおいのでがをにと]$/.test(text)
+              )
+                return true;
+              if (
+                /^(はい|うん|ええ|そう|そうですね|なるほど|そっか|ふーん|へー|ああ|おお|それで|それから|でも|だから|けど|ただ|まあ)[、。.!？\s]*$/.test(
+                  text,
+                )
+              )
+                return true;
+              if (
+                text.length <= 30 &&
+                /^(はい|うん|ええ|そう)[、。,.!？\s]*(はい|うん|ええ|そう)[、。,.!？\s]*/.test(
+                  text,
+                ) &&
+                !/[ぁ-ん]{3,}/.test(
+                  text.replace(/(はい|うん|ええ|そう)[、。,.!？\s]*/g, ""),
+                )
+              )
+                return true;
+              const repMatch = text.match(/(.{2,8}[、。,.!？\s]*)\1{3,}/);
+              if (repMatch && repMatch[0].length > text.length * 0.3)
+                return true;
+              if (text.length > 100) {
+                const words = text
+                  .replace(/[、。,.!？\s]+/g, " ")
+                  .trim()
+                  .split(" ");
+                const freq = new Map<string, number>();
+                for (const w of words) {
+                  if (w.length >= 1) freq.set(w, (freq.get(w) || 0) + 1);
+                }
+                for (const [, count] of freq) {
+                  if (count >= 10 && count > words.length * 0.4) return true;
+                }
+              }
+              return false;
+            })();
+            if (isHallucination) {
+              console.warn("[voice] Suppressed hallucination:", text);
+            } else {
+              const displayText = data.taggedText || text;
+              transcriptRef.current +=
+                (transcriptRef.current ? "\n---\n" : "") + displayText;
+              setFullTranscript(transcriptRef.current);
+              setInterimText(text);
+              onTranscriptRef.current?.(text);
+            }
+          }
+          return;
+        } catch (err) {
+          const isAbort =
+            err instanceof Error &&
+            (err.name === "AbortError" || /abort/i.test(err.message));
+          const isNetwork =
+            err instanceof TypeError && /fetch|network/i.test(err.message);
+
+          if ((isAbort || isNetwork) && attempt < MAX_SEND_RETRIES) {
+            console.warn(
+              `[voice] ${isAbort ? "Fetch aborted" : "Network error"}, retrying (${attempt + 1}/${MAX_SEND_RETRIES})...`,
+            );
+            await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+            continue;
+          }
+          console.error("[voice] Transcription error:", err);
+          // Retries are exhausted. The AbortController here is fired ONLY by the
+          // 60s timeout above (there is no external/intentional abort of this
+          // fetch), so an abort at this point means this live segment was lost.
+          // On native platforms the full recording is archived and Refine
+          // re-transcribes it, so surface it calmly (amber) rather than as a
+          // hard error — explicitly, never silently.
+          if (isTauri) {
+            onInfoRef.current?.(LIVE_SEGMENT_RECOVERABLE_MSG);
+          } else {
+            onErrorRef.current?.(
+              isAbort
+                ? "音声区間の文字起こしがタイムアウトしました。この区間は取り込めていない可能性があります。"
+                : `Transcription error: ${err}`,
+            );
+          }
+          return;
         }
-      } catch (err) {
-        console.error("[voice] Transcription error:", err);
-        onErrorRef.current?.(`Transcription error: ${err}`);
       }
     },
     [language],
@@ -294,10 +387,28 @@ export function useVoiceInput({
           try {
             const chunk = bridge.getChunk();
             if (chunk) {
-              await sendChunk(chunk, {
-                encoding: "LINEAR16",
-                sampleRate: 16000,
-              });
+              // A single getChunk() can span far more than CHUNK_MS when JS
+              // timers were frozen (app backgrounded): the bridge returns the
+              // whole accumulated buffer on the first foreground tick. Split it
+              // into ≤CHUNK_MS segments so an over-length request never hits the
+              // synchronous STT limit (would 400). Foreground ticks are already
+              // within the limit → returned as-is (single send).
+              const segments = splitLinear16Base64(
+                chunk,
+                CHUNK_MS / 1000,
+                16000,
+              );
+              if (segments.length > 1) {
+                console.log(
+                  `[voice] Android background catchup: split into ${segments.length} segments`,
+                );
+              }
+              for (const seg of segments) {
+                await sendChunk(seg, {
+                  encoding: "LINEAR16",
+                  sampleRate: 16000,
+                });
+              }
             }
           } catch (e) {
             console.error("[voice] Android chunk error:", e);
@@ -445,9 +556,10 @@ export function useVoiceInput({
       }
 
       // Common setup for both paths
+      startTimeRef.current = Date.now();
       setDuration(0);
       durationIntervalRef.current = setInterval(() => {
-        setDuration((d) => d + 1);
+        setDuration(Math.floor((Date.now() - startTimeRef.current) / 1000));
       }, 1000);
 
       // Auto-stop after MAX_DURATION_SECONDS
@@ -477,12 +589,13 @@ export function useVoiceInput({
     else startRecording();
   }, [isRecording, startRecording, stopRecording]);
 
+  const mountedRef = useRef(false);
   useEffect(() => {
-    try {
-      if (fullTranscript)
-        localStorage.setItem("voice_transcript", fullTranscript);
-      else localStorage.removeItem("voice_transcript");
-    } catch {}
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    onTranscriptUpdateRef.current?.(fullTranscript);
   }, [fullTranscript]);
 
   const clearTranscript = useCallback(() => {
@@ -490,6 +603,21 @@ export function useVoiceInput({
     setFullTranscript("");
     setInterimText("");
   }, []);
+
+  // Follow the host's saved transcript when it swaps to a different one — e.g.
+  // switching documents. The panel is normally remounted (keyed by doc id), but
+  // this guarantees the transcript stays tied to the active document even if the
+  // instance is reused: never show one document's transcript on another. Never
+  // clobber a live recording in progress.
+  const lastInitialRef = useRef(initialTranscript);
+  useEffect(() => {
+    if (initialTranscript === lastInitialRef.current) return;
+    lastInitialRef.current = initialTranscript;
+    if (isRecording) return;
+    transcriptRef.current = initialTranscript || "";
+    setFullTranscript(initialTranscript || "");
+    setInterimText("");
+  }, [initialTranscript, isRecording]);
 
   // Cleanup on unmount
   useEffect(() => {

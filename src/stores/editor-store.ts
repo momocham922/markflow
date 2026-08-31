@@ -3,7 +3,7 @@ import type { EditorView } from "@codemirror/view";
 
 interface PendingInsert {
   text: string;
-  mode: "replace" | "append";
+  mode: "replace" | "append" | "replaceAll";
 }
 
 interface EditorState {
@@ -17,6 +17,8 @@ interface EditorState {
   insertAtCursor: (text: string) => boolean;
   replaceSelection: (text: string) => boolean;
   appendToDoc: (text: string) => boolean;
+  /** Replace the ENTIRE document with new text (single undoable change) */
+  replaceDocument: (text: string) => boolean;
   /** Queued insert for iOS — applied by Editor after AI panel closes */
   pendingInsert: PendingInsert | null;
   setPendingInsert: (insert: PendingInsert | null) => void;
@@ -94,6 +96,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const len = view.state.doc.length;
     view.dispatch({
       changes: { from: len, insert: `\n\n${text}` },
+    });
+    view.focus();
+    return true;
+  },
+
+  replaceDocument: (text: string) => {
+    const { view } = get();
+    if (!isViewAlive(view)) return false;
+    // Guard: never wipe a non-empty document with empty text (content protection).
+    if (!text.trim() && view.state.doc.length > 0) return false;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
     });
     view.focus();
     return true;

@@ -2,7 +2,11 @@ import { useState, useEffect, useCallback } from "react";
 import { X, Plus, Trash2, Power, PowerOff, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { McpServerConfig } from "@/services/mcp";
-import { connectServer, disconnectServer, getConnectedServerIds } from "@/services/mcp";
+import {
+  connectServer,
+  disconnectServer,
+  getConnectedServerIds,
+} from "@/services/mcp";
 import * as db from "@/services/database";
 import { useAuthStore } from "@/stores/auth-store";
 import { saveUserSettingsToFirestore } from "@/services/firebase";
@@ -35,7 +39,11 @@ async function saveMcpConfigs(configs: McpServerConfig[]): Promise<void> {
   }
 }
 
-export function McpSettings({ open, onClose, onToolsChanged }: McpSettingsProps) {
+export function McpSettings({
+  open,
+  onClose,
+  onToolsChanged,
+}: McpSettingsProps) {
   const [configs, setConfigs] = useState<McpServerConfig[]>([]);
   const [connectedIds, setConnectedIds] = useState<Set<string>>(new Set());
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -95,7 +103,9 @@ export function McpSettings({ open, onClose, onToolsChanged }: McpSettingsProps)
       refreshConnected();
       onToolsChanged();
     } catch (err) {
-      setError(`${config.name}: ${err instanceof Error ? err.message : String(err)}`);
+      setError(
+        `${config.name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       setConnecting(null);
     }
@@ -107,14 +117,20 @@ export function McpSettings({ open, onClose, onToolsChanged }: McpSettingsProps)
     <div className="absolute inset-0 z-50 flex flex-col bg-background">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <span className="text-sm font-medium">MCP Servers</span>
-        <Button variant="ghost" size="icon" className="h-6 w-6 cursor-pointer" onClick={onClose}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 cursor-pointer"
+          onClick={onClose}
+        >
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
 
       <div className="flex-1 p-3 flex flex-col gap-2 min-h-0 overflow-y-auto">
         <p className="text-[10px] text-muted-foreground">
-          Connect MCP (Model Context Protocol) servers to give Claude access to external tools.
+          Connect MCP (Model Context Protocol) servers to give MarkFlow AI
+          access to external tools.
         </p>
 
         {error && (
@@ -138,7 +154,9 @@ export function McpSettings({ open, onClose, onToolsChanged }: McpSettingsProps)
               className="flex items-center gap-2 rounded border border-border px-2 py-1.5"
             >
               <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium truncate">{config.name}</div>
+                <div className="text-xs font-medium truncate">
+                  {config.name}
+                </div>
                 <div className="text-[10px] text-muted-foreground truncate">
                   {config.command} {config.args.join(" ")}
                 </div>
@@ -193,10 +211,20 @@ export function McpSettings({ open, onClose, onToolsChanged }: McpSettingsProps)
               className="w-full rounded border border-input bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
             />
             <div className="flex gap-2 justify-end">
-              <Button variant="ghost" size="sm" className="text-xs cursor-pointer" onClick={() => setAddMode(false)}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs cursor-pointer"
+                onClick={() => setAddMode(false)}
+              >
                 Cancel
               </Button>
-              <Button size="sm" className="text-xs cursor-pointer" onClick={handleAdd} disabled={!newName.trim() || !newCommand.trim()}>
+              <Button
+                size="sm"
+                className="text-xs cursor-pointer"
+                onClick={handleAdd}
+                disabled={!newName.trim() || !newCommand.trim()}
+              >
                 Add
               </Button>
             </div>

@@ -5,7 +5,9 @@ import path from "path";
 import { readFileSync } from "fs";
 
 const host = process.env.TAURI_DEV_HOST;
-const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf-8"));
+const pkg = JSON.parse(
+  readFileSync(path.resolve(__dirname, "package.json"), "utf-8"),
+);
 
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
@@ -15,6 +17,14 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+    },
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        research: path.resolve(__dirname, "research.html"),
+      },
     },
   },
   clearScreen: false,
@@ -37,6 +47,6 @@ export default defineConfig(async () => ({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "server/**/*.test.ts"],
   },
 }));

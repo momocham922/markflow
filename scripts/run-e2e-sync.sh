@@ -13,11 +13,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-# Default test account credentials (created via Firebase Auth REST API)
-export TEST_USER_A_EMAIL="${TEST_USER_A_EMAIL:-test-sync-a@markflow.app}"
-export TEST_USER_A_PASSWORD="${TEST_USER_A_PASSWORD:-MF-e2e-test-2026!}"
-export TEST_USER_B_EMAIL="${TEST_USER_B_EMAIL:-test-sync-b@markflow.app}"
-export TEST_USER_B_PASSWORD="${TEST_USER_B_PASSWORD:-MF-e2e-test-2026!}"
+# Test account credentials — MUST be provided via the environment. Never commit
+# real credentials to the repo (a prior version hardcoded a shared password here,
+# which then had to be treated as compromised). Export these before running, e.g.
+# from a local (gitignored) secrets file or your shell profile:
+#   TEST_USER_A_EMAIL=... TEST_USER_A_PASSWORD=... \
+#   TEST_USER_B_EMAIL=... TEST_USER_B_PASSWORD=... ./scripts/run-e2e-sync.sh
+for var in TEST_USER_A_EMAIL TEST_USER_A_PASSWORD \
+  TEST_USER_B_EMAIL TEST_USER_B_PASSWORD; do
+  if [ -z "${!var}" ]; then
+    echo "ERROR: $var is not set. Provide the sync E2E test credentials via the" >&2
+    echo "       environment (do NOT hardcode them in this script)." >&2
+    exit 1
+  fi
+done
+export TEST_USER_A_EMAIL TEST_USER_A_PASSWORD TEST_USER_B_EMAIL TEST_USER_B_PASSWORD
 
 echo "=== Sync E2E: User A = $TEST_USER_A_EMAIL ==="
 echo "=== Sync E2E: User B = $TEST_USER_B_EMAIL ==="

@@ -5,7 +5,6 @@ import {
   getDoc,
   getDocs,
   setDoc,
-  updateDoc,
   deleteDoc,
   deleteField,
   runTransaction,
@@ -14,8 +13,45 @@ import {
   serverTimestamp,
   type Timestamp,
 } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 
 const firestore = getFirestore();
+
+// ─── Email → uid resolution (server-side) ──────────────────────
+// The `users` collection is owner-read-only (firestore.rules), so the client
+// cannot query it to map an invite email to a uid without exposing the whole
+// directory. Instead we ask the ai-proxy, which resolves ONE email at a time via
+// the Admin SDK and returns only { exists, uid }. No proxy configured, no token,
+// or a transport error THROWS — we never silently treat a lookup failure as
+// "user not found" (that would add a dead collaborator entry that can never gain
+// access). A genuine 200 { exists:false } is the legitimate "not registered yet"
+// answer and is returned normally.
+export async function resolveUserByEmail(
+  email: string,
+): Promise<{ exists: boolean; uid: string | null }> {
+  const proxyBase = import.meta.env.VITE_AI_PROXY_URL || "";
+  if (!proxyBase) {
+    throw new Error("ユーザー検索に必要な接続先が設定されていません。");
+  }
+  const user = getAuth().currentUser;
+  if (!user) {
+    throw new Error("サインインが必要です。");
+  }
+  const token = await user.getIdToken();
+  const res = await fetch(`${proxyBase}/v1/users/resolve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    throw new Error(`ユーザー検索に失敗しました (HTTP ${res.status})`);
+  }
+  const data = (await res.json()) as { exists?: boolean; uid?: string | null };
+  return { exists: !!data.exists, uid: data.uid ?? null };
+}
 
 // ─── Share Links ───────────────────────────────────────────────
 
@@ -52,20 +88,24 @@ export async function enableShareLink(
     expiresAt: expiresInMs ? Date.now() + expiresInMs : null,
   };
 
-  await updateDoc(ref, { shareLink });
+  await setDoc(ref, { shareLink }, { merge: true });
   return shareLink;
 }
 
 /** Disable a share link (keeps the token so re-enabling gives the same URL) */
 export async function disableShareLink(docId: string): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  await updateDoc(ref, { "shareLink.enabled": false });
+  // Deep-merge into the shareLink map so token/permission/expiresAt survive.
+  await setDoc(ref, { shareLink: { enabled: false } }, { merge: true });
 }
 
 /** Fetch a document by share token (for viewers without login) */
-export async function fetchDocumentByToken(
-  token: string,
-): Promise<{ id: string; title: string; content: string; permission: "view" | "edit" } | null> {
+export async function fetchDocumentByToken(token: string): Promise<{
+  id: string;
+  title: string;
+  content: string;
+  permission: "view" | "edit";
+} | null> {
   const q = query(
     collection(firestore, "documents"),
     where("shareLink.enabled", "==", true),
@@ -104,12 +144,8 @@ export interface Collaborator {
 
 /** Check if a user with the given email has ever signed in to the app */
 export async function checkUserExists(email: string): Promise<boolean> {
-  const usersQ = query(
-    collection(firestore, "users"),
-    where("email", "==", email),
-  );
-  const snap = await getDocs(usersQ);
-  return !snap.empty;
+  const { exists } = await resolveUserByEmail(email);
+  return exists;
 }
 
 /** Add a collaborator to a document by email (atomic transaction) */
@@ -118,14 +154,9 @@ export async function addCollaborator(
   email: string,
   role: "editor" | "viewer",
 ): Promise<void> {
-  // Look up the user by email in the users collection
-  const usersQ = query(
-    collection(firestore, "users"),
-    where("email", "==", email),
-  );
-  const usersSnap = await getDocs(usersQ);
-
-  const uid = usersSnap.empty ? "" : usersSnap.docs[0].id;
+  // Resolve email -> uid via the server (users collection is not client-readable).
+  const { uid: resolvedUid } = await resolveUserByEmail(email);
+  const uid = resolvedUid || "";
   const key = uid || email.replace(/[.#$/\[\]]/g, "_");
 
   const ref = doc(firestore, "documents", docId);
@@ -152,7 +183,8 @@ export async function removeCollaborator(
   docId: string,
   collaborator: Collaborator,
 ): Promise<void> {
-  const key = collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
+  const key =
+    collaborator.uid || collaborator.email.replace(/[.#$/\[\]]/g, "_");
   const ref = doc(firestore, "documents", docId);
 
   await runTransaction(firestore, async (transaction) => {
@@ -176,9 +208,12 @@ export async function updateCollaboratorRole(
   newRole: "editor" | "viewer",
 ): Promise<void> {
   const key = oldCollab.uid || oldCollab.email.replace(/[.#$/\[\]]/g, "_");
-  await updateDoc(doc(firestore, "documents", docId), {
-    [`collaborators.${key}.role`]: newRole,
-  });
+  // Deep-merge preserves the collaborator's email/addedAt fields.
+  await setDoc(
+    doc(firestore, "documents", docId),
+    { collaborators: { [key]: { role: newRole } } },
+    { merge: true },
+  );
 }
 
 /** Get collaborators for a document (returns array for UI compatibility) */
@@ -188,7 +223,10 @@ export async function getCollaborators(docId: string): Promise<Collaborator[]> {
   const data = snap.data();
   if (!data?.collaborators) return [];
 
-  const collabMap = data.collaborators as Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
+  const collabMap = data.collaborators as Record<
+    string,
+    { email: string; role: "editor" | "viewer"; addedAt: number }
+  >;
   return Object.entries(collabMap).map(([uid, val]) => ({
     uid,
     email: val.email,
@@ -206,21 +244,23 @@ export async function fetchSharedWithMe(
     where("collaboratorUids", "array-contains", uid),
   );
 
-  try {
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => {
-      const data = d.data();
-      const collabData = data.collaborators?.[uid] as { role: "editor" | "viewer" } | undefined;
-      return {
-        id: d.id,
-        title: data.title,
-        role: collabData?.role ?? "viewer",
-      };
-    });
-  } catch (err) {
-    console.warn("fetchSharedWithMe query failed:", err);
-    return [];
-  }
+  // Intentionally NOT catching here: a transient getDocs failure must REJECT so
+  // callers can distinguish "no shared docs" from "fetch failed". syncFromCloud
+  // (auth-store) relies on this to flip sharedOk=false and skip deletion
+  // reconciliation — swallowing the error here would tombstone valid shared docs
+  // for up to 30 days on a network blip. All other callers already guard with
+  // their own catch (Sidebar.tsx, firebase.ts debug helper).
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => {
+    const data = d.data();
+    const collabData = data.collaborators?.[uid] as
+      { role: "editor" | "viewer" } | undefined;
+    return {
+      id: d.id,
+      title: data.title,
+      role: collabData?.role ?? "viewer",
+    };
+  });
 }
 
 // ─── Teams ─────────────────────────────────────────────────────
@@ -232,12 +272,66 @@ export interface TeamMember {
   joinedAt: number;
 }
 
+/**
+ * Team subscription state — written ONLY by the ai-proxy webhook via the Admin
+ * SDK (firestore.rules freezes it from all client writes). Members may READ it
+ * (they can read the whole team doc), so the UI renders plan/seat state from it;
+ * clients must never set it. `status` mirrors the entitlement status vocabulary
+ * (active|grace|trialing grant access; on_hold|canceled|revoked do not).
+ */
+export interface TeamBilling {
+  status?: string;
+  seats?: number;
+  ownerUid?: string;
+  currentPeriodEnd?: number;
+  priceId?: string;
+}
+
 export interface Team {
   id: string;
   name: string;
   ownerId: string;
   members: TeamMember[];
   createdAt: Timestamp | null;
+  /** Denormalized uid list (Firestore array-contains queries + rules). */
+  memberUids?: string[];
+  /** Team-level folder list (see get/setTeamFolders). */
+  folders?: string[];
+  /** Server-written subscription state (see TeamBilling). Read-only for clients. */
+  billing?: TeamBilling;
+  /**
+   * Ordered uid list of who holds a paid seat — server-written (seat-assign
+   * endpoint) and frozen from client writes. The first `billing.seats` uids get
+   * the shared AI pool (assignment order is the capacity fence). Read-only here.
+   */
+  seatAssignments?: string[];
+}
+
+/**
+ * True when a team subscription grants access. Mirrors the server spend gate
+ * `deriveSeatAccess` (gating.ts), which admits ONLY `active` and `grace` — NOT
+ * `trialing`. The webhook normalizes `trialing → active` before writing team
+ * billing (billing.ts `mapStripeStatus`), so a real doc never carries `trialing`;
+ * we keep the two predicates identical so the UI can never show a team as active
+ * while the server denies its members the pool.
+ */
+export function isTeamBillingActive(billing?: TeamBilling | null): boolean {
+  const s = String(billing?.status ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "active" || s === "grace";
+}
+
+/** True when `uid` is the owner or an admin of `team` (seat-management rights). */
+export function isTeamManager(
+  team: Team,
+  uid: string | null | undefined,
+): boolean {
+  if (!uid) return false;
+  if (team.ownerId === uid) return true;
+  return team.members.some(
+    (m) => m.uid === uid && (m.role === "owner" || m.role === "admin"),
+  );
 }
 
 const TEAMS_COLLECTION = "teams";
@@ -254,7 +348,12 @@ export async function createTeam(
     ownerId: owner.uid,
     memberUids: [owner.uid],
     members: [
-      { uid: owner.uid, email: owner.email, role: "owner", joinedAt: Date.now() },
+      {
+        uid: owner.uid,
+        email: owner.email,
+        role: "owner",
+        joinedAt: Date.now(),
+      },
     ],
     createdAt: serverTimestamp(),
   });
@@ -276,13 +375,13 @@ export async function addTeamMember(
   teamId: string,
   member: { email: string; uid?: string; role: "admin" | "member" },
 ): Promise<void> {
-  // Look up the user by email
-  const usersQ = query(
-    collection(firestore, "users"),
-    where("email", "==", member.email),
-  );
-  const usersSnap = await getDocs(usersQ);
-  const uid = member.uid || (usersSnap.empty ? "" : usersSnap.docs[0].id);
+  // Resolve email -> uid via the server (users collection is not client-readable).
+  let resolvedUid = member.uid || "";
+  if (!resolvedUid) {
+    const r = await resolveUserByEmail(member.email);
+    resolvedUid = r.uid || "";
+  }
+  const uid = resolvedUid;
 
   const teamMember: TeamMember = {
     uid,
@@ -359,15 +458,21 @@ export async function getTeamFolders(teamId: string): Promise<string[]> {
 }
 
 /** Save team-level folders list */
-export async function setTeamFolders(teamId: string, folders: string[]): Promise<void> {
+export async function setTeamFolders(
+  teamId: string,
+  folders: string[],
+): Promise<void> {
   const ref = doc(firestore, TEAMS_COLLECTION, teamId);
-  await updateDoc(ref, { folders });
+  await setDoc(ref, { folders }, { merge: true });
 }
 
 /** Move a team document to a different folder */
-export async function moveTeamDocument(docId: string, folder: string): Promise<void> {
+export async function moveTeamDocument(
+  docId: string,
+  folder: string,
+): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  await updateDoc(ref, { folder });
+  await setDoc(ref, { folder }, { merge: true });
 }
 
 /** Create a document within a team */
@@ -421,7 +526,11 @@ export async function copyTeamDocToPersonal(
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  return { id: newId, title: data.title || "Untitled", content: data.content || "" };
+  return {
+    id: newId,
+    title: data.title || "Untitled",
+    content: data.content || "",
+  };
 }
 
 /** Move a personal document into a team */
@@ -431,7 +540,8 @@ export async function moveDocToTeam(
   folder: string = "/",
 ): Promise<void> {
   const ref = doc(firestore, "documents", docId);
-  await updateDoc(ref, { teamId, folder });
+  // Merge (not update) so the caller can create-then-move a freshly synced doc.
+  await setDoc(ref, { teamId, folder }, { merge: true });
 }
 
 // ─── User Profile (for looking up users by email) ──────────────

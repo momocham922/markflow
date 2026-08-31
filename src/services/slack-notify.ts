@@ -1,4 +1,4 @@
-import { getFirestore, doc, getDoc, updateDoc } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 
 export interface SlackNotifyConfig {
   webhookUrl: string;
@@ -18,7 +18,9 @@ const DEFAULT_CONFIG: SlackNotifyConfig = {
 };
 
 /** Load Slack notification config from Firestore document */
-export async function loadSlackNotifyConfig(docId: string): Promise<SlackNotifyConfig> {
+export async function loadSlackNotifyConfig(
+  docId: string,
+): Promise<SlackNotifyConfig> {
   try {
     const firestore = getFirestore();
     const snap = await getDoc(doc(firestore, "documents", docId));
@@ -26,14 +28,23 @@ export async function loadSlackNotifyConfig(docId: string): Promise<SlackNotifyC
     if (data?.slackConfig) {
       return { ...DEFAULT_CONFIG, ...data.slackConfig };
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return { ...DEFAULT_CONFIG };
 }
 
 /** Save Slack notification config to Firestore document */
-export async function saveSlackNotifyConfig(docId: string, config: SlackNotifyConfig): Promise<void> {
+export async function saveSlackNotifyConfig(
+  docId: string,
+  config: SlackNotifyConfig,
+): Promise<void> {
   const firestore = getFirestore();
-  await updateDoc(doc(firestore, "documents", docId), { slackConfig: config });
+  await setDoc(
+    doc(firestore, "documents", docId),
+    { slackConfig: config },
+    { merge: true },
+  );
 }
 
 /** Send a notification to Slack about a document event */

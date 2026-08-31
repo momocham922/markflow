@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>MarkFlow uses the microphone for voice-to-text input.</string>
+	<string>MarkFlow uses the microphone to record your voice and transcribe it into notes. Recording continues in the background so long dictations are not cut off when the screen is off or you switch apps.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>MarkFlow accesses your photo library to insert images into documents.</string>
 	<key>NSCameraUsageDescription</key>

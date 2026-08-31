@@ -57,9 +57,9 @@ git push
 ```bash
 TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
 TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
-APPLE_API_KEY="AQ996V29F4" \
-APPLE_API_ISSUER="fab7704b-d2a9-4ce6-9e58-c6a73c958c22" \
-APPLE_API_KEY_PATH="/Users/3937/.tauri/AuthKey_AQ996V29F4.p8" \
+APPLE_API_KEY="<APPLE_API_KEY>" \
+APPLE_API_ISSUER="<APPLE_API_ISSUER>" \
+APPLE_API_KEY_PATH="~/.tauri/AuthKey_<APPLE_API_KEY>.p8" \
 pnpm tauri build
 ```
 

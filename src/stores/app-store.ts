@@ -19,6 +19,9 @@ export interface Document {
   titlePinned?: boolean;
   docType?: DocType;
   ownerName?: string;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
 }
 
 export interface CustomPreviewTheme {
@@ -62,6 +65,21 @@ interface AppState {
   addDocument: (doc: Document) => Promise<void>;
   updateDocument: (id: string, updates: Partial<Document>) => void;
   deleteDocument: (id: string) => Promise<void>;
+  /**
+   * Clear the IN-MEMORY document cache (sidebar) without touching SQLite. Used
+   * on logout and on account switch so the previous account's documents never
+   * remain visible. Also cancels pending debounced saves/cloud-syncs so a late
+   * timer can't resurrect a just-cleared doc after the switch wipe.
+   */
+  resetLocalDocuments: () => void;
+  /**
+   * Fail-closed isolation guard: drop from the IN-MEMORY list any PRIVATE doc
+   * owned by a DIFFERENT account (ownerId set, != uid, not shared/team). Runs on
+   * login so a cold start that loaded the previous account's SQLite rows before
+   * auth resolved can't leave them in the sidebar. Complements the SQLite-level
+   * purgeForeignDocuments() so the leak is impossible at both layers.
+   */
+  dropForeignDocuments: (uid: string) => void;
 
   // Folder management
   folders: string[];
@@ -218,7 +236,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.error("[app-store] SQLite theme save failed:", e),
       );
       // Backup: localStorage (always works in WebView)
-      try { localStorage.setItem("markflow:themeSettings", json); } catch {}
+      try {
+        localStorage.setItem("markflow:themeSettings", json);
+      } catch {}
       // Cloud sync
       syncSettingToCloud({ themeSettings });
       return { themeSettings };
@@ -227,12 +247,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
 
   activeDocId: null,
-  setActiveDocId: (id) => set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) }),
+  setActiveDocId: (id) => {
+    set({ activeDocId: id, ...(isMobile ? { sidebarOpen: false } : {}) });
+    // Persist the open document. On mobile the WebView can be reloaded or the
+    // process recreated when backgrounded (e.g. screen-off during a long voice
+    // recording); without this the app boots with activeDocId=null and the
+    // document the user was in appears "closed". Restored in loadDocuments only
+    // if the id still exists locally. Fire-and-forget; never blocks navigation.
+    db.setSetting("activeDocId", id ?? "").catch(() => {});
+  },
 
   documents: [],
   folders: ["/"],
   pendingRestoreContent: null,
-  setPendingRestoreContent: (content) => set({ pendingRestoreContent: content }),
+  setPendingRestoreContent: (content) =>
+    set({ pendingRestoreContent: content }),
 
   customPreviewThemes: [],
 
@@ -244,7 +273,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       for (const r of rows) {
         let tags: string[] = [];
-        try { tags = JSON.parse(r.tags || "[]"); } catch { /* ignore */ }
+        try {
+          tags = JSON.parse(r.tags || "[]");
+        } catch {
+          /* ignore */
+        }
         let content = r.content;
         let title = r.title;
 
@@ -254,15 +287,28 @@ export const useAppStore = create<AppState>((set, get) => ({
           if (recovered) {
             content = recovered.content;
             title = recovered.title || r.title;
-            console.warn(`[app-store] Recovered doc ${r.id} from ${recovered.source}`);
+            console.warn(
+              `[app-store] Recovered doc ${r.id} from ${recovered.source}`,
+            );
             // Persist the recovery back to documents table
             db.upsertDocument({
-              id: r.id, title, content,
-              createdAt: r.created_at, updatedAt: Date.now(),
-              folder: r.folder || "/", tags: JSON.parse(r.tags || "[]"),
-              ownerId: r.owner_id ?? null, isShared: r.is_shared === 1,
+              id: r.id,
+              title,
+              content,
+              createdAt: r.created_at,
+              updatedAt: Date.now(),
+              folder: r.folder || "/",
+              tags: JSON.parse(r.tags || "[]"),
+              ownerId: r.owner_id ?? null,
+              isShared: r.is_shared === 1,
               titlePinned: r.title_pinned === 1,
               docType: (r.doc_type as DocType) || "markdown",
+              // upsertDocument fully overwrites the row — omitting these would
+              // NULL the voice columns, silently dropping recording data during a
+              // content recovery.
+              voiceTranscript: r.voice_transcript ?? null,
+              voiceGcsUri: r.voice_gcs_uri ?? null,
+              voiceRecordedAt: r.voice_recorded_at ?? null,
             }).catch(console.error);
           } else {
             // No local recovery possible — try cloud after auth init
@@ -282,6 +328,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           isShared: r.is_shared === 1,
           titlePinned: r.title_pinned === 1,
           docType: (r.doc_type as DocType) || "markdown",
+          voiceTranscript: r.voice_transcript ?? null,
+          voiceGcsUri: r.voice_gcs_uri ?? null,
+          voiceRecordedAt: r.voice_recorded_at ?? null,
         });
       }
 
@@ -294,20 +343,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Load theme settings: SQLite primary, localStorage fallback
       let savedThemeSettings = await db.getSetting("themeSettings");
       if (!savedThemeSettings) {
-        try { savedThemeSettings = localStorage.getItem("markflow:themeSettings"); } catch {}
+        try {
+          savedThemeSettings = localStorage.getItem("markflow:themeSettings");
+        } catch {}
       }
       let themeSettings = { ...defaultThemeSettings };
       if (savedThemeSettings) {
         try {
-          themeSettings = { ...defaultThemeSettings, ...JSON.parse(savedThemeSettings) };
-        } catch { /* ignore */ }
+          themeSettings = {
+            ...defaultThemeSettings,
+            ...JSON.parse(savedThemeSettings),
+          };
+        } catch {
+          /* ignore */
+        }
       }
 
       // Load persisted empty folders
       let extraFolders: string[] = [];
       const savedFolders = await db.getSetting("folders");
       if (savedFolders) {
-        try { extraFolders = JSON.parse(savedFolders); } catch { /* ignore */ }
+        try {
+          extraFolders = JSON.parse(savedFolders);
+        } catch {
+          /* ignore */
+        }
       }
 
       const folders = deriveFolders(documents, extraFolders);
@@ -316,7 +376,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       let customPreviewThemes: CustomPreviewTheme[] = [];
       const savedCustomThemes = await db.getSetting("customPreviewThemes");
       if (savedCustomThemes) {
-        try { customPreviewThemes = JSON.parse(savedCustomThemes); } catch { /* ignore */ }
+        try {
+          customPreviewThemes = JSON.parse(savedCustomThemes);
+        } catch {
+          /* ignore */
+        }
+      }
+
+      // Restore the last-open document so a mobile WebView reload / process
+      // recreation (common after backgrounding) reopens the same document
+      // instead of dropping to an empty editor. Guarded: only restore if the id
+      // still exists locally. Foreign/stale ids are further nulled by
+      // dropForeignDocuments once auth resolves.
+      let restoredActiveId: string | null = null;
+      try {
+        const savedActiveId = await db.getSetting("activeDocId");
+        if (savedActiveId && documents.some((d) => d.id === savedActiveId)) {
+          restoredActiveId = savedActiveId;
+        }
+      } catch {
+        /* ignore */
       }
 
       if (savedTheme === "light" || savedTheme === "dark") {
@@ -324,19 +403,70 @@ export const useAppStore = create<AppState>((set, get) => ({
           "dark",
           savedTheme === "dark",
         );
-        set({ documents, folders, theme: savedTheme, themeSettings, customPreviewThemes, initialized: true });
+        set({
+          documents,
+          folders,
+          theme: savedTheme,
+          themeSettings,
+          customPreviewThemes,
+          activeDocId: restoredActiveId,
+          initialized: true,
+        });
       } else {
-        set({ documents, folders, themeSettings, customPreviewThemes, initialized: true });
+        set({
+          documents,
+          folders,
+          themeSettings,
+          customPreviewThemes,
+          activeDocId: restoredActiveId,
+          initialized: true,
+        });
       }
     } catch {
       // Running in browser without Tauri — skip DB, but still restore themes from localStorage
       let themeSettings = { ...defaultThemeSettings };
       try {
         const lsTheme = localStorage.getItem("markflow:themeSettings");
-        if (lsTheme) themeSettings = { ...defaultThemeSettings, ...JSON.parse(lsTheme) };
+        if (lsTheme)
+          themeSettings = { ...defaultThemeSettings, ...JSON.parse(lsTheme) };
       } catch {}
       set({ themeSettings, initialized: true });
     }
+  },
+
+  resetLocalDocuments: () => {
+    // Cancel pending debounced local saves + cloud sync so a timer firing after
+    // an account-switch wipe can't re-insert the previous user's doc into SQLite.
+    for (const [id, t] of saveTimers) {
+      clearTimeout(t);
+      saveTimers.delete(id);
+    }
+    pendingDocs.clear();
+    if (cloudSyncTimer) {
+      clearTimeout(cloudSyncTimer);
+      cloudSyncTimer = null;
+    }
+    set({ documents: [], activeDocId: null, folders: ["/"] });
+    // Drop the persisted open-document pointer too, so a post-wipe reload can't
+    // resurrect the previous user's document as "active".
+    db.setSetting("activeDocId", "").catch(() => {});
+  },
+
+  dropForeignDocuments: (uid: string) => {
+    if (!uid) return;
+    set((s) => {
+      const kept = s.documents.filter(
+        (d) => !(d.ownerId && d.ownerId !== uid && !d.isShared && !d.teamId),
+      );
+      if (kept.length === s.documents.length) return {};
+      return {
+        documents: kept,
+        activeDocId:
+          s.activeDocId && !kept.some((d) => d.id === s.activeDocId)
+            ? null
+            : s.activeDocId,
+      };
+    });
   },
 
   addDocument: async (doc) => {
@@ -345,7 +475,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const exists = s.documents.some((d) => d.id === doc.id);
       if (exists) {
         return {
-          documents: s.documents.map((d) => d.id === doc.id ? { ...d, ...doc } : d),
+          documents: s.documents.map((d) =>
+            d.id === doc.id ? { ...d, ...doc } : d,
+          ),
         };
       }
       return {
@@ -395,9 +527,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Ignore if no DB
     }
     // Also delete from cloud
-    import("@/stores/auth-store").then(({ useAuthStore }) => {
-      useAuthStore.getState().deleteFromCloud(id);
-    }).catch(() => {})
+    import("@/stores/auth-store")
+      .then(({ useAuthStore }) => {
+        useAuthStore.getState().deleteFromCloud(id);
+      })
+      .catch(() => {});
   },
 
   createFolder: (path) => {
@@ -441,13 +575,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (doc.folder === oldPath) {
         updateDocument(doc.id, { folder: newPath, updatedAt: Date.now() });
       } else if (doc.folder.startsWith(oldPath + "/")) {
-        updateDocument(doc.id, { folder: newPath + doc.folder.slice(oldPath.length), updatedAt: Date.now() });
+        updateDocument(doc.id, {
+          folder: newPath + doc.folder.slice(oldPath.length),
+          updatedAt: Date.now(),
+        });
       }
     }
     set((s) => {
       const folders = s.folders.map((f) => {
         if (f === oldPath) return newPath;
-        if (f.startsWith(oldPath + "/")) return newPath + f.slice(oldPath.length);
+        if (f.startsWith(oldPath + "/"))
+          return newPath + f.slice(oldPath.length);
         return f;
       });
       const toSave = folders.filter((f) => f !== "/");
@@ -464,8 +602,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addCustomPreviewTheme: (theme) => {
     set((s) => {
-      const customPreviewThemes = [...s.customPreviewThemes.filter((t) => t.id !== theme.id), theme];
-      db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      const customPreviewThemes = [
+        ...s.customPreviewThemes.filter((t) => t.id !== theme.id),
+        theme,
+      ];
+      db.setSetting(
+        "customPreviewThemes",
+        JSON.stringify(customPreviewThemes),
+      ).catch(console.error);
       syncSettingToCloud({ customPreviewThemes });
       return { customPreviewThemes };
     });
@@ -473,13 +617,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   removeCustomPreviewTheme: (id) => {
     set((s) => {
-      const customPreviewThemes = s.customPreviewThemes.filter((t) => t.id !== id);
-      db.setSetting("customPreviewThemes", JSON.stringify(customPreviewThemes)).catch(console.error);
+      const customPreviewThemes = s.customPreviewThemes.filter(
+        (t) => t.id !== id,
+      );
+      db.setSetting(
+        "customPreviewThemes",
+        JSON.stringify(customPreviewThemes),
+      ).catch(console.error);
       syncSettingToCloud({ customPreviewThemes });
       // Reset to default if the removed theme was active
       if (s.themeSettings.previewTheme === id) {
         const themeSettings = { ...s.themeSettings, previewTheme: "github" };
-        db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(console.error);
+        db.setSetting("themeSettings", JSON.stringify(themeSettings)).catch(
+          console.error,
+        );
         return { customPreviewThemes, themeSettings };
       }
       return { customPreviewThemes };

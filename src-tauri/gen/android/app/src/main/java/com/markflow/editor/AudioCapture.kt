@@ -72,6 +72,16 @@ class AudioCapture(private val activity: MainActivity) {
         synchronized(lock) { buffer.clear() }
         isRecording = true
         record.startRecording()
+        // Start the microphone foreground service so the OS keeps capturing while
+        // backgrounded / screen-off (and doesn't kill the process, which would
+        // close the open document). Started here — from the JS bridge on a
+        // user-visible Activity — because a mic FGS cannot be started from the
+        // background. Best-effort: recording still proceeds if this throws.
+        try {
+            VoiceRecordingService.start(activity)
+        } catch (e: Exception) {
+            android.util.Log.w("MarkFlow", "Foreground service start failed: ${e.message}")
+        }
         android.util.Log.i("MarkFlow", "AudioRecord started: ${sampleRate}Hz, float=$useFloat")
 
         // Create archive temp file for Refine pipeline (16kHz mono i16 PCM)
@@ -94,6 +104,7 @@ class AudioCapture(private val activity: MainActivity) {
                     if (read > 0) {
                         synchronized(lock) {
                             for (i in 0 until read) buffer.add(readBuf[i])
+                            capBuffer()
                         }
                         writeToArchive(readBuf, read)
                     }
@@ -105,6 +116,7 @@ class AudioCapture(private val activity: MainActivity) {
                     if (read > 0) {
                         synchronized(lock) {
                             for (i in 0 until read) buffer.add(readBuf[i].toFloat() / 32768f)
+                            capBuffer()
                         }
                         writeToArchiveShort(readBuf, read)
                     }
@@ -162,6 +174,20 @@ class AudioCapture(private val activity: MainActivity) {
         }
     }
 
+    // Bound the in-memory live buffer to ~120s (must be called while holding
+    // `lock`). The JS drain loop (getChunk every CHUNK_MS) is frozen while the
+    // app is backgrounded, so without a cap this list would grow unbounded and
+    // OOM during a long screen-off recording. The Refine archive is written
+    // separately and stays complete, so capping only trims the (best-effort)
+    // live-transcript backlog — mirrors the Rust MIC_BUFFER_MAX_SAMPLES cap.
+    private fun capBuffer() {
+        val cap = sampleRate * 120
+        if (buffer.size > cap) {
+            val drop = buffer.size - cap
+            buffer.subList(0, drop).clear()
+        }
+    }
+
     fun stop() {
         isRecording = false
         audioRecord?.stop()
@@ -169,6 +195,11 @@ class AudioCapture(private val activity: MainActivity) {
         audioRecord = null
         try { archiveFile?.close() } catch (_: Exception) {}
         archiveFile = null
+        try {
+            VoiceRecordingService.stop(activity)
+        } catch (e: Exception) {
+            android.util.Log.w("MarkFlow", "Foreground service stop failed: ${e.message}")
+        }
     }
 
     fun getArchivePath(): String? = archivePath

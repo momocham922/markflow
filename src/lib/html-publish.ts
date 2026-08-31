@@ -5,7 +5,10 @@
 
 import { marked } from "marked";
 import hljs from "highlight.js";
+import DOMPurify from "dompurify";
 import { previewThemes, type PreviewTheme } from "@/styles/preview-themes";
+import { buildThemeVarLines } from "@/lib/theme-css";
+import { resolveMermaidConfig } from "@/lib/mermaid-theme";
 
 interface PublishOptions {
   title: string;
@@ -42,13 +45,29 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-/** Build theme CSS variables string */
+/**
+ * Serialize a value to JSON safe for embedding inside an inline `<script>`.
+ * `JSON.stringify` escapes quotes/backslashes but NOT `<`, `>`, `/`, or the
+ * U+2028/U+2029 line separators, so a crafted color value like
+ * `…</script><script>…` would otherwise close the module script early and inject
+ * arbitrary script into the public published page (stored XSS). Escaping these to
+ * `\uXXXX` keeps the JSON value byte-identical to the parser while making it
+ * impossible for the HTML tokenizer to see a closing tag.
+ */
+export function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\//g, "\\u002f")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+/** Build theme CSS variables string (sanitized — themes may be untrusted imports) */
 function buildThemeVars(theme: PreviewTheme, isDark: boolean): string {
   const vars = { ...theme.variables };
   if (isDark && theme.dark) Object.assign(vars, theme.dark);
-  return Object.entries(vars)
-    .map(([k, v]) => `  ${k}: ${v};`)
-    .join("\n");
+  return buildThemeVarLines(vars);
 }
 
 /** Generate TOC HTML from headings */
@@ -80,6 +99,11 @@ export function generatePublishHtml(opts: PublishOptions): string {
 
   // Configure marked with heading IDs
   const renderer = new marked.Renderer();
+  // Dedup identical heading slugs (GitHub-style -1/-2) so TOC anchors don't all
+  // resolve to the first heading of a given title. Track the fully-resolved ids
+  // (not just base counts): a generated "foo-1" must not collide with an
+  // explicit heading whose own slug is already "foo-1".
+  const usedIds = new Set<string>();
   renderer.heading = function ({
     text,
     depth,
@@ -87,7 +111,14 @@ export function generatePublishHtml(opts: PublishOptions): string {
     text: string;
     depth: number;
   }) {
-    const id = slugify(text);
+    const base = slugify(text) || "section";
+    let id = base;
+    let n = 1;
+    while (usedIds.has(id)) {
+      id = `${base}-${n}`;
+      n++;
+    }
+    usedIds.add(id);
     return `<h${depth} id="${id}">${text}</h${depth}>`;
   };
   renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
@@ -105,13 +136,54 @@ export function generatePublishHtml(opts: PublishOptions): string {
     return `<pre><code class="hljs${lang ? ` language-${lang}` : ""}">${highlighted}</code></pre>`;
   };
 
+  // Wrap tables in a horizontal-scroll container. Without this, wide/multi-column
+  // tables were squeezed into the fixed content width (table-layout: fixed +
+  // width: 100%), collapsing columns to unreadable slivers. The wrapper lets the
+  // table size to its content and scroll sideways when it overflows.
+  const defaultTable = renderer.table.bind(renderer);
+  renderer.table = (token) =>
+    `<div class="table-wrap">${defaultTable(token)}</div>`;
+
   marked.setOptions({ gfm: true, breaks: true });
-  const bodyHtml = marked.parse(content, { renderer }) as string;
+  // marked (v17) does NOT sanitize HTML — raw <script>/<img onerror=…> in the
+  // markdown would become stored XSS on the published page. Sanitize the body
+  // while preserving heading ids (the TOC anchors depend on them) and the
+  // mermaid/hljs class hooks used by the runtime scripts and styles.
+  const rawBody = marked.parse(content, { renderer }) as string;
+  const bodyHtml = DOMPurify.sanitize(rawBody, {
+    ADD_ATTR: ["target", "id", "class"],
+  })
+    // Body content (raw HTML embedded in the document) may carry ids that
+    // collide with the runtime TOC controls emitted after it (toc-fab /
+    // toc-mobile / toc-backdrop). getElementById returns the FIRST match in
+    // tree order, so a body element appearing before the real control would
+    // shadow it and silently break the mobile TOC FAB. Strip only these
+    // reserved control ids from body content — heading anchor ids (referenced
+    // by TOC item clicks) are outside this set and stay intact. DOMPurify
+    // serializes via the DOM, so ids are always double-quoted here.
+    .replace(/\bid="(?:toc-fab|toc-mobile|toc-backdrop)"/g, "");
 
   // Extract headings for TOC
   const headings = extractHeadings(bodyHtml);
   const tocHtml = buildTocHtml(headings);
   const hasToc = headings.length > 0;
+
+  // Mobile floating TOC: a bottom-right FAB that expands a tappable outline.
+  const tocMobileHtml = hasToc
+    ? `<button class="toc-fab" id="toc-fab" aria-label="目次" aria-expanded="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div class="toc-backdrop" id="toc-backdrop"></div>
+  <nav class="toc-mobile" id="toc-mobile">
+    <div class="toc-title">Table of Contents</div>
+    ${headings
+      .map(
+        (h) =>
+          `<a href="#${h.id}" class="toc-item toc-h${h.level}" data-target="${h.id}">${h.text}</a>`,
+      )
+      .join("\n    ")}
+  </nav>`
+    : "";
 
   // Resolve theme
   const preset =
@@ -120,6 +192,16 @@ export function generatePublishHtml(opts: PublishOptions): string {
     previewThemes.github;
   const themeVarsLight = buildThemeVars(preset, false);
   const themeVarsDark = buildThemeVars(preset, true);
+
+  // Brand Mermaid palettes (base themeVariables) baked for both modes so the
+  // published page's diagrams follow the theme and re-theme on the dark toggle.
+  const mmThemes = [preset, ...(customPreviewThemes ?? [])];
+  const mermaidVarsLight = jsonForScript(
+    resolveMermaidConfig(preset.id, false, mmThemes).themeVariables,
+  );
+  const mermaidVarsDark = jsonForScript(
+    resolveMermaidConfig(preset.id, true, mmThemes).themeVariables,
+  );
 
   const escTitle = title
     .replace(/&/g, "&amp;")
@@ -136,15 +218,20 @@ export function generatePublishHtml(opts: PublishOptions): string {
 <meta property="og:type" content="article">
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'default',
-  themeVariables: { fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif', fontSize: '14px' },
-  flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
-  sequence: { useMaxWidth: true },
-});
+var MM_LIGHT = ${mermaidVarsLight};
+var MM_DARK = ${mermaidVarsDark};
+function initMermaid(dark) {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: dark ? MM_DARK : MM_LIGHT,
+    flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
+    sequence: { useMaxWidth: true },
+  });
+}
+initMermaid(document.documentElement.classList.contains('dark'));
 
-function fixMermaidSvg(el, dark) {
+function fixMermaidSvg(el) {
   var svg = el.querySelector('svg');
   if (!svg) return;
   var modified = false;
@@ -193,23 +280,7 @@ function fixMermaidSvg(el, dark) {
     modified = true;
   }
 
-  if (dark) {
-    var mainBg = null, maxArea = 0;
-    allRects.forEach(function(r){
-      if (sectionRects.indexOf(r) >= 0) return;
-      var a = parseFloat(r.getAttribute('width') || '0') * parseFloat(r.getAttribute('height') || '0');
-      if (a > maxArea) { maxArea = a; mainBg = r; }
-    });
-    if (mainBg) { mainBg.setAttribute('fill', 'transparent'); modified = true; }
-    sectionRects.forEach(function(r){
-      var fill = r.getAttribute('fill') || '';
-      var m = fill.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
-      if (m) r.setAttribute('fill', 'rgba(' + Math.round(Number(m[1])*0.25) + ',' + Math.round(Number(m[2])*0.25) + ',' + Math.round(Number(m[3])*0.25) + ',0.6)');
-      var stroke = r.getAttribute('stroke') || '';
-      var sm = stroke.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
-      if (sm) r.setAttribute('stroke', 'rgba(' + Math.round(Number(sm[1])*0.35) + ',' + Math.round(Number(sm[2])*0.35) + ',' + Math.round(Number(sm[3])*0.35) + ',0.5)');
-    });
-  }
+  // Diagram colors are driven natively by the Mermaid base themeVariables.
 
   if (modified) {
     try {
@@ -229,6 +300,7 @@ document.querySelectorAll('.mermaid').forEach(function(el){
 
 async function renderAllMermaid() {
   var dark = document.documentElement.classList.contains('dark');
+  initMermaid(dark);
   var divs = document.querySelectorAll('.mermaid');
   for (var i = 0; i < divs.length; i++) {
     var el = divs[i];
@@ -238,7 +310,7 @@ async function renderAllMermaid() {
       var result = await mermaid.render('mermaid-' + Date.now() + '-' + i, source);
       el.innerHTML = result.svg;
       if (result.bindFunctions) result.bindFunctions(el);
-      fixMermaidSvg(el, dark);
+      fixMermaidSvg(el);
     } catch(e) { el.textContent = String(e); }
   }
 }
@@ -465,10 +537,11 @@ body {
 .prose strong { font-weight: 700; }
 .prose em { font-style: italic; }
 .prose img { max-width: 100%; border-radius: 0.5em; margin: 1em 0; box-shadow: 0 2px 8px oklch(0 0 0 / 0.1); }
-.prose table { width: 100%; border-collapse: collapse; margin: 1em 0; table-layout: fixed; word-wrap: break-word; overflow-wrap: break-word; }
-.prose th { border-bottom: 2px solid var(--border); padding: 0.6em 0.75em; text-align: left; font-weight: 600; background: oklch(0 0 0 / 0.02); word-wrap: break-word; overflow-wrap: break-word; }
+.prose .table-wrap { overflow-x: auto; margin: 1em 0; max-width: 100%; -webkit-overflow-scrolling: touch; }
+.prose table { width: auto; min-width: 100%; border-collapse: collapse; margin: 0; table-layout: auto; }
+.prose th { border-bottom: 2px solid var(--border); padding: 0.6em 0.75em; text-align: left; font-weight: 600; background: oklch(0 0 0 / 0.02); overflow-wrap: break-word; }
 html.dark .prose th { background: oklch(1 1 1 / 0.03); }
-.prose td { border-bottom: 1px solid var(--border); padding: 0.5em 0.75em; word-wrap: break-word; overflow-wrap: break-word; }
+.prose td { border-bottom: 1px solid var(--border); padding: 0.5em 0.75em; overflow-wrap: break-word; }
 
 /* Syntax highlighting */
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
@@ -485,43 +558,73 @@ html.dark .prose th { background: oklch(1 1 1 / 0.03); }
 .hljs-strong { font-weight: bold; }
 
 /* Mermaid diagram styles */
-.prose .mermaid { margin: 1.5em 0; min-height: 40px; background: rgba(0,0,0,0.02); border-radius: 0.375rem; padding: 1em 0; }
-html.dark .prose .mermaid { background: #161b22; }
+.prose .mermaid { margin: 1.5em 0; min-height: 40px; background: transparent; border-radius: 0.375rem; padding: 1em 0; }
 .prose .mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
 .prose .mermaid .actor { stroke-width: 1.5px; }
 .prose .mermaid .note { stroke-width: 1px; }
 .prose .mermaid rect.note { rx: 4px; ry: 4px; }
 .prose .mermaid .actor-line { stroke-dasharray: 4, 4; }
 .prose .mermaid .activation0, .prose .mermaid .activation1, .prose .mermaid .activation2 { rx: 3px; ry: 3px; }
-html.dark .prose .mermaid svg text, html.dark .prose .mermaid svg tspan { fill: #c9d1d9 !important; }
-html.dark .prose .mermaid svg .actor { fill: #21262d !important; stroke: #8b949e !important; }
-html.dark .prose .mermaid svg text.actor > tspan { fill: #e6edf3 !important; }
-html.dark .prose .mermaid svg rect.note { fill: #1c2128 !important; stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .noteText, html.dark .prose .mermaid svg .noteText > tspan { fill: #e6edf3 !important; }
-html.dark .prose .mermaid svg .actor-line { stroke: #484f58 !important; }
-html.dark .prose .mermaid svg .messageLine0, html.dark .prose .mermaid svg .messageLine1 { stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .messageText { fill: #c9d1d9 !important; }
-html.dark .prose .mermaid svg .loopLine { stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .labelBox { fill: #21262d !important; stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .labelText, html.dark .prose .mermaid svg .labelText > tspan { fill: #e6edf3 !important; }
-html.dark .prose .mermaid svg .loopText, html.dark .prose .mermaid svg .loopText > tspan { fill: #c9d1d9 !important; }
-html.dark .prose .mermaid svg .activation0, html.dark .prose .mermaid svg .activation1, html.dark .prose .mermaid svg .activation2 { fill: #30363d !important; stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .sequenceNumber { fill: #e6edf3 !important; }
-html.dark .prose .mermaid svg marker path { fill: #8b949e !important; stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .node rect, html.dark .prose .mermaid svg .node circle, html.dark .prose .mermaid svg .node polygon { fill: #21262d !important; stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .node .label { fill: #e6edf3 !important; }
-html.dark .prose .mermaid svg .edgePath .path { stroke: #8b949e !important; }
-html.dark .prose .mermaid svg .edgeLabel { background-color: #161b22 !important; color: #c9d1d9 !important; }
-html.dark .prose .mermaid svg .cluster rect { fill: #161b22 !important; stroke: #30363d !important; }
-html.dark .prose .mermaid svg .cluster text { fill: #c9d1d9 !important; }
 
 /* Task list checkboxes */
 .prose input[type="checkbox"] { margin-right: 0.4em; }
 
+/* Mobile floating TOC (hidden on desktop) */
+.toc-fab {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--prose-headings);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 200;
+  box-shadow: 0 4px 16px oklch(0 0 0 / 0.18);
+}
+.toc-fab svg { width: 22px; height: 22px; }
+.toc-mobile {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  max-height: 60vh;
+  width: min(78vw, 320px);
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 8px;
+  z-index: 200;
+  box-shadow: 0 8px 28px oklch(0 0 0 / 0.22);
+  -webkit-overflow-scrolling: touch;
+}
+.toc-mobile.open { display: block; }
+.toc-mobile .toc-title { padding: 0 8px; margin-bottom: 0.75em; }
+.toc-mobile .toc-item { padding: 8px 10px; font-size: 0.85rem; border-left: none; border-radius: 6px; }
+.toc-mobile .toc-item:hover, .toc-mobile .toc-item.active { background: oklch(0.5 0 0 / 0.08); color: var(--prose-links); }
+.toc-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 199;
+  background: transparent;
+}
+.toc-backdrop.open { display: block; }
+
 /* Responsive */
 @media (max-width: 900px) {
   .toc-sidebar { display: none; }
-  .main-content { padding: 1.5em 1em 3em; }
+  .main-content { padding: 1.25em 1em 4em; }
+  .page-header { padding: 0.6em 1em; }
+  .branding { display: none; }
+  .prose h1 { font-size: 1.45em; padding-bottom: 0.25em; margin-top: 1em; }
+  .toc-fab { display: flex; }
 }
 @media print {
   .page-header, .toc-sidebar { display: none; }
@@ -547,10 +650,33 @@ ${customPreviewCss || ""}
 ${bodyHtml}
     </article>
   </div>
+  ${hasToc ? tocMobileHtml : ""}
   ${
     hasToc
       ? `<script>
 (function() {
+  // Mobile TOC toggle (FAB → panel; close on backdrop or item tap)
+  var fab = document.getElementById('toc-fab');
+  var panel = document.getElementById('toc-mobile');
+  var backdrop = document.getElementById('toc-backdrop');
+  function closeToc() {
+    if (!panel) return;
+    panel.classList.remove('open');
+    if (backdrop) backdrop.classList.remove('open');
+    if (fab) fab.setAttribute('aria-expanded', 'false');
+  }
+  if (fab && panel) {
+    fab.addEventListener('click', function() {
+      var open = panel.classList.toggle('open');
+      if (backdrop) backdrop.classList.toggle('open', open);
+      fab.setAttribute('aria-expanded', String(open));
+    });
+    panel.addEventListener('click', function(e) {
+      if (e.target && e.target.closest('.toc-item')) closeToc();
+    });
+    if (backdrop) backdrop.addEventListener('click', closeToc);
+  }
+
   var items = document.querySelectorAll('.toc-item');
   var targets = [];
   items.forEach(function(item) {

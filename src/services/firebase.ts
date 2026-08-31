@@ -28,12 +28,7 @@ import {
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
-import {
-  getStorage,
-  ref,
-  uploadBytes,
-  getDownloadURL,
-} from "firebase/storage";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -44,14 +39,54 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "",
 };
 
-const GOOGLE_CLIENT_ID =
-  import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-const GOOGLE_CLIENT_SECRET =
-  import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "";
-const GITHUB_CLIENT_ID =
-  import.meta.env.VITE_GITHUB_CLIENT_ID || "";
-const GITHUB_CLIENT_SECRET =
-  import.meta.env.VITE_GITHUB_CLIENT_SECRET || "";
+// Only the PUBLIC client_id ships in the bundle. The client_secret lives ONLY
+// on the ai-proxy (BFF): the browser runs the authorization-code flow, then the
+// received `code` is exchanged for tokens server-side via exchangeOAuthCode().
+// Never reintroduce VITE_GOOGLE_CLIENT_SECRET / VITE_GITHUB_CLIENT_SECRET here —
+// a client secret in a distributed binary / public repo is a leaked secret.
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+const GITHUB_CLIENT_ID = import.meta.env.VITE_GITHUB_CLIENT_ID || "";
+const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
+
+/**
+ * Generate a cryptographically random OAuth `state` value. It is sent in the
+ * authorization URL and verified by the loopback callback listener (Rust) so a
+ * forged callback (CSRF / auth-code injection) that doesn't echo this exact
+ * value is rejected. 32 URL-safe chars ≈ 190 bits of entropy.
+ */
+function generateOAuthState(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, "0"))
+    .join("")
+    .slice(0, 32);
+}
+
+/**
+ * Exchange an OAuth authorization code for tokens via the ai-proxy BFF.
+ * The provider client_secret never reaches this bundle — the proxy holds it.
+ */
+async function exchangeOAuthCode(
+  provider: "google" | "github",
+  code: string,
+  redirectUri: string,
+): Promise<{ id_token?: string; access_token?: string }> {
+  const res = await fetch(`${AI_PROXY_URL}/v1/auth/oauth/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, code, redirectUri }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = ((await res.json()) as { error?: string })?.error || "";
+    } catch {
+      /* body not JSON */
+    }
+    throw new Error(`Token exchange failed: ${res.status} ${detail}`.trim());
+  }
+  return res.json();
+}
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
@@ -79,25 +114,11 @@ export async function checkPendingOAuthCode(): Promise<User | null> {
     if (!code) return null;
 
     const redirectUri = "http://localhost:19847/callback";
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const err = await tokenResponse.text();
-      throw new Error(`Token exchange failed: ${err}`);
-    }
-
-    const tokens = await tokenResponse.json();
-    const credential = GoogleAuthProvider.credential(tokens.id_token, tokens.access_token);
+    const tokens = await exchangeOAuthCode("google", code, redirectUri);
+    const credential = GoogleAuthProvider.credential(
+      tokens.id_token,
+      tokens.access_token,
+    );
     const result = await signInWithCredential(auth, credential);
     return result.user;
   } catch (e) {
@@ -107,7 +128,8 @@ export async function checkPendingOAuthCode(): Promise<User | null> {
 }
 
 export async function signInWithGoogle(): Promise<User | null> {
-  const { getPlatform, isMobile } = await import("@/platform");
+  const { getPlatform, isMobile, isIOS, isAndroid } =
+    await import("@/platform");
   const platform = await getPlatform();
 
   const port = 19847;
@@ -120,8 +142,16 @@ export async function signInWithGoogle(): Promise<User | null> {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
-    // Start localhost callback server (iOS mode)
-    await invoke<number>("oauth_listen", { ios: true });
+    // Start localhost callback server with the CSRF state to verify. The
+    // platform flags tell Rust which callback page to serve: iOS dismisses the
+    // in-app SFSafariVC; Android serves a markflow:// return-to-app page (the
+    // system browser is a separate task with nothing to dismiss).
+    const oauthState = generateOAuthState();
+    await invoke<number>("oauth_listen", {
+      ios: isIOS,
+      android: isAndroid,
+      state: oauthState,
+    });
 
     const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
@@ -130,18 +160,32 @@ export async function signInWithGoogle(): Promise<User | null> {
       scope: "openid email profile",
       prompt: "select_account",
       access_type: "offline",
+      state: oauthState,
     });
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
     // Wait for the OAuth callback event from Rust
     const authCode = await new Promise<string>((resolve, reject) => {
       let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        clearTimeout(timeoutId);
+      };
+      // Route launch failures through the same settle+cleanup path so a
+      // failed browser open doesn't leak the 300s timer and event listeners.
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
 
       const unlistenOk = listen<string>("oauth-callback", (event) => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           resolve(event.payload);
         }
       });
@@ -149,58 +193,42 @@ export async function signInWithGoogle(): Promise<User | null> {
       const unlistenErr = listen<string>("oauth-error", (event) => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           reject(new Error(event.payload));
         }
       });
 
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         if (!settled) {
           settled = true;
-          unlistenOk.then((fn) => fn());
-          unlistenErr.then((fn) => fn());
+          cleanup();
           invoke("dismiss_safari_vc").catch(() => {});
           reject(new Error("Authentication timed out"));
         }
       }, 300000);
 
-      // Open system browser for OAuth
-      import("@/platform").then(({ isIOS: isIOSPlatform }) => {
-        if (isIOSPlatform) {
-          invoke("open_safari_vc", { url: authUrl }).catch(reject);
-        } else {
-          invoke("open_external_url", { url: authUrl }).catch(reject);
-        }
-      }).catch(reject);
+      // Open system browser for OAuth. iOS uses the in-app SFSafariVC; Android
+      // and other mobile use the external browser.
+      if (isIOS) {
+        invoke("open_safari_vc", { url: authUrl }).catch(fail);
+      } else {
+        invoke("open_external_url", { url: authUrl }).catch(fail);
+      }
     });
 
-    // Exchange code for tokens
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code: authCode,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const err = await tokenResponse.text();
-      throw new Error(`Token exchange failed: ${err}`);
-    }
-
-    const tokens = await tokenResponse.json();
-    const credential = GoogleAuthProvider.credential(tokens.id_token, tokens.access_token);
+    // Exchange code for tokens (server-side; client_secret stays on the proxy)
+    const tokens = await exchangeOAuthCode("google", authCode, redirectUri);
+    const credential = GoogleAuthProvider.credential(
+      tokens.id_token,
+      tokens.access_token,
+    );
     const result = await signInWithCredential(auth, credential);
     return result.user;
   }
 
   // Desktop: use local OAuth callback server + external browser
-  await platform.startOAuthListener();
+  const oauthState = generateOAuthState();
+  await platform.startOAuthListener(oauthState);
 
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
@@ -209,17 +237,31 @@ export async function signInWithGoogle(): Promise<User | null> {
     scope: "openid email profile",
     prompt: "select_account",
     access_type: "offline",
+    state: oauthState,
   });
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      unlistenOk.then((fn) => fn());
+      unlistenErr.then((fn) => fn());
+      clearTimeout(timeoutId);
+    };
+    // Route launch failures through the same settle+cleanup path so a
+    // failed browser open doesn't leak the 300s timer and event listeners.
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
 
     const unlistenOk = platform.onOAuthCallback((code) => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         resolve(code);
       }
     });
@@ -227,42 +269,23 @@ export async function signInWithGoogle(): Promise<User | null> {
     const unlistenErr = platform.onOAuthError((error) => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         reject(new Error(error));
       }
     });
 
-    setTimeout(() => {
+    timeoutId = setTimeout(() => {
       if (!settled) {
         settled = true;
-        unlistenOk.then((fn) => fn());
-        unlistenErr.then((fn) => fn());
+        cleanup();
         reject(new Error("Authentication timed out"));
       }
     }, 300000);
 
-    platform.openExternal(authUrl).catch(reject);
+    platform.openExternal(authUrl).catch(fail);
   });
 
-  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      code: authCode,
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
-      redirect_uri: redirectUri,
-      grant_type: "authorization_code",
-    }),
-  });
-
-  if (!tokenResponse.ok) {
-    const err = await tokenResponse.text();
-    throw new Error(`Token exchange failed: ${err}`);
-  }
-
-  const tokens = await tokenResponse.json();
+  const tokens = await exchangeOAuthCode("google", authCode, redirectUri);
   const credential = GoogleAuthProvider.credential(
     tokens.id_token,
     tokens.access_token,
@@ -272,14 +295,15 @@ export async function signInWithGoogle(): Promise<User | null> {
 }
 
 export async function signInWithGitHub(): Promise<User | null> {
-  const { getPlatform, isMobile } = await import("@/platform");
+  const { getPlatform, isMobile, isIOS, isAndroid } =
+    await import("@/platform");
   const platform = await getPlatform();
 
   const port = 19847;
   const redirectUri = `http://localhost:${port}/callback`;
 
-  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-    throw new Error("GitHub OAuth credentials not configured");
+  if (!GITHUB_CLIENT_ID) {
+    throw new Error("GitHub OAuth client id not configured");
   }
 
   // Mobile: use system browser for OAuth
@@ -287,105 +311,141 @@ export async function signInWithGitHub(): Promise<User | null> {
     const { invoke } = await import("@tauri-apps/api/core");
     const { listen } = await import("@tauri-apps/api/event");
 
-    await invoke<number>("oauth_listen", { ios: true });
+    const oauthState = generateOAuthState();
+    await invoke<number>("oauth_listen", {
+      ios: isIOS,
+      android: isAndroid,
+      state: oauthState,
+    });
 
     const params = new URLSearchParams({
       client_id: GITHUB_CLIENT_ID,
       redirect_uri: redirectUri,
       scope: "read:user user:email",
+      state: oauthState,
     });
     const authUrl = `https://github.com/login/oauth/authorize?${params}`;
 
     const authCode = await new Promise<string>((resolve, reject) => {
       let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        unlistenOk.then((fn) => fn());
+        unlistenErr.then((fn) => fn());
+        clearTimeout(timeoutId);
+      };
+      // Route launch failures through the same settle+cleanup path so a
+      // failed browser open doesn't leak the 300s timer and event listeners.
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
       const unlistenOk = listen<string>("oauth-callback", (event) => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); resolve(event.payload); }
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve(event.payload);
+        }
       });
       const unlistenErr = listen<string>("oauth-error", (event) => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error(event.payload)); }
-      });
-      setTimeout(() => {
-        if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); invoke("dismiss_safari_vc").catch(() => {}); reject(new Error("Authentication timed out")); }
-      }, 300000);
-      import("@/platform").then(({ isIOS: isIOSPlatform }) => {
-        if (isIOSPlatform) {
-          invoke("open_safari_vc", { url: authUrl }).catch(reject);
-        } else {
-          invoke("open_external_url", { url: authUrl }).catch(reject);
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(event.payload));
         }
-      }).catch(reject);
+      });
+      timeoutId = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          invoke("dismiss_safari_vc").catch(() => {});
+          reject(new Error("Authentication timed out"));
+        }
+      }, 300000);
+      if (isIOS) {
+        invoke("open_safari_vc", { url: authUrl }).catch(fail);
+      } else {
+        invoke("open_external_url", { url: authUrl }).catch(fail);
+      }
     });
 
-    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code: authCode,
-        redirect_uri: redirectUri,
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      throw new Error(`GitHub token exchange failed: ${await tokenResponse.text()}`);
-    }
-
-    const tokens = await tokenResponse.json();
-    if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+    const tokens = await exchangeOAuthCode("github", authCode, redirectUri);
+    if (!tokens.access_token) throw new Error("GitHub token exchange failed");
     const credential = GithubAuthProvider.credential(tokens.access_token);
     const result = await signInWithCredential(auth, credential);
     return result.user;
   }
 
   // Desktop: external browser
-  await platform.startOAuthListener();
+  const oauthState = generateOAuthState();
+  await platform.startOAuthListener(oauthState);
 
   const params = new URLSearchParams({
     client_id: GITHUB_CLIENT_ID,
     redirect_uri: redirectUri,
     scope: "read:user user:email",
+    state: oauthState,
   });
   const authUrl = `https://github.com/login/oauth/authorize?${params}`;
 
   const authCode = await new Promise<string>((resolve, reject) => {
     let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      unlistenOk.then((fn) => fn());
+      unlistenErr.then((fn) => fn());
+      clearTimeout(timeoutId);
+    };
+    // Route launch failures through the same settle+cleanup path so a
+    // failed browser open doesn't leak the 300s timer and event listeners.
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
     const unlistenOk = platform.onOAuthCallback((code) => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); resolve(code); }
+      if (!settled) {
+        settled = true;
+        cleanup();
+        resolve(code);
+      }
     });
     const unlistenErr = platform.onOAuthError((error) => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error(error)); }
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new Error(error));
+      }
     });
-    setTimeout(() => {
-      if (!settled) { settled = true; unlistenOk.then(fn => fn()); unlistenErr.then(fn => fn()); reject(new Error("Authentication timed out")); }
+    timeoutId = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new Error("Authentication timed out"));
+      }
     }, 300000);
-    platform.openExternal(authUrl).catch(reject);
+    platform.openExternal(authUrl).catch(fail);
   });
 
-  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      client_secret: GITHUB_CLIENT_SECRET,
-      code: authCode,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!tokenResponse.ok) {
-    throw new Error(`GitHub token exchange failed: ${await tokenResponse.text()}`);
-  }
-
-  const tokens = await tokenResponse.json();
-  if (tokens.error) throw new Error(tokens.error_description || tokens.error);
+  const tokens = await exchangeOAuthCode("github", authCode, redirectUri);
+  if (!tokens.access_token) throw new Error("GitHub token exchange failed");
   const credential = GithubAuthProvider.credential(tokens.access_token);
   const result = await signInWithCredential(auth, credential);
   return result.user;
 }
 
-export async function reportCrash(data: Record<string, unknown>): Promise<void> {
+export async function reportCrash(
+  data: Record<string, unknown>,
+): Promise<void> {
   try {
+    // Defense-in-depth privacy gate: never persist a crash report unless the
+    // user consented to telemetry. Callers gate too, but this is the last line.
+    // Lazy import avoids a static firebase<->telemetry cycle.
+    const { getConsent } = await import("./telemetry");
+    if (!getConsent()) return;
     const userId = auth.currentUser?.uid || null;
     await addDoc(collection(firestore, "crash_reports"), {
       ...data,
@@ -411,7 +471,10 @@ export interface FirestoreDocument {
   ownerId: string;
   ownerName?: string;
   docType?: string;
-  collaborators: Record<string, { email: string; role: "editor" | "viewer"; addedAt: number }>;
+  collaborators: Record<
+    string,
+    { email: string; role: "editor" | "viewer"; addedAt: number }
+  >;
   tags: string[];
   folder: string;
   titlePinned?: boolean;
@@ -419,6 +482,9 @@ export interface FirestoreDocument {
   updatedAt: Timestamp | null;
   teamId?: string | null;
   shareLink?: { enabled: boolean; token: string; permission: "view" | "edit" };
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: Timestamp | null;
 }
 
 const DOCS_COLLECTION = "documents";
@@ -457,6 +523,9 @@ export async function saveDocumentToFirestore(docData: {
   titlePinned?: boolean;
   updatedAt?: number;
   teamId?: string | null;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
 
@@ -487,11 +556,22 @@ export async function saveDocumentToFirestore(docData: {
       folder: docData.folder ?? "/",
       tags: docData.tags ?? [],
       titlePinned: docData.titlePinned ?? false,
-      updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
+      updatedAt: docData.updatedAt
+        ? Timestamp.fromMillis(docData.updatedAt)
+        : serverTimestamp(),
     };
     if (docData.ownerName) payload.ownerName = docData.ownerName;
     if (docData.docType) payload.docType = docData.docType;
     if (docData.teamId !== undefined) payload.teamId = docData.teamId;
+    if (docData.voiceTranscript !== undefined)
+      payload.voiceTranscript = docData.voiceTranscript;
+    if (docData.voiceGcsUri !== undefined)
+      payload.voiceGcsUri = docData.voiceGcsUri;
+    if (docData.voiceRecordedAt !== undefined)
+      payload.voiceRecordedAt =
+        docData.voiceRecordedAt !== null
+          ? Timestamp.fromMillis(docData.voiceRecordedAt)
+          : null;
 
     if (snap.exists()) {
       transaction.update(ref, payload);
@@ -547,6 +627,9 @@ export async function saveDocumentMerge(docData: {
   titlePinned?: boolean;
   updatedAt?: number;
   teamId?: string | null;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
 }): Promise<void> {
   const ref = doc(firestore, DOCS_COLLECTION, docData.id);
   // Safety checks: owner, timestamp, and empty content — same guards as saveDocumentToFirestore
@@ -558,18 +641,38 @@ export async function saveDocumentMerge(docData: {
     if (docData.updatedAt && cloudUpdatedAt > docData.updatedAt) return;
     if (!docData.content?.trim() && cloudData.content?.trim()) return;
   }
-  await setDoc(ref, {
-    title: docData.title,
-    content: docData.content,
-    ownerId: docData.ownerId,
-    ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
-    folder: docData.folder ?? "/",
-    tags: docData.tags ?? [],
-    titlePinned: docData.titlePinned ?? false,
-    ...(docData.docType ? { docType: docData.docType } : {}),
-    ...(docData.teamId !== undefined ? { teamId: docData.teamId } : {}),
-    updatedAt: docData.updatedAt ? Timestamp.fromMillis(docData.updatedAt) : serverTimestamp(),
-  }, { merge: true });
+  await setDoc(
+    ref,
+    {
+      title: docData.title,
+      content: docData.content,
+      ownerId: docData.ownerId,
+      ...(docData.ownerName ? { ownerName: docData.ownerName } : {}),
+      folder: docData.folder ?? "/",
+      tags: docData.tags ?? [],
+      titlePinned: docData.titlePinned ?? false,
+      ...(docData.docType ? { docType: docData.docType } : {}),
+      ...(docData.teamId !== undefined ? { teamId: docData.teamId } : {}),
+      ...(docData.voiceTranscript !== undefined
+        ? { voiceTranscript: docData.voiceTranscript }
+        : {}),
+      ...(docData.voiceGcsUri !== undefined
+        ? { voiceGcsUri: docData.voiceGcsUri }
+        : {}),
+      ...(docData.voiceRecordedAt !== undefined
+        ? {
+            voiceRecordedAt:
+              docData.voiceRecordedAt !== null
+                ? Timestamp.fromMillis(docData.voiceRecordedAt)
+                : null,
+          }
+        : {}),
+      updatedAt: docData.updatedAt
+        ? Timestamp.fromMillis(docData.updatedAt)
+        : serverTimestamp(),
+    },
+    { merge: true },
+  );
 }
 
 export async function deleteDocumentFromFirestore(
@@ -582,7 +685,11 @@ export async function updateShareLink(
   docId: string,
   shareLink: { enabled: boolean; token: string; permission: "view" | "edit" },
 ): Promise<void> {
-  await setDoc(doc(firestore, DOCS_COLLECTION, docId), { shareLink }, { merge: true });
+  await setDoc(
+    doc(firestore, DOCS_COLLECTION, docId),
+    { shareLink },
+    { merge: true },
+  );
 }
 
 // ─── Publish URL management ─────────────────────────────────
@@ -591,10 +698,14 @@ export async function setPublishUrl(
   docId: string,
   publishUrl: string | null,
 ): Promise<void> {
-  await setDoc(doc(firestore, DOCS_COLLECTION, docId), {
-    publishUrl: publishUrl,
-    publishedAt: publishUrl ? serverTimestamp() : null,
-  }, { merge: true });
+  await setDoc(
+    doc(firestore, DOCS_COLLECTION, docId),
+    {
+      publishUrl: publishUrl,
+      publishedAt: publishUrl ? serverTimestamp() : null,
+    },
+    { merge: true },
+  );
 }
 
 // ─── Version history cloud sync ─────────────────────────────
@@ -614,20 +725,36 @@ export interface FirestoreVersion {
 
 export async function syncVersionToCloud(
   documentId: string,
-  version: { id: string; content: string; title: string; message: string | null; createdAt: number },
+  version: {
+    id: string;
+    content: string;
+    title: string;
+    message: string | null;
+    createdAt: number;
+  },
   ownerId: string,
   ownerName: string,
 ): Promise<void> {
   if (!version.content?.trim()) return;
-  const ref = doc(firestore, DOCS_COLLECTION, documentId, "versions", version.id);
-  await setDoc(ref, {
-    content: version.content,
-    title: version.title,
-    message: version.message,
-    createdAt: version.createdAt,
-    ownerId,
-    ownerName,
-  }, { merge: true });
+  const ref = doc(
+    firestore,
+    DOCS_COLLECTION,
+    documentId,
+    "versions",
+    version.id,
+  );
+  await setDoc(
+    ref,
+    {
+      content: version.content,
+      title: version.title,
+      message: version.message,
+      createdAt: version.createdAt,
+      ownerId,
+      ownerName,
+    },
+    { merge: true },
+  );
 }
 
 export async function fetchVersionsFromCloud(
@@ -638,15 +765,23 @@ export async function fetchVersionsFromCloud(
     orderBy("createdAt", "desc"),
   );
   const snap = await getDocs(q);
-  return snap.docs.map((d) => ({
-    id: d.id,
-    documentId,
-    ...d.data(),
-  }) as FirestoreVersion);
+  return snap.docs.map(
+    (d) =>
+      ({
+        id: d.id,
+        documentId,
+        ...d.data(),
+      }) as FirestoreVersion,
+  );
 }
 
-export async function deleteVersionFromCloud(documentId: string, versionId: string): Promise<void> {
-  await deleteDoc(doc(firestore, DOCS_COLLECTION, documentId, "versions", versionId));
+export async function deleteVersionFromCloud(
+  documentId: string,
+  versionId: string,
+): Promise<void> {
+  await deleteDoc(
+    doc(firestore, DOCS_COLLECTION, documentId, "versions", versionId),
+  );
 }
 
 // ─── User settings (theme, preferences) ─────────────────────
@@ -658,7 +793,11 @@ export async function saveUserSettingsToFirestore(
   settings: Record<string, unknown>,
 ): Promise<void> {
   const ref = doc(firestore, SETTINGS_COLLECTION, uid);
-  await setDoc(ref, { ...settings, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(
+    ref,
+    { ...settings, updatedAt: serverTimestamp() },
+    { merge: true },
+  );
 }
 
 export async function fetchUserSettings(
@@ -717,7 +856,13 @@ export async function saveAiThreadsToCloud(
   docId: string,
   threads: { id: string; title: string; createdAt: number }[],
 ): Promise<void> {
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", `${docId}__meta`);
+  const ref = doc(
+    firestore,
+    SETTINGS_COLLECTION,
+    uid,
+    "ai_chats",
+    `${docId}__meta`,
+  );
   await setDoc(ref, { threads, updatedAt: serverTimestamp() });
 }
 
@@ -726,10 +871,20 @@ export async function fetchAiThreadsFromCloud(
   uid: string,
   docId: string,
 ): Promise<{ id: string; title: string; createdAt: number }[] | null> {
-  const ref = doc(firestore, SETTINGS_COLLECTION, uid, "ai_chats", `${docId}__meta`);
+  const ref = doc(
+    firestore,
+    SETTINGS_COLLECTION,
+    uid,
+    "ai_chats",
+    `${docId}__meta`,
+  );
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
-  return (snap.data().threads || []) as { id: string; title: string; createdAt: number }[];
+  return (snap.data().threads || []) as {
+    id: string;
+    title: string;
+    createdAt: number;
+  }[];
 }
 
 // ─── Image upload (Firebase Storage) ────────────────────────
@@ -767,10 +922,14 @@ export async function logErrorToCloud(
     await addDoc(collection(firestore, "error_logs"), {
       uid,
       context,
-      error: error instanceof Error ? { message: error.message, code: (error as { code?: string }).code } : String(error),
+      error:
+        error instanceof Error
+          ? { message: error.message, code: (error as { code?: string }).code }
+          : String(error),
       meta: meta ?? {},
       createdAt: serverTimestamp(),
-      appVersion: (globalThis as Record<string, unknown>).__APP_VERSION__ ?? "unknown",
+      appVersion:
+        (globalThis as Record<string, unknown>).__APP_VERSION__ ?? "unknown",
     });
   } catch {
     // Best-effort — don't throw if logging itself fails
@@ -802,28 +961,30 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
   };
 
   // Force syncFromCloud — more reliable than page reload for E2E tests
-  (window as unknown as Record<string, unknown>).__TEST_FORCE_SYNC__ = async (): Promise<string> => {
-    try {
-      const { useAuthStore } = await import("../stores/auth-store");
-      await useAuthStore.getState().syncFromCloud();
-      return "ok";
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_FORCE_SYNC__ =
+    async (): Promise<string> => {
+      try {
+        const { useAuthStore } = await import("../stores/auth-store");
+        await useAuthStore.getState().syncFromCloud();
+        return "ok";
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
   // Verify sharing state — check if a doc has collaboratorUids for debugging
-  (window as unknown as Record<string, unknown>).__TEST_GET_SHARED_DOCS__ = async (): Promise<string> => {
-    try {
-      const currentUser = getAuth().currentUser;
-      if (!currentUser) return "error:not_logged_in";
-      const { fetchSharedWithMe } = await import("./sharing");
-      const docs = await fetchSharedWithMe(currentUser.uid);
-      return JSON.stringify(docs);
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_GET_SHARED_DOCS__ =
+    async (): Promise<string> => {
+      try {
+        const currentUser = getAuth().currentUser;
+        if (!currentUser) return "error:not_logged_in";
+        const { fetchSharedWithMe } = await import("./sharing");
+        const docs = await fetchSharedWithMe(currentUser.uid);
+        return JSON.stringify(docs);
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
   // Programmatic share: save doc to Firestore + add collaborator (bypasses UI)
   (window as unknown as Record<string, unknown>).__TEST_SHARE_DOC__ = async (
@@ -870,45 +1031,48 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
   };
 
   // Save active doc directly to Firestore (bypasses syncToCloud transaction issues)
-  (window as unknown as Record<string, unknown>).__TEST_SAVE_TO_CLOUD__ = async (): Promise<string> => {
-    try {
-      const currentUser = getAuth().currentUser;
-      if (!currentUser) return "error:not_logged_in";
-      const { useAppStore } = await import("../stores/app-store");
-      const state = useAppStore.getState();
-      const activeDocId = state.activeDocId;
-      if (!activeDocId) return "error:no_active_doc";
-      const activeDoc = state.documents.find((d) => d.id === activeDocId);
-      if (!activeDoc) return "error:doc_not_found";
+  (window as unknown as Record<string, unknown>).__TEST_SAVE_TO_CLOUD__ =
+    async (): Promise<string> => {
+      try {
+        const currentUser = getAuth().currentUser;
+        if (!currentUser) return "error:not_logged_in";
+        const { useAppStore } = await import("../stores/app-store");
+        const state = useAppStore.getState();
+        const activeDocId = state.activeDocId;
+        if (!activeDocId) return "error:no_active_doc";
+        const activeDoc = state.documents.find((d) => d.id === activeDocId);
+        if (!activeDoc) return "error:doc_not_found";
 
-      const firestore = getFirestore();
-      const ref = doc(firestore, "documents", activeDocId);
-      // Use set with merge to avoid transaction read-rule issues
-      await setDoc(
-        ref,
-        {
-          title: activeDoc.title,
-          content: activeDoc.content,
-          ownerId: activeDoc.ownerId || currentUser.uid,
-          ownerName: currentUser.displayName || currentUser.email || undefined,
-          folder: activeDoc.folder ?? "/",
-          tags: activeDoc.tags ?? [],
-          titlePinned: activeDoc.titlePinned ?? false,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true },
-      );
-      return "ok";
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+        const firestore = getFirestore();
+        const ref = doc(firestore, "documents", activeDocId);
+        // Use set with merge to avoid transaction read-rule issues
+        await setDoc(
+          ref,
+          {
+            title: activeDoc.title,
+            content: activeDoc.content,
+            ownerId: activeDoc.ownerId || currentUser.uid,
+            ownerName:
+              currentUser.displayName || currentUser.email || undefined,
+            folder: activeDoc.folder ?? "/",
+            tags: activeDoc.tags ?? [],
+            titlePinned: activeDoc.titlePinned ?? false,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+        return "ok";
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
   // Debug: get current user UID
-  (window as unknown as Record<string, unknown>).__TEST_GET_UID__ = (): string => {
-    const currentUser = getAuth().currentUser;
-    return currentUser ? currentUser.uid : "not_logged_in";
-  };
+  (window as unknown as Record<string, unknown>).__TEST_GET_UID__ =
+    (): string => {
+      const currentUser = getAuth().currentUser;
+      return currentUser ? currentUser.uid : "not_logged_in";
+    };
 
   // Debug: check document info in Firestore
   (window as unknown as Record<string, unknown>).__TEST_DOC_INFO__ = async (
@@ -947,35 +1111,118 @@ if (import.meta.env.VITE_TEST_MODE === "1") {
     }
   };
 
-  (window as unknown as Record<string, unknown>).__TEST_ADD_TEAM_MEMBER__ = async (
-    argsJson: string,
-  ): Promise<string> => {
-    try {
-      const { teamId, email, role } = JSON.parse(argsJson);
-      const { addTeamMember } = await import("./sharing");
-      await addTeamMember(teamId, { email, role: role || "member" });
-      return "ok";
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_ADD_TEAM_MEMBER__ =
+    async (argsJson: string): Promise<string> => {
+      try {
+        const { teamId, email, role } = JSON.parse(argsJson);
+        const { addTeamMember } = await import("./sharing");
+        await addTeamMember(teamId, { email, role: role || "member" });
+        return "ok";
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
 
-  (window as unknown as Record<string, unknown>).__TEST_CREATE_TEAM_DOC__ = async (
-    argsJson: string,
-  ): Promise<string> => {
-    try {
-      const { teamId, title, content } = JSON.parse(argsJson);
-      const currentUser = getAuth().currentUser;
-      if (!currentUser) return "error:not_logged_in";
-      const { createTeamDocument } = await import("./sharing");
-      const docId = await createTeamDocument(teamId, currentUser.uid, currentUser.displayName || currentUser.email || undefined);
-      // Update title and content after creation
-      const firestore = getFirestore();
-      const ref = doc(firestore, "documents", docId);
-      await setDoc(ref, { title, content, ownerName: currentUser.displayName || currentUser.email || undefined, updatedAt: serverTimestamp() }, { merge: true });
-      return "ok:" + docId;
-    } catch (e: unknown) {
-      return "error:" + (e instanceof Error ? e.message : String(e));
-    }
-  };
+  (window as unknown as Record<string, unknown>).__TEST_CREATE_TEAM_DOC__ =
+    async (argsJson: string): Promise<string> => {
+      try {
+        const { teamId, title, content } = JSON.parse(argsJson);
+        const currentUser = getAuth().currentUser;
+        if (!currentUser) return "error:not_logged_in";
+        const { createTeamDocument } = await import("./sharing");
+        const docId = await createTeamDocument(
+          teamId,
+          currentUser.uid,
+          currentUser.displayName || currentUser.email || undefined,
+        );
+        // Update title and content after creation
+        const firestore = getFirestore();
+        const ref = doc(firestore, "documents", docId);
+        await setDoc(
+          ref,
+          {
+            title,
+            content,
+            ownerName:
+              currentUser.displayName || currentUser.email || undefined,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+        return "ok:" + docId;
+      } catch (e: unknown) {
+        return "error:" + (e instanceof Error ? e.message : String(e));
+      }
+    };
+}
+
+// --- Research Sessions ---
+
+import type { ResearchCard } from "@/stores/research-store";
+
+export async function saveResearchSession(
+  documentId: string,
+  session: {
+    id: string;
+    cards: ResearchCard[];
+    startedAt: number;
+    endedAt: number | null;
+    ownerId: string;
+  },
+): Promise<void> {
+  const ref = doc(
+    firestore,
+    DOCS_COLLECTION,
+    documentId,
+    "research_sessions",
+    session.id,
+  );
+  await setDoc(
+    ref,
+    {
+      cards: session.cards.map((c) => ({
+        id: c.id,
+        timestamp: c.timestamp,
+        trigger: c.trigger,
+        query: c.query,
+        type: c.type,
+        summary: c.summary,
+        sources: c.sources,
+        credibility: c.credibility,
+        integrated: c.integrated,
+      })),
+      startedAt: Timestamp.fromMillis(session.startedAt),
+      endedAt: session.endedAt ? Timestamp.fromMillis(session.endedAt) : null,
+      ownerId: session.ownerId,
+    },
+    { merge: true },
+  );
+}
+
+export async function fetchResearchSessions(documentId: string): Promise<
+  Array<{
+    id: string;
+    cards: ResearchCard[];
+    startedAt: number;
+    endedAt: number | null;
+    ownerId: string;
+  }>
+> {
+  const q = query(
+    collection(firestore, DOCS_COLLECTION, documentId, "research_sessions"),
+    orderBy("startedAt", "desc"),
+  );
+  const snap = await getDocs(q);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return snap.docs.map((d) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = d.data() as any;
+    return {
+      id: d.id,
+      cards: data.cards || [],
+      startedAt: data.startedAt?.toMillis?.() || 0,
+      endedAt: data.endedAt?.toMillis?.() || null,
+      ownerId: data.ownerId || "",
+    };
+  });
 }

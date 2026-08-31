@@ -164,12 +164,24 @@
     -webkit-user-select: none;
   }
 
+  /* Safe-area single source of truth. iOS/WebKit report OS insets through
+     env(safe-area-inset-*). Android's WebView does NOT report the navigation
+     bar that way (env() returns 0), so MainActivity injects the measured
+     WindowInsets value into --android-safe-bottom. That var is unset on
+     iOS/web/desktop, so var() transparently falls back to env(). */
+  :root {
+    --safe-area-bottom: var(
+      --android-safe-bottom,
+      env(safe-area-inset-bottom, 0px)
+    );
+  }
+
   /* iOS safe area — viewport-fit=cover */
   .safe-top {
     padding-top: env(safe-area-inset-top, 0px);
   }
   .safe-bottom {
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-area-bottom);
   }
   .safe-left {
     padding-left: env(safe-area-inset-left, 0px);
@@ -607,11 +619,51 @@ input::selection {
   line-height: 1.6 !important;
   word-break: break-word !important;
   overflow-wrap: break-word !important;
+  max-width: 100% !important;
+  overflow-x: hidden !important;
 }
 
-/* AI panel scrollbar — slightly narrower */
-.ai-panel-scroll [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
+/* AI panel scrollbar — slightly narrower. The panel scrolls with a native
+   overflow-y div (not Radix ScrollArea) so touch-scroll works reliably inside
+   the mobile WebView and never drags the surrounding chrome. */
+.ai-panel-scroll::-webkit-scrollbar {
   width: 4px;
+}
+
+/* Pin the AI panel's message content to the container width so a long code line
+   / wide table is confined to each pre/table (which scroll internally) instead
+   of widening the whole message column. */
+.ai-panel-scroll > div {
+  display: block !important;
+  max-width: 100%;
+}
+
+/* Code blocks: never widen the column — scroll horizontally inside their box. */
+.ai-markdown.prose pre {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+}
+
+/* Tables: scroll inside their own box instead of stretching the column. */
+.ai-markdown.prose table {
+  display: block !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+}
+
+/* Images (e.g. generated / pasted) never exceed the column width. */
+.ai-markdown.prose img {
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+/* Research panel: force ScrollArea content to wrap to the container width.
+   Radix renders the viewport's child as `display: table; min-width: 100%`,
+   which sizes content to its intrinsic width — long lines then overflow and
+   get clipped by the card's overflow-hidden instead of wrapping. Forcing the
+   wrapper to block makes text wrap to the available width at any window size. */
+.research-scroll [data-slot="scroll-area-viewport"] > div {
+  display: block !important;
 }
 
 /* ---- Task checkbox in preview ---- */
@@ -805,16 +857,16 @@ input::selection {
   padding-bottom: 1px;
 }
 
-/* Mermaid diagrams */
+/* Mermaid diagrams — colors come from native `base` themeVariables resolved
+   from the active preview theme (see src/lib/mermaid-theme.ts). The container
+   stays transparent so diagrams float on the themed preview surface in both
+   light and dark. */
 .prose .mermaid {
   margin: 1.5em 0;
   min-height: 40px;
-  background: rgba(0, 0, 0, 0.02);
+  background: transparent;
   border-radius: 0.375rem;
   padding: 1em 0;
-}
-.dark .prose .mermaid {
-  background: #161b22;
 }
 .prose .mermaid:not([data-mermaid-processed]) {
   min-height: 60px;
@@ -843,88 +895,6 @@ input::selection {
 .prose .mermaid .activation2 {
   rx: 3px;
   ry: 3px;
-}
-
-/* Mermaid dark mode */
-.dark .prose .mermaid svg text,
-.dark .prose .mermaid svg tspan {
-  fill: #c9d1d9 !important;
-}
-.dark .prose .mermaid svg .actor {
-  fill: #21262d !important;
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg text.actor > tspan {
-  fill: #e6edf3 !important;
-}
-.dark .prose .mermaid svg rect.note {
-  fill: #1c2128 !important;
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .noteText,
-.dark .prose .mermaid svg .noteText > tspan {
-  fill: #e6edf3 !important;
-}
-.dark .prose .mermaid svg .actor-line {
-  stroke: #484f58 !important;
-}
-.dark .prose .mermaid svg .messageLine0,
-.dark .prose .mermaid svg .messageLine1 {
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .messageText {
-  fill: #c9d1d9 !important;
-}
-.dark .prose .mermaid svg .loopLine {
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .labelBox {
-  fill: #21262d !important;
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .labelText,
-.dark .prose .mermaid svg .labelText > tspan {
-  fill: #e6edf3 !important;
-}
-.dark .prose .mermaid svg .loopText,
-.dark .prose .mermaid svg .loopText > tspan {
-  fill: #c9d1d9 !important;
-}
-.dark .prose .mermaid svg .activation0,
-.dark .prose .mermaid svg .activation1,
-.dark .prose .mermaid svg .activation2 {
-  fill: #30363d !important;
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .sequenceNumber {
-  fill: #e6edf3 !important;
-}
-.dark .prose .mermaid svg marker path {
-  fill: #8b949e !important;
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .node rect,
-.dark .prose .mermaid svg .node circle,
-.dark .prose .mermaid svg .node polygon {
-  fill: #21262d !important;
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .node .label {
-  fill: #e6edf3 !important;
-}
-.dark .prose .mermaid svg .edgePath .path {
-  stroke: #8b949e !important;
-}
-.dark .prose .mermaid svg .edgeLabel {
-  background-color: #161b22 !important;
-  color: #c9d1d9 !important;
-}
-.dark .prose .mermaid svg .cluster rect {
-  fill: #161b22 !important;
-  stroke: #30363d !important;
-}
-.dark .prose .mermaid svg .cluster text {
-  fill: #c9d1d9 !important;
 }
 
 /* Collaboration cursor styles (y-codemirror.next) */
@@ -1002,6 +972,17 @@ input::selection {
   line-height: 1.5 !important;
 }
 
+/* ---- Preview pane paper ---- */
+/* Each preview theme supplies its own signature ground via --prose-bg (injected
+   at :root by the preview <style>). This is what makes Dracula's plum, Solarized's
+   cream, Nord's polar-night, etc. feel authentic instead of floating text on the
+   app background. Falls back to the app background so neutral themes (GitHub) and
+   custom themes without a --prose-bg stay transparent. Scoped to the preview
+   scroll container so the AI panel and editor pane are untouched. */
+.preview-scroll {
+  background: var(--prose-bg, var(--background));
+}
+
 /* ---- Mobile preview ---- */
 .mobile-preview.prose {
   font-size: 0.875rem !important;
@@ -1024,7 +1005,20 @@ input::selection {
   display: block !important;
   overflow-x: auto !important;
   max-width: 100% !important;
+  width: max-content !important;
   font-size: 0.8rem !important;
+  -webkit-overflow-scrolling: touch;
+}
+/* Keep cells on a single line so text-heavy cells stay readable instead of
+   char-stacking to squeeze into the viewport width. The table itself
+   (display:block + overflow-x:auto above) then scrolls horizontally. Only
+   explicit <br> breaks a cell — matches the owner request "明示的な改行以外は
+   改行しない". Resets the inherited break-word from .mobile-preview.prose. */
+.mobile-preview.prose th,
+.mobile-preview.prose td {
+  white-space: nowrap !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
 }
 .mobile-preview.prose .youtube-embed {
   max-width: 100% !important;
@@ -1044,4 +1038,91 @@ input::selection {
 }
 .mobile-preview.prose h3 {
   font-size: 1.1em !important;
+}
+
+/* ── Mind map bloom entrance ────────────────────────────────────────────────
+   When the MindMap View opens, child nodes burst outward from the root
+   ("最上位ノードからぶわっと下位ノードが吹き出す"). Each node starts sitting on
+   its parent (translated by its --mm-dx/--mm-dy, scaled down) and springs to
+   its real spot; the --mm-delay staggers deeper levels so the wave ripples out
+   from the root. Scoped to `.mindmap-bloom` (MindMapView only) so MindMapEditor,
+   which reuses MindMapNode, never animates. The animation is on the .mm-node
+   wrapper — not the styled inner div — so fill-mode:both can't clobber the
+   `selected` scale. */
+@keyframes mm-bloom {
+  from {
+    opacity: 0;
+    transform: translate(var(--mm-dx, 0), var(--mm-dy, 0)) scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+@keyframes mm-edge-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.mindmap-bloom .react-flow__node .mm-node {
+  display: inline-block;
+  /* Kill the inline-block baseline descender so .react-flow__node hugs the node
+     box exactly — otherwise the extra sub-baseline space would inflate node
+     height and nudge the vertically-centered edge handles off-center. */
+  vertical-align: top;
+  transform-origin: left center;
+  /* Start HIDDEN and stay hidden until the map is armed (below). React Flow
+     positions/centers nodes only after it has measured them and run fitView
+     (signalled by onInit → the `bloom-armed` class). Holding nodes invisible
+     until then stops the entrance from playing off-screen before the fit — the
+     exact failure that hid the animation on slow mobile WebViews. */
+  opacity: 0;
+}
+/* Edges also wait for the arm so connectors don't flash before the nodes. */
+.mindmap-bloom .react-flow__edge {
+  opacity: 0;
+}
+/* Armed by MindMapView's onInit: viewport initialized = every node measured AND
+   fitView applied, so the map is on-screen. Only now does the bloom run, so the
+   burst is always actually seen. Fill-mode:both leaves the final frame
+   (opacity:1) in place, overriding the hidden base. */
+.mindmap-bloom.bloom-armed .react-flow__node .mm-node {
+  animation: mm-bloom 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--mm-delay, 0ms);
+  /* NOTE: no `will-change` here. A permanent will-change:transform promotes every
+     node to its own GPU layer, rasterized once at the initial (fit-to-view,
+     often <1) scale — so zooming in stretches that low-res texture and the nodes
+     look pixelated. React Flow zooms via the viewport transform and re-rasterizes
+     crisply as long as nodes aren't force-promoted. */
+}
+.mindmap-bloom.bloom-armed .react-flow__edge {
+  animation: mm-edge-fade 0.5s ease both;
+  animation-delay: 0.12s;
+}
+/* Reduced motion: skip the entrance but keep the map visible — never leave nodes
+   stuck at the opacity:0 base. */
+@media (prefers-reduced-motion: reduce) {
+  .mindmap-bloom .react-flow__node .mm-node,
+  .mindmap-bloom .react-flow__edge {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+}
+/* Failsafe against a black MindMap. The bloom keyframe starts at opacity:0 and
+   uses fill-mode:both, so if it never runs (or stalls before the first frame) on
+   a slow mobile WebView, every node would stay invisible on the near-black
+   canvas. MindMapView adds `bloom-settled` a beat after mount to force all nodes
+   fully visible regardless of animation state — the animation still plays on
+   capable devices, but visibility never depends on it. */
+.mindmap-bloom.bloom-settled .react-flow__node .mm-node {
+  opacity: 1 !important;
+  transform: none !important;
+  animation: none !important;
+}
+.mindmap-bloom.bloom-settled .react-flow__edge {
+  opacity: 1 !important;
+  animation: none !important;
 }

@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "research",
+  "description": "Capability for the standalone research floating window",
+  "windows": ["research"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-set-always-on-top",
+    "shell:allow-open"
+  ]
+}

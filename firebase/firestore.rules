@@ -3,10 +3,14 @@ rules_version = '2';
 // Helper function to check if user is a member of a team
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users can read/write their own user document
-    // Other authenticated users can read (for email lookup)
+    // Users can read/write ONLY their own user document. Previously ANY signed-in
+    // user could read the ENTIRE users collection ("for email lookup"), exposing
+    // every user's email / displayName / photo and enabling bulk directory
+    // enumeration. Email->uid resolution for invites now runs server-side
+    // (ai-proxy /v1/users/resolve via the Admin SDK, one email at a time), so the
+    // client never needs to read anyone else's profile.
     match /users/{userId} {
-      allow read: if request.auth != null;
+      allow read: if request.auth != null && request.auth.uid == userId;
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 
@@ -20,7 +24,29 @@ service cloud.firestore {
           && request.auth.uid in get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.memberUids;
       }
 
-      allow create: if request.auth != null;
+      // Anti-abuse ceiling on the per-doc collaborators map. This is NOT the
+      // per-plan monetization cap (Free 0 / Pro 3 / Team ∞): that is plan-aware
+      // and MUST be enforced in the ai-proxy at billing GO, because `internal`
+      // (staff/owner during the dark period) is derived from a server-only env
+      // allowlist that Firestore rules cannot see — a plan-reading rule would
+      // wrongly block ALL collaboration for everyone right now. This ceiling only
+      // bounds pathological growth (a scripted client adding thousands of entries
+      // → doc bloat, sync cost, 1MB-doc crash). Legit per-doc guest sharing never
+      // approaches it; team docs share via teamId, not this map.
+      function collabWithinCeiling() {
+        return request.resource.data.get('collaborators', {}).size() <= 500
+          // never trap an already-over-limit doc: allow shrinking / not growing.
+          || request.resource.data.get('collaborators', {}).size()
+             <= resource.data.get('collaborators', {}).size();
+      }
+
+      // Create: the caller MUST be the owner of the doc they create. Without
+      // this, any signed-in user could inject a document carrying a VICTIM's
+      // ownerId (phishing title/content surfaces in the victim's sidebar) or
+      // seed collaborator/team fields they don't control.
+      allow create: if request.auth != null
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.get('collaborators', {}).size() <= 500;
       // Check collaborator access via map keys or collaboratorUids array
       function isCollaborator() {
         return request.auth.uid in resource.data.collaborators.keys()
@@ -41,11 +67,26 @@ service cloud.firestore {
         isTeamMember() ||
         (resource.data.shareLink != null && resource.data.shareLink.enabled == true)
       );
-      allow update: if request.auth != null && (
-        resource.data.ownerId == request.auth.uid ||
-        isEditor() ||
-        isTeamMember()
-      );
+      // Update: the OWNER has full control (incl. sharing fields). An editor or
+      // team member may edit CONTENT but MUST NOT alter ownership/sharing —
+      // otherwise an editor could set ownerId to themselves (takeover), promote
+      // themselves via `collaborators`, move the doc into a team they control, or
+      // flip `shareLink` on. Those fields are frozen (unchanged-or-absent) on any
+      // non-owner update. (Live content editing of shared/team docs flows through
+      // the collab server's Admin SDK, which bypasses these rules.)
+      allow update: if request.auth != null
+        && collabWithinCeiling()
+        && (
+          resource.data.ownerId == request.auth.uid ||
+          (
+            (isEditor() || isTeamMember())
+            && request.resource.data.ownerId == resource.data.ownerId
+            && request.resource.data.get('collaborators', {}) == resource.data.get('collaborators', {})
+            && request.resource.data.get('collaboratorUids', []) == resource.data.get('collaboratorUids', [])
+            && request.resource.data.get('teamId', null) == resource.data.get('teamId', null)
+            && request.resource.data.get('shareLink', null) == resource.data.get('shareLink', null)
+          )
+        );
       allow delete: if request.auth != null && (
         resource.data.ownerId == request.auth.uid
       );
@@ -66,6 +107,22 @@ service cloud.firestore {
         allow read, write: if request.auth != null && canAccessVersions();
       }
 
+      // Research sessions subcollection — same access as versions
+      match /research_sessions/{sessionId} {
+        function canAccessResearch() {
+          let parent = get(/databases/$(database)/documents/documents/$(docId)).data;
+          return parent.ownerId == request.auth.uid
+            || ('collaborators' in parent && parent.collaborators != null
+                && request.auth.uid in parent.collaborators.keys())
+            || ('collaboratorUids' in parent && parent.collaboratorUids != null
+                && request.auth.uid in parent.collaboratorUids)
+            || ('teamId' in parent && parent.teamId != null && parent.teamId != ""
+                && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids);
+        }
+
+        allow read, write: if request.auth != null && canAccessResearch();
+      }
+
       // Comments subcollection
       match /comments/{commentId} {
         allow read: if request.auth != null;
@@ -75,13 +132,35 @@ service cloud.firestore {
       }
     }
 
-    // Teams: members can read/update, owner can delete
+    // Teams: members can read/update, owner can delete.
+    //
+    // SERVER-ONLY billing fields: `billing` (subscription status/seats/ownerUid)
+    // and `seatAssignments` (who may spend the shared AI pool) are written ONLY by
+    // the ai-proxy via the Admin SDK (which bypasses these rules). A team member is
+    // allowed to update the doc (rename, add/remove members via sharing.ts), but
+    // MUST NOT be able to touch billing/seatAssignments — otherwise an assigned
+    // member could forge `billing.status:"active"`, inflate `billing.seats`, or
+    // re-add themselves to `seatAssignments` to keep spending the team pool after
+    // being removed. The equality guards freeze both fields on every client update
+    // (unchanged-or-absent), and create forbids seeding them at all.
     match /teams/{teamId} {
-      allow create: if request.auth != null;
+      allow create: if request.auth != null
+        && !('billing' in request.resource.data)
+        && !('seatAssignments' in request.resource.data);
       allow read: if request.auth != null &&
         request.auth.uid in resource.data.memberUids;
-      allow update: if request.auth != null &&
-        request.auth.uid in resource.data.memberUids;
+      // Update: a member may edit the team doc, but ownerId is FROZEN (no client
+      // takeover — ownership transfer would be a server op) and the owner must
+      // remain in memberUids (a member cannot lock the owner out). billing and
+      // seatAssignments stay server-only (forge/seat-theft guard). Membership
+      // list changes remain client-writable by design (managers manage members
+      // in-app); the money/access-critical fields above are all fenced.
+      allow update: if request.auth != null
+        && request.auth.uid in resource.data.memberUids
+        && request.resource.data.ownerId == resource.data.ownerId
+        && resource.data.ownerId in request.resource.data.memberUids
+        && request.resource.data.get('billing', null) == resource.data.get('billing', null)
+        && request.resource.data.get('seatAssignments', null) == resource.data.get('seatAssignments', null);
       allow delete: if request.auth != null &&
         resource.data.ownerId == request.auth.uid;
     }
@@ -105,10 +184,101 @@ service cloud.firestore {
         resource.data.ownerId == request.auth.uid;
     }
 
-    // Error logs: any authenticated user can create, only own logs readable
+    // Error logs: a user may write ONLY logs stamped with their own uid, and may
+    // read ONLY their own. The prior `read: if request.auth != null` let any
+    // signed-in user read EVERY user's error logs (paths, messages, metadata).
     match /error_logs/{logId} {
-      allow create: if request.auth != null;
-      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.uid == request.auth.uid;
+    }
+
+    // Crash reports: written client-side by reportCrash() (Rust panic hook +
+    // window.onerror/unhandledrejection → firebase.ts). These had NO rule and so
+    // were DEFAULT-DENIED — every reportCrash() addDoc silently failed (the fn
+    // swallows the error), so we captured ZERO crashes. A user may create ONLY a
+    // report stamped with their own uid and read ONLY their own. The Admin SDK
+    // (ai-proxy) bypasses these rules for aggregation/Slack.
+    match /crash_reports/{reportId} {
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+    }
+
+    // User feedback (bug reports / feature requests): written ONLY by the ai-proxy
+    // /v1/feedback endpoint via the Admin SDK (it verifies the Firebase token,
+    // server-stamps uid/email, redacts PII, and computes the dedupe fingerprint),
+    // so clients never write directly. A user may read back their OWN submissions;
+    // the aggregate `feedback_groups` (dedupe/threshold state) is fully server-only.
+    match /feedback/{feedbackId} {
+      allow read: if request.auth != null
+        && resource.data.uid == request.auth.uid;
+      allow write: if false;
+    }
+    match /feedback_groups/{fingerprint} {
+      allow read, write: if false;
+    }
+
+    // Entitlements: server-write-only source of truth for paid plan status.
+    // Written exclusively by the ai-proxy / billing webhooks via the Admin SDK
+    // (which bypasses these rules). Clients may read their own to render UI
+    // (current plan, upsell), but MUST NOT write — otherwise a user could
+    // grant themselves Pro from devtools.
+    match /entitlements/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // Usage counters: server-write-only monthly metering (usage/{uid}/months/{yyyy-mm}).
+    // Clients may read their own to show remaining quota; only the server writes.
+    match /usage/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+
+      match /months/{period} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+    }
+
+    // Stripe billing internals: written ONLY by the ai-proxy webhook via the
+    // Admin SDK (bypasses these rules). No client ever reads or writes them —
+    // stripeEvents/{eventId} is the idempotency dedupe log, stripeCustomers/
+    // {customerId} is the Stripe-customer→uid reverse map for lifecycle events.
+    match /stripeEvents/{eventId} {
+      allow read, write: if false;
+    }
+    match /stripeCustomers/{customerId} {
+      allow read, write: if false;
+    }
+
+    // Batch-transcribe concurrency leases: written ONLY by the ai-proxy via the
+    // Admin SDK (bypasses these rules). Caps a user to one in-flight batch job;
+    // no client ever reads or writes them.
+    match /batchLocks/{userId} {
+      allow read, write: if false;
+    }
+
+    // Team seat reverse index (teamSeats/{uid} → {teamId}): written ONLY by the
+    // ai-proxy seat-assign endpoint via the Admin SDK. It is the authoritative
+    // "which funded team does this uid draw from" lookup the metering path trusts,
+    // so a client must NEVER read or write it (a forged entry would grant the
+    // shared team pool). Fully server-only.
+    match /teamSeats/{userId} {
+      allow read, write: if false;
+    }
+
+    // In-App Purchase internals (Apple/Play): written ONLY by the ai-proxy IAP
+    // endpoints via the Admin SDK. iapEvents/{eventId} is the notification
+    // idempotency log; iapCustomers/{key} maps a store transaction/purchase token
+    // to a uid for server notifications. No client ever reads or writes them.
+    match /iapEvents/{eventId} {
+      allow read, write: if false;
+    }
+    match /iapCustomers/{key} {
+      allow read, write: if false;
     }
   }
 }

@@ -171,7 +171,13 @@ for track_name in ["internal", "alpha"]:
         packageName=package, editId=edit_id, track=track_name,
         body={"track": track_name, "releases": [release_body]}
     ).execute()
-    print(f"Published to {track_name}: v{version} (versionCode={version_code})")
+    print(f"Staged on {track_name}: v{version} (versionCode={version_code})")
+
+# COMMIT the edit — without this the uploaded bundle and track changes are
+# discarded when the edit expires, so nothing ever reaches testers. (This was
+# missing: every release after versionCode 5032 silently failed to publish.)
+service.edits().commit(packageName=package, editId=edit_id).execute()
+print(f"Committed edit {edit_id}: v{version} (versionCode={version_code}) is live on internal + alpha")
 PYEOF
 
 echo ""

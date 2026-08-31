@@ -54,13 +54,28 @@ export interface PlatformAdapter {
 
   // --- Image upload ---
   /** Upload image from a file path (desktop: reads file in Rust) */
-  uploadImageFromPath(path: string, uid: string, token: string, bucket: string): Promise<string>;
+  uploadImageFromPath(
+    path: string,
+    uid: string,
+    token: string,
+    bucket: string,
+  ): Promise<string>;
   /** Upload image from base64 data */
-  uploadImageFromBase64(data: string, ext: string, uid: string, token: string, bucket: string): Promise<string>;
+  uploadImageFromBase64(
+    data: string,
+    ext: string,
+    uid: string,
+    token: string,
+    bucket: string,
+  ): Promise<string>;
 
   // --- OAuth ---
-  /** Start OAuth listener, returns port for callback URL */
-  startOAuthListener(): Promise<number>;
+  /**
+   * Start OAuth listener, returns port for callback URL. `expectedState` is the
+   * CSRF `state` value included in the auth URL; the listener rejects any
+   * callback whose state doesn't match it.
+   */
+  startOAuthListener(expectedState?: string): Promise<number>;
   /** Listen for OAuth callback event, returns auth code */
   onOAuthCallback(callback: (code: string) => void): Promise<() => void>;
   /** Listen for OAuth error event */
@@ -70,11 +85,19 @@ export interface PlatformAdapter {
   /** Listen for window close event */
   onWindowClose(callback: () => Promise<void>): Promise<(() => void) | null>;
   /** Listen for file drag-drop events */
-  onDragDrop(callback: (paths: string[], position: { x: number; y: number }) => void): Promise<(() => void) | null>;
+  onDragDrop(
+    callback: (paths: string[], position: { x: number; y: number }) => void,
+  ): Promise<(() => void) | null>;
 
   // --- Auto-update ---
   /** Check for app updates, returns update info or null */
-  checkForUpdate(channel?: "stable" | "beta"): Promise<{ version: string; body?: string; install: () => Promise<void> } | null>;
+  checkForUpdate(
+    channel?: "stable" | "beta",
+  ): Promise<{
+    version: string;
+    body?: string;
+    install: () => Promise<void>;
+  } | null>;
   /** Relaunch the app after update */
   relaunch(): Promise<void>;
 }

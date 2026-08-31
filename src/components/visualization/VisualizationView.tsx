@@ -30,7 +30,9 @@ const nodeTypes = { knowledge: KnowledgeNode };
 
 function extractWikiLinks(content: string): string[] {
   // Strip code blocks first
-  const stripped = content.replace(/```[\s\S]*?```/g, "").replace(/`[^`]+`/g, "");
+  const stripped = content
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]+`/g, "");
   const links: string[] = [];
   const regex = /\[\[([^\]]+)\]\]/g;
   let match;
@@ -217,7 +219,9 @@ function DetailPanel({
         <div>
           <div className="flex items-center gap-1.5 text-blue-500 mb-1.5">
             <Link2 className="h-3 w-3" />
-            <span className="font-medium">Links ({forwardLinks?.size ?? 0})</span>
+            <span className="font-medium">
+              Links ({forwardLinks?.size ?? 0})
+            </span>
           </div>
           {forwardLinks && forwardLinks.size > 0 ? (
             <ul className="space-y-1">
@@ -245,7 +249,9 @@ function DetailPanel({
         <div>
           <div className="flex items-center gap-1.5 text-emerald-500 mb-1.5">
             <ArrowLeftRight className="h-3 w-3" />
-            <span className="font-medium">Backlinks ({backlinks?.size ?? 0})</span>
+            <span className="font-medium">
+              Backlinks ({backlinks?.size ?? 0})
+            </span>
           </div>
           {backlinks && backlinks.size > 0 ? (
             <ul className="space-y-1">
@@ -271,9 +277,7 @@ function DetailPanel({
 
         {/* Meta */}
         <div className="text-muted-foreground space-y-1">
-          {doc.folder && doc.folder !== "/" && (
-            <p>Folder: {doc.folder}</p>
-          )}
+          {doc.folder && doc.folder !== "/" && <p>Folder: {doc.folder}</p>}
           {doc.tags.length > 0 && (
             <div className="flex flex-wrap gap-1 mt-1">
               {doc.tags.map((tag) => (
@@ -355,13 +359,15 @@ function KnowledgeGraphInner() {
             linkCount: graphData.forwardLinkMap.get(doc.id)?.size ?? 0,
             backlinkCount: graphData.backlinkMap.get(doc.id)?.size ?? 0,
             isOrphan: graphData.orphanIds.has(doc.id),
-            isActive: doc.id === selectedDocId,
+            // Selection highlight is applied by a dedicated effect (below) so
+            // that selecting a node never re-seeds positions / wipes drags.
+            isActive: false,
             folder: doc.folder || "/",
             tags: doc.tags,
           },
         };
       }),
-    [filteredDocs, positions, graphData, selectedDocId],
+    [filteredDocs, positions, graphData],
   );
 
   // Build edges
@@ -381,7 +387,8 @@ function KnowledgeGraphInner() {
               : l.to === selectedDocId
                 ? "var(--color-emerald-500)"
                 : "var(--border)",
-          strokeWidth: l.from === selectedDocId || l.to === selectedDocId ? 2 : 1,
+          strokeWidth:
+            l.from === selectedDocId || l.to === selectedDocId ? 2 : 1,
           opacity: selectedDocId
             ? l.from === selectedDocId || l.to === selectedDocId
               ? 1
@@ -391,8 +398,53 @@ function KnowledgeGraphInner() {
       }));
   }, [graphData.links, filteredDocs, selectedDocId]);
 
-  const [nodes, , onNodesChange] = useNodesState(initialNodes);
-  const [edges, , onEdgesChange] = useEdgesState(initialEdges);
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+
+  // useNodesState/useEdgesState only seed from their initial arg — they do NOT
+  // re-sync when it changes. Without these effects, filters, layout changes, and
+  // newly created/deleted documents would never appear after the first render.
+  //
+  // Re-seed structure (which nodes exist + labels/counts) when the node set
+  // changes, but PRESERVE the live position of any node that already exists.
+  // forceLayout() seeds positions with Math.random(), and `positions` recomputes
+  // on every documents mutation (autosave / cloud sync touches the store), so
+  // blindly re-seeding to initialNodes would re-randomize the layout and wipe the
+  // user's manual drags mid-session. Only genuinely new node ids take the
+  // freshly-computed layout position. selectedDocId is intentionally excluded
+  // from the deps (selecting must not re-seed); the current selection is folded
+  // in here, and the effect below keeps the highlight in sync afterwards.
+  useEffect(() => {
+    setNodes((prev) => {
+      const prevById = new Map(prev.map((n) => [n.id, n]));
+      return initialNodes.map((n) => {
+        const existing = prevById.get(n.id);
+        return {
+          ...n,
+          position: existing ? existing.position : n.position,
+          data: { ...n.data, isActive: n.id === selectedDocId },
+        };
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialNodes, setNodes]);
+
+  // Selection changed but structure didn't — flip isActive in place, preserving
+  // any manual drag positions the user set on the nodes.
+  useEffect(() => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        const active = n.id === selectedDocId;
+        return n.data.isActive === active
+          ? n
+          : { ...n, data: { ...n.data, isActive: active } };
+      }),
+    );
+  }, [selectedDocId, setNodes]);
+
+  useEffect(() => {
+    setEdges(initialEdges);
+  }, [initialEdges, setEdges]);
 
   // Re-fit view when layout changes
   useEffect(() => {
@@ -458,9 +510,7 @@ function KnowledgeGraphInner() {
             <select
               className="bg-transparent border border-border rounded px-1 py-0.5 text-[10px] cursor-pointer"
               value={filterFolder || ""}
-              onChange={(e) =>
-                setFilterFolder(e.target.value || null)
-              }
+              onChange={(e) => setFilterFolder(e.target.value || null)}
             >
               <option value="">All folders</option>
               {folders.map((f) => (
@@ -477,7 +527,12 @@ function KnowledgeGraphInner() {
       {documents.length > 0 && totalLinks === 0 && (
         <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 bg-card border border-border rounded-lg px-4 py-3 shadow-md text-center max-w-xs">
           <p className="text-xs text-muted-foreground">
-            Use <code className="bg-muted px-1 rounded text-[10px]">[[document title]]</code> in your Markdown to create links between documents. The knowledge graph will visualize these connections.
+            Use{" "}
+            <code className="bg-muted px-1 rounded text-[10px]">
+              [[document title]]
+            </code>{" "}
+            in your Markdown to create links between documents. The knowledge
+            graph will visualize these connections.
           </p>
         </div>
       )}

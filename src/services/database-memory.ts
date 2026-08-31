@@ -41,7 +41,7 @@ export class MemoryDatabase {
     }
 
     if (q.toUpperCase().startsWith("UPDATE")) {
-      return { rowsAffected: 0 };
+      return this.handleUpdate(q, bindValues || []);
     }
 
     return { rowsAffected: 0 };
@@ -112,10 +112,37 @@ export class MemoryDatabase {
     if (!colMatch) return { rowsAffected: 0 };
     const columns = colMatch[1].split(",").map((c) => c.trim());
 
-    // Build row from bind values
+    // Parse the VALUES(...) list so each column maps to its OWN slot. A slot is
+    // either a `$N` placeholder (→ bindValues[N-1]) or an inline literal (e.g.
+    // `is_dirty` is written as a literal `1`, not a bind param). Mapping columns
+    // to bindValues by index would misalign every column after the first literal
+    // — which silently corrupted owner_id / is_shared in this adapter.
+    const valuesMatch = query.match(/VALUES\s*\(([^)]+)\)/i);
     const row: Record<string, unknown> = {};
-    for (let i = 0; i < columns.length; i++) {
-      row[columns[i]] = bindValues[i] ?? null;
+    if (valuesMatch) {
+      const slots = valuesMatch[1].split(",").map((s) => s.trim());
+      for (let i = 0; i < columns.length; i++) {
+        const slot = slots[i];
+        if (slot === undefined) {
+          row[columns[i]] = null;
+          continue;
+        }
+        const param = slot.match(/^\$(\d+)$/);
+        if (param) {
+          row[columns[i]] = bindValues[parseInt(param[1], 10) - 1] ?? null;
+        } else if (/^-?\d+(\.\d+)?$/.test(slot)) {
+          row[columns[i]] = Number(slot);
+        } else if (/^NULL$/i.test(slot)) {
+          row[columns[i]] = null;
+        } else {
+          row[columns[i]] = slot.replace(/^'(.*)'$/, "$1");
+        }
+      }
+    } else {
+      // No parseable VALUES list — fall back to positional bind mapping.
+      for (let i = 0; i < columns.length; i++) {
+        row[columns[i]] = bindValues[i] ?? null;
+      }
     }
 
     // Handle ON CONFLICT (upsert)
@@ -135,6 +162,41 @@ export class MemoryDatabase {
     return { rowsAffected: 1, lastInsertId: table.rows.length };
   }
 
+  // Supports `UPDATE <table> SET c1 = $a, c2 = $b [, ...] WHERE col = $n`.
+  // Only the equality-WHERE form is modeled (all internal UPDATEs use it); an
+  // unrecognized WHERE leaves rows untouched rather than risk over-writing.
+  private handleUpdate(query: string, bindValues: unknown[]) {
+    const tableMatch = query.match(/UPDATE\s+(\w+)\s+SET/i);
+    if (!tableMatch) return { rowsAffected: 0 };
+    const table = this.tables.get(tableMatch[1]);
+    if (!table) return { rowsAffected: 0 };
+
+    const setMatch = query.match(/SET\s+(.+?)\s+WHERE/i);
+    if (!setMatch) return { rowsAffected: 0 };
+    // Parse "col = $n" assignments.
+    const assignments: { col: string; paramIdx: number }[] = [];
+    for (const part of setMatch[1].split(",")) {
+      const m = part.trim().match(/(\w+)\s*=\s*\$(\d+)/);
+      if (m) assignments.push({ col: m[1], paramIdx: parseInt(m[2]) - 1 });
+    }
+    if (assignments.length === 0) return { rowsAffected: 0 };
+
+    const whereMatch = query.match(/WHERE\s+(\w+)\s*=\s*\$(\d+)/i);
+    if (!whereMatch) return { rowsAffected: 0 };
+    const whereCol = whereMatch[1];
+    const whereVal = bindValues[parseInt(whereMatch[2]) - 1];
+
+    let affected = 0;
+    for (const row of table.rows) {
+      if (row[whereCol] === whereVal) {
+        for (const a of assignments)
+          row[a.col] = bindValues[a.paramIdx] ?? null;
+        affected++;
+      }
+    }
+    return { rowsAffected: affected };
+  }
+
   private handleDelete(query: string, bindValues: unknown[]) {
     const tableMatch = query.match(/DELETE\s+FROM\s+(\w+)/i);
     if (!tableMatch) return { rowsAffected: 0 };
@@ -151,6 +213,16 @@ export class MemoryDatabase {
       const before = table.rows.length;
       table.rows = table.rows.filter((r) => r[col] !== value);
       return { rowsAffected: before - table.rows.length };
+    }
+
+    // No equality WHERE. An unconditional `DELETE FROM t` (no WHERE at all) is a
+    // full clear — empty the table so it matches real SQLite (used by the
+    // account-switch local wipe). An unrecognized WHERE (e.g. `<`, `IN`) is left
+    // untouched rather than risk over-deleting.
+    if (!/\bWHERE\b/i.test(query)) {
+      const before = table.rows.length;
+      table.rows = [];
+      return { rowsAffected: before };
     }
 
     return { rowsAffected: 0 };

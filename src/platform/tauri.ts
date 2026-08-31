@@ -4,7 +4,12 @@
  * All @tauri-apps/* imports are isolated here.
  * Dynamic imports ensure graceful degradation if Tauri APIs are unavailable.
  */
-import type { PlatformAdapter, OgpData, SaveFileOptions, OpenFileOptions } from "./types";
+import type {
+  PlatformAdapter,
+  OgpData,
+  SaveFileOptions,
+  OpenFileOptions,
+} from "./types";
 
 export const tauriAdapter: PlatformAdapter = {
   isTauri: true,
@@ -47,19 +52,41 @@ export const tauriAdapter: PlatformAdapter = {
     await invoke("print_html", { html });
   },
 
-  async uploadImageFromPath(path: string, uid: string, token: string, bucket: string): Promise<string> {
+  async uploadImageFromPath(
+    path: string,
+    uid: string,
+    token: string,
+    bucket: string,
+  ): Promise<string> {
     const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<string>("upload_image_from_path", { path, uid, token, bucket });
+    return await invoke<string>("upload_image_from_path", {
+      path,
+      uid,
+      token,
+      bucket,
+    });
   },
 
-  async uploadImageFromBase64(data: string, ext: string, uid: string, token: string, bucket: string): Promise<string> {
+  async uploadImageFromBase64(
+    data: string,
+    ext: string,
+    uid: string,
+    token: string,
+    bucket: string,
+  ): Promise<string> {
     const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<string>("upload_image_from_base64", { base64Data: data, ext, uid, token, bucket });
+    return await invoke<string>("upload_image_from_base64", {
+      base64Data: data,
+      ext,
+      uid,
+      token,
+      bucket,
+    });
   },
 
-  async startOAuthListener(): Promise<number> {
+  async startOAuthListener(expectedState?: string): Promise<number> {
     const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<number>("oauth_listen");
+    return await invoke<number>("oauth_listen", { state: expectedState });
   },
 
   async onOAuthCallback(callback: (code: string) => void): Promise<() => void> {
@@ -78,7 +105,9 @@ export const tauriAdapter: PlatformAdapter = {
     return unlisten;
   },
 
-  async onWindowClose(callback: () => Promise<void>): Promise<(() => void) | null> {
+  async onWindowClose(
+    callback: () => Promise<void>,
+  ): Promise<(() => void) | null> {
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const win = getCurrentWindow();
@@ -93,12 +122,16 @@ export const tauriAdapter: PlatformAdapter = {
     }
   },
 
-  async onDragDrop(callback: (paths: string[], position: { x: number; y: number }) => void): Promise<(() => void) | null> {
+  async onDragDrop(
+    callback: (paths: string[], position: { x: number; y: number }) => void,
+  ): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
-      const unlisten = await listen<{ paths: string[]; position: { x: number; y: number } }>(
-        "tauri://drag-drop",
-        (event) => callback(event.payload.paths, event.payload.position),
+      const unlisten = await listen<{
+        paths: string[];
+        position: { x: number; y: number };
+      }>("tauri://drag-drop", (event) =>
+        callback(event.payload.paths, event.payload.position),
       );
       return unlisten;
     } catch {
@@ -106,13 +139,19 @@ export const tauriAdapter: PlatformAdapter = {
     }
   },
 
-  async checkForUpdate(channel: "stable" | "beta" = "stable"): Promise<{ version: string; body?: string; install: () => Promise<void> } | null> {
+  async checkForUpdate(
+    channel: "stable" | "beta" = "stable",
+  ): Promise<{
+    version: string;
+    body?: string;
+    install: () => Promise<void>;
+  } | null> {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const result = await invoke<{ version: string; body: string | null } | null>(
-        "check_for_update",
-        { channel },
-      );
+      const result = await invoke<{
+        version: string;
+        body: string | null;
+      } | null>("check_for_update", { channel });
       if (!result) return null;
       return {
         version: result.version,

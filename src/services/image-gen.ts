@@ -5,9 +5,11 @@
  */
 
 import { auth } from "./firebase";
+import { aiProxyHeaders, reportIfQuota } from "./ai-proxy";
 import { getPlatform } from "@/platform";
 
-const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
+const AI_PROXY_URL =
+  import.meta.env.VITE_AI_PROXY_URL || "http://localhost:8080";
 const STORAGE_BUCKET = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "";
 
 async function getFirebaseToken(): Promise<string> {
@@ -39,16 +41,28 @@ export async function generateImage(
   // Call AI proxy image generation endpoint
   const response = await fetch(`${AI_PROXY_URL}/v1/image/generate`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
+    headers: aiProxyHeaders(token),
     body: JSON.stringify({ prompt }),
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Image generation failed: ${response.status} ${error}`);
+    const raw = await response.text();
+    reportIfQuota(response.status, raw);
+    // The proxy returns { error, finishReason? } as JSON. Surface the plain
+    // message (e.g. the model's "try rephrasing" note) instead of dumping the
+    // raw JSON blob at the user. 422 = model reached but declined the prompt.
+    let message = raw;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.error === "string") message = parsed.error;
+    } catch {
+      /* raw was not JSON — keep as-is */
+    }
+    const error = new Error(message);
+    // 422 = model reached but declined this prompt (recitation/safety). The UI
+    // shows an actionable "rephrase" hint for this, not a generic failure.
+    if (response.status === 422) error.name = "ImagePromptDeclined";
+    throw error;
   }
 
   const result = await response.json();

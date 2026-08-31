@@ -82,6 +82,18 @@ static FRONTEND_ALIVE: AtomicBool = AtomicBool::new(false);
 /// Pending OAuth code from iOS in-webview flow
 static PENDING_OAUTH_CODE: Mutex<Option<String>> = Mutex::new(None);
 
+/// Android OAuth "return to app" page served by the loopback callback. The
+/// system browser opens as a separate task, so we bounce back into the app via
+/// the markflow:// deep link (routed to the singleTask MainActivity by its
+/// BROWSABLE intent-filter). Auto navigation to a custom scheme is gesture-gated
+/// in Chrome, so the visible tap button is the guaranteed path. Dark theme,
+/// Japanese copy, no emoji — mirrors hosting/checkout/success/index.html.
+const OAUTH_ANDROID_RETURN_HTML: &str = r#"<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>サインイン - MarkFlow</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}.card{max-width:460px;padding:3rem;text-align:center}.logo{font-size:1.75rem;font-weight:700;margin-bottom:1.5rem}h1{font-size:1.25rem;margin-bottom:.75rem}p{color:#a1a1aa;font-size:.95rem;line-height:1.7;margin-bottom:1.5rem}.btn{display:inline-block;padding:.7rem 1.75rem;border-radius:.5rem;font-size:.95rem;font-weight:500;text-decoration:none;background:#6366f1;color:#fff}.hint{margin-top:1rem;font-size:.8rem;color:#71717a}</style><script>(function(){try{window.location.href="markflow://oauth"}catch(e){}})();</script></head><body><div class="card"><div class="logo">MarkFlow</div><h1>サインインが完了しました</h1><p>アプリに戻ってください。自動的に戻らない場合は、下のボタンをタップしてください。</p><a class="btn" href="markflow://oauth">アプリに戻る</a><p class="hint">このタブは閉じていただいて構いません。</p></div></body></html>"#;
+
+/// Android OAuth error page (loopback callback). `{{ERR}}` is replaced with the
+/// HTML-escaped provider error code before serving.
+const OAUTH_ANDROID_ERROR_HTML: &str = r#"<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>サインイン - MarkFlow</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#fafafa;min-height:100vh;display:flex;align-items:center;justify-content:center}.card{max-width:460px;padding:3rem;text-align:center}.logo{font-size:1.75rem;font-weight:700;margin-bottom:1.5rem}h1{font-size:1.25rem;margin-bottom:.75rem}p{color:#a1a1aa;font-size:.95rem;line-height:1.7;margin-bottom:1.5rem}.code{color:#71717a;font-size:.8rem;margin-bottom:1.5rem}.btn{display:inline-block;padding:.7rem 1.75rem;border-radius:.5rem;font-size:.95rem;font-weight:500;text-decoration:none;background:#6366f1;color:#fff}</style></head><body><div class="card"><div class="logo">MarkFlow</div><h1>サインインに失敗しました</h1><p>もう一度お試しください。問題が続く場合は時間をおいて再度お試しください。</p><p class="code">{{ERR}}</p><a class="btn" href="markflow://oauth">アプリに戻る</a></div></body></html>"#;
+
 /// Open SFSafariViewController on iOS using ObjC runtime
 #[cfg(target_os = "ios")]
 static SAFARI_VC: Mutex<Option<usize>> = Mutex::new(None);
@@ -423,9 +435,28 @@ async fn fetch_ogp(url: String) -> Result<OgpData, String> {
 }
 
 #[tauri::command]
-async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, String> {
+async fn oauth_listen(
+    app: tauri::AppHandle,
+    ios: Option<bool>,
+    android: Option<bool>,
+    state: Option<String>,
+) -> Result<u16, String> {
     let port: u16 = 19847;
     let is_ios = ios.unwrap_or(false);
+    // Android has no in-app browser sheet to dismiss (unlike iOS's SFSafariVC):
+    // the system browser opens as a SEPARATE task, so after it hits our loopback
+    // socket nothing brings MarkFlow back to the foreground. We instead serve a
+    // "return to app" page that bounces to the markflow:// deep link (the OS then
+    // foregrounds the singleTask activity via its BROWSABLE intent-filter). Auto
+    // navigation to a custom scheme is gesture-gated in Chrome, so the visible
+    // tap button is the guaranteed path; the auth code is already delivered
+    // out-of-band via the oauth-callback event, so sign-in completes regardless.
+    let is_android = android.unwrap_or(false);
+    // Expected OAuth `state` for this sign-in. When present, a callback whose
+    // state does not match is rejected as CSRF / auth-code injection (an attacker
+    // navigating the browser to our loopback callback with THEIR code can't guess
+    // this random value). None disables the check (older callers only).
+    let expected_state = state;
     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .map_err(|e| format!("Failed to bind port {}: {}", port, e))?;
 
@@ -444,6 +475,7 @@ async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, S
                         let query_str = &query_part[..end];
                         let mut code = None;
                         let mut error = None;
+                        let mut returned_state = None;
                         for param in query_str.split('&') {
                             let mut kv = param.splitn(2, '=');
                             match (kv.next(), kv.next()) {
@@ -453,7 +485,20 @@ async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, S
                                 (Some("error"), Some(v)) => {
                                     error = Some(urlencoding::decode(v).unwrap_or_default().to_string())
                                 }
+                                (Some("state"), Some(v)) => {
+                                    returned_state = Some(urlencoding::decode(v).unwrap_or_default().to_string())
+                                }
                                 _ => {}
+                            }
+                        }
+
+                        // CSRF guard: if we expected a state, the callback MUST echo
+                        // it exactly. A mismatch (or missing state) means this is not
+                        // the flow we started — drop the code and surface an error.
+                        if let Some(ref expected) = expected_state {
+                            if returned_state.as_deref() != Some(expected.as_str()) {
+                                code = None;
+                                error = Some("state_mismatch".to_string());
                             }
                         }
 
@@ -477,6 +522,18 @@ async fn oauth_listen(app: tauri::AppHandle, ios: Option<bool>) -> Result<u16, S
                                         }
                                     }
                                 }
+                            } else if is_android {
+                                // Android: system browser is a separate task; serve a page
+                                // that bounces to markflow://oauth so the OS foregrounds the
+                                // app (auto-nav best-effort + mandatory tap fallback).
+                                let html = OAUTH_ANDROID_RETURN_HTML;
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-callback", auth_code);
                             } else {
                                 // Desktop: show success page and emit event
                                 let html = r#"<!DOCTYPE html><html><head><style>
@@ -512,6 +569,24 @@ p{color:#666;margin:0;font-size:0.95em;}
                                         }
                                     }
                                 }
+                            } else if is_android {
+                                // Android: error page also offers a return-to-app button so the
+                                // user isn't stranded in the browser. Escape the reflected error
+                                // (defense-in-depth; err is a provider code but the page is served
+                                // over the loopback socket).
+                                let safe_err = err
+                                    .replace('&', "&amp;")
+                                    .replace('<', "&lt;")
+                                    .replace('>', "&gt;")
+                                    .replace('"', "&quot;");
+                                let html = OAUTH_ANDROID_ERROR_HTML.replace("{{ERR}}", &safe_err);
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(), html
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.flush();
+                                let _ = app.emit("oauth-error", err);
                             } else {
                                 let html = format!(
                                     "<!DOCTYPE html><html><body><p>Authentication error: {}</p></body></html>", err
@@ -750,105 +825,6 @@ async fn upload_image_from_path(
     upload_image_cloud(data, ext, uid, token, bucket).await
 }
 
-/// Upload HTML string to Firebase Storage for publishing.
-/// Stores at `published/{doc_id}.html` with public download URL.
-#[tauri::command]
-async fn upload_html_cloud(
-    html: String,
-    doc_id: String,
-    token: String,
-    bucket: String,
-) -> Result<String, String> {
-    let object_path = format!("published/{}.html", doc_id);
-    let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
-        bucket,
-        urlencoding::encode(&object_path),
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client
-        .post(&upload_url)
-        .header("Authorization", format!("Firebase {}", token))
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("X-Goog-Upload-Protocol", "raw")
-        .header("X-Goog-Upload-Command", "upload, finalize")
-        .body(html.into_bytes())
-        .send()
-        .await
-        .map_err(|e| format!("Upload request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Upload failed (HTTP {}): {}", status, body));
-    }
-
-    let body = resp.text().await.unwrap_or_default();
-    let encoded_path = urlencoding::encode(&object_path);
-
-    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
-                bucket, encoded_path, dl_token
-            )
-        } else {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-                bucket, encoded_path
-            )
-        }
-    } else {
-        format!(
-            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-            bucket, encoded_path
-        )
-    };
-
-    Ok(download_url)
-}
-
-/// Delete a published HTML from Firebase Storage.
-#[tauri::command]
-async fn delete_published_html(
-    doc_id: String,
-    token: String,
-    bucket: String,
-) -> Result<(), String> {
-    let object_path = format!("published/{}.html", doc_id);
-    let delete_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}",
-        bucket,
-        urlencoding::encode(&object_path),
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client
-        .delete(&delete_url)
-        .header("Authorization", format!("Firebase {}", token))
-        .send()
-        .await
-        .map_err(|e| format!("Delete request failed: {}", e))?;
-
-    // 404 = already deleted, treat as success
-    if !resp.status().is_success() && resp.status().as_u16() != 404 {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Delete failed (HTTP {}): {}", status, body));
-    }
-
-    Ok(())
-}
-
 /// Upload image from base64 string — avoids massive JSON number array over IPC.
 #[tauri::command]
 async fn upload_image_from_base64(
@@ -872,10 +848,38 @@ struct UpdateCheckResult {
     body: Option<String>,
 }
 
-const STABLE_ENDPOINT: &str =
+// --- Update manifest endpoints ---
+// Default = public GitHub Releases (works while the repo is public, unchanged
+// behavior for every existing build). The distribution migration (decision #1)
+// self-hosts the manifests + artifacts behind markflow.jp/updates (GCS-backed,
+// see hosting/nginx.conf + scripts/release-updates-gcs.sh) so the GitHub repo
+// can be made PRIVATE without breaking auto-update. The transition build is
+// produced by setting MARKFLOW_UPDATE_BASE=https://markflow.jp/updates at
+// COMPILE time — kept as a compile-time env (not a runtime flag) because Tauri
+// resolves the updater endpoint at build; keeping the default on GitHub means
+// the plain working tree is always shippable even before the new host exists.
+const STABLE_ENDPOINT_GITHUB: &str =
     "https://github.com/momocham922/markflow/releases/latest/download/latest.json";
-const BETA_ENDPOINT: &str =
+const BETA_ENDPOINT_GITHUB: &str =
     "https://github.com/momocham922/markflow/releases/download/beta/beta.json";
+
+fn stable_endpoint() -> String {
+    match option_env!("MARKFLOW_UPDATE_BASE") {
+        Some(base) if !base.is_empty() => {
+            format!("{}/latest.json", base.trim_end_matches('/'))
+        }
+        _ => STABLE_ENDPOINT_GITHUB.to_string(),
+    }
+}
+
+fn beta_endpoint() -> String {
+    match option_env!("MARKFLOW_UPDATE_BASE") {
+        Some(base) if !base.is_empty() => {
+            format!("{}/beta.json", base.trim_end_matches('/'))
+        }
+        _ => BETA_ENDPOINT_GITHUB.to_string(),
+    }
+}
 
 #[tauri::command]
 async fn check_for_update(
@@ -883,8 +887,8 @@ async fn check_for_update(
     channel: String,
 ) -> Result<Option<UpdateCheckResult>, String> {
     let endpoint = match channel.as_str() {
-        "beta" => BETA_ENDPOINT,
-        _ => STABLE_ENDPOINT,
+        "beta" => beta_endpoint(),
+        _ => stable_endpoint(),
     };
 
     let url: url::Url = endpoint.parse().map_err(|e: url::ParseError| e.to_string())?;
@@ -909,8 +913,8 @@ async fn check_for_update(
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), String> {
     let endpoint = match channel.as_str() {
-        "beta" => BETA_ENDPOINT,
-        _ => STABLE_ENDPOINT,
+        "beta" => beta_endpoint(),
+        _ => stable_endpoint(),
     };
 
     let url: url::Url = endpoint.parse().map_err(|e: url::ParseError| e.to_string())?;
@@ -943,7 +947,7 @@ async fn install_update(app: tauri::AppHandle, channel: String) -> Result<(), St
 /// Bypasses semver comparison so beta users can switch back to stable.
 #[tauri::command]
 async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
-    let url: url::Url = STABLE_ENDPOINT
+    let url: url::Url = stable_endpoint()
         .parse()
         .map_err(|e: url::ParseError| e.to_string())?;
 
@@ -1107,9 +1111,24 @@ static VOICE_ARCHIVE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static VOICE_ARCHIVE_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(serde::Serialize)]
+struct VoiceArchiveChunk {
+    gcs_uri: String,
+    /// Global start time of this chunk within the full recording (seconds).
+    start_sec: f64,
+    /// Duration of this chunk (seconds), including overlap with neighbors.
+    duration_sec: f64,
+}
+
+#[derive(serde::Serialize)]
 struct VoiceArchiveResult {
+    /// First chunk — kept for back-compat ("has archive" / retry indicator).
     gcs_uri: String,
     download_url: String,
+    /// Ordered chunks. Recordings ≤58min produce a single chunk (no change).
+    /// Longer recordings are split into ≤55min parts with 20s overlap so each
+    /// stays under chirp_3 BatchRecognize's 60-minute hard limit; the server
+    /// dedups the overlap by word timestamp for lossless boundaries.
+    chunks: Vec<VoiceArchiveChunk>,
 }
 
 // ── App Nap prevention (macOS) ──
@@ -1130,7 +1149,9 @@ fn disable_app_nap() {
         let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
         let reason = objc2_foundation::NSString::from_str("Voice recording");
         let options: u64 = 0x00EFFFFF; // NSActivityUserInitiatedAllowingIdleSystemSleep
-        let activity: *mut AnyObject = msg_send![pi, beginActivityWithOptions: options reason: &*reason];
+        let activity: *mut AnyObject = msg_send![pi, beginActivityWithOptions: options, reason: &*reason];
+        // beginActivityWithOptions: returns an autoreleased object — retain to prevent ARC from freeing it
+        let _: *mut AnyObject = msg_send![activity, retain];
         *APP_NAP_ACTIVITY.lock().unwrap() = activity as usize;
     }
     println!("[voice] App Nap disabled for recording");
@@ -1150,6 +1171,8 @@ fn enable_app_nap() {
             let activity = ptr as *mut AnyObject;
             let pi: *mut AnyObject = msg_send![class!(NSProcessInfo), processInfo];
             let _: () = msg_send![pi, endActivity: activity];
+            // Balance the retain from disable_app_nap
+            let _: () = msg_send![activity, release];
         }
         println!("[voice] App Nap re-enabled");
     }
@@ -1427,7 +1450,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     }
     let sample_rate = unsafe { get_av_sample_rate() } as u32;
     let channels = unsafe { get_av_channels() } as u32;
-    println!("[voice] AVAudioEngine started: {}Hz, {}ch", sample_rate, channels);
+    println!("[voice] AVCaptureSession started: {}Hz, {}ch", sample_rate, channels);
 
     VOICE_SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
     VOICE_CHANNELS.store(channels, Ordering::Relaxed);
@@ -1439,20 +1462,85 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
     }
     VOICE_ACTIVE.store(true, Ordering::SeqCst);
 
-    // Poll AVAudioEngine buffer → VOICE_BUFFER
+    // Poll native capture buffer → VOICE_BUFFER
     std::thread::spawn(|| {
+        extern "C" {
+            fn drain_av_audio_buffer(dest: *mut f32, max: i32) -> i32;
+            fn get_av_total_samples() -> u64;
+        }
         let mut temp = vec![0.0f32; 16384];
+        let mut last_log = std::time::Instant::now();
         while VOICE_ACTIVE.load(Ordering::Relaxed) {
-            extern "C" { fn drain_av_audio_buffer(dest: *mut f32, max: i32) -> i32; }
             let count = unsafe { drain_av_audio_buffer(temp.as_mut_ptr(), temp.len() as i32) };
             if count > 0 {
+                // iOS: write the Refine archive HERE (native poll thread, which
+                // keeps running under UIBackgroundModes audio) instead of in
+                // get_voice_chunk, which is driven by WKWebView JS timers that
+                // stall when backgrounded/screen-off. This preserves full audio
+                // fidelity for Refine while the screen is off. Mic is always
+                // mono on iOS (no system audio), and this runs before the
+                // VOICE_BUFFER try_lock so it's immune to buffer contention.
+                #[cfg(target_os = "ios")]
+                {
+                    use std::io::Write;
+                    const ARCHIVE_RATE: u32 = 16000;
+                    let src_rate =
+                        VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(ARCHIVE_RATE);
+                    let src = &temp[..count as usize];
+                    let resampled: Vec<f32> = if src_rate > ARCHIVE_RATE {
+                        let ratio = src_rate as f64 / ARCHIVE_RATE as f64;
+                        let new_len = (src.len() as f64 / ratio) as usize;
+                        (0..new_len)
+                            .map(|i| {
+                                let pos = i as f64 * ratio;
+                                let idx = pos as usize;
+                                let frac = pos - idx as f64;
+                                let s0 = src[idx.min(src.len() - 1)];
+                                let s1 = src[(idx + 1).min(src.len() - 1)];
+                                s0 + (s1 - s0) * frac as f32
+                            })
+                            .collect()
+                    } else {
+                        src.to_vec()
+                    };
+                    if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
+                        if let Some(ref mut file) = *archive {
+                            for &s in &resampled {
+                                let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                                let _ = file.write_all(&sample.to_le_bytes());
+                            }
+                        }
+                    }
+                }
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     buf.extend_from_slice(&temp[..count as usize]);
                     if buf.len() > MIC_BUFFER_MAX_SAMPLES {
                         let drop = buf.len() - MIC_BUFFER_MAX_SAMPLES;
                         buf.drain(..drop);
+                        // Smoking gun for background loss: the JS drain loop
+                        // (get_voice_chunk) stalled long enough that the ~120s
+                        // cap discarded the oldest audio. Previously silent.
+                        let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
+                        println!(
+                            "[voice][buffer-overflow] dropped {} samples (~{:.1}s) — drain loop stalled (likely backgrounded)",
+                            drop,
+                            drop as f64 / rate,
+                        );
                     }
                 }
+            }
+            // Periodic diagnostics (~every 10s): compare native captured audio
+            // against buffer occupancy to tell "capture stopped" (native flat)
+            // from "drain stalled" (native rising, occupancy rising) on iOS.
+            if last_log.elapsed().as_secs() >= 10 {
+                last_log = std::time::Instant::now();
+                let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
+                let native_total = unsafe { get_av_total_samples() } as f64 / rate;
+                let occupancy = VOICE_BUFFER.lock().map(|b| b.len()).unwrap_or(0) as f64 / rate;
+                println!(
+                    "[voice][diag] native_captured={:.1}s buffer_occupancy={:.1}s",
+                    native_total, occupancy,
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -1832,9 +1920,17 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     let mic_max = mic_rate * 25 * channels;
     let sys_max = sys_rate * 25;
 
+    let voice_active = VOICE_ACTIVE.load(Ordering::Relaxed);
+    // Minimum 5s of audio to avoid short fragments with poor STT quality.
+    // When recording stops (voice_active=false), flush all remaining audio.
+    let mic_min = if voice_active { mic_rate * 5 * channels } else { 0 };
+    let sys_min = if voice_active { sys_rate * 5 } else { 0 };
+
     let mic_samples: Vec<f32> = {
         let mut buf = VOICE_BUFFER.lock().unwrap();
-        if buf.len() <= mic_max {
+        if buf.len() < mic_min {
+            Vec::new()
+        } else if buf.len() <= mic_max {
             std::mem::take(&mut *buf)
         } else {
             let chunk = buf[..mic_max].to_vec();
@@ -1844,7 +1940,9 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     };
     let sys_samples: Vec<f32> = {
         let mut buf = SYSTEM_AUDIO_BUFFER.lock().unwrap();
-        if buf.len() <= sys_max {
+        if buf.len() < sys_min {
+            Vec::new()
+        } else if buf.len() <= sys_max {
             std::mem::take(&mut *buf)
         } else {
             let chunk = buf[..sys_max].to_vec();
@@ -1911,7 +2009,11 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         }).collect()
     };
 
-    // Archive: write mono audio to temp file BEFORE overlap/VAD (continuous, no gaps)
+    // Archive: write mono audio to temp file BEFORE overlap/VAD (continuous, no gaps).
+    // On iOS the archive is written by the native poll thread instead (it keeps
+    // running when backgrounded, unlike this JS-timer-driven command) — skip here
+    // to avoid double-writing. See start_voice_recording_inner.
+    #[cfg(not(target_os = "ios"))]
     if !mono.is_empty() {
         use std::io::Write;
         const ARCHIVE_RATE: u32 = 16000;
@@ -2025,9 +2127,113 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     }))
 }
 
-/// Upload the full-session voice archive to Firebase Storage as a WAV file.
+/// Build a 44-byte WAV header for 16 kHz mono 16-bit PCM of the given data size.
+fn build_wav_header(data_size: u32) -> Vec<u8> {
+    let sample_rate: u32 = 16000;
+    let channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let file_size = 36 + data_size;
+    let mut h = Vec::with_capacity(44);
+    h.extend_from_slice(b"RIFF");
+    h.extend_from_slice(&file_size.to_le_bytes());
+    h.extend_from_slice(b"WAVE");
+    h.extend_from_slice(b"fmt ");
+    h.extend_from_slice(&16u32.to_le_bytes());
+    h.extend_from_slice(&1u16.to_le_bytes());
+    h.extend_from_slice(&channels.to_le_bytes());
+    h.extend_from_slice(&sample_rate.to_le_bytes());
+    h.extend_from_slice(&byte_rate.to_le_bytes());
+    h.extend_from_slice(&block_align.to_le_bytes());
+    h.extend_from_slice(&bits_per_sample.to_le_bytes());
+    h.extend_from_slice(b"data");
+    h.extend_from_slice(&data_size.to_le_bytes());
+    h
+}
+
+/// Stream a byte range of the on-disk PCM archive to Firebase Storage as a WAV
+/// object (header + range). Memory-safe: seek + limited read, 64KB chunks.
+/// Returns (gcs_uri, download_url).
+async fn upload_wav_range(
+    client: &reqwest::Client,
+    bucket: &str,
+    token: &str,
+    object_path: &str,
+    src_path: &str,
+    start_byte: u64,
+    len_bytes: u64,
+) -> Result<(String, String), String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let header = build_wav_header(len_bytes as u32);
+    let mut f = tokio::fs::File::open(src_path)
+        .await
+        .map_err(|e| format!("Failed to open archive: {}", e))?;
+    if start_byte > 0 {
+        f.seek(std::io::SeekFrom::Start(start_byte))
+            .await
+            .map_err(|e| format!("Failed to seek archive: {}", e))?;
+    }
+    let limited = f.take(len_bytes);
+    let header_stream =
+        futures::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(header)) });
+    let file_stream = tokio_util::io::ReaderStream::with_capacity(limited, 65536);
+    let body_stream = header_stream.chain(file_stream);
+    let total_size = 44 + len_bytes;
+
+    let upload_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
+        bucket,
+        urlencoding::encode(object_path),
+    );
+
+    let resp = client
+        .post(&upload_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .header("Content-Type", "audio/wav")
+        .header("Content-Length", total_size.to_string())
+        .header("X-Goog-Upload-Protocol", "raw")
+        .header("X-Goog-Upload-Command", "upload, finalize")
+        .body(reqwest::Body::wrap_stream(body_stream))
+        .send()
+        .await
+        .map_err(|e| format!("Upload failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    let encoded_path = urlencoding::encode(object_path);
+    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
+                bucket, encoded_path, dl_token
+            )
+        } else {
+            format!(
+                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+                bucket, encoded_path
+            )
+        }
+    } else {
+        format!(
+            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+            bucket, encoded_path
+        )
+    };
+    let gcs_uri = format!("gs://{}/{}", bucket, object_path);
+    Ok((gcs_uri, download_url))
+}
+
+/// Upload the full-session voice archive to Firebase Storage as WAV file(s).
 /// Accepts optional `archive_path` for Android (Kotlin archive) — falls back to Rust archive.
-/// Uses chunked reading to avoid loading entire file into memory (iOS OOM protection).
+/// Recordings >58min are split into ≤55min chunks (20s overlap) to stay under
+/// chirp_3 BatchRecognize's 60-minute limit. Uses streaming (seek + limited read)
+/// to avoid loading the whole file into memory (iOS/Android OOM protection).
 #[tauri::command]
 async fn upload_voice_archive(
     uid: String,
@@ -2051,99 +2257,81 @@ async fn upload_voice_archive(
         return Err("Voice archive is empty".into());
     }
 
-    // Build WAV header (44 bytes) — PCM data stays on disk
-    let data_size = pcm_size as u32;
-    let file_size = 36 + data_size;
-    let sample_rate: u32 = 16000;
-    let channels: u16 = 1;
-    let bits_per_sample: u16 = 16;
-    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
-    let block_align = channels * bits_per_sample / 8;
-
-    let mut wav_header = Vec::with_capacity(44);
-    wav_header.extend_from_slice(b"RIFF");
-    wav_header.extend_from_slice(&file_size.to_le_bytes());
-    wav_header.extend_from_slice(b"WAVE");
-    wav_header.extend_from_slice(b"fmt ");
-    wav_header.extend_from_slice(&16u32.to_le_bytes());
-    wav_header.extend_from_slice(&1u16.to_le_bytes());
-    wav_header.extend_from_slice(&channels.to_le_bytes());
-    wav_header.extend_from_slice(&sample_rate.to_le_bytes());
-    wav_header.extend_from_slice(&byte_rate.to_le_bytes());
-    wav_header.extend_from_slice(&block_align.to_le_bytes());
-    wav_header.extend_from_slice(&bits_per_sample.to_le_bytes());
-    wav_header.extend_from_slice(b"data");
-    wav_header.extend_from_slice(&data_size.to_le_bytes());
-
-    let duration_secs = pcm_size as f64 / (sample_rate as f64 * 2.0);
-    println!("[voice] Archive WAV: {} + {} bytes PCM, {:.1}s", wav_header.len(), pcm_size, duration_secs);
-
-    // Stream upload: WAV header + PCM file in 64KB chunks (avoids loading entire file into RAM)
-    let pcm_file = tokio::fs::File::open(&path).await
-        .map_err(|e| format!("Failed to open archive: {}", e))?;
-    let header_stream = futures::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(wav_header)) });
-    let file_stream = tokio_util::io::ReaderStream::with_capacity(pcm_file, 65536);
-    let body_stream = header_stream.chain(file_stream);
-    let total_size = 44 + pcm_size;
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let object_path = format!("audio/{}/{}.wav", uid, id);
-
-    let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
-        bucket,
-        urlencoding::encode(&object_path),
-    );
+    let bytes_per_sec: u64 = 16000 * 2; // 16kHz mono 16-bit
+    let duration_secs = pcm_size as f64 / bytes_per_sec as f64;
+    println!("[voice] Archive: {} bytes PCM, {:.1}s", pcm_size, duration_secs);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client
-        .post(&upload_url)
-        .header("Authorization", format!("Firebase {}", token))
-        .header("Content-Type", "audio/wav")
-        .header("Content-Length", total_size.to_string())
-        .header("X-Goog-Upload-Protocol", "raw")
-        .header("X-Goog-Upload-Command", "upload, finalize")
-        .body(reqwest::Body::wrap_stream(body_stream))
-        .send()
-        .await
-        .map_err(|e| format!("Upload failed: {}", e))?;
+    let id = uuid::Uuid::new_v4().to_string();
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Upload failed (HTTP {}): {}", status, body));
+    // chirp_3 BatchRecognize hard-caps a single file at 60 minutes. Split long
+    // recordings into ≤55min parts with 20s overlap so the server can dedup the
+    // overlap by word timestamp (lossless boundaries). ≤58min → single file.
+    const STEP_SECS: u64 = 55 * 60;
+    const OVERLAP_SECS: u64 = 20;
+    const SINGLE_MAX_SECS: f64 = 58.0 * 60.0;
+
+    let mut chunks: Vec<VoiceArchiveChunk> = Vec::new();
+    let mut first_download_url = String::new();
+
+    if duration_secs <= SINGLE_MAX_SECS {
+        let object_path = format!("audio/{}/{}.wav", uid, id);
+        let (gcs_uri, dl) =
+            upload_wav_range(&client, &bucket, &token, &object_path, &path, 0, pcm_size).await?;
+        first_download_url = dl;
+        chunks.push(VoiceArchiveChunk {
+            gcs_uri,
+            start_sec: 0.0,
+            duration_sec: duration_secs,
+        });
+    } else {
+        let step_bytes = STEP_SECS * bytes_per_sec;
+        let span_bytes = (STEP_SECS + OVERLAP_SECS) * bytes_per_sec;
+        let mut i: u64 = 0;
+        loop {
+            let start_byte = i * step_bytes;
+            if start_byte >= pcm_size {
+                break;
+            }
+            let len = std::cmp::min(span_bytes, pcm_size - start_byte);
+            let object_path = format!("audio/{}/{}-c{}.wav", uid, id, i);
+            let (gcs_uri, dl) =
+                upload_wav_range(&client, &bucket, &token, &object_path, &path, start_byte, len)
+                    .await?;
+            if i == 0 {
+                first_download_url = dl;
+            }
+            chunks.push(VoiceArchiveChunk {
+                gcs_uri,
+                start_sec: start_byte as f64 / bytes_per_sec as f64,
+                duration_sec: len as f64 / bytes_per_sec as f64,
+            });
+            i += 1;
+        }
+        println!(
+            "[voice] Archive split into {} chunks ({:.1}min recording)",
+            chunks.len(),
+            duration_secs / 60.0
+        );
     }
 
-    let body = resp.text().await.unwrap_or_default();
-    let encoded_path = urlencoding::encode(&object_path);
+    let first = chunks.first().ok_or("No chunks produced")?;
+    let gcs_uri = first.gcs_uri.clone();
+    println!(
+        "[voice] Archive uploaded: {} chunk(s), primary GCS: {}",
+        chunks.len(),
+        gcs_uri
+    );
 
-    let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(dl_token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
-                bucket, encoded_path, dl_token
-            )
-        } else {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-                bucket, encoded_path
-            )
-        }
-    } else {
-        format!(
-            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-            bucket, encoded_path
-        )
-    };
-
-    let gcs_uri = format!("gs://{}/{}", bucket, object_path);
-    println!("[voice] Archive uploaded: {} (GCS: {})", download_url, gcs_uri);
-
-    Ok(VoiceArchiveResult { gcs_uri, download_url })
+    Ok(VoiceArchiveResult {
+        gcs_uri,
+        download_url: first_download_url,
+        chunks,
+    })
 }
 
 /// Check if a voice archive file exists (for restoring hasArchive after remount).
@@ -2168,14 +2356,24 @@ fn clear_voice_archive() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_fs::init());
+
+    // In-App Purchase (StoreKit 2 on iOS, Play Billing v9 on Android) — MOBILE ONLY.
+    // The `tauri-plugin-iap` crate is compiled only for iOS/Android (see Cargo.toml
+    // target cfg), so this registration MUST be cfg-gated too, or the desktop build
+    // would fail to resolve the symbol. Desktop keeps Stripe. Purchases stay dark
+    // until VITE_BILLING_ENABLED and the store products go live.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let builder = builder.plugin(tauri_plugin_iap::init());
+
+    builder
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations(
@@ -2316,9 +2514,9 @@ pub fn run() {
                         .as_deref()
                         .unwrap_or("");
                     let endpoint = if version.contains("beta") {
-                        BETA_ENDPOINT
+                        beta_endpoint()
                     } else {
-                        STABLE_ENDPOINT
+                        stable_endpoint()
                     };
 
                     let url: url::Url = match endpoint.parse() {
@@ -2367,7 +2565,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, upload_html_cloud, delete_published_html, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

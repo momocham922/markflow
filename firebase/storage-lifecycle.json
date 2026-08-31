@@ -1,0 +1,15 @@
+{
+  "//": "GCS Object Lifecycle for the Firebase Storage bucket (markflow-app-2026.firebasestorage.app).",
+  "//audio": "Raw voice recordings under audio/{uid}/ are a TRANSIENT processing artifact: uploaded by the client, read ONCE by BatchRecognize during refine, and never played back afterwards. Without a TTL they were retained indefinitely (a privacy liability for a paid app). This rule deletes them 7 days after creation — far beyond the minutes the transcription needs, so no user workflow breaks, while bounding retention of sensitive voice data.",
+  "//scope": "matchesPrefix is scoped to audio/ ONLY. images/ (embedded in documents — must persist forever) and published/ (live published pages) never match and are NOT affected. NOTE: a bucket has a single lifecycle config; applying this REPLACES any existing one. Verified empty before first apply (2026-08-25).",
+  "//apply": "The GCS lifecycle API accepts ONLY the `rule` field, so strip the `//` doc keys first. NOT part of `firebase deploy` (that manages storage.rules only). Run: jq '{rule}' firebase/storage-lifecycle.json > /tmp/lc.json && gcloud storage buckets update gs://markflow-app-2026.firebasestorage.app --lifecycle-file=/tmp/lc.json --account ga.crossmedia@gmail.com",
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "age": 7,
+        "matchesPrefix": ["audio/"]
+      }
+    }
+  ]
+}

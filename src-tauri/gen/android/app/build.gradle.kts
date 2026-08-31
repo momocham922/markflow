@@ -18,12 +18,16 @@ android {
     namespace = "com.markflow.editor"
     signingConfigs {
         create("release") {
+            // No hardcoded password fallback: release signing requires ANDROID_KEYSTORE_PASS
+            // in the environment. When unset (e.g. debug/dev builds) the signing config is left
+            // unpopulated and only release builds fail loudly — never a silent compromised default.
             val ks = file(System.getProperty("user.home") + "/.android/markflow-release.keystore")
-            if (ks.exists()) {
+            val ksPass = System.getenv("ANDROID_KEYSTORE_PASS")
+            if (ks.exists() && ksPass != null) {
                 storeFile = ks
-                storePassword = System.getenv("ANDROID_KEYSTORE_PASS") ?: "markflow2026"
+                storePassword = ksPass
                 keyAlias = "markflow"
-                keyPassword = System.getenv("ANDROID_KEY_PASS") ?: System.getenv("ANDROID_KEYSTORE_PASS") ?: "markflow2026"
+                keyPassword = System.getenv("ANDROID_KEY_PASS") ?: ksPass
             }
         }
     }

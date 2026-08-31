@@ -25,10 +25,24 @@ import { useAppStore } from "@/stores/app-store";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
+import { buildThemeVarLines } from "@/lib/theme-css";
+import { MERMAID_FONT, resolveMermaidConfig } from "@/lib/mermaid-theme";
+import { emitLocalEdit } from "@/lib/local-edit-signal";
 import { markdownShortcuts } from "@/extensions/markdown-shortcuts";
-import { imagePaste, processImagePath } from "@/extensions/image-paste";
+import {
+  imagePaste,
+  processImagePath,
+  makeUploadPlaceholder,
+  replaceUploadPlaceholder,
+} from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
-import { VoicePanel } from "./VoicePanel";
+import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
+import { ResearchPanel } from "./ResearchPanel";
+import { useResearchPipeline } from "@/hooks/use-research-pipeline";
+import {
+  useResearchWindowManager,
+  registerResearchInsert,
+} from "@/hooks/use-research-window";
 import { useAutoVersion } from "@/hooks/use-auto-version";
 import { useCollaboration } from "@/hooks/use-collaboration";
 import {
@@ -150,13 +164,12 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
 
 marked.use({ renderer });
 
-const MERMAID_FONT =
-  'ui-sans-serif, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif';
-
+// Neutral safety-net init at module load. The real brand palette is applied
+// per render pass from the active preview theme (see mermaidCfg below).
 function initMermaid() {
   mermaid.initialize({
     startOnLoad: false,
-    theme: "default",
+    theme: "base",
     themeVariables: { fontFamily: MERMAID_FONT, fontSize: "14px" },
     flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
     sequence: { useMaxWidth: true },
@@ -168,7 +181,7 @@ initMermaid();
 // Module-level cache — survives component remounts
 const mermaidSvgCache = new Map<string, string>();
 
-function fixMermaidSvg(el: HTMLElement, dark: boolean) {
+function fixMermaidSvg(el: HTMLElement) {
   const svg = el.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
 
@@ -241,45 +254,9 @@ function fixMermaidSvg(el: HTMLElement, dark: boolean) {
     modified = true;
   }
 
-  // --- Dark mode: transparent main bg + darken section colors ---
-  if (dark) {
-    // Make the largest rect (main background) transparent
-    let mainBg: Element | null = null;
-    let maxArea = 0;
-    for (const r of allRects) {
-      if (sectionRects.includes(r)) continue;
-      const a =
-        parseFloat(r.getAttribute("width") || "0") *
-        parseFloat(r.getAttribute("height") || "0");
-      if (a > maxArea) {
-        maxArea = a;
-        mainBg = r;
-      }
-    }
-    if (mainBg) {
-      mainBg.setAttribute("fill", "transparent");
-      modified = true;
-    }
-
-    for (const r of sectionRects) {
-      const fill = r.getAttribute("fill") || "";
-      const m = fill.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (m) {
-        r.setAttribute(
-          "fill",
-          `rgba(${Math.round(Number(m[1]) * 0.25)}, ${Math.round(Number(m[2]) * 0.25)}, ${Math.round(Number(m[3]) * 0.25)}, 0.6)`,
-        );
-      }
-      const stroke = r.getAttribute("stroke") || "";
-      const sm = stroke.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (sm) {
-        r.setAttribute(
-          "stroke",
-          `rgba(${Math.round(Number(sm[1]) * 0.35)}, ${Math.round(Number(sm[2]) * 0.35)}, ${Math.round(Number(sm[3]) * 0.35)}, 0.5)`,
-        );
-      }
-    }
-  }
+  // Diagram colors (nodes / edges / text / dark mode) are now driven natively by
+  // the Mermaid `base` themeVariables resolved from the active preview theme, so
+  // no manual per-element re-tinting is needed here.
 
   // --- Update viewBox only if elements were expanded AND getBBox is valid ---
   if (modified) {
@@ -316,6 +293,8 @@ export function Editor() {
   );
   const [scrollSyncEnabled, setScrollSyncEnabled] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState("");
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
   const setView = useEditorStore((s) => s.setView);
@@ -423,6 +402,25 @@ export function Editor() {
     title: activeDoc?.title ?? "",
     collabActive: isCollabReady,
   });
+
+  // Reset the mirrored transcript to the newly-opened document's saved value
+  // when switching docs, so the research pipeline never sees the previous
+  // document's transcript. (VoicePanel is remounted per doc, but this keeps the
+  // Editor-level mirror document-scoped too.)
+  useEffect(() => {
+    setVoiceTranscript(activeDoc?.voiceTranscript || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDocId]);
+
+  useResearchPipeline({
+    isRecording: voiceRecording,
+    fullTranscript: voiceTranscript,
+    documentContent: activeDoc?.content || "",
+    activeDocId,
+  });
+
+  // Bridges research-store state to the standalone floating window (desktop).
+  useResearchWindowManager();
 
   // Auto-convert legacy HTML content to Markdown on first load
   useEffect(() => {
@@ -573,11 +571,25 @@ export function Editor() {
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
-  const prevThemeRef = useRef(theme);
+
+  // Brand Mermaid palette derived from the active preview theme × light/dark.
+  // The signature encodes theme id + mode + resolved colors, so it doubles as
+  // the render-cache key (re-renders exactly when the palette changes).
+  const mermaidCfg = useMemo(
+    () =>
+      resolveMermaidConfig(
+        themeSettings.previewTheme,
+        theme === "dark",
+        customPreviewThemes,
+      ),
+    [themeSettings.previewTheme, theme, customPreviewThemes],
+  );
+  const mermaidSig = mermaidCfg.signature;
+  const prevSigRef = useRef(mermaidSig);
 
   const restoreMermaidFromCache = useCallback(
     (container: HTMLElement) => {
-      const prefix = theme === "dark" ? "d:" : "l:";
+      const prefix = mermaidSig + ":";
       const divs = container.querySelectorAll<HTMLElement>(".mermaid");
       for (const el of Array.from(divs)) {
         const source = el.getAttribute("data-mermaid-source") || "";
@@ -593,7 +605,7 @@ export function Editor() {
         }
       }
     },
-    [theme],
+    [mermaidSig],
   );
 
   const previewVisible = previewMode !== "edit" && previewMode !== "mindmap";
@@ -602,34 +614,56 @@ export function Editor() {
     if (!previewVisible) return;
     const container = previewRef.current;
     if (!container) return;
-    const themeChanged = prevThemeRef.current !== theme;
-    prevThemeRef.current = theme;
-    if (themeChanged) {
+    const paletteChanged = prevSigRef.current !== mermaidSig;
+    prevSigRef.current = mermaidSig;
+    if (paletteChanged) {
       container
         .querySelectorAll<HTMLElement>(".mermaid[data-mermaid-processed]")
         .forEach((el) => {
           el.removeAttribute("data-mermaid-processed");
           el.innerHTML = "";
         });
+      // Immediately restore from the NEW palette's cache (if present) so a theme
+      // switch back to a previously-rendered palette shows the diagram in the
+      // same synchronous frame instead of flashing an empty box.
+      restoreMermaidFromCache(container);
       return;
     }
     restoreMermaidFromCache(container);
-  }, [previewHtml, theme, previewVisible, restoreMermaidFromCache]);
+  }, [previewHtml, mermaidSig, previewVisible, restoreMermaidFromCache]);
 
   const renderMermaidRef = useRef<(() => void) | null>(null);
   renderMermaidRef.current = () => {
     const container = previewRef.current;
     if (!container) return;
-    const isDark = theme === "dark";
-    const prefix = isDark ? "d:" : "l:";
+    // Signature this batch renders under. `mermaid.initialize` mutates a single
+    // global config, so if the palette changes mid-batch (prevSigRef advances to
+    // the new sig) an in-flight render would produce a wrong-palette SVG. We
+    // abort the batch the moment the live palette no longer matches, so a stale
+    // SVG is never written to the DOM or cached under this (now-wrong) key.
+    const batchSig = mermaidSig;
+    const prefix = batchSig + ":";
     const divs = container.querySelectorAll<HTMLElement>(".mermaid");
     const needsRender = Array.from(divs).filter((el) => {
       if (el.querySelector("svg")) return false;
       return true;
     });
     if (needsRender.length === 0) return;
+    // Apply the current brand palette before rendering this batch.
+    try {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "base",
+        themeVariables: mermaidCfg.themeVariables,
+        flowchart: { htmlLabels: false, padding: 15, useMaxWidth: true },
+        sequence: { useMaxWidth: true },
+      });
+    } catch {
+      /* keep last-good config */
+    }
     (async () => {
       for (const el of needsRender) {
+        if (prevSigRef.current !== batchSig) return; // palette moved on — abort
         if (!el.isConnected || el.querySelector("svg")) continue;
         const source = el.getAttribute("data-mermaid-source") || "";
         if (!source) continue;
@@ -644,12 +678,15 @@ export function Editor() {
             `mermaid-${Math.random().toString(36).slice(2)}`,
             source,
           );
+          // The palette may have changed while awaiting; if so this SVG was
+          // rendered under a now-stale global config — discard it entirely.
+          if (prevSigRef.current !== batchSig) return;
           mermaidSvgCache.set(prefix + source, svg);
           if (!el.isConnected) continue;
           el.innerHTML = svg;
           bindFunctions?.(el);
           try {
-            fixMermaidSvg(el, isDark);
+            fixMermaidSvg(el);
             mermaidSvgCache.set(prefix + source, el.innerHTML);
           } catch {
             /* fixMermaidSvg failed — cache still has raw SVG */
@@ -673,7 +710,7 @@ export function Editor() {
       clearTimeout(t2);
       clearTimeout(t3);
     };
-  }, [previewHtml, theme, previewVisible]);
+  }, [previewHtml, mermaidSig, previewVisible]);
 
   useEffect(() => {
     if (!previewVisible) return;
@@ -751,9 +788,9 @@ export function Editor() {
     if (theme === "dark" && preset.dark) {
       Object.assign(vars, preset.dark);
     }
-    const entries = Object.entries(vars)
-      .map(([k, v]) => `  ${k}: ${v};`)
-      .join("\n");
+    // Sanitize: custom (imported) themes are untrusted and go straight into a
+    // <style> tag — an unfiltered value can break out and inject arbitrary CSS.
+    const entries = buildThemeVarLines(vars);
     return `:root {\n${entries}\n}`;
   }, [themeSettings.previewTheme, theme, customPreviewThemes]);
 
@@ -776,11 +813,18 @@ export function Editor() {
         if (firstLine) updates.title = firstLine.slice(0, 50);
       }
       updateDocument(activeDocId, updates);
+      // Non-collab (personal) docs edit through this controlled onChange path.
+      // Collab docs are handled in onUpdate (isUserEvent-gated) to exclude
+      // remote yCollab sync — don't double-emit here.
+      if (!isCollabReadyRef.current) {
+        emitLocalEdit(activeDocId, updates.title ?? activeDoc?.title ?? "");
+      }
     },
     [
       activeDocId,
       activeDoc?.titlePinned,
       activeDoc?.ownerId,
+      activeDoc?.title,
       user?.uid,
       updateDocument,
     ],
@@ -819,7 +863,14 @@ export function Editor() {
               tr.isUserEvent("redo") ||
               tr.isUserEvent("move")),
         );
-        if (hasLocal) markLocalEditRef.current();
+        if (hasLocal) {
+          markLocalEditRef.current();
+          // Attribute Slack edit-notifications to the current user only.
+          // Read the active doc fresh so title/id are never stale.
+          const st = useAppStore.getState();
+          const d = st.documents.find((x) => x.id === st.activeDocId);
+          if (d) emitLocalEdit(d.id, d.title);
+        }
       }
     },
     [setView],
@@ -834,8 +885,16 @@ export function Editor() {
       if (isCollabReady) {
         collabReplaceContent(content);
       }
+      // Restoring is a genuine local edit but bypasses onChange/onUpdate.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
-    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
+    [
+      activeDocId,
+      activeDoc?.title,
+      updateDocument,
+      isCollabReady,
+      collabReplaceContent,
+    ],
   );
 
   // Watch for pending restore from VersionPanel (store-based bridge)
@@ -857,6 +916,17 @@ export function Editor() {
       if (pendingInsert.mode === "replace") {
         const { from, to } = view.state.selection.main;
         view.dispatch({ changes: { from, to, insert: pendingInsert.text } });
+      } else if (pendingInsert.mode === "replaceAll") {
+        // Content protection: don't wipe a non-empty doc with empty text.
+        if (pendingInsert.text.trim() || view.state.doc.length === 0) {
+          view.dispatch({
+            changes: {
+              from: 0,
+              to: view.state.doc.length,
+              insert: pendingInsert.text,
+            },
+          });
+        }
       } else {
         const len = view.state.doc.length;
         view.dispatch({
@@ -953,7 +1023,7 @@ export function Editor() {
             const pos =
               view.posAtCoords({ x: position.x, y: position.y }) ??
               view.state.selection.main.head;
-            const placeholder = "![Uploading image...]()";
+            const placeholder = makeUploadPlaceholder();
             view.dispatch({
               changes: { from: pos, insert: placeholder + "\n" },
             });
@@ -963,34 +1033,13 @@ export function Editor() {
                 imagePaths.map((p) => processImagePath(p)),
               );
               const v = viewRef.current;
-              if (v) {
-                const doc = v.state.doc.toString();
-                const idx = doc.indexOf(placeholder);
-                if (idx >= 0) {
-                  v.dispatch({
-                    changes: {
-                      from: idx,
-                      to: idx + placeholder.length,
-                      insert: markdowns.join("\n"),
-                    },
-                  });
-                }
-              }
+              if (v)
+                replaceUploadPlaceholder(v, placeholder, markdowns.join("\n"));
             } catch (err: unknown) {
               const v = viewRef.current;
               if (v) {
-                const doc = v.state.doc.toString();
-                const idx = doc.indexOf(placeholder);
-                if (idx >= 0) {
-                  const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-                  v.dispatch({
-                    changes: {
-                      from: idx,
-                      to: idx + placeholder.length,
-                      insert: errMsg,
-                    },
-                  });
-                }
+                const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
+                replaceUploadPlaceholder(v, placeholder, errMsg);
               }
             }
           })) ?? undefined;
@@ -1009,8 +1058,10 @@ export function Editor() {
     (content: string) => {
       if (!activeDocId) return;
       updateDocument(activeDocId, { content, updatedAt: Date.now() });
+      // Direct updateDocument bypasses onChange, so emit the local-edit signal.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
-    [activeDocId, updateDocument],
+    [activeDocId, activeDoc?.title, updateDocument],
   );
   const handleMindMapTitleChange = useCallback(
     (title: string) => {
@@ -1035,14 +1086,24 @@ export function Editor() {
       if (isCollabReady) {
         collabReplaceContent(newContent);
       }
+      // Neither onChange (ExternalChange) nor onUpdate (programmatic collab
+      // dispatch lacks userEvent) fires here — emit the local-edit signal.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
     [
       activeDocId,
       activeDoc?.content,
+      activeDoc?.title,
       updateDocument,
       isCollabReady,
       collabReplaceContent,
     ],
+  );
+
+  // Let the research UI (panel / floating window) insert a card into the doc.
+  useEffect(
+    () => registerResearchInsert(handleInsertMarkdown),
+    [handleInsertMarkdown],
   );
 
   const handleSetContent = useCallback(
@@ -1055,8 +1116,25 @@ export function Editor() {
       if (isCollabReady) {
         collabReplaceContent(newContent);
       }
+      // Direct updateDocument / programmatic collab dispatch bypass the
+      // onChange/onUpdate emit paths — signal this genuine local edit.
+      emitLocalEdit(activeDocId, activeDoc?.title ?? "");
     },
-    [activeDocId, updateDocument, isCollabReady, collabReplaceContent],
+    [
+      activeDocId,
+      activeDoc?.title,
+      updateDocument,
+      isCollabReady,
+      collabReplaceContent,
+    ],
+  );
+
+  const handleVoiceDataChange = useCallback(
+    (update: VoiceDataUpdate) => {
+      if (!activeDocId) return;
+      updateDocument(activeDocId, update);
+    },
+    [activeDocId, updateDocument],
   );
 
   if (!activeDoc) {
@@ -1091,7 +1169,8 @@ export function Editor() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
+      {voiceOpen && !isMobile && <ResearchPanel />}
       <EditorToolbar
         previewMode={previewMode}
         onPreviewModeChange={setPreviewMode}
@@ -1139,7 +1218,7 @@ export function Editor() {
           ) : undefined
         }
       />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
         {/* Editor pane — always mounted, hidden in preview-only and mindmap modes */}
         <div
           ref={editorScrollRef}
@@ -1176,6 +1255,7 @@ export function Editor() {
         {previewMode === "mindmap" && (
           <div className="flex-1">
             <MindMapView
+              docId={activeDocId ?? undefined}
               content={activeDoc.content || ""}
               title={activeDoc.title}
               onNodeClick={({ text }) => {
@@ -1230,7 +1310,14 @@ export function Editor() {
                     const lines = content.split("\n");
                     let cbCount = 0;
                     for (let i = 0; i < lines.length; i++) {
-                      const match = lines[i].match(/^(\s*[-*+]\s*)\[([ xX])\]/);
+                      // Must match every list item marked renders as a task
+                      // checkbox — including ORDERED items (`1. [ ]`), which marked
+                      // also turns into checkboxes. Counting only `[-*+]` here while
+                      // the preview counts all of them shifts the index and toggles
+                      // the wrong line.
+                      const match = lines[i].match(
+                        /^(\s*(?:[-*+]|\d+[.)])\s+)\[([ xX])\]/,
+                      );
                       if (match) {
                         if (cbCount === idx) {
                           const isChecked = match[2] !== " ";
@@ -1238,10 +1325,20 @@ export function Editor() {
                             /\[([ xX])\]/,
                             isChecked ? "[ ]" : "[x]",
                           );
+                          const toggled = lines.join("\n");
                           updateDocument(activeDocId, {
-                            content: lines.join("\n"),
+                            content: toggled,
                             updatedAt: Date.now(),
                           });
+                          // Collab docs: Y.Doc is the source of truth. Without
+                          // this the toggle updates only the local store/preview
+                          // and is reverted on the next sync (never reaching
+                          // peers). Mirror the other content handlers.
+                          if (isCollabReady) collabReplaceContent(toggled);
+                          // Direct updateDocument bypasses onChange/onUpdate
+                          // (applied as an ExternalChange), so signal this
+                          // genuine local edit for the Slack edit-notification.
+                          emitLocalEdit(activeDocId, activeDoc?.title ?? "");
                           break;
                         }
                         cbCount++;
@@ -1256,6 +1353,42 @@ export function Editor() {
                   e.preventDefault();
                   const docId = target.getAttribute("data-doc-id");
                   if (docId) setActiveDocId(docId);
+                  return;
+                }
+                // In-document anchor link ([text](#見出しテキスト)) → scroll to the
+                // heading whose text matches the fragment. Used by research
+                // supplements to link back to the related meeting topic.
+                const anchorEl = (e.target as HTMLElement).closest(
+                  'a[href^="#"]',
+                ) as HTMLAnchorElement | null;
+                if (anchorEl) {
+                  const rawFrag = (anchorEl.getAttribute("href") || "").slice(
+                    1,
+                  );
+                  let frag = rawFrag.trim();
+                  try {
+                    frag = decodeURIComponent(rawFrag).trim();
+                  } catch {
+                    /* malformed %-sequence — use raw fragment */
+                  }
+                  if (frag) {
+                    e.preventDefault();
+                    const container = previewScrollRef.current;
+                    const headings = container?.querySelectorAll(
+                      "h1, h2, h3, h4, h5, h6",
+                    );
+                    if (headings) {
+                      for (const heading of headings) {
+                        if (heading.textContent?.trim() === frag) {
+                          heading.scrollIntoView({
+                            behavior: "smooth",
+                            block: "start",
+                          });
+                          break;
+                        }
+                      }
+                    }
+                  }
                 }
               }}
             />
@@ -1285,9 +1418,15 @@ export function Editor() {
       </div>
       {voiceOpen && (
         <VoicePanel
+          key={activeDocId}
           onInsertMarkdown={handleInsertMarkdown}
           onSetContent={handleSetContent}
           documentContent={activeDoc?.content || ""}
+          onTranscriptChange={setVoiceTranscript}
+          onRecordingChange={setVoiceRecording}
+          voiceTranscript={activeDoc?.voiceTranscript}
+          voiceGcsUri={activeDoc?.voiceGcsUri}
+          onVoiceDataChange={handleVoiceDataChange}
         />
       )}
     </div>

@@ -8,36 +8,108 @@ import {
   Monitor,
   Info,
   Wand2,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isAndroid, isMobile, isTauri } from "@/platform";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
+import { useResearchStore } from "@/stores/research-store";
+import type { ResearchCard } from "@/stores/research-store";
+import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
+import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
+import { extractHints } from "@/lib/text-utils";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
+
+/**
+ * Build the "Questions Context" block for Structure/Refine. Speaker-questions
+ * are prompts the user may ASK — NOT facts and NOT meeting speech — so they go
+ * into their own trailing '## 確認したいこと' section, kept separate from the
+ * web-research '## 補足情報（Web調査）' section and never woven into the body.
+ */
+function buildQuestionsContext(questionCards: ResearchCard[]): string {
+  return (
+    "\n\n## Questions Context (follow-up questions to ASK — NOT meeting content)\n" +
+    "These are candidate questions the user may want to ASK the other participants. " +
+    "They are NOT facts and NOT anything anyone said. Follow the SEPARATION RULE: " +
+    "collect them under a SINGLE trailing section titled '## 確認したいこと' " +
+    "(translate the title to match the document's language), placed AFTER any " +
+    "'## 補足情報（Web調査）' section and clearly separate from it. Render as a " +
+    "bulleted checklist of the questions themselves; you MAY drop any ' — *intent*' " +
+    "annotation and merge duplicate/near-identical questions. Do NOT weave them " +
+    "into the minutes body. Omit the section entirely if none are meaningful.\n\n" +
+    questionCards.map((c) => c.summary).join("\n")
+  );
+}
+
+export interface VoiceDataUpdate {
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  voiceRecordedAt?: number | null;
+}
 
 interface VoicePanelProps {
   onInsertMarkdown: (markdown: string) => void;
   onSetContent: (content: string) => void;
   documentContent: string;
+  onTranscriptChange?: (transcript: string) => void;
+  onRecordingChange?: (isRecording: boolean) => void;
+  voiceTranscript?: string | null;
+  voiceGcsUri?: string | null;
+  onVoiceDataChange?: (update: VoiceDataUpdate) => void;
 }
 
-function extractHints(text: string): string[] {
-  const hints = new Set<string>();
-  // 漢字複合語（3文字以上 — 短い一般語を除外して固有名詞・専門用語に絞る）
-  const kanji = text.match(/[一-鿿]{3,}/g);
-  if (kanji) kanji.forEach((w) => hints.add(w));
-  // カタカナ語（4文字以上 — 一般的なカタカナ語を除外）
-  const katakana = text.match(/[゠-ヿ]{4,}/g);
-  if (katakana) katakana.forEach((w) => hints.add(w));
-  // 英単語（大文字始まり4文字以上）
-  const english = text.match(/[A-Z][a-zA-Z]{3,}/g);
-  if (english) english.forEach((w) => hints.add(w));
-  // 長い語を優先（固有名詞は一般語より長い傾向）
-  return Array.from(hints)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 50);
+function ResearchTriggerButton() {
+  const analyzing = useResearchStore((s) => s.analyzing);
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="h-7 w-7 shrink-0"
+      onClick={triggerResearchAnalysis}
+      disabled={analyzing}
+      title="Analyze now"
+    >
+      {analyzing ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />
+      ) : (
+        <Search className="h-3.5 w-3.5" />
+      )}
+    </Button>
+  );
+}
+
+/**
+ * Mobile entry point to the research bottom sheet. The sheet (not this button)
+ * holds the toggles + manual "今すぐ解析", so this stays a compact icon that
+ * never crowds the transcription controls row. Shows a live card count badge.
+ */
+function MobileResearchButton() {
+  const count = useResearchStore((s) => s.cards.length);
+  const analyzing = useResearchStore((s) => s.analyzing);
+  const setMobileSheetOpen = useResearchStore((s) => s.setMobileSheetOpen);
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="relative h-8 w-8 shrink-0"
+      onClick={() => setMobileSheetOpen(true)}
+      title="リサーチ"
+    >
+      {analyzing ? (
+        <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+      ) : (
+        <Search className="h-4 w-4" />
+      )}
+      {count > 0 && (
+        <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-500 px-1 text-[9px] font-semibold text-white">
+          {count}
+        </span>
+      )}
+    </Button>
+  );
 }
 
 function formatDuration(seconds: number): string {
@@ -46,10 +118,33 @@ function formatDuration(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
+/**
+ * Prepare the live transcript for display: strip raw diarization labels
+ * (e.g. "[Speaker 0]") — these are for internal pipeline use only and must
+ * never be shown raw — and split chunk boundaries ("\n---\n") into segments
+ * so they can be rendered as visual divider lines.
+ */
+function toTranscriptSegments(raw: string): string[] {
+  return raw
+    .split(/\n---\n/)
+    .map((seg) =>
+      seg
+        .replace(/\[Speaker[^\]]*\]\s*/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    )
+    .filter((seg) => seg.length > 0);
+}
+
 export function VoicePanel({
   onInsertMarkdown,
   onSetContent,
   documentContent,
+  onTranscriptChange,
+  onRecordingChange,
+  voiceTranscript: savedVoiceTranscript,
+  voiceGcsUri: savedVoiceGcsUri,
+  onVoiceDataChange,
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [refining, setRefining] = useState(false);
@@ -65,8 +160,20 @@ export function VoicePanel({
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastStructuredRef = useRef("");
+  // Mirror of lastStructuredRef for the UI: the transcript text as of the last
+  // successful Structure run. Drives the highlighted divider in the preview.
+  // (A ref alone doesn't trigger re-render.)
+  const [lastStructuredText, setLastStructuredText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const refineAbortRef = useRef<AbortController | null>(null);
+  // Chunks from the last archive upload this session. Lets a Refine retry skip
+  // re-uploading (and re-splitting) the audio. Long recordings (>58min) are
+  // split into ≤55min parts with 20s overlap to clear chirp_3's 60-min limit.
+  const uploadedChunksRef = useRef<Array<{
+    gcsUri: string;
+    startSec: number;
+    durationSec: number;
+  }> | null>(null);
 
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
@@ -93,6 +200,9 @@ export function VoicePanel({
   const onSetContentRef = useRef(onSetContent);
   const docContentRef = useRef(documentContent);
   const sttVocabRef = useRef<Set<string>>(new Set());
+  const onVoiceDataChangeRef = useRef(onVoiceDataChange);
+  const savedVoiceGcsUriRef = useRef(savedVoiceGcsUri);
+  const hasArchiveRef = useRef(false);
 
   const {
     isRecording,
@@ -121,6 +231,10 @@ export function VoicePanel({
     onInfo: (msg) => setVoiceInfo(msg),
     onMaxDuration: () =>
       setVoiceError("Recording stopped: maximum duration (4 hours) reached."),
+    initialTranscript: savedVoiceTranscript || "",
+    onTranscriptUpdate: (text) => {
+      onVoiceDataChangeRef.current?.({ voiceTranscript: text || null });
+    },
   });
 
   useEffect(() => {
@@ -134,8 +248,42 @@ export function VoicePanel({
     });
   }, []);
 
+  // Background-gap notice (mobile). While the app is backgrounded / screen-off,
+  // the WebView's JS timers freeze, so the LIVE transcript can't advance — but
+  // native capture keeps recording the full session into the Refine archive
+  // (iOS AVAudioEngine / Android microphone foreground service). On return, make
+  // that explicit rather than leaving a silent gap: the audio was preserved and
+  // "Refine" re-transcribes + structures the whole recording. Active only while
+  // recording; the listener is removed as soon as recording stops.
   useEffect(() => {
-    if (isRecording) setHasArchive(true);
+    if (!isMobile || !isRecording) return;
+    let hiddenAt = 0;
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+      } else if (hiddenAt) {
+        const gapSec = Math.round((Date.now() - hiddenAt) / 1000);
+        hiddenAt = 0;
+        if (gapSec >= 5) {
+          setVoiceInfo(
+            `バックグラウンド中の約${gapSec}秒はライブ表示に反映されませんが、音声は録音され続けています。停止後に「Refine」で全体を文字起こし・構造化できます。`,
+          );
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [isRecording]);
+
+  useEffect(() => {
+    if (isRecording) {
+      setHasArchive(true);
+      uploadedChunksRef.current = null;
+      onVoiceDataChangeRef.current?.({
+        voiceGcsUri: null,
+        voiceRecordedAt: null,
+      });
+    }
   }, [isRecording]);
 
   useEffect(() => {
@@ -158,10 +306,21 @@ export function VoicePanel({
     };
   }, [isRecording]);
 
+  useEffect(() => {
+    onTranscriptChange?.(fullTranscript);
+  }, [fullTranscript, onTranscriptChange]);
+
+  useEffect(() => {
+    onRecordingChange?.(isRecording);
+  }, [isRecording, onRecordingChange]);
+
   // Keep refs in sync
   useEffect(() => {
     fullTranscriptRef.current = fullTranscript;
   }, [fullTranscript]);
+  useEffect(() => {
+    hasArchiveRef.current = hasArchive;
+  }, [hasArchive]);
   useEffect(() => {
     structuringRef.current = structuring;
   }, [structuring]);
@@ -174,6 +333,12 @@ export function VoicePanel({
   useEffect(() => {
     docContentRef.current = documentContent;
   }, [documentContent]);
+  useEffect(() => {
+    onVoiceDataChangeRef.current = onVoiceDataChange;
+  }, [onVoiceDataChange]);
+  useEffect(() => {
+    savedVoiceGcsUriRef.current = savedVoiceGcsUri;
+  }, [savedVoiceGcsUri]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -217,10 +382,13 @@ export function VoicePanel({
         "CRITICAL: You are NOT creating a cleaned-up transcript or conversation log. " +
         "You MUST deeply understand the content and produce an INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
         "Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
+        "CONSOLIDATION (CRITICAL — the document must be non-redundant): Each distinct topic, decision, fact, definition, number, or conclusion must appear EXACTLY ONCE, in the single most relevant section. Conversations naturally circle back to the same topic — do NOT create a new section, and do NOT restate the point, each time it recurs. Instead, gather everything about a topic into its one section. Never repeat the same conclusion/figure/definition/action item across multiple sections; if it is relevant elsewhere, refer to it in one short phrase rather than duplicating the content. Before finalizing, scan your own output and merge any sections or bullets that cover the same subject. A tight, well-consolidated document is strongly preferred over a long, exhaustive, repetitive one. " +
         "Use speaker information INTERNALLY to understand context and perspectives. NEVER output raw speaker labels like 'Speaker 0', 'speaker1'. If a speaker's name is identifiable from the transcript, use their real name for attribution (e.g., '田中さんが指摘した問題点'). Otherwise describe by role or paraphrase without attribution. " +
         "The transcript contains '---' markers indicating chunk boundaries. Speaker labels are ONLY consistent WITHIN segments between --- markers — the same speaker may have different labels in different segments. Use speech content to identify and unify speakers across segments. " +
         "Omit filler, repetition, backchannel responses, and off-topic tangents. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ', '音声メモ', 'Voice Notes'. " +
+        "SEPARATION RULE: If web-search supplementary information is provided in the input (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end of the document, titled '## 補足情報（Web調査）' (translate the title to match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact, figure, or conclusion that already appears in the body. Keep each supplement concise (a sentence or two) and, where useful, note which meeting topic it supplements. Do NOT create this section if no research information was provided. " +
+        "If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), placed after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
         "Output ONLY the structured Markdown, no explanations or meta-commentary. Do not truncate. " +
         'FINALLY, after the document, append a single line: <!--VOCAB:["term1","term2",...]-->  containing up to 50 key proper nouns, person names, technical terms, project names, and specialized vocabulary that appeared in or were corrected from the transcript. Include the CORRECT spelling. This line will be stripped and used to improve future speech recognition — it is NOT part of the document.';
 
@@ -249,27 +417,98 @@ export function VoicePanel({
         userContent = `Convert this voice transcript into a structured informational document:\n\n${transcript}`;
       }
 
+      const { useResearchStore } = await import("@/stores/research-store");
+      // Weave research either when the global toggle is on, OR when the user
+      // queued specific cards ("組み込む") for the next run. Individual queued
+      // cards are honored even if the global toggle is off.
+      const includeAll = useResearchStore.getState().includeInStructure;
+      const includedCards = useResearchStore
+        .getState()
+        .cards.filter(
+          (c) =>
+            !c.integrated && c.summary && (includeAll || c.queuedForStructure),
+        );
+      // Web-research (facts) and speaker-questions (prompts to ask) are woven
+      // into SEPARATE trailing sections — never mixed into the minutes body.
+      const researchCards = includedCards.filter((c) => c.type !== "question");
+      const questionCards = includedCards.filter((c) => c.type === "question");
+      if (researchCards.length > 0) {
+        userContent +=
+          "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
+          "The following was gathered via web search during the recording — background reference, NOT something anyone said in the meeting. " +
+          "Follow the SEPARATION RULE: put these in the trailing '## 補足情報（Web調査）' section, NOT in the minutes body. " +
+          "For EACH item: use a natural H3 heading like '### 〇〇の件について' (never the raw query); write 1–2 concise sentences (do not dump the summary verbatim); include ONLY what adds to the minutes; and, if it clearly supplements a specific meeting section, add a link on its own line — [本文「<見出し>」への補足](#<見出し>) — copying that body heading VERBATIM. Cite sources as markdown links.\n\n" +
+          researchCards
+            .map((c) => {
+              const srcList = c.sources
+                .map((s) => `  - [${s.title}](${s.url})`)
+                .join("\n");
+              return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
+            })
+            .join("\n\n");
+      }
+      if (questionCards.length > 0) {
+        userContent += buildQuestionsContext(questionCards);
+      }
+
       const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: aiProxyHeaders(token),
         body: JSON.stringify({
           system: systemPrompt,
           messages: [{ role: "user", content: userContent }],
-          max_tokens: 16384,
-          stream: false,
+          // Max out at opus-5's full 128K streaming ceiling so even very long
+          // meetings never truncate. It's a cap, not a charge.
+          max_tokens: 128000,
+          stream: true,
         }),
       });
 
-      if (!res.ok) throw new Error(`Structure failed: ${res.status}`);
+      if (!res.ok) {
+        reportIfQuota(res.status, await res.text().catch(() => ""));
+        throw new Error(`Structure failed: ${res.status}`);
+      }
 
-      const data = await res.json();
-      const markdown =
-        data.content?.[0]?.text ||
-        data.content?.map((c: { text?: string }) => c.text || "").join("") ||
-        "";
+      const structReader = res.body?.getReader();
+      if (!structReader) throw new Error("No response body");
+      const structDecoder = new TextDecoder();
+      let structSseBuffer = "";
+      let markdown = "";
+      let structStopReason = "";
+      while (true) {
+        const { done, value } = await structReader.read();
+        if (done) break;
+        structSseBuffer += structDecoder.decode(value, { stream: true });
+        const sseLines = structSseBuffer.split("\n");
+        structSseBuffer = sseLines.pop() || "";
+        for (const sseLine of sseLines) {
+          if (!sseLine.startsWith("data: ")) continue;
+          const ssePayload = sseLine.slice(6).trim();
+          if (ssePayload === "[DONE]") continue;
+          try {
+            const sseEvt = JSON.parse(ssePayload);
+            if (sseEvt.type === "content_block_delta" && sseEvt.delta?.text) {
+              markdown += sseEvt.delta.text;
+            } else if (
+              sseEvt.type === "message_delta" &&
+              sseEvt.delta?.stop_reason
+            ) {
+              structStopReason = sseEvt.delta.stop_reason;
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
+
+      // No-silent-failure: warn when the model hit the output cap and truncated.
+      if (structStopReason === "max_tokens") {
+        setVoiceError(
+          "構造化がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
+        );
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+      }
 
       if (markdown.trim()) {
         // Extract vocabulary feedback from <!--VOCAB:[...]-->
@@ -298,9 +537,35 @@ export function VoicePanel({
           onInsertRef.current(`\n\n${cleanOutput}\n`);
         }
         lastStructuredRef.current = transcript;
+        setLastStructuredText(transcript);
+        // Mark only the cards we actually wove in (clears their queued flag);
+        // don't touch cards that weren't included this run. Covers both
+        // research and question cards.
+        if (includedCards.length > 0) {
+          const store = useResearchStore.getState();
+          for (const c of includedCards) store.markIntegrated(c.id);
+        }
       }
     } catch (err) {
       console.error("[voice] Structuring failed:", err);
+      // Surface the failure so a manual "Structure" click never fails silently
+      // (the user would otherwise stare at an unchanged document). Auto-runs
+      // stay quiet — they retry on the next interval, and quota 429s already
+      // raise the global banner via reportIfQuota().
+      if (manual) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isNetwork =
+          /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
+            msg,
+          );
+        setVoiceError(
+          isNetwork
+            ? "構造化中に通信エラーが発生しました。もう一度「Structure」を押して再試行してください。"
+            : `構造化に失敗しました: ${msg}`,
+        );
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+      }
     } finally {
       setStructuring(false);
       structuringRef.current = false;
@@ -309,13 +574,26 @@ export function VoicePanel({
 
   const doRefine = useCallback(async () => {
     const transcript = fullTranscriptRef.current;
-    if (!transcript.trim() || refiningRef.current) return;
+    if (refiningRef.current) return;
+    // Refine re-transcribes the recording from its native archive, so it does
+    // NOT require a live transcript: a fully-backgrounded session has an empty
+    // live transcript (JS timers were frozen) but the complete audio was still
+    // captured. Proceed whenever an archive — or a previously uploaded URI —
+    // exists, even with no live text.
+    if (
+      !transcript.trim() &&
+      !hasArchiveRef.current &&
+      !savedVoiceGcsUriRef.current
+    )
+      return;
 
     const abortController = new AbortController();
     refineAbortRef.current = abortController;
 
     setRefining(true);
     refiningRef.current = true;
+    // Tracks the current stage so a failure can report where it happened.
+    let stageLabel = "準備";
     try {
       const user = useAuthStore.getState().user;
       if (!user) throw new Error("Not authenticated");
@@ -325,43 +603,92 @@ export function VoicePanel({
       const bucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET;
       if (!bucket) throw new Error("Storage bucket not configured");
 
-      // Stage 1: Upload audio archive
-      setRefineStage("upload");
-      const { invoke } = await import("@tauri-apps/api/core");
+      // Stage 1: Upload audio archive → chunks (skip if already uploaded this
+      // session). Recordings >58min are split into ≤55min parts (20s overlap).
+      let chunks = uploadedChunksRef.current;
+      if (chunks) {
+        console.log(
+          "[voice] Reusing uploaded chunks for refine retry:",
+          chunks.length,
+        );
+      } else {
+        setRefineStage("upload");
+        stageLabel = "音声アップロード";
+        const { invoke } = await import("@tauri-apps/api/core");
 
-      // Android: get archive path from Kotlin JS bridge
-      let androidArchivePath: string | undefined;
-      if (isAndroid) {
-        const bridge = (window as unknown as Record<string, unknown>)
-          .AndroidAudio as { getArchivePath?: () => string | null } | undefined;
-        const p = bridge?.getArchivePath?.();
-        if (!p) throw new Error("No voice archive available on this device");
-        androidArchivePath = p;
+        let androidArchivePath: string | undefined;
+        if (isAndroid) {
+          const bridge = (window as unknown as Record<string, unknown>)
+            .AndroidAudio as
+            | {
+                getArchivePath?: () => string | null;
+              }
+            | undefined;
+          const p = bridge?.getArchivePath?.();
+          if (!p) throw new Error("No voice archive available on this device");
+          androidArchivePath = p;
+        }
+
+        try {
+          const archiveResult = await invoke<{
+            gcs_uri: string;
+            download_url: string;
+            chunks: Array<{
+              gcs_uri: string;
+              start_sec: number;
+              duration_sec: number;
+            }>;
+          }>("upload_voice_archive", {
+            uid,
+            token,
+            bucket,
+            archivePath: androidArchivePath,
+          });
+          chunks = (archiveResult.chunks || []).map((c) => ({
+            gcsUri: c.gcs_uri,
+            startSec: c.start_sec,
+            durationSec: c.duration_sec,
+          }));
+          if (chunks.length === 0 && archiveResult.gcs_uri) {
+            chunks = [
+              { gcsUri: archiveResult.gcs_uri, startSec: 0, durationSec: 0 },
+            ];
+          }
+          uploadedChunksRef.current = chunks;
+          onVoiceDataChangeRef.current?.({
+            voiceGcsUri: chunks[0]?.gcsUri || null,
+            voiceRecordedAt: Date.now(),
+          });
+        } catch (e) {
+          // Archive gone (e.g. after reload) but a prior single-file URI was
+          // saved — fall back to it (correct for short recordings).
+          if (savedVoiceGcsUriRef.current) {
+            chunks = [
+              {
+                gcsUri: savedVoiceGcsUriRef.current,
+                startSec: 0,
+                durationSec: 0,
+              },
+            ];
+            uploadedChunksRef.current = chunks;
+          } else {
+            throw e;
+          }
+        }
       }
 
-      const archiveResult = await invoke<{
-        gcs_uri: string;
-        download_url: string;
-      }>("upload_voice_archive", {
-        uid,
-        token,
-        bucket,
-        archivePath: androidArchivePath,
-      });
-
-      // Stage 2: Batch transcribe with full-session diarization
+      // Stage 2: Batch transcribe with full-session diarization (per-chunk,
+      // parallel server-side; overlap deduped by word timestamp).
       setRefineStage("transcribe");
+      stageLabel = "文字起こし";
       const timeout = setTimeout(() => abortController.abort(), 15 * 60 * 1000);
       const batchRes = await fetch(
         `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers: aiProxyHeaders(token),
           body: JSON.stringify({
-            gcsUri: archiveResult.gcs_uri,
+            chunks,
             language: "ja-JP",
           }),
           signal: abortController.signal,
@@ -371,6 +698,24 @@ export function VoicePanel({
 
       if (!batchRes.ok) {
         const errText = await batchRes.text();
+        reportIfQuota(batchRes.status, errText);
+        // The server may return a clean, user-facing Japanese `message` (e.g.
+        // 429 batch_in_progress: one in-flight batch per user). Prefer it verbatim.
+        let serverMsg = "";
+        try {
+          const j = JSON.parse(errText) as { message?: string };
+          if (typeof j.message === "string") serverMsg = j.message;
+        } catch {
+          /* not JSON; fall through to the raw-text handling below */
+        }
+        if (serverMsg) throw new Error(serverMsg);
+        // BatchRecognize (chirp_3) rejects files longer than 60 minutes. Turn
+        // the raw STT error into a clear, actionable message for the user.
+        if (/too long|60 ?minutes|60\s*分/i.test(errText)) {
+          throw new Error(
+            "録音が60分を超えているためRefineできません（一括文字起こしの上限）。録音中の自動Structureは全長で機能します。長時間の録音は60分以内で区切ってください。",
+          );
+        }
         throw new Error(
           `Batch transcribe failed: ${batchRes.status} ${errText}`,
         );
@@ -382,11 +727,14 @@ export function VoicePanel({
       const speakerCount = batchData.speakerCount || 0;
 
       if (!diarizedTranscript.trim()) {
-        throw new Error("Batch transcription returned empty result");
+        throw new Error(
+          "文字起こし結果が空でした。録音に音声が入っていない可能性があります。",
+        );
       }
 
       // Stage 3: Claude refinement with diarized transcript + existing structure
       setRefineStage("structure");
+      stageLabel = "整形";
       const existingDoc = docContentRef.current.trim();
       const docVocabulary = existingDoc ? extractHints(existingDoc) : [];
       const vocabularyHint =
@@ -396,7 +744,7 @@ export function VoicePanel({
 
       const refineSystemPrompt =
         "You are a document assistant performing a FINAL REFINEMENT. " +
-        "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session with globally consistent speaker labels, " +
+        "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session. It may contain '---' markers separating processing segments of a long recording; speaker labels are ONLY consistent WITHIN a segment (the same speaker may have a different number across '---') — use speech content to identify and unify the same speaker across segments, " +
         (existingDoc
           ? "and an EXISTING DOCUMENT (a preliminary structure created during recording). "
           : "") +
@@ -408,48 +756,146 @@ export function VoicePanel({
         "2) Use the speaker labels INTERNALLY to understand who holds which opinion, who proposed what, and the dynamics between participants — but NEVER output raw speaker labels like 'Speaker 1', 'Speaker 0', 'speaker0', etc. " +
         "3) When attribution matters: if a speaker's name can be identified from the transcript (e.g., they introduced themselves or were addressed by name), use their real name (e.g., '田中さんからの質問', '鈴木の提案'). Otherwise, describe by inferred role or position (e.g., '提案側の意見として', 'プロジェクトリーダーが指摘した点'). If neither name nor role can be inferred, paraphrase without attribution rather than using speaker numbers. " +
         "4) Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
-        "5) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
+        "5) CONSOLIDATION (CRITICAL — non-redundant): Each distinct topic, decision, fact, definition, number, or conclusion must appear EXACTLY ONCE, in the single most relevant section. The conversation circles back to topics — do NOT create a new section or restate a point each time it recurs; gather everything about a topic into its one section. Never repeat the same conclusion/figure/definition/action item across sections; refer to it in one short phrase if needed elsewhere. Before finalizing, scan your output and merge sections/bullets covering the same subject. Prefer a tight, consolidated document over a long, repetitive one. " +
+        "6) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
+        "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
         "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
         "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
-      const refineUserContent = existingDoc
+      let refineUserContent = existingDoc
         ? `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
         : `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\nProduce a polished structured document from this transcript.`;
 
+      const { useResearchStore: getResearchStore } =
+        await import("@/stores/research-store");
+      // Weave research when the global toggle is on OR specific cards were
+      // queued for the next run ("組み込む").
+      const includeAllRefine = getResearchStore.getState().includeInStructure;
+      const refineIncludedCards = getResearchStore
+        .getState()
+        .cards.filter(
+          (c) =>
+            !c.integrated &&
+            c.summary &&
+            (includeAllRefine || c.queuedForStructure),
+        );
+      const refineResearchCards = refineIncludedCards.filter(
+        (c) => c.type !== "question",
+      );
+      const refineQuestionCards = refineIncludedCards.filter(
+        (c) => c.type === "question",
+      );
+      if (refineResearchCards.length > 0) {
+        refineUserContent +=
+          "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
+          "Gathered via web search during the recording — background reference, NOT meeting speech. " +
+          "Follow the SEPARATION RULE: put these in the trailing '## 補足情報（Web調査）' section, NOT in the minutes body. " +
+          "For EACH item: use a natural H3 heading like '### 〇〇の件について' (never the raw query); write 1–2 concise sentences (do not dump the summary verbatim); include ONLY what adds to the minutes; and, if it clearly supplements a specific meeting section, add a link on its own line — [本文「<見出し>」への補足](#<見出し>) — copying that body heading VERBATIM. Cite sources as markdown links.\n\n" +
+          refineResearchCards
+            .map((c) => {
+              const srcList = c.sources
+                .map((s) => `  - [${s.title}](${s.url})`)
+                .join("\n");
+              return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
+            })
+            .join("\n\n");
+      }
+      if (refineQuestionCards.length > 0) {
+        refineUserContent += buildQuestionsContext(refineQuestionCards);
+      }
+
       const refineRes = await fetch(`${AI_PROXY_URL}/v1/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: aiProxyHeaders(token),
         body: JSON.stringify({
           system: refineSystemPrompt,
           messages: [{ role: "user", content: refineUserContent }],
-          max_tokens: 16384,
-          stream: false,
+          // Max out at opus-5's full 128K streaming ceiling so even very long
+          // meetings never truncate. It's a cap, not a charge.
+          max_tokens: 128000,
+          stream: true,
         }),
         signal: abortController.signal,
       });
 
       if (!refineRes.ok) {
-        throw new Error(`Refine structuring failed: ${refineRes.status}`);
+        const errBody = await refineRes.text().catch(() => "");
+        reportIfQuota(refineRes.status, errBody);
+        throw new Error(
+          `Refine structuring failed: ${refineRes.status} ${errBody}`.trim(),
+        );
       }
 
-      const refineData = await refineRes.json();
-      const refinedOutput =
-        refineData.content?.[0]?.text || refineData.content || "";
+      // Read SSE stream to collect full response
+      const reader = refineRes.body?.getReader();
+      if (!reader) throw new Error("No response body");
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      let refinedOutput = "";
+      let refineStopReason = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const evt = JSON.parse(payload);
+            if (evt.type === "content_block_delta" && evt.delta?.text) {
+              refinedOutput += evt.delta.text;
+            } else if (evt.type === "message_delta" && evt.delta?.stop_reason) {
+              refineStopReason = evt.delta.stop_reason;
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
+
+      // No-silent-failure: warn when the model hit the output cap and truncated.
+      if (refineStopReason === "max_tokens") {
+        setVoiceError(
+          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
+        );
+        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+      }
 
       if (refinedOutput.trim()) {
         onSetContentRef.current(refinedOutput.trim());
+        // Mark only the cards actually woven in (clears their queued flag).
+        // Covers both research and question cards.
+        if (refineIncludedCards.length > 0) {
+          const store = getResearchStore.getState();
+          for (const c of refineIncludedCards) store.markIntegrated(c.id);
+        }
       }
       setHasArchive(false);
+      uploadedChunksRef.current = null;
+      onVoiceDataChangeRef.current?.({
+        voiceTranscript: null,
+        voiceGcsUri: null,
+        voiceRecordedAt: null,
+      });
       import("@tauri-apps/api/core")
         .then(({ invoke }) => invoke("clear_voice_archive"))
         .catch(() => {});
     } catch (err) {
       console.error("[voice] Refine failed:", err);
       const msg = err instanceof Error ? err.message : String(err);
-      setVoiceError(`Refine failed: ${msg}`);
+      const isNetwork =
+        /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
+          msg,
+        );
+      // Audio is already uploaded on failure, so retrying skips re-upload.
+      const friendly = isNetwork
+        ? `${stageLabel}中に通信エラー。時間がかかりすぎたか回線が不安定な可能性があります。「Refine」をもう一度押して再試行してください。`
+        : `${stageLabel}で失敗: ${msg}`;
+      setVoiceError(`Refine failed: ${friendly}`);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
     } finally {
@@ -529,9 +975,37 @@ export function VoicePanel({
           ref={scrollRef}
           className="max-h-32 overflow-y-auto px-4 py-2 text-sm leading-relaxed whitespace-pre-wrap wrap-break-word select-text cursor-text"
         >
-          {fullTranscript && (
-            <span className="text-foreground">{fullTranscript}</span>
-          )}
+          {fullTranscript &&
+            (() => {
+              // Segments already covered by the last Structure run. The divider
+              // above the first NOT-yet-structured segment marks where Structure
+              // most recently ran, and gets highlighted.
+              const structuredCount = lastStructuredText
+                ? toTranscriptSegments(lastStructuredText).length
+                : 0;
+              return toTranscriptSegments(fullTranscript).map((seg, i) => {
+                const isStructureBoundary = i > 0 && i === structuredCount;
+                return (
+                  <div
+                    key={i}
+                    className={
+                      i === 0
+                        ? ""
+                        : isStructureBoundary
+                          ? "mt-2 border-t-2 border-primary pt-2"
+                          : "mt-2 border-t border-border pt-2"
+                    }
+                  >
+                    {isStructureBoundary && (
+                      <span className="mb-1 block text-[10px] font-medium text-primary">
+                        最新の構造化位置
+                      </span>
+                    )}
+                    <span className="text-foreground">{seg}</span>
+                  </div>
+                );
+              });
+            })()}
           {isRecording && !fullTranscript && !interimText && (
             <span className="text-muted-foreground animate-pulse">
               Listening...
@@ -559,7 +1033,7 @@ export function VoicePanel({
 
       {/* Controls */}
       <div
-        className={`flex items-center border-t border-border/50 ${isMobile ? "gap-1.5 px-2 py-2" : "gap-2 px-3 py-2"}`}
+        className={`flex items-center border-t border-border/50 ${isMobile ? "gap-1.5 px-2 py-2 overflow-x-auto" : "gap-2 px-3 py-2"}`}
       >
         <Button
           variant={isRecording ? "destructive" : "default"}
@@ -614,7 +1088,7 @@ export function VoicePanel({
           </div>
         )}
 
-        {isDesktop && <div className="flex-1" />}
+        <div className="flex-1" />
 
         {isTauri && isDesktop && !isRecording && (
           <Button
@@ -662,6 +1136,9 @@ export function VoicePanel({
           <option value={300}>5min</option>
         </select>
 
+        {isRecording && !isMobile && <ResearchTriggerButton />}
+        {isMobile && <MobileResearchButton />}
+
         <Button
           variant="outline"
           size="sm"
@@ -678,7 +1155,7 @@ export function VoicePanel({
           Structure
         </Button>
 
-        {isTauri && !isRecording && fullTranscript.trim() && hasArchive && (
+        {isTauri && !isRecording && (hasArchive || !!savedVoiceGcsUri) && (
           <Button
             variant="outline"
             size="sm"
@@ -703,8 +1180,15 @@ export function VoicePanel({
           onClick={() => {
             clearTranscript();
             lastStructuredRef.current = "";
+            setLastStructuredText("");
             sttVocabRef.current.clear();
+            uploadedChunksRef.current = null;
             setHasArchive(false);
+            onVoiceDataChangeRef.current?.({
+              voiceTranscript: null,
+              voiceGcsUri: null,
+              voiceRecordedAt: null,
+            });
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))
               .catch(() => {});
