@@ -119,6 +119,9 @@ function App() {
   // Only show blocking overlay for the very first sync (login/startup)
   const prevSyncingRef = useRef(false);
   const initialSyncDoneRef = useRef(false);
+  // Throttle for the foreground entitlement re-fetch (see visibilitychange
+  // effect below); epoch ms of the last fired fetch.
+  const lastEntitlementFetchRef = useRef(0);
   useEffect(() => {
     if (prevSyncingRef.current && !syncing) {
       initialSyncDoneRef.current = true;
@@ -327,6 +330,31 @@ function App() {
     window.addEventListener("hashchange", handleHash);
     return () => window.removeEventListener("hashchange", handleHash);
   }, [parseShareToken, handleBillingReturn]);
+
+  // Re-pull the entitlement when the app returns to the foreground. A store
+  // subscription changed outside the app — most importantly an IAP CANCELLATION
+  // made in Apple's/Google's manage-subscriptions sheet — only reflects in the
+  // UI once we re-query /v1/me/entitlement. Without this a user who cancels and
+  // (in the accelerated sandbox) whose sub then EXPIRES sees the CTA stay stuck
+  // on "現在のプラン" instead of switching back to the Pro upgrade button, because
+  // nothing re-fetched. Throttled so rapid focus toggles don't spam the endpoint;
+  // fetchEntitlement is a no-op when signed out.
+  useEffect(() => {
+    const MIN_INTERVAL_MS = 15_000;
+    const refetch = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastEntitlementFetchRef.current < MIN_INTERVAL_MS) return;
+      lastEntitlementFetchRef.current = now;
+      void useEntitlementStore.getState().fetchEntitlement();
+    };
+    document.addEventListener("visibilitychange", refetch);
+    window.addEventListener("focus", refetch);
+    return () => {
+      document.removeEventListener("visibilitychange", refetch);
+      window.removeEventListener("focus", refetch);
+    };
+  }, []);
 
   // Listen for deep link events (markflow://share/{token}, markflow://billing/*)
   useEffect(() => {

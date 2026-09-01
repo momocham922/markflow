@@ -648,6 +648,16 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
         // A failed open is a failure, never a silent success — a user trying to
         // cancel must get feedback (サイレントフォールバック禁止).
         if (!opened) throw new Error("store_manage_failed");
+        // iOS's native manage sheet (AppStore.showManageSubscriptions) resolves
+        // only AFTER the customer dismisses it, so re-pull the entitlement now: a
+        // cancellation that already took effect (e.g. an accelerated sandbox sub
+        // that has expired) flips the CTA from "現在のプラン" to the upgrade CTA
+        // immediately instead of showing a stale plan. A mid-period cancel
+        // legitimately stays paid until expiry — the foreground re-fetch (App.tsx
+        // visibilitychange) then catches the later downgrade when the user
+        // returns to the app. Fire-and-forget so the manage flow returns promptly
+        // and billingBusy clears; fetchEntitlement drives its own loading flag.
+        void get().fetchEntitlement();
         return { ok: true };
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);

@@ -170,9 +170,21 @@
      WindowInsets value into --android-safe-bottom. That var is unset on
      iOS/web/desktop, so var() transparently falls back to env(). */
   :root {
+    --safe-area-top: env(safe-area-inset-top, 0px);
     --safe-area-bottom: var(
       --android-safe-bottom,
       env(safe-area-inset-bottom, 0px)
+    );
+    /* Dialogs are viewport-centered (fixed + translate -50%). On iOS
+       (viewport-fit=cover) 100dvh spans UNDER the notch/Dynamic Island and the
+       home indicator, so a dialog taller than the safe area (e.g. the paywall on
+       a phone) is clipped top AND bottom and its header/CTA can't be reached.
+       Subtract the top+bottom safe insets so the max height — and thus the
+       symmetrically-centered box — always fits inside the safe area. On
+       desktop/web/Android-top the insets are 0px, so this stays identical to the
+       previous calc(100dvh - 2rem). */
+    --dialog-max-h: calc(
+      100dvh - 2rem - var(--safe-area-top) - var(--safe-area-bottom)
     );
   }
 
