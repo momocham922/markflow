@@ -504,7 +504,14 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   startCheckout: async (plan, interval = "month", opts) => {
-    if (!BILLING_ENABLED) return;
+    // Billing dark (pre-GO): never a silent no-op. The purchase CTA is already
+    // gated off in the paywall (proPurchasable = BILLING_ENABLED), but if any
+    // other path reaches here, surface a clear message instead of a dead button
+    // (サイレントフォールバック禁止) — matching openBillingPortal / changeTeamSeats.
+    if (!BILLING_ENABLED) {
+      set({ billingError: "決済は現在準備中です。しばらくお待ちください。" });
+      return;
+    }
     const user = auth.currentUser;
     if (!user) {
       set({ billingError: "サインインが必要です。" });

@@ -35,6 +35,15 @@ env:
   VITE_AI_PROXY_URL: ${{ secrets.VITE_AI_PROXY_URL }}
   VITE_YJS_WEBSOCKET_URL: ${{ secrets.VITE_YJS_WEBSOCKET_URL }}
   VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+  # Billing (Stripe) purchase UI. BETA-ONLY: lit here so beta testers can verify
+  # the Pro/Team upgrade flow against the server's Stripe TEST mode (zero real
+  # money). The macOS beta build sets this inline too (release-testflight.sh /
+  # release-android-internal.sh already do). The STABLE workflow deliberately
+  # OMITS this so the stable channel stays dark until Stripe goes to production —
+  # otherwise real stable users would hit a test-mode checkout. Enabling it also
+  # activates the freemium gates on desktop (Web publish = Pro+, collaborator
+  # caps); existing internal testers are unlimited so are unaffected.
+  VITE_BILLING_ENABLED: "true"
 
 jobs:
   build-and-release:

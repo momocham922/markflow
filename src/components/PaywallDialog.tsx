@@ -295,15 +295,19 @@ export function PaywallDialog() {
   // the buyer picks the team + seats and drives the seat-aware checkout.
   const goToTeamManage = () => openTeamManage();
 
-  // Pro is purchasable on every platform: desktop/web via Stripe, mobile via
-  // native IAP (StoreKit/Play). Mobile only lights up once billing is live
-  // (BILLING_ENABLED) so pre-GO builds still show "近日対応予定". Team is per-seat
-  // and sold on desktop/web only — there is no mobile Team SKU — so it is never
-  // purchasable on mobile. Anti-steering compliant: the mobile Pro CTA drives the
-  // native IAP sheet (startCheckout → purchaseMobileSubscription), never an
-  // external web page (hence no external-link glyph on mobile).
-  const proPurchasable = !isMobile || BILLING_ENABLED;
-  const teamPurchasable = !isMobile;
+  // Pro is purchasable on every platform once billing is live (BILLING_ENABLED):
+  // desktop/web via Stripe, mobile via native IAP (StoreKit/Play). It is gated on
+  // BILLING_ENABLED on EVERY platform — desktop INCLUDED — so a dark build (e.g.
+  // the stable channel before Stripe is in production) shows "近日対応予定" instead
+  // of a live-looking upgrade button whose startCheckout silently no-ops. (The old
+  // `!isMobile || BILLING_ENABLED` left desktop showing a purchasable-but-dead CTA
+  // whenever the desktop build shipped dark — the reported "押しても飛ばない" bug.)
+  // Team is per-seat and sold on desktop/web only (no mobile Team SKU), so it is
+  // additionally never purchasable on mobile. Anti-steering compliant: the mobile
+  // Pro CTA drives the native IAP sheet (startCheckout → purchaseMobileSubscription),
+  // never an external web page (hence no external-link glyph on mobile).
+  const proPurchasable = BILLING_ENABLED;
+  const teamPurchasable = !isMobile && BILLING_ENABLED;
 
   return (
     <Dialog open={paywallOpen} onOpenChange={(o) => !o && closePaywall()}>
@@ -416,7 +420,9 @@ export function PaywallDialog() {
 
         <p className="text-center text-[11px] text-muted-foreground">
           {!isMobile
-            ? "お支払いはStripeの安全な決済ページで行われます。いつでもキャンセルできます。"
+            ? BILLING_ENABLED
+              ? "お支払いはStripeの安全な決済ページで行われます。いつでもキャンセルできます。"
+              : "デスクトップ版の課金は近日対応予定です。"
             : proPurchasable
               ? "Proプランはアプリ内課金でご購入いただけます。Teamプランはデスクトップ版またはWebからご購入ください。"
               : "モバイルアプリでのご購入は近日対応予定です。デスクトップ版またはWebからアップグレードいただけます。"}
