@@ -44,6 +44,7 @@ UIDS=(
   "ZeBRcujqF0NTuqT2Lbz2oMIrCZJ3"  # staff-07
   "WkG0ditPu2NOIUGwgLsVRw4S0sf1"  # staff-08 (corp)
   "RHyQXRfPouf9dHI9nI9D4Q652ER2"  # staff-08 (personal)
+  "2Ewn6m6mjYgQZACMATHU2amRoej2"  # staff-09 (corp)
   # NOTE: the E2E test accounts (test-sync-a/b) were removed from this list —
   # they must NEVER hold `internal` (unlimited, cost-uncapped) entitlements, since
   # their credentials are shared for CI. Any internal entitlement already written
