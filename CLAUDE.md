@@ -112,8 +112,14 @@ TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
 git checkout release/beta
 ./scripts/bump-version.sh X.Y.Z-beta.N
 git add -A && git commit
+# VITE_BILLING_ENABLED=true はベータ限定で課金UIを点灯させる（StripeテストモードでPro/Team
+# 購入フローを実費ゼロ検証するため）。iOS(release-testflight.sh)/Android(release-android-
+# internal.sh)/Windows(release-beta.yml)は既にインライン点灯済み。**macOSだけはこのローカル
+# ビルドコマンドで明示しないと点灯が抜け、デスクトップだけ課金ダークの非対称配信になる**
+# （beta.9で実際に踏んだ回帰）。Stableビルドは絶対に付けない（stableはStripe本番GOまでダーク）。
 TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" pnpm tauri build
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+  VITE_BILLING_ENABLED=true pnpm tauri build
 ./scripts/release-beta.sh
 ```
 
@@ -184,7 +190,7 @@ TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
   APPLE_API_KEY="<APPLE_API_KEY>" \
   APPLE_API_ISSUER="<APPLE_API_ISSUER>" \
   APPLE_API_KEY_PATH="~/.tauri/AuthKey_<APPLE_API_KEY>.p8" \
-  pnpm tauri build
+  VITE_BILLING_ENABLED=true pnpm tauri build   # ベータのみ点灯（stableは付けない）
 ./scripts/release-beta.sh
 ./scripts/release-testflight.sh
 ANDROID_KEYSTORE_PASS=<REDACTED: local secret store> ./scripts/release-android-internal.sh
