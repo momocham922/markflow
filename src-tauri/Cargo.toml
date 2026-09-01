@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.6.2-beta.4"
+version = "0.6.2-beta.5"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -54,5 +54,10 @@ objc2-foundation = { version = "0.3", features = ["NSURL", "NSString"] }
 # Desktop keeps Stripe: macOS StoreKit IAP requires an app-sandboxed Mac App Store
 # build, which is INCOMPATIBLE with MarkFlow's Developer-ID DMG distribution, so the
 # plugin is never compiled into the macOS/Windows/Linux binaries (byte-unaffected).
+# Vendored fork of crates.io tauri-plugin-iap 0.9.1 — byte-identical purchase flow
+# plus ONE added command `show_manage_subscriptions` (iOS StoreKit 2
+# AppStore.showManageSubscriptions / Android Play subscriptions deep link), which
+# upstream 0.9.x/0.10.x-rc still lack. Lets real-Apple-ID TestFlight/production
+# subscribers cancel IN-APP (their subs never appear under Settings › Subscriptions).
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
-tauri-plugin-iap = "0.9"
+tauri-plugin-iap = { path = "plugins/tauri-plugin-iap" }

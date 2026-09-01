@@ -78,9 +78,29 @@ async function openBillingUrl(url: string): Promise<boolean> {
 async function openStoreSubscriptions(
   source: "app_store" | "play",
 ): Promise<boolean> {
+  const { isIOS } = await import("@/platform");
+
+  // iOS: prefer StoreKit 2's native manage-subscriptions sheet
+  // (AppStore.showManageSubscriptions). This is the ONLY surface that lists an
+  // IAP subscription for a real-Apple-ID TestFlight/sandbox tester — such subs
+  // never appear under Settings › Subscriptions, so the itms-apps:// deep link
+  // is a dead end for testers. Production subscribers see it in both places.
+  if (source === "app_store" && isIOS) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("plugin:iap|show_manage_subscriptions");
+      return true;
+    } catch (err) {
+      // Fall through to the itms-apps:// deep link (pre-iOS-15 / no scene / etc.).
+      console.warn(
+        "[billing] native manage subscriptions failed, falling back to deep link:",
+        err,
+      );
+    }
+  }
+
   let url: string;
   if (source === "app_store") {
-    const { isIOS } = await import("@/platform");
     url = isIOS
       ? "itms-apps://apps.apple.com/account/subscriptions"
       : "https://apps.apple.com/account/subscriptions";
