@@ -420,6 +420,71 @@ describe("appleFactsFromDecoded", () => {
     expect(r.intent.terminal).toBe(true);
     expect(r.intent.plan).toBe("pro"); // plan echo; gate uses canceled status
   });
+
+  it("extracts revocationDateMs from a refunded transaction", () => {
+    const f = appleFactsFromDecoded(
+      { ...TXN, revocationDate: 1_788_000_000_000 },
+      { status: 1 },
+    );
+    expect(f.revocationDateMs).toBe(1_788_000_000_000);
+  });
+
+  it("refund via revocationDate revokes even when data.status still reads active (1)", () => {
+    // Single-transaction refund: Apple can leave data.status=1 while the decoded
+    // txn carries revocationDate. Access must still be pulled — terminal canceled.
+    const f = appleFactsFromDecoded(
+      { ...TXN, revocationDate: 1_788_000_000_000 },
+      { status: 1 },
+    );
+    const r = buildAppleIntent(f);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.status).toBe("canceled");
+    expect(r.intent.terminal).toBe(true);
+    const d = decideEntitlementWrite(null, r.intent);
+    expect(d.apply).toBe(true);
+    if (d.apply) expect(derivePlan(d.fields)).toBe("free");
+  });
+
+  it("a strictly-newer resubscribe after a refund clears terminal and restores pro", () => {
+    // The refund (terminal canceled) must NOT permanently block a genuine
+    // resubscribe: a later active txn (newer signedDate) reuses the
+    // originalTransactionId, arrives strictly-newer, and re-grants pro.
+    const refund = buildAppleIntent(
+      appleFactsFromDecoded(
+        {
+          ...TXN,
+          revocationDate: 1_788_000_000_000,
+          signedDate: 1_788_000_000_000,
+        },
+        { status: 1, eventId: "uuid-refund" },
+      ),
+    );
+    expect(refund.ok).toBe(true);
+    if (!refund.ok) return;
+    const dead = decideEntitlementWrite(null, refund.intent);
+    expect(dead.apply).toBe(true);
+    if (!dead.apply) return;
+    const existing = { ...dead.fields, subId: refund.intent.subId };
+
+    const resub = buildAppleIntent(
+      appleFactsFromDecoded(
+        {
+          ...TXN,
+          signedDate: 1_789_000_000_000,
+          expiresDate: 1_791_000_000_000,
+        },
+        { status: 1, eventId: "uuid-resub" },
+      ),
+    );
+    expect(resub.ok).toBe(true);
+    if (!resub.ok) return;
+    const d = decideEntitlementWrite(existing, resub.intent);
+    expect(d.apply).toBe(true);
+    if (!d.apply) return;
+    expect(d.fields.terminal).toBe(false);
+    expect(derivePlan(d.fields)).toBe("pro");
+  });
 });
 
 describe("playFactsFromPurchaseV2", () => {
