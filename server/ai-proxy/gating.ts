@@ -93,6 +93,35 @@ export function derivePlan(
   return "free";
 }
 
+/** IAP lifecycle notifications (Apple ASSN v2 / Play RTDN) are BEST-EFFORT. */
+export const IAP_EXPIRY_GRACE_SEC = 24 * 60 * 60;
+
+/**
+ * Read-time money-leak backstop for IAP subscriptions. Apple/Play deliver
+ * renew/expire/refund as best-effort server notifications; if one is lost, a
+ * lapsed sub would keep plan=pro/team + status=active in Firestore forever and
+ * `derivePlan` (pure, time-agnostic) would keep granting access. When an
+ * app_store/play entitlement is still paid yet its stored period end is well in
+ * the past, treat it as `free` for THIS response. Legitimate grace / billing
+ * retry arrive as their OWN status (grace→access, on_hold→revoked) through
+ * derivePlan, so a PAST period end UNDER a paid status can only mean a missed
+ * lifecycle event — never a real grace window. Pure so it is unit-testable; the
+ * clock (nowSec) is injected. Stripe is excluded (it has a reconcile-capable
+ * webhook + no lost-notification failure mode of this shape).
+ */
+export function iapExpiryBackstop(
+  plan: Plan,
+  source: string | null | undefined,
+  periodEndSec: number,
+  nowSec: number,
+): Plan {
+  const isIap = source === "app_store" || source === "play";
+  const isPaid = plan === "pro" || plan === "team";
+  if (!isIap || !isPaid || !(periodEndSec > 0)) return plan;
+  if (nowSec - periodEndSec > IAP_EXPIRY_GRACE_SEC) return "free";
+  return plan;
+}
+
 /**
  * Calendar-month key in Asia/Tokyo (the product's fixed timezone). Usage
  * counters reset on the JST month boundary, not UTC.

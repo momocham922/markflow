@@ -5,6 +5,8 @@ import {
   parseUidSet,
   resolveViewAs,
   derivePlan,
+  iapExpiryBackstop,
+  IAP_EXPIRY_GRACE_SEC,
   periodKey,
   checkQuota,
   isChargeable,
@@ -326,6 +328,52 @@ describe("derivePlan", () => {
   it("still downgrades genuinely inactive statuses after normalization", () => {
     expect(derivePlan({ plan: "PRO", status: "PAST_DUE" })).toBe("free");
     expect(derivePlan({ plan: " team ", status: " canceled " })).toBe("free");
+  });
+});
+
+// =====================================================================
+// iapExpiryBackstop — read-time money-leak guard for lost IAP notifications
+// =====================================================================
+describe("iapExpiryBackstop", () => {
+  const DAY = 24 * 60 * 60;
+  const NOW = 1_756_700_000; // fixed epoch seconds (injected clock)
+
+  it("downgrades an app_store sub whose period end is well past", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - DAY; // > grace ago
+    expect(iapExpiryBackstop("pro", "app_store", periodEnd, NOW)).toBe("free");
+    expect(iapExpiryBackstop("team", "app_store", periodEnd, NOW)).toBe("free");
+  });
+
+  it("downgrades a play sub whose period end is well past", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - 1;
+    expect(iapExpiryBackstop("pro", "play", periodEnd, NOW)).toBe("free");
+  });
+
+  it("keeps access inside the grace window (skew + delivery lag)", () => {
+    const justPast = NOW - Math.floor(IAP_EXPIRY_GRACE_SEC / 2);
+    expect(iapExpiryBackstop("pro", "app_store", justPast, NOW)).toBe("pro");
+    const future = NOW + DAY;
+    expect(iapExpiryBackstop("pro", "play", future, NOW)).toBe("pro");
+  });
+
+  it("never touches Stripe or founder rails (no lost-notification failure mode)", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - DAY;
+    expect(iapExpiryBackstop("pro", "stripe", periodEnd, NOW)).toBe("pro");
+    expect(iapExpiryBackstop("pro", "founder", periodEnd, NOW)).toBe("pro");
+    expect(iapExpiryBackstop("pro", null, periodEnd, NOW)).toBe("pro");
+  });
+
+  it("never upgrades free or touches internal", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - DAY;
+    expect(iapExpiryBackstop("free", "app_store", periodEnd, NOW)).toBe("free");
+    expect(iapExpiryBackstop("internal", "app_store", periodEnd, NOW)).toBe(
+      "internal",
+    );
+  });
+
+  it("no-ops when there is no stored period end", () => {
+    expect(iapExpiryBackstop("pro", "app_store", 0, NOW)).toBe("pro");
+    expect(iapExpiryBackstop("pro", "play", -1, NOW)).toBe("pro");
   });
 });
 

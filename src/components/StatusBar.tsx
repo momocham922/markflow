@@ -166,13 +166,19 @@ function DesktopStatusBar() {
           </label>
         )}
         {/* Plan badge for general users (and owner while previewing a plan).
-            When billing is live it is a click-to-open entry: Free → upgrade,
+            Click-to-open entry: Free → upgrade (only while billing is live);
             Pro/Team → the same dialog doubles as the usage meter + subscription
-            management surface ("契約を管理"), so paying users can always reach it. */}
+            management surface ("契約を管理"). A PAID user's badge stays clickable
+            even while the purchase UI is dark (BILLING_ENABLED=false) — otherwise
+            a Pro user on the shipped desktop build had a non-clickable badge and
+            NO path to 利用状況/サブスク管理 (the reported PC dead-end). */}
         {user &&
           effectivePlan &&
           (viewAs !== null || effectivePlan !== "internal") &&
-          (BILLING_ENABLED && effectivePlan !== "internal" ? (
+          (effectivePlan !== "internal" &&
+          (BILLING_ENABLED ||
+            effectivePlan === "pro" ||
+            effectivePlan === "team") ? (
             <button
               className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
               title={

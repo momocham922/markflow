@@ -78,7 +78,11 @@ echo "=== versionCode: $NEXT_VCODE ==="
 # ─── Build ───
 echo "=== Building Android AAB (aarch64) ==="
 cd "$ROOT"
-pnpm tauri android build --target aarch64
+# VITE_BILLING_ENABLED lights up the in-app purchase UI (Pro IAP) — same as the
+# iOS TestFlight build (release-testflight.sh). Without it the internal build ships
+# with billing dark and the Play subscription flow cannot be tested. VITE_AI_PROXY_URL
+# is read from .env by Vite (inline VITE_* env vars take priority in loadEnv).
+VITE_BILLING_ENABLED=true pnpm tauri android build --target aarch64
 
 AAB="src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab"
 UNSIGNED_APK="src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"

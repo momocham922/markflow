@@ -248,6 +248,13 @@ interface EntitlementState {
    * management surface instead (openBillingPortal branches on this).
    */
   source: string | null;
+  /**
+   * When the current paid subscription's period ends / next renews, in epoch
+   * MILLISECONDS (server sends seconds→ms). null for free / internal / an
+   * assigned team member (no own subscription). Shown in the usage view so a
+   * subscriber can see their renewal (or, after cancel, expiry) date.
+   */
+  expiresDate: number | null;
   loading: boolean;
   loaded: boolean;
   /** Last 429 quota_exceeded surfaced by an AI call, for upsell UI. */
@@ -354,6 +361,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   seats: 1,
   period: null,
   source: null,
+  expiresDate: null,
   loading: false,
   loaded: false,
   lastQuotaError: null,
@@ -401,6 +409,10 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
         seats: Math.max(1, Math.floor(Number(d.seats) || 1)),
         period: d.period ?? null,
         source: typeof d.source === "string" ? d.source : null,
+        expiresDate:
+          typeof d.expiresDate === "number" && d.expiresDate > 0
+            ? d.expiresDate
+            : null,
         loaded: true,
         loading: false,
       });
@@ -589,7 +601,15 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   openBillingPortal: async () => {
-    if (!BILLING_ENABLED) return { ok: false, error: "決済は現在準備中です。" };
+    // Managing/cancelling an EXISTING subscription must work even while the
+    // purchase UI is dark (BILLING_ENABLED=false): a paid user (esp. an IAP
+    // subscriber routed to the store's own management surface below) must never be
+    // trapped unable to cancel. Only block when billing is dark AND the user is
+    // not currently on a paid plan.
+    const plan = get().effectivePlan;
+    const isPaid = plan === "pro" || plan === "team";
+    if (!BILLING_ENABLED && !isPaid)
+      return { ok: false, error: "決済は現在準備中です。" };
     const user = auth.currentUser;
     if (!user) {
       const msg = "サインインが必要です。";
@@ -785,7 +805,15 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   openPaywall: (reason = null) => {
-    if (!BILLING_ENABLED) return;
+    // The purchase UI ships dark (BILLING_ENABLED) until launch. EXCEPTION: a user
+    // who ALREADY holds a paid subscription (pro/team — typically bought via the
+    // mobile IAP rails) must always be able to open this dialog to see their usage
+    // and reach 契約を管理 — otherwise a Pro user on a dark desktop build has no
+    // path to usage/management at all (the reported PC dead-end). Free users stay
+    // gated so no purchase CTA appears before launch.
+    const plan = get().effectivePlan;
+    const isPaid = plan === "pro" || plan === "team";
+    if (!BILLING_ENABLED && !isPaid) return;
     set({ paywallOpen: true, paywallReason: reason, billingError: null });
   },
   closePaywall: () => set({ paywallOpen: false, paywallReason: null }),
@@ -803,6 +831,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       seats: 1,
       period: null,
       source: null,
+      expiresDate: null,
       loaded: false,
       loading: false,
       lastQuotaError: null,
@@ -849,6 +878,78 @@ export function collaboratorLimit(plan: Plan | null): number {
       return 3;
     default: // free / null
       return 0;
+  }
+}
+
+/**
+ * Where a subscription is billed, for UI copy. `source` is the ai-proxy
+ * entitlement rail: "app_store" (Apple IAP), "play" (Google IAP), "stripe"
+ * (desktop/web card), "founder" (grandfathered), or null (free / team member).
+ */
+export function billingSourceLabel(source: string | null): string {
+  switch (source) {
+    case "app_store":
+      return "App Store（iOSアプリ）";
+    case "play":
+      return "Google Play（Androidアプリ）";
+    case "stripe":
+      return "クレジットカード（Web）";
+    case "founder":
+      return "永年優待";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Label for the "manage subscription" action, matched to the billing rail so the
+ * button says where it will actually send the user (Apple/Google mandate their
+ * own management surface for IAP subscriptions; Stripe uses the customer portal).
+ */
+export function manageLabelForSource(source: string | null): string {
+  switch (source) {
+    case "app_store":
+      return "App Storeで管理";
+    case "play":
+      return "Google Playで管理";
+    default:
+      return "契約を管理";
+  }
+}
+
+/**
+ * One-line guidance explaining WHERE an IAP subscription must be managed, shown
+ * in the usage view for app_store/play subscribers (who often try to manage from
+ * the desktop and hit a dead end). Empty for Stripe/founder/free — no special
+ * routing needed. The exact Settings path is spelled out so a user can find it
+ * even offline.
+ */
+export function billingSourceGuidance(source: string | null): string {
+  switch (source) {
+    case "app_store":
+      return "このプランはiOSアプリ（App Store）経由でご購入いただいています。解約・プラン変更・お支払い方法の更新は、iPhone/iPadの「設定 › （自分の名前）› サブスクリプション」から行えます。";
+    case "play":
+      return "このプランはAndroidアプリ（Google Play）経由でご購入いただいています。解約・プラン変更・お支払い方法の更新は、Playストアアプリの「メニュー › 定期購入」から行えます。";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Format an epoch-ms subscription period end as a JST calendar date (the
+ * product's fixed timezone). Returns "" for null so callers can omit the line.
+ */
+export function formatExpiryDate(ms: number | null): string {
+  if (!ms || ms <= 0) return "";
+  try {
+    return new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }).format(new Date(ms));
+  } catch {
+    return "";
   }
 }
 

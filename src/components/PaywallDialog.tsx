@@ -13,6 +13,7 @@ import { isMobile } from "@/platform";
 import {
   useEntitlementStore,
   featureLabel,
+  manageLabelForSource,
   BILLING_ENABLED,
   type BillingInterval,
   type ViewAsPlan,
@@ -193,10 +194,13 @@ function PlanCard({
 
       <div className="mt-4 sm:mt-5">
         {isCurrent ? (
+          // Managing an EXISTING subscription is always available (not gated by
+          // `purchasable`, which governs NEW purchases): an IAP subscriber must be
+          // able to reach store management even while the purchase UI is dark.
           <Button
             variant="outline"
             className="w-full"
-            disabled={busy || !purchasable}
+            disabled={busy}
             onClick={onManage}
           >
             {manageLabel}
@@ -233,6 +237,7 @@ export function PaywallDialog() {
     paywallReason,
     closePaywall,
     effectivePlan,
+    source,
     startCheckout,
     openBillingPortal,
     openTeamManage,
@@ -241,6 +246,11 @@ export function PaywallDialog() {
     fetchEntitlement,
   } = useEntitlementStore();
   const [interval, setInterval] = useState<BillingInterval>("month");
+  // Where the CURRENT subscription is billed → routes/labels the manage button so
+  // an IAP subscriber sees "App Storeで管理" / "Google Playで管理" (not "契約を管理",
+  // which would misleadingly imply the Stripe portal).
+  const proManageLabel = manageLabelForSource(source);
+  const isPaid = effectivePlan === "pro" || effectivePlan === "team";
 
   // Mobile Pro pricing. Seed with the ASC/Play fallback (MOBILE_PRICING) so the
   // card NEVER flashes the desktop Stripe amount (¥1,280) before the live query
@@ -302,11 +312,17 @@ export function PaywallDialog() {
           base DialogContent keeps it scrollable, we just don't paint the bar. */}
       <DialogContent className="sm:max-w-2xl gap-3 sm:gap-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <DialogHeader>
-          <DialogTitle>プランをアップグレード</DialogTitle>
+          <DialogTitle>
+            {isPaid && !paywallReason
+              ? "プランと利用状況"
+              : "プランをアップグレード"}
+          </DialogTitle>
           <DialogDescription>
             {paywallReason
               ? `「${featureLabel(paywallReason)}」が今月の上限に達しました。上位プランで大幅に上限が広がります。`
-              : "より多くのAI・音声・リサーチ機能をご利用いただけます。"}
+              : isPaid
+                ? "現在のプランのご利用状況を確認し、サブスクリプションを管理できます。"
+                : "より多くのAI・音声・リサーチ機能をご利用いただけます。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -355,6 +371,7 @@ export function PaywallDialog() {
             onSubscribe={(p) => startCheckout(p, interval)}
             onManage={openBillingPortal}
             purchasable={proPurchasable}
+            manageLabel={proManageLabel}
             ctaShowsExternal={false}
             priceModel={proPrice ?? undefined}
           />
@@ -368,6 +385,7 @@ export function PaywallDialog() {
               onSubscribe={(p) => startCheckout(p, interval)}
               onManage={openBillingPortal}
               purchasable={proPurchasable}
+              manageLabel={proManageLabel}
               ctaShowsExternal={!isMobile}
             />
             <PlanCard

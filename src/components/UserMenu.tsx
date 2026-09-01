@@ -80,27 +80,25 @@ export function UserMenu() {
   } = useAuthStore();
   const effectivePlan = useEntitlementStore((s) => s.effectivePlan);
   const openPaywall = useEntitlementStore((s) => s.openPaywall);
-  const openBillingPortal = useEntitlementStore((s) => s.openBillingPortal);
   const openTeamManage = useEntitlementStore((s) => s.openTeamManage);
   const openFeedback = useFeedbackStore((s) => s.openFeedback);
   const telemetryConsent = useTelemetryStore((s) => s.consent);
   const telemetryReady = useTelemetryStore((s) => s.ready);
   const setTelemetryConsentChoice = useTelemetryStore((s) => s.setConsent);
-  // Show the upgrade entry to Free users; the manage entry to paying users.
-  // internal (staff/owner real plan) sees neither — they don't buy.
+  // Show the upgrade entry to Free users only (purchase UI stays dark until
+  // launch via BILLING_ENABLED). internal (staff/owner real plan) sees neither
+  // upgrade nor plan — they don't buy.
   const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
   const isPaidPlan = effectivePlan === "pro" || effectivePlan === "team";
-  // Anti-steering (Apple/Google): mobile app users must NOT be routed to the
-  // external Stripe billing portal directly. On desktop, paying users get a
-  // one-tap shortcut straight to the Stripe customer portal.
-  const showManage = BILLING_ENABLED && !isMobile && isPaidPlan;
-  // On mobile there is no StatusBar plan badge, so once a user is Pro/Team the
-  // upgrade entry (Free-only) disappears and — because showManage excludes
-  // mobile — they have NO way left to reopen the plan screen. Give paying mobile
-  // users a menu entry that opens the PaywallDialog: it renders the usage meter
-  // (利用料確認) and a "契約を管理" button that routes an IAP subscriber to the
-  // OS store's subscription manager via openBillingPortal (anti-steering-safe).
-  const showPlanMobile = BILLING_ENABLED && isMobile && isPaidPlan;
+  // A paid user (pro/team — commonly bought via mobile IAP) must ALWAYS be able
+  // to open the plan dialog to see usage (利用状況の確認) and manage/cancel the
+  // subscription (サブスク管理), on EVERY platform and even while the purchase UI
+  // is dark. Before, this required BILLING_ENABLED and excluded desktop, so a Pro
+  // user on the shipped desktop build had no path at all (the reported dead-end).
+  // The dialog's manage button is source-aware: it routes an IAP sub to the OS
+  // store's own manager and a Stripe sub to the customer portal — anti-steering
+  // safe on mobile.
+  const showPlan = isPaidPlan;
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -134,15 +132,14 @@ export function UserMenu() {
     );
   }, [resetCloudAndReSync, isOnline]);
 
-  // Manage/cancel an existing subscription. openBillingPortal sets billingError
-  // in the store, but that is only rendered inside PaywallDialog (closed here),
-  // so we surface the failure ourselves — otherwise the button looks dead and a
-  // user trying to CANCEL gets no feedback (silent failure).
-  const handleManageSubscription = useCallback(async () => {
+  // Open the plan dialog (usage meter + source-aware 契約を管理). Routing an
+  // existing subscription to its correct management surface lives inside the
+  // dialog, so this menu entry just opens it — one discoverable place for both
+  // 利用状況 and サブスク管理.
+  const handleOpenPlan = useCallback(() => {
     setMobileMenuOpen(false);
-    const res = await openBillingPortal();
-    if (!res.ok && res.error) window.alert(res.error);
-  }, [openBillingPortal]);
+    openPaywall();
+  }, [openPaywall]);
 
   useEffect(() => {
     if (!syncMenuOpen) return;
@@ -275,20 +272,8 @@ export function UserMenu() {
                 プランをアップグレード
               </button>
             )}
-            {showManage && (
-              <button className={menuItem} onClick={handleManageSubscription}>
-                <CreditCard className="h-4 w-4" />
-                契約を管理
-              </button>
-            )}
-            {showPlanMobile && (
-              <button
-                className={menuItem}
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  openPaywall();
-                }}
-              >
+            {showPlan && (
+              <button className={menuItem} onClick={handleOpenPlan}>
                 <CreditCard className="h-4 w-4" />
                 利用状況・プラン
               </button>
@@ -384,13 +369,13 @@ export function UserMenu() {
           <Sparkles className={iconSize} />
         </Button>
       )}
-      {showManage && (
+      {showPlan && (
         <Button
           variant="ghost"
           size="icon"
           className={btnSize}
-          onClick={handleManageSubscription}
-          title="契約を管理"
+          onClick={handleOpenPlan}
+          title="利用状況・プラン"
         >
           <CreditCard className={iconSize} />
         </Button>

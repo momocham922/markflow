@@ -8,6 +8,7 @@ import {
   parseUidSet,
   resolveViewAs,
   derivePlan,
+  iapExpiryBackstop,
   periodKey,
   checkQuota,
   isChargeable,
@@ -177,10 +178,15 @@ const IAP_ALLOW_SANDBOX =
 // Sandbox (TestFlight) / License-tester purchase so the owner can validate the
 // IAP flow end-to-end WITHOUT flipping the global IAP_ALLOW_SANDBOX, which would
 // hand real Pro to ANY sandbox tester. This is production-SAFE to keep set: a
-// non-listed real user still gets `sandbox_not_allowed`. Only consulted at the
-// authed /iap/verify sites (the acting uid is the VERIFIED Firebase uid there);
-// the server-to-server notification handlers carry no acting uid and stay on the
-// global flag (they ack-but-don't-apply sandbox events in production).
+// non-listed real user still gets `sandbox_not_allowed`. Consulted at BOTH the
+// authed /iap/verify sites (acting uid = VERIFIED Firebase uid) AND the
+// server-to-server notification handlers (Apple ASSN / Play RTDN), which resolve
+// the bound uid from the transaction/token FIRST, then gate per-uid. Grant and
+// revoke MUST use the same gate: if a tester may sandbox-PURCHASE, that tester's
+// sandbox EXPIRED/refund must also APPLY, else the entitlement sticks on Pro
+// after the sandbox sub expires (the grant/revoke asymmetry that stranded a
+// TestFlight tester on stale Pro). Real production events (env=Production /
+// non-test) skip the gate and apply as before.
 const IAP_SANDBOX_UIDS = new Set(
   (process.env.IAP_SANDBOX_UIDS || "")
     .split(",")
@@ -1561,11 +1567,18 @@ async function resolvePlan(
   meterKey: string;
   seats: number;
   source: string | null;
+  expiresDate: number | null;
 }> {
   let real: ResolvedEntitlement;
   if (INTERNAL_UIDS.has(uid)) {
     // Internal allowlist is unmetered — meter under the uid (never consulted).
-    real = { realPlan: "internal", meterKey: uid, seats: 1, source: null };
+    real = {
+      realPlan: "internal",
+      meterKey: uid,
+      seats: 1,
+      source: null,
+      expiresDate: null,
+    };
   } else {
     real = await loadEntitlement(uid);
   }
@@ -1580,6 +1593,7 @@ async function resolvePlan(
     meterKey: real.meterKey,
     seats: real.seats,
     source: real.source ?? null,
+    expiresDate: real.expiresDate ?? null,
   };
 }
 
@@ -1600,6 +1614,12 @@ interface ResolvedEntitlement {
    * so an IAP subscriber must be sent to the store's own management UI instead.
    */
   source?: string | null;
+  /**
+   * Subscription period end (epoch MILLISECONDS) for a paid own-subscription, or
+   * null. Surfaced to the client so the plan panel can show the renewal/expiry
+   * date; also the input to computeEntitlement's read-time IAP expiry backstop.
+   */
+  expiresDate?: number | null;
   // Set when the plan could NOT be resolved (Firestore error) and we fell back to
   // "free". Lets callers that must fail OPEN (the publish serve-gate) tell a
   // genuine free plan apart from a lookup blip. The AI metering path ignores it
@@ -1648,14 +1668,35 @@ async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
     const snap = await db.collection("entitlements").doc(uid).get();
     const data = snap.exists ? (snap.data() as Record<string, unknown>) : null;
     const source = data?.source ? String(data.source) : null;
-    const plan = data ? derivePlan(data) : "free";
+    // Stored subscription period end (SECONDS — iap.ts msToSec / billing.ts).
+    const periodEndSec = Number(data?.currentPeriodEnd) || 0;
+    const expiresDate = periodEndSec > 0 ? periodEndSec * 1000 : null;
+    const derived = data ? derivePlan(data) : "free";
+    // Read-time IAP expiry backstop (money-leak guard) — pure logic in gating.ts
+    // (iapExpiryBackstop), the clock injected here. Response-only: we do NOT write
+    // from this hot read path — the next /iap/verify or a (re)delivered
+    // notification persists the terminal doc.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const plan = iapExpiryBackstop(derived, source, periodEndSec, nowSec);
+    if (plan !== derived) {
+      console.warn(
+        `[iap] expiry backstop: uid=${uid} source=${source} periodEnd=${periodEndSec} now=${nowSec} — treating as free (missed lifecycle notification?)`,
+      );
+    }
     if (plan === "team") {
       const teamId = String(data?.teamId || "").trim() || uid;
       const seats = Math.max(1, Math.floor(Number(data?.seats) || 1));
-      return { realPlan: "team", meterKey: teamId, seats, source };
+      return { realPlan: "team", meterKey: teamId, seats, source, expiresDate };
     }
     if (plan === "pro" || plan === "internal") {
-      return { realPlan: plan, meterKey: uid, seats: 1, source };
+      return {
+        realPlan: plan,
+        meterKey: uid,
+        seats: 1,
+        source,
+        // internal is unmetered/admin-seeded — no meaningful expiry to show.
+        expiresDate: plan === "internal" ? null : expiresDate,
+      };
     }
     // free own-entitlement → maybe an assigned member of a paid team. The team
     // MEMBER owns no subscription of their own (the team owner's doc holds the
@@ -1667,8 +1708,11 @@ async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
         meterKey: seat.teamId,
         seats: seat.seats,
         source: null,
+        expiresDate: null,
       };
-    return { realPlan: "free", meterKey: uid, seats: 1, source };
+    // A backstop-expired IAP sub reads as free here but keeps its `source` so the
+    // client can still explain WHERE the lapsed subscription lived if needed.
+    return { realPlan: "free", meterKey: uid, seats: 1, source, expiresDate };
   } catch (err) {
     // Fail to per-uid "free" (NOT unlimited) so a Firestore blip can neither
     // break the product nor leak unlimited cost. Logged explicitly — never silent.
@@ -2921,10 +2965,8 @@ const server = http.createServer(async (req, res) => {
   if (req.url === "/v1/me/entitlement") {
     try {
       const uid = await verifyFirebaseToken(req.headers.authorization);
-      const { realPlan, plan, viewAs, meterKey, seats } = await resolvePlan(
-        req,
-        uid,
-      );
+      const { realPlan, plan, viewAs, meterKey, seats, source, expiresDate } =
+        await resolvePlan(req, uid);
       const isOwner = OWNER_UIDS.has(uid);
       const ym = periodKey(new Date());
       let usage: Record<string, number> = {};
@@ -2976,6 +3018,16 @@ const server = http.createServer(async (req, res) => {
           seats,
           limits,
           usage,
+          // Billing rail owning THIS user's own subscription (stripe / app_store /
+          // play / founder / null). The client routes "契約を管理" on it: an IAP
+          // sub has no Stripe customer, so it must be sent to the store's own
+          // management UI instead. Dropping it here (the pre-fix behavior) left the
+          // client's source-aware routing dead → IAP users hit the Stripe portal
+          // and saw a false "no subscription found".
+          source: source ?? null,
+          // Subscription period end (epoch ms) for the plan panel's renewal/expiry
+          // line; null for free / no dated subscription.
+          expiresDate: expiresDate ?? null,
         }),
       );
       return;
@@ -3775,24 +3827,35 @@ const server = http.createServer(async (req, res) => {
       const data = (notification.data || {}) as Record<string, unknown>;
       const signedTx = String(data.signedTransactionInfo || "").trim();
       const notifProduction = isProdEnvironment(data.environment);
-      if (signedTx && !notifProduction && !IAP_ALLOW_SANDBOX) {
-        // Sandbox notification in a production deployment — never apply it (would
-        // grant/alter a real entitlement from a test purchase). Still ack +
-        // dedupe-record below so Apple stops retrying.
-        console.log(`[iap] apple notif ${uuid} sandbox — ack, not applied`);
-      } else if (signedTx) {
-        const production = notifProduction;
-        const txn = (await appleVerifier(production).verifyAndDecodeTransaction(
-          signedTx,
-        )) as unknown as Record<string, unknown>;
+      if (signedTx) {
+        // Decode + resolve the bound uid FIRST so the sandbox decision is PER-UID
+        // (sandboxAllowedFor), mirroring /iap/verify. The SAME allowlisted testers
+        // who may sandbox-PURCHASE must also have their sandbox lifecycle
+        // (renew / expire / refund) APPLIED — otherwise a sandbox EXPIRED is
+        // dropped and the tester is stuck on Pro forever (grant/revoke asymmetry).
+        // A real production notification (notifProduction=true) is unaffected: the
+        // sandbox gate below is skipped and it applies as before.
+        const txn = (await appleVerifier(
+          notifProduction,
+        ).verifyAndDecodeTransaction(signedTx)) as unknown as Record<
+          string,
+          unknown
+        >;
         const facts = appleFactsFromDecoded(txn, {
           status: data.status,
           eventId: uuid,
         });
         const result = buildAppleIntent(facts);
         const subId = String(txn.originalTransactionId || "").trim();
-        const uid = await lookupIapCustomer(subId);
-        if (result.ok && uid) {
+        const uid = subId ? await lookupIapCustomer(subId) : null;
+        if (!notifProduction && !(uid && sandboxAllowedFor(uid))) {
+          // Sandbox notification whose bound uid is NOT sandbox-allowed (or a stray
+          // sandbox event in a production deployment) — never apply it to a real
+          // entitlement. Still ack + dedupe-record below so Apple stops retrying.
+          console.log(
+            `[iap] apple notif ${uuid} sandbox — ack, not applied (uid=${uid ?? "?"})`,
+          );
+        } else if (result.ok && uid) {
           await applyIapIntent(uid, result, "notif/apple");
         } else {
           console.warn(
@@ -3887,27 +3950,31 @@ const server = http.createServer(async (req, res) => {
           eventId: rtdn.messageId,
           eventTimeMs: rtdn.eventTimeMs,
         });
-        if (facts.test && !IAP_ALLOW_SANDBOX) {
-          // Test-purchase RTDN in production — ack + dedupe-record, never apply.
+        const result = buildPlayIntent(facts);
+        // Resolve the bound uid FIRST so the test-purchase decision is PER-UID
+        // (sandboxAllowedFor), mirroring /iap/verify/android. The SAME allowlisted
+        // testers who may test-PURCHASE must also have their test lifecycle
+        // (renew / expire / refund) APPLIED — otherwise a test EXPIRED is dropped
+        // and the tester is stuck on Pro forever (grant/revoke asymmetry). Prefer
+        // the server-established binding; fall back to the obfuscated account id we
+        // set at purchase (from the authoritative Play API).
+        let uid = await lookupIapCustomer(token);
+        if (!uid && result.ok) uid = String(result.uid || "") || null;
+        if (facts.test && !(uid && sandboxAllowedFor(uid))) {
+          // Test-purchase RTDN whose bound uid is NOT sandbox-allowed (or a stray
+          // test event) — ack + dedupe-record, never apply to a real entitlement.
           console.log(
-            `[iap] play sub ${rtdn.messageId} test — ack, not applied`,
+            `[iap] play sub ${rtdn.messageId} test — ack, not applied (uid=${uid ?? "?"})`,
           );
+        } else if (result.ok && uid) {
+          await bindIapCustomer(result.intent.subId!, uid, {
+            source: "play",
+          });
+          await applyIapIntent(uid, result, "rtdn/sub");
         } else {
-          const result = buildPlayIntent(facts);
-          // Prefer the server-established binding; fall back to the obfuscated
-          // account id we set at purchase (from the authoritative Play API).
-          let uid = await lookupIapCustomer(token);
-          if (!uid && result.ok) uid = String(result.uid || "") || null;
-          if (result.ok && uid) {
-            await bindIapCustomer(result.intent.subId!, uid, {
-              source: "play",
-            });
-            await applyIapIntent(uid, result, "rtdn/sub");
-          } else {
-            console.warn(
-              `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
-            );
-          }
+          console.warn(
+            `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
+          );
         }
       } else {
         console.log(`[iap] play RTDN ${rtdn.messageId} no actionable body`);
