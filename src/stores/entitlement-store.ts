@@ -835,15 +835,16 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   openPaywall: (reason = null) => {
-    // The purchase UI ships dark (BILLING_ENABLED) until launch. EXCEPTION: a user
-    // who ALREADY holds a paid subscription (pro/team — typically bought via the
-    // mobile IAP rails) must always be able to open this dialog to see their usage
-    // and reach 契約を管理 — otherwise a Pro user on a dark desktop build has no
-    // path to usage/management at all (the reported PC dead-end). Free users stay
-    // gated so no purchase CTA appears before launch.
-    const plan = get().effectivePlan;
-    const isPaid = plan === "pro" || plan === "team";
-    if (!BILLING_ENABLED && !isPaid) return;
+    // This dialog is the single surface for 利用状況 (the usage meter) + plan info +
+    // the platform-appropriate upgrade / 契約を管理 action, so it must ALWAYS open
+    // for a signed-in user — on every platform and even while the purchase UI
+    // ships dark (BILLING_ENABLED=false). Purchase-CTA visibility is gated INSIDE
+    // the dialog (PaywallDialog: desktop shows the Stripe upgrade, mobile shows
+    // "近日対応予定" until launch), NOT by refusing to open. Refusing for a Free
+    // user while dark left the StatusBar/UserMenu entry a no-op — the reported PC
+    // dead-end the moment the owner downgraded (mirror of the earlier paid-user
+    // dead-end). All callers are user-triggered (badge/menu click or a gated
+    // action), so this never auto-pops.
     set({ paywallOpen: true, paywallReason: reason, billingError: null });
   },
   closePaywall: () => set({ paywallOpen: false, paywallReason: null }),

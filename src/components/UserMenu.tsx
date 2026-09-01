@@ -98,7 +98,14 @@ export function UserMenu() {
   // The dialog's manage button is source-aware: it routes an IAP sub to the OS
   // store's own manager and a Stripe sub to the customer portal — anti-steering
   // safe on mobile.
-  const showPlan = isPaidPlan;
+  //
+  // Free users must ALSO always reach the dialog — it shows the usage meter for
+  // everyone, plus the upgrade path. When the purchase UI is live the dedicated
+  // "アップグレード" entry (showUpgrade) already covers Free, so only add the
+  // "利用状況・プラン" entry for Free when that upgrade entry is NOT shown — avoids
+  // a duplicate item opening the same dialog, and fixes the dead-end where a
+  // downgraded Free user had no path to 利用状況 while billing was dark.
+  const showPlan = isPaidPlan || (effectivePlan === "free" && !showUpgrade);
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
