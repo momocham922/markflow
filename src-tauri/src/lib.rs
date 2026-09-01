@@ -2410,6 +2410,13 @@ fn clear_voice_archive() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // rustls 0.23 requires a process-wide default CryptoProvider. tauri core and
+    // tauri-plugin-updater build reqwest 0.13 (rustls) clients that panic with
+    // "No provider set" if none is installed, crashing the app on startup
+    // (reproduced on the iOS simulator). Install the ring provider once here;
+    // .ok() ignores the error when a provider is already set (idempotent).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

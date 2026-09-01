@@ -1,6 +1,6 @@
 [package]
 name = "markflow"
-version = "0.6.2-beta.6"
+version = "0.6.2-beta.7"
 description = "A modern, elegant Markdown editor"
 authors = ["MarkFlow Team"]
 edition = "2021"
@@ -23,6 +23,11 @@ urlencoding = "2"
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-fs = "2.4.5"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+# rustls 0.23 needs a process-wide default CryptoProvider installed at startup;
+# tauri core + tauri-plugin-updater build reqwest 0.13 (rustls) clients that
+# panic ("No provider set") without one. Pin to `ring` (already the only
+# provider in the tree) and install it in run().
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-deep-link = "2"

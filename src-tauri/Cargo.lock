@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "markflow"
-version = "0.6.2-beta.6"
+version = "0.6.2-beta.7"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2435,6 +2435,7 @@ dependencies = [
  "objc2-foundation",
  "ort",
  "reqwest 0.12.28",
+ "rustls",
  "screencapturekit",
  "serde",
  "serde_json",
