@@ -16,6 +16,7 @@ import { useEffect } from "react";
 import { useResearchStore } from "@/stores/research-store";
 import { useAppStore } from "@/stores/app-store";
 import { groundedSearch } from "@/services/research";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import type { ResearchCard, ResearchSource } from "@/stores/research-store";
 import { isTauri, isMobile } from "@/platform";
 
@@ -252,7 +253,7 @@ export function useResearchWindowManager(): void {
             } catch (e) {
               store.updateCard(id, {
                 loading: false,
-                error: e instanceof Error ? e.message : "再試行に失敗しました",
+                error: friendlyErrorMessage(e, "research"),
               });
             }
           }

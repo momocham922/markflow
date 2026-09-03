@@ -17,6 +17,7 @@ import {
   clampBatchReserveMinutes,
   measuredBatchMinutes,
   reconcileBatchDelta,
+  failedBatchChargeDelta,
   shouldRefund,
   deriveSeatAccess,
   type Plan,
@@ -1053,6 +1054,12 @@ const meteringStore: MeteringStore = {
 // exceed the Cloud Run request timeout (900s) so a legitimately long batch is
 // never reclaimed as "stale" while it is still running.
 const BATCH_LEASE_STALE_MS = 20 * 60 * 1000;
+// Hard cap on chunks per batch-transcribe request. Each chunk launches its own
+// paid BatchRecognize job, so an unbounded chunk array is a parallel cost bomb;
+// the pre-flight reserve now floors at 1 min/chunk (clampBatchReserveMinutes) but
+// this cap bounds the fan-out independently. The client splits recordings into
+// ≤55-min chunks, so 48 chunks covers ~44h — far beyond any real recording.
+const MAX_BATCH_CHUNKS = 48;
 const serverValues: ServerValues = {
   increment: (n) => FieldValue.increment(n),
   serverTimestamp: () => FieldValue.serverTimestamp(),
@@ -1160,6 +1167,39 @@ async function getGcpAccessToken(): Promise<string> {
     throw new Error("Failed to get access token from metadata server");
   const data = (await res.json()) as { access_token: string };
   return data.access_token;
+}
+
+// Upstream statuses that are worth a retry: rate limits and transient overload.
+// 529 is Anthropic/Vertex "overloaded"; 503 is Gemini/Vertex unavailable. A 4xx
+// other than 429 is a caller/config error and is NOT retried.
+const TRANSIENT_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 529]);
+
+// Retry a fetch thunk on transient upstream failures with exponential backoff.
+// Returns the FINAL Response (which may still be non-OK) so the caller decides
+// how to degrade — this helper never throws on an HTTP error status and never
+// reads the returned body (the caller owns it). The discarded body of a failed
+// intermediate attempt is drained so the socket can be reused.
+async function fetchUpstreamWithRetry(
+  make: () => Promise<Response>,
+  opts?: { attempts?: number; baseDelayMs?: number },
+): Promise<Response> {
+  const attempts = opts?.attempts ?? 3;
+  const baseDelayMs = opts?.baseDelayMs ?? 500;
+  let last: Response | null = null;
+  for (let i = 0; i < attempts; i++) {
+    const r = await make();
+    if (r.ok || !TRANSIENT_UPSTREAM_STATUS.has(r.status)) return r;
+    last = r;
+    if (i < attempts - 1) {
+      try {
+        await r.text(); // drain the discarded body before retrying
+      } catch {
+        /* ignore */
+      }
+      await new Promise((res) => setTimeout(res, baseDelayMs * 2 ** i));
+    }
+  }
+  return last as Response;
 }
 
 // Revocation / disabled-account check for the metered (cost-incurring) paths.
@@ -1355,7 +1395,7 @@ async function deleteStoragePrefix(prefix: string): Promise<number> {
  * is unconfigured (DARK) or the user has no customer. Never throws.
  */
 async function cancelPersonalStripeSubscription(uid: string): Promise<void> {
-  if (!isBillingConfigured()) return;
+  if (!billingConfigured()) return;
   try {
     const entSnap = await getFirestore()
       .collection("entitlements")
@@ -1737,6 +1777,17 @@ async function resolveTeamSeat(
   const teamSnap = await db.collection("teams").doc(teamId).get();
   if (!teamSnap.exists) return null;
   const t = teamSnap.data() as Record<string, unknown>;
+  // Current membership gate: a uid removed from the team must lose the shared
+  // pool IMMEDIATELY, even if a stale seatAssignments entry still names them.
+  // removeTeamMember is a client Firestore write that strips memberUids but does
+  // not (cannot securely) rewrite the server-authoritative seatAssignments, so
+  // deriveSeatAccess alone would keep granting a fired member access. Requiring
+  // BOTH current membership AND an in-capacity seat closes that at the server
+  // gate (authoritative — cannot be bypassed by the client).
+  const memberUids = Array.isArray(t?.memberUids)
+    ? (t.memberUids as unknown[]).map((u) => String(u ?? "").trim())
+    : [];
+  if (!memberUids.includes(uid)) return null;
   const billing = t?.billing as
     { status?: unknown; seats?: unknown } | undefined;
   const assignments = Array.isArray(t?.seatAssignments)
@@ -1812,10 +1863,24 @@ async function guard(
     }
     return { ok: true, charged: true, uid, meterKey, plan, feature, cost, ym };
   } catch (err) {
-    // Fail-open on metering-infra error: don't break AI for a DB blip. Logged.
-    // charged:false — the increment never persisted, so never refund it.
+    // Fail CLOSED on metering-infra error. A metered plan whose usage counter
+    // cannot be read/incremented must NOT be granted the feature for free — that
+    // is exactly the "user at their limit slips through during a Firestore blip"
+    // money leak (project rule: サイレントフォールバック禁止・障害は明示的に失敗させろ).
+    // Internal/unlimited plans never reach here (precheck.unlimited returned
+    // above), so this only fails a genuinely metered request. Surfaced as a
+    // retriable 503 with a stable code the client maps to a friendly message —
+    // never a silent success and never a raw error string.
     console.error(`guard tx failed for ${uid}/${feature}:`, err);
-    return { ok: true, charged: false, uid, meterKey, plan, feature, cost, ym };
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "metering_unavailable",
+        feature,
+        retryable: true,
+      }),
+    );
+    return { ok: false };
   }
 }
 
@@ -2081,12 +2146,33 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Read request body (shared by all POST routes)
+  // 10 MB cap: every endpoint using this reader posts JSON (chat/transcript
+  // metadata/feedback) — never raw audio (that goes to Storage; requests carry
+  // only a gcsUri). The Stripe webhook uses its own raw-body reader. A cap here
+  // stops an unbounded body from pinning memory (OOM / cost DoS vector).
+  const MAX_BODY_BYTES = 10 * 1024 * 1024;
   const readBody = (): Promise<string> =>
     new Promise<string>((resolve, reject) => {
-      let data = "";
-      req.on("data", (chunk: Buffer) => (data += chunk.toString()));
-      req.on("end", () => resolve(data));
-      req.on("error", reject);
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let aborted = false;
+      req.on("data", (chunk: Buffer) => {
+        if (aborted) return;
+        size += chunk.length;
+        if (size > MAX_BODY_BYTES) {
+          aborted = true;
+          reject(new Error("Request body too large"));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on("end", () => {
+        if (!aborted) resolve(Buffer.concat(chunks).toString("utf8"));
+      });
+      req.on("error", (e) => {
+        if (!aborted) reject(e);
+      });
     });
 
   // --- /v1/auth/oauth/exchange (BFF: swap authorization code → tokens) ---
@@ -2851,7 +2937,7 @@ const server = http.createServer(async (req, res) => {
             stripeSubscriptionId?: unknown;
           } | null;
           const subId = String(billing?.stripeSubscriptionId ?? "").trim();
-          if (subId && isBillingConfigured()) {
+          if (subId && billingConfigured()) {
             try {
               await getStripe().subscriptions.cancel(subId);
             } catch (e) {
@@ -2880,7 +2966,11 @@ const server = http.createServer(async (req, res) => {
           try {
             await doc.ref.update({
               memberUids: FieldValue.arrayRemove(uid),
-              [`seatAssignments.${uid}`]: FieldValue.delete(),
+              // seatAssignments is an ORDERED ARRAY (the capacity fence), not a
+              // map — remove the uid with arrayRemove. The old map-path delete
+              // (`seatAssignments.<uid>`) was a no-op on an array, so a deleted
+              // account's seat lingered and could push a live member off the end.
+              seatAssignments: FieldValue.arrayRemove(uid),
             });
             scrubbedTeams++;
             progressed = true;
@@ -4208,6 +4298,22 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Cap the chunk fan-out. Each chunk launches its own paid BatchRecognize
+      // job in parallel (Promise.all below), so an oversized `chunks` array is a
+      // cost bomb independent of the quota reserve. The client never produces
+      // more than ~a few dozen chunks (≤55min each); anything larger is abuse.
+      if (chunks.length > MAX_BATCH_CHUNKS) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "too_many_chunks",
+            message:
+              "録音が長すぎます。もう少し短い録音に分けてお試しください。",
+          }),
+        );
+        return;
+      }
+
       // Pre-flight reserve from the client-supplied (untrusted) durations —
       // negatives clamped, floored at 1. The authoritative charge is reconciled
       // below from the server-measured transcript length, so the client cannot
@@ -4254,11 +4360,18 @@ const server = http.createServer(async (req, res) => {
 
       const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
 
+      // Per-chunk "op launched" flags. A chunk's paid BatchRecognize op is billed
+      // by Google the moment it is created (startRes.ok), so on a partial failure
+      // we charge for the ops that STARTED and refund only the rest (see the
+      // failure branch below and failedBatchChargeDelta).
+      const startedChunks: boolean[] = new Array(chunks.length).fill(false);
+
       // Transcribe one file: start the op, poll to completion, surface per-file
       // errors, and return its SpeechRecognitionResult[] (word-level speaker
       // labels + timestamps). Throws on any failure.
       const transcribeFile = async (
         uri: string,
+        idx: number,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ): Promise<any[]> => {
         const startToken = await getGcpAccessToken();
@@ -4292,6 +4405,10 @@ const server = http.createServer(async (req, res) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const op = (await startRes.json()) as any;
         const opName: string = op.name;
+        // The op now exists on Google's side and is billed regardless of whether
+        // it later succeeds, errors, or times out — flag it so a partial failure
+        // charges for it instead of refunding it.
+        startedChunks[idx] = true;
         const shortName = uri.split("/").pop();
         console.log(`[batch] Operation started: ${opName} (${shortName})`);
 
@@ -4353,20 +4470,55 @@ const server = http.createServer(async (req, res) => {
         return fileResults[fileKey]?.inlineResult?.transcript?.results || [];
       };
 
-      // Run all chunks in parallel (total ≈ slowest chunk).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let chunkResults: any[][];
-      try {
-        chunkResults = await Promise.all(
-          chunks.map((c) => transcribeFile(c.gcsUri)),
-        );
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+      // Run all chunks in parallel (total ≈ slowest chunk). allSettled (not all)
+      // so one chunk's failure doesn't erase the fact that the OTHER chunks' paid
+      // ops already launched — the failure branch below charges for every started
+      // op instead of refunding the whole batch.
+      const settled = await Promise.allSettled(
+        chunks.map((c, i) => transcribeFile(c.gcsUri, i)),
+      );
+      const firstReject = settled.find((s) => s.status === "rejected") as
+        PromiseRejectedResult | undefined;
+      if (firstReject) {
+        const msg =
+          firstReject.reason instanceof Error
+            ? firstReject.reason.message
+            : String(firstReject.reason);
         console.error(`[batch] Transcription failed: ${msg}`);
+        // A batch that launched real BatchRecognize ops then failed must NOT
+        // refund the whole reserve — that would let a client loop "N valid + 1
+        // poisoned" chunks to run paid STT for free. Charge the ops that STARTED
+        // (Google billed them) and refund only the never-launched remainder. The
+        // delta is always ≤ 0 (see failedBatchChargeDelta), so this never
+        // over-charges; startedCount = 0 (a pre-flight start failure) is still a
+        // full refund. Setting committed=true stops `finally` refunding on top.
+        const startedCount = startedChunks.filter(Boolean).length;
+        if (g.ok && g.charged) {
+          await adjustUsage(
+            g.meterKey,
+            "batchMin",
+            failedBatchChargeDelta(startedCount, reserveMin),
+            g.plan,
+            g.ym,
+          );
+        }
+        committed = true;
+        console.log(
+          `[batch] Partial failure: ${startedCount}/${chunks.length} op(s) started; charged ${Math.min(
+            startedCount,
+            reserveMin,
+          )}min of reserved ${reserveMin}min`,
+        );
         res.writeHead(502, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: msg }));
         return;
       }
+      // All chunks fulfilled — collect their results in order.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const chunkResults: any[][] = settled.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (s) => (s as PromiseFulfilledResult<any[]>).value,
+      );
 
       // Dedup the 20s overlap by word timestamp — split the overlap at its
       // midpoint so each boundary word is emitted exactly once — then build a
@@ -4448,7 +4600,11 @@ const server = http.createServer(async (req, res) => {
       // from the actual STT word/result offsets, not the client's claim). This
       // is the authoritative charge — a client that under-reported duration now
       // has its counter corrected upward so the next request is blocked.
-      const measuredMin = measuredBatchMinutes(chunkResults, OVERLAP_SECS);
+      const measuredMin = measuredBatchMinutes(
+        chunkResults,
+        OVERLAP_SECS,
+        chunks.map((c) => c.durationSec),
+      );
       if (g.ok && g.charged) {
         await adjustUsage(
           g.meterKey,
@@ -4487,10 +4643,13 @@ const server = http.createServer(async (req, res) => {
             console.error(`[batch] lease release failed for ${leaseUid}:`, e),
         );
       }
-      // On any non-success path (transcription 502, timeout, throw) refund the
-      // full reserve so a failed batch never costs the user minutes. Combined
-      // with the lease above this bounds abuse: a timeout-driven refund loop can
-      // now only run ONE job at a time per uid (residual serial retry accepted).
+      // Refund the reserve only on paths that left committed=false: an early
+      // 429/return (no op launched) or an exception caught above (rare, e.g. a
+      // post-transcription processing bug). The partial-failure branch is NOT one
+      // of these — it already reconciled the charge to the ops that STARTED and
+      // set committed=true, so it is not refunded on top. Charging started ops
+      // there closes the old free-STT loop (which full-refunded every partial
+      // failure), while the per-uid lease keeps a retry loop serial.
       await refundIfUncommitted(g, committed);
     }
     return;
@@ -4741,34 +4900,41 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
       }
       userPrompt += `\n\n## 検索済みトピック（重複禁止）\n${searchedTopics.length > 0 ? searchedTopics.join(", ") : "(なし)"}`;
 
-      const vertexRes = await fetch(getVertexAiUrl(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          anthropic_version: "vertex-2023-10-16",
-          // Generous headroom for opus-5's default `thinking` tokens PLUS the
-          // JSON brief: with thinking on, a low ceiling can be spent before the
-          // JSON is emitted, truncating it ("no JSON found"). The ceiling is a
-          // cap, not a charge. Kept below the 128K streaming max because this
-          // call is non-streaming (stream:false) and a huge cap would widen the
-          // HTTP-timeout window; the JSON brief is small and finishes early.
-          max_tokens: 32000,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }],
-          stream: false,
+      const vertexRes = await fetchUpstreamWithRetry(() =>
+        fetch(getVertexAiUrl(), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            anthropic_version: "vertex-2023-10-16",
+            // Generous headroom for opus-5's default `thinking` tokens PLUS the
+            // JSON brief: with thinking on, a low ceiling can be spent before the
+            // JSON is emitted, truncating it ("no JSON found"). The ceiling is a
+            // cap, not a charge. Kept below the 128K streaming max because this
+            // call is non-streaming (stream:false) and a huge cap would widen the
+            // HTTP-timeout window; the JSON brief is small and finishes early.
+            max_tokens: 32000,
+            system: systemPrompt,
+            messages: [{ role: "user", content: userPrompt }],
+            stream: false,
+          }),
         }),
-      });
+      );
 
       if (!vertexRes.ok) {
-        const errText = await vertexRes.text();
+        // Never leak the raw upstream status/body to the client (that produced
+        // the "素の500エラー" users saw). Research is a best-effort background
+        // enhancement: on upstream failure we degrade to an empty result with a
+        // clean 200 so the panel simply shows no new cards this tick. committed
+        // stays false → the reserved aiCall is refunded in `finally`.
+        const errText = await vertexRes.text().catch(() => "");
         console.error(
-          `[research] analyze error: ${vertexRes.status} | ${errText}`,
+          `[research] analyze upstream failed: ${vertexRes.status} | ${errText.slice(0, 500)}`,
         );
-        res.writeHead(vertexRes.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: errText }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ searches: [], questions: null }));
         return;
       }
 
@@ -4806,7 +4972,26 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         return;
       }
 
-      const result = JSON.parse(jsonMatch[0]);
+      // The greedy /\{[\s\S]*\}/ span can capture non-JSON text, and a
+      // thinking-truncated response can leave the JSON malformed — an unguarded
+      // JSON.parse here throws, and the outer catch turned that into a raw 500
+      // (the "素の500エラー" users saw). Degrade to an empty result on any parse
+      // failure; Vertex was invoked so the charge is kept (committed=true).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let result: any;
+      try {
+        result = JSON.parse(jsonMatch[0]);
+      } catch (parseErr) {
+        console.error(
+          `[research] analyze: JSON parse failed: ${
+            parseErr instanceof Error ? parseErr.message : String(parseErr)
+          }`,
+        );
+        committed = true; // Vertex was invoked (cost incurred) — keep the charge.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ searches: [], questions: null }));
+        return;
+      }
       const searches = Array.isArray(result.searches) ? result.searches : [];
       // Questions are follow-up prompts the user can ASK — no web search needed.
       // Only surface them when the director produced a non-empty item list.
@@ -4886,33 +5071,46 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
       const userPrompt = query;
 
-      const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemPrompt }],
+      const geminiRes = await fetchUpstreamWithRetry(() =>
+        fetch(getGeminiUrl(GEMINI_MODEL), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
           },
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: userPrompt }],
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: systemPrompt }],
             },
-          ],
-          tools: [{ googleSearch: {} }],
+            contents: [
+              {
+                role: "user",
+                parts: [{ text: userPrompt }],
+              },
+            ],
+            tools: [{ googleSearch: {} }],
+          }),
         }),
-      });
+      );
 
       if (!geminiRes.ok) {
-        const errText = await geminiRes.text();
+        // Same degrade-not-leak policy as analyze: return a clean, empty result
+        // (with `degraded:true` so the client can show a soft "検索できませんでした"
+        // state instead of a raw error) rather than passing the upstream status/
+        // body through. committed stays false → the aiCall is refunded.
+        const errText = await geminiRes.text().catch(() => "");
         console.error(
-          `[research] grounded-search error: ${geminiRes.status} | ${errText}`,
+          `[research] grounded-search upstream failed: ${geminiRes.status} | ${errText.slice(0, 500)}`,
         );
-        res.writeHead(geminiRes.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: errText }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            summary: "",
+            sources: [],
+            webSearchQueries: [],
+            degraded: true,
+          }),
+        );
         return;
       }
 
@@ -5017,19 +5215,35 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
     const accessToken = await getGcpAccessToken();
 
-    const vertexRes = await fetch(getVertexAiUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(vertexBody),
-    });
+    const vertexRes = await fetchUpstreamWithRetry(() =>
+      fetch(getVertexAiUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(vertexBody),
+      }),
+    );
 
     if (!vertexRes.ok) {
-      const errText = await vertexRes.text();
-      res.writeHead(vertexRes.status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: errText }));
+      // Do NOT pass the raw Vertex body through — it is an opaque upstream error
+      // that surfaced as a raw blob in the UI. Emit a machine-readable code +
+      // retryable flag; the client (AiPanel.pushFriendlyError) maps it to a
+      // friendly Japanese message. Full body is logged server-side for ops.
+      const errText = await vertexRes.text().catch(() => "");
+      console.error(
+        `[chat] vertex upstream failed: ${vertexRes.status} | ${errText.slice(0, 800)}`,
+      );
+      const retryable = TRANSIENT_UPSTREAM_STATUS.has(vertexRes.status);
+      const status = retryable ? 503 : 502;
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "ai_upstream_error",
+          retryable,
+        }),
+      );
       return;
     }
 

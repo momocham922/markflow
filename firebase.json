@@ -6,14 +6,18 @@
   "storage": {
     "rules": "firebase/storage.rules"
   },
+  "emulators": {
+    "firestore": {
+      "port": 8080
+    },
+    "singleProjectMode": true
+  },
   "hosting": {
     "public": "hosting",
     "headers": [
       {
         "source": "/.well-known/**",
-        "headers": [
-          { "key": "Content-Type", "value": "application/json" }
-        ]
+        "headers": [{ "key": "Content-Type", "value": "application/json" }]
       }
     ],
     "rewrites": [

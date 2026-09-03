@@ -15,6 +15,7 @@ import {
   clampBatchReserveMinutes,
   measuredBatchMinutes,
   reconcileBatchDelta,
+  failedBatchChargeDelta,
   shouldRefund,
   deriveSeatAccess,
   type Plan,
@@ -396,6 +397,39 @@ describe("reconcileBatchDelta", () => {
 });
 
 // =====================================================================
+// failedBatchChargeDelta — charge started ops, refund only unlaunched
+// =====================================================================
+describe("failedBatchChargeDelta", () => {
+  it("full refund when nothing launched (pre-flight start failure)", () => {
+    // 0 ops started, reserve 48 → refund all 48 (delta -48).
+    expect(failedBatchChargeDelta(0, 48)).toBe(-48);
+  });
+
+  it("charges everything when all ops launched then failed (the abuse case)", () => {
+    // N valid + 1 poisoned: all 48 ops started (Google billed each) → delta 0,
+    // so the reserve STANDS. The counter is not reset, so the repeat-loop draws
+    // down quota and self-terminates at the user's limit.
+    expect(failedBatchChargeDelta(48, 48)).toBe(0);
+  });
+
+  it("refunds only the unlaunched remainder on a partial launch", () => {
+    // 20 of 48 ops started before the failure → keep 20, refund 28 (delta -28).
+    expect(failedBatchChargeDelta(20, 48)).toBe(-28);
+  });
+
+  it("never over-charges: startedCount above reserve is capped at reserve", () => {
+    // Defensive: even if startedCount somehow exceeded reserveMin, the delta
+    // clamps to 0 (never a positive/extra charge on the failure path).
+    expect(failedBatchChargeDelta(60, 48)).toBe(0);
+  });
+
+  it("clamps negative/fractional inputs", () => {
+    expect(failedBatchChargeDelta(-5, 10)).toBe(-10);
+    expect(failedBatchChargeDelta(3.9, 10)).toBe(-7);
+  });
+});
+
+// =====================================================================
 // shouldRefund — refund a reserved cost only when truly uncommitted
 // =====================================================================
 describe("shouldRefund", () => {
@@ -522,14 +556,41 @@ describe("clampBatchReserveMinutes", () => {
     ).toBe(90);
   });
 
-  it("floors at 1 even for zero/absent durations", () => {
+  it("floors at 1 minute PER CHUNK for zero/absent durations", () => {
+    // Single zero-duration chunk still reserves 1.
     expect(clampBatchReserveMinutes([{ durationSec: 0 }])).toBe(1);
     expect(clampBatchReserveMinutes([{}])).toBe(1);
-    expect(clampBatchReserveMinutes([{ durationSec: 0 }, {}])).toBe(1);
+    // TWO zero-duration chunks reserve 2 (per-chunk floor) — this is the
+    // money-leak fix: N chunks draw down ≥ N minutes up front regardless of the
+    // (untrusted) declared durations, so a user at their limit cannot fan out
+    // dozens of paid BatchRecognize jobs on a 1-minute total reserve.
+    expect(clampBatchReserveMinutes([{ durationSec: 0 }, {}])).toBe(2);
+    expect(
+      clampBatchReserveMinutes([
+        { durationSec: 0 },
+        { durationSec: 0 },
+        { durationSec: 0 },
+      ]),
+    ).toBe(3);
   });
 
-  it("clamps negative durations to zero (never a negative reserve)", () => {
+  it("reserves >= chunk count even when declared minutes are smaller", () => {
+    // 12 chunks each claiming 1s: total 12s → ceil = 1 min, but the per-chunk
+    // floor forces a 12-minute reserve (one job per chunk).
+    const chunks = Array.from({ length: 12 }, () => ({ durationSec: 1 }));
+    expect(clampBatchReserveMinutes(chunks)).toBe(12);
+  });
+
+  it("uses the declared minutes when they exceed the chunk count", () => {
+    // 2 long chunks: the ceil'd total (90) dominates the per-chunk floor (2).
+    expect(
+      clampBatchReserveMinutes([{ durationSec: 3300 }, { durationSec: 2100 }]),
+    ).toBe(90);
+  });
+
+  it("clamps negative durations to zero (never below the per-chunk floor)", () => {
     expect(clampBatchReserveMinutes([{ durationSec: -9999 }])).toBe(1);
+    // 2 chunks: ceil(120/60)=2 and chunk-count floor=2 → 2.
     expect(
       clampBatchReserveMinutes([{ durationSec: -100 }, { durationSec: 120 }]),
     ).toBe(2);
@@ -590,6 +651,39 @@ describe("measuredBatchMinutes", () => {
     // measures to 50 → the counter is corrected upward regardless of the claim.
     const fiftyMin = chunkFromEndOffset(3000);
     expect(measuredBatchMinutes([fiftyMin], 20)).toBe(50);
+  });
+
+  it("floors the bill at the declared duration (silence-tail defense, M1)", () => {
+    // 30s of speech followed by a long silence tail: Google bills the real audio
+    // length, so a 600s chunk with only 30s of detected speech must bill 600s
+    // (10 min), NOT 30s. Passing the declared duration as a floor closes the
+    // "speak briefly then pad with silence for near-free STT" hole.
+    const chunk = chunkFromEndOffset(30); // speech ends at 30s
+    expect(measuredBatchMinutes([chunk], 20)).toBe(1); // without declared: 30s→1
+    expect(measuredBatchMinutes([chunk], 20, [600])).toBe(10); // declared 600s→10
+  });
+
+  it("never bills below the detected speech offset even if under-declared", () => {
+    // A client that under-declares (claims 10s for a 50-min file) cannot lower
+    // the bill below the server-measured speech offset (3000s → 50 min).
+    const fiftyMin = chunkFromEndOffset(3000);
+    expect(measuredBatchMinutes([fiftyMin], 20, [10])).toBe(50);
+  });
+
+  it("applies the declared floor per chunk and still subtracts overlaps", () => {
+    // Two chunks, each 30s of speech but 1800s (30min) of real audio; 20s
+    // overlap subtracted once → 3600s - 20s = 3580s → ceil = 60 min.
+    const a = chunkFromEndOffset(30);
+    const b = chunkFromEndOffset(30);
+    expect(measuredBatchMinutes([a, b], 20, [1800, 1800])).toBe(60);
+  });
+
+  it("ignores missing/garbage declared entries (falls back to offset)", () => {
+    const chunk = chunkFromEndOffset(90); // 90s speech → 2 min
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(measuredBatchMinutes([chunk], 20, [NaN as any])).toBe(2);
+    expect(measuredBatchMinutes([chunk], 20, [])).toBe(2);
+    expect(measuredBatchMinutes([chunk], 20, [-500])).toBe(2);
   });
 });
 

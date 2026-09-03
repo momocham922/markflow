@@ -10,6 +10,7 @@ import {
 import { isIOS, isMobile, isTauri } from "@/platform";
 import { cn } from "@/lib/utils";
 import { countWords } from "@/lib/editor-utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import * as db from "@/services/database";
 
 export function StatusBar() {
@@ -107,7 +108,10 @@ function DesktopStatusBar() {
         await relaunch();
       } catch (err) {
         setDowngrading(false);
-        window.alert(`Stable版のインストールに失敗しました: ${err}`);
+        console.error("[statusbar] force_install_stable failed:", err);
+        window.alert(
+          `Stable版のインストールに失敗しました。${friendlyErrorMessage(err, "update")}`,
+        );
       }
       return;
     }

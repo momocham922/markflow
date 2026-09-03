@@ -243,6 +243,31 @@ export function reconcileBatchDelta(
 }
 
 /**
+ * The usage-counter delta to apply when a batch transcription FAILS partway.
+ * Each chunk launches its OWN paid BatchRecognize op (Google bills the op the
+ * moment it is created), so a batch that starts N ops then fails must NOT refund
+ * the whole reserve — otherwise a client could resubmit "N valid + 1 poisoned"
+ * chunks to run real STT compute for free on a repeating loop (the per-uid lease
+ * serializes it but does not stop the loop). We keep the charge for the chunks
+ * whose op actually STARTED and refund only the never-launched remainder.
+ *
+ * `startedCount` ≤ chunks.length ≤ `reserveMin` (clampBatchReserveMinutes floors
+ * the reserve at 1 min/chunk), so the returned delta is ALWAYS ≤ 0: the failure
+ * path can only ever refund the unstarted portion, never over-charge. Passing
+ * startedCount = 0 (nothing launched — e.g. a pre-flight token/4xx error) yields
+ * a full refund, preserving the "a failed batch costs nothing" promise for the
+ * common start-failure case.
+ */
+export function failedBatchChargeDelta(
+  startedCount: number,
+  reserveMin: number,
+): number {
+  const started = Math.max(0, Math.floor(startedCount));
+  const reserve = Math.max(0, Math.floor(reserveMin));
+  return Math.min(started, reserve) - reserve;
+}
+
+/**
  * Whether a guarded request should refund its reserved cost. True ONLY when the
  * reservation succeeded AND actually charged quota (g.ok && g.charged) AND the
  * request did not commit (the upstream cost was never incurred). Internal /
@@ -266,12 +291,20 @@ export function parseOffset(v: unknown): number {
 /**
  * Pre-flight reserve (in minutes) for a batch-transcribe request, from the
  * client-supplied per-chunk durations. Negative/absent durations are clamped to
- * 0, and the reserve is floored at 1 so every request consumes something during
- * processing. This is only a best-effort block against obvious over-limit; the
- * authoritative charge is reconciled server-side after transcription via
- * measuredBatchMinutes(). Because the client value is untrusted, a caller can at
- * most under-reserve by one file's worth before the reconciled counter blocks
- * the next request — it can never obtain unlimited minutes.
+ * 0, then the reserve is floored at 1 minute PER CHUNK (not 1 minute total).
+ *
+ * The per-chunk floor is the money-leak fix: each chunk launches its OWN paid
+ * BatchRecognize job (minutes of STT compute) BEFORE the cost is reconciled, so a
+ * request that sends N chunks with durationSec=0 must still draw down at least N
+ * minutes of quota up front. That bounds the chunk COUNT a request can fan out to
+ * the caller's remaining quota (a user already at their limit reserves ≥1 and is
+ * blocked from starting any batch at all), and it composes with:
+ *   - the per-request chunk cap (MAX_BATCH_CHUNKS in index.ts) — bounds fan-out,
+ *   - the per-uid in-flight lease — serializes jobs so bursts can't run parallel,
+ *   - measuredBatchMinutes() reconcile — corrects the counter to the actual after.
+ * The client value stays untrusted (it can only ever raise its own reserve, never
+ * obtain free minutes): under-reporting duration is capped by the per-chunk floor
+ * + reconcile; over-reporting only charges the caller more.
  */
 export function clampBatchReserveMinutes(
   chunks: Array<{ durationSec?: number }>,
@@ -280,21 +313,35 @@ export function clampBatchReserveMinutes(
     (s, c) => s + Math.max(0, Number(c.durationSec) || 0),
     0,
   );
-  return Math.max(1, Math.ceil(totalSec / 60));
+  // Floor at 1 min PER CHUNK so N chunks reserve ≥ N minutes regardless of the
+  // (untrusted) declared durations.
+  return Math.max(chunks.length, Math.ceil(totalSec / 60));
 }
 
 /**
- * Server-measured billable minutes for a completed batch transcription, derived
- * from the actual STT output (word/result end offsets) — never the client's
- * claim. `chunkResults[i]` is the SpeechRecognitionResult[] for chunk i. For a
- * multi-chunk recording the 20s overlaps are subtracted so audio is billed once.
+ * Server-measured billable minutes for a completed batch transcription. The
+ * billable length of each chunk is the GREATER of:
+ *   - the last speech offset from the actual STT output (word/result end offsets)
+ *     — a lower bound that ignores TRAILING silence, and
+ *   - the client-declared chunk duration `declaredSecs[i]` (when provided).
+ * Google bills by AUDIO length, so billing on the speech offset alone would let a
+ * clip of speech followed by a long silence tail transcribe for near-free. Taking
+ * the declared duration as a FLOOR closes that: an honest client declares the true
+ * chunk length (silence included) and is billed for it, while a client that
+ * under-declares to dodge the charge can only fall back to the speech-offset lower
+ * bound (and has already paid the per-chunk pre-flight reserve — see
+ * clampBatchReserveMinutes). A client can never LOWER its bill below actual speech
+ * this way; it can only raise it by over-declaring (self-harm). For a multi-chunk
+ * recording the 20s overlaps are subtracted so shared audio is billed once.
  */
 export function measuredBatchMinutes(
   chunkResults: Array<Array<unknown>>,
   overlapSecs: number,
+  declaredSecs?: ReadonlyArray<number>,
 ): number {
   let totalSec = 0;
-  for (const results of chunkResults) {
+  for (let i = 0; i < chunkResults.length; i++) {
+    const results = chunkResults[i];
     let maxOffset = 0;
     for (const r of results) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -308,7 +355,10 @@ export function measuredBatchMinutes(
         if (eo > maxOffset) maxOffset = eo;
       }
     }
-    totalSec += maxOffset;
+    // Floor the chunk's billable length at its declared duration (audio length),
+    // never below the detected speech offset.
+    const declared = Math.max(0, Number(declaredSecs?.[i]) || 0);
+    totalSec += Math.max(maxOffset, declared);
   }
   const n = chunkResults.length;
   if (n > 1) totalSec -= overlapSecs * (n - 1);

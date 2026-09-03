@@ -25,38 +25,47 @@ import { derivePlan } from "./gating";
 // right plan.
 // =====================================================================
 describe("mapAppleProductToPlan", () => {
-  it("maps every configured Apple product to its plan", () => {
+  it("maps every configured Apple product to pro (MOBILE = PRO ONLY)", () => {
     expect(mapAppleProductToPlan("com.markflow.app.pro.monthly")).toBe("pro");
     expect(mapAppleProductToPlan("com.markflow.app.pro.yearly")).toBe("pro");
-    expect(mapAppleProductToPlan("com.markflow.app.team.monthly")).toBe("team");
-    expect(mapAppleProductToPlan("com.markflow.app.team.yearly")).toBe("team");
+  });
+  it("maps a team SKU to null — no per-seat Team on mobile (T2 fence)", () => {
+    // Defense-in-depth: even if a team product id were somehow purchased, it must
+    // map to null so buildAppleIntent fails closed and never mints plan=team.
+    expect(mapAppleProductToPlan("com.markflow.app.team.monthly")).toBeNull();
+    expect(mapAppleProductToPlan("com.markflow.app.team.yearly")).toBeNull();
   });
   it("returns null for an unknown product (fail closed)", () => {
     expect(mapAppleProductToPlan("com.markflow.app.enterprise")).toBeNull();
     expect(mapAppleProductToPlan("")).toBeNull();
     expect(mapAppleProductToPlan(undefined)).toBeNull();
   });
-  it("catalog is internally consistent (interval present for each)", () => {
+  it("catalog only registers pro SKUs (no team) and each has an interval", () => {
     for (const [id, v] of Object.entries(APPLE_PRODUCTS)) {
       expect(id.startsWith("com.markflow.app.")).toBe(true);
-      expect(["pro", "team"]).toContain(v.plan);
+      expect(id).not.toContain(".team.");
+      expect(v.plan).toBe("pro");
       expect(["month", "year"]).toContain(v.interval);
     }
   });
 });
 
 describe("mapPlayProductToPlan", () => {
-  it("maps configured Play products to their plan", () => {
+  it("maps the configured Play product to pro (MOBILE = PRO ONLY)", () => {
     expect(mapPlayProductToPlan("com.markflow.app.pro")).toBe("pro");
-    expect(mapPlayProductToPlan("com.markflow.app.team")).toBe("team");
+  });
+  it("maps a team SKU to null — no per-seat Team on mobile (T2 fence)", () => {
+    expect(mapPlayProductToPlan("com.markflow.app.team")).toBeNull();
   });
   it("returns null for an unknown product", () => {
     expect(mapPlayProductToPlan("com.markflow.app.other")).toBeNull();
     expect(mapPlayProductToPlan(undefined)).toBeNull();
   });
-  it("catalog only grants pro/team", () => {
-    for (const v of Object.values(PLAY_PRODUCTS))
-      expect(["pro", "team"]).toContain(v);
+  it("catalog only grants pro (no team SKU registered)", () => {
+    for (const [id, v] of Object.entries(PLAY_PRODUCTS)) {
+      expect(id).not.toContain(".team");
+      expect(v).toBe("pro");
+    }
   });
 });
 
@@ -183,16 +192,15 @@ describe("buildAppleIntent", () => {
     expect(r.intent.terminal).toBe(false);
   });
 
-  it("grants team as a FLAT 1-seat plan (no teamId)", () => {
+  it("a team SKU on a GRANTING status fails closed — no IAP-minted team (T2)", () => {
+    // MOBILE = PRO ONLY: a team product id is unmapped, so a grant must fail
+    // closed rather than mint plan=team from a mobile purchase.
     const r = buildAppleIntent({
       ...APPLE_BASE,
       productId: "com.markflow.app.team.yearly",
+      status: 1,
     });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.intent.plan).toBe("team");
-    expect(r.intent.seats).toBe(1);
-    expect(r.intent.teamId).toBeUndefined();
+    expect(r).toEqual({ ok: false, reason: "unmapped_product" });
   });
 
   it("unknown status → not ok (index.ts preserves the doc)", () => {

@@ -20,6 +20,7 @@ import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
 import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
 import { extractHints } from "@/lib/text-utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
@@ -230,7 +231,7 @@ export function VoicePanel({
     },
     onInfo: (msg) => setVoiceInfo(msg),
     onMaxDuration: () =>
-      setVoiceError("Recording stopped: maximum duration (4 hours) reached."),
+      setVoiceError("録音を停止しました（最長4時間に達しました）。"),
     initialTranscript: savedVoiceTranscript || "",
     onTranscriptUpdate: (text) => {
       onVoiceDataChangeRef.current?.({ voiceTranscript: text || null });
@@ -553,16 +554,9 @@ export function VoicePanel({
       // stay quiet — they retry on the next interval, and quota 429s already
       // raise the global banner via reportIfQuota().
       if (manual) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const isNetwork =
-          /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
-            msg,
-          );
-        setVoiceError(
-          isNetwork
-            ? "構造化中に通信エラーが発生しました。もう一度「Structure」を押して再試行してください。"
-            : `構造化に失敗しました: ${msg}`,
-        );
+        // Never echo the raw upstream message/status — route through the shared
+        // classifier so the user only ever sees a localized, friendly reason.
+        setVoiceError(friendlyErrorMessage(err, "voice"));
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
         errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
       }
@@ -886,16 +880,11 @@ export function VoicePanel({
         .catch(() => {});
     } catch (err) {
       console.error("[voice] Refine failed:", err);
-      const msg = err instanceof Error ? err.message : String(err);
-      const isNetwork =
-        /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
-          msg,
-        );
       // Audio is already uploaded on failure, so retrying skips re-upload.
-      const friendly = isNetwork
-        ? `${stageLabel}中に通信エラー。時間がかかりすぎたか回線が不安定な可能性があります。「Refine」をもう一度押して再試行してください。`
-        : `${stageLabel}で失敗: ${msg}`;
-      setVoiceError(`Refine failed: ${friendly}`);
+      // Route the reason through the shared classifier (never leak the raw
+      // message/status or an English "Refine failed:" prefix); keep only the
+      // localized stage label so the user knows which step failed.
+      setVoiceError(`${stageLabel}: ${friendlyErrorMessage(err, "voice")}`);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
     } finally {

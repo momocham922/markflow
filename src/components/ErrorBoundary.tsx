@@ -122,11 +122,12 @@ export class ErrorBoundary extends React.Component<Props, State> {
       >
         <div style={{ maxWidth: 640, margin: "0 auto" }}>
           <h1 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>
-            Something went wrong
+            問題が発生しました
           </h1>
           <p style={{ fontSize: 14, color: "#444", margin: "0 0 20px" }}>
-            The app hit an unexpected error. Your documents are safe. Try
-            reloading — if it keeps happening, reset the theme to defaults.
+            予期しないエラーが発生しました。ドキュメントは安全に保存されています。
+            まず「再読み込み」をお試しください。繰り返し発生する場合は、テーマを
+            初期設定に戻してから再読み込みしてください。
           </p>
           <div
             style={{
@@ -141,16 +142,19 @@ export class ErrorBoundary extends React.Component<Props, State> {
               onClick={this.reload}
               style={{ ...btn, background: "#111111", color: "#ffffff" }}
             >
-              Reload
+              再読み込み
             </button>
             <button
               type="button"
               onClick={this.resetTheme}
               style={{ ...btn, background: "#f5f5f5", color: "#111111" }}
             >
-              Reset theme &amp; reload
+              テーマを初期化して再読み込み
             </button>
           </div>
+          <p style={{ fontSize: 12, color: "#888", margin: "0 0 6px" }}>
+            エラー詳細（不具合報告用）
+          </p>
           <pre
             style={{
               fontSize: 12,

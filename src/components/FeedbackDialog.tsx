@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { submitFeedback, type FeedbackKind } from "@/services/feedback";
 import { useAppStore } from "@/stores/app-store";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 
 const KINDS: {
   value: FeedbackKind;
@@ -97,7 +98,7 @@ export function FeedbackDialog({
       // Brief success confirmation, then auto-close.
       setTimeout(() => onOpenChange(false), 1200);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "送信に失敗しました。");
+      setError(friendlyErrorMessage(err, "feedback"));
       setSubmitting(false);
     }
   };

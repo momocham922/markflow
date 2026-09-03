@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
+import { friendlyErrorMessage, FriendlyError } from "@/lib/friendly-error";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 const CHUNK_MS = 25000; // 25 second chunks: longer context = better accuracy
@@ -223,7 +224,10 @@ export function useVoiceInput({
             if (isTauri && (res.status === 400 || res.status >= 500)) {
               onInfoRef.current?.(LIVE_SEGMENT_RECOVERABLE_MSG);
             } else {
-              onErrorRef.current?.(`Transcription error: ${res.status}`);
+              // Classify off the status (never surface the raw code/body).
+              onErrorRef.current?.(
+                friendlyErrorMessage(`${res.status} ${errText}`, "voice"),
+              );
             }
             return;
           }
@@ -320,7 +324,7 @@ export function useVoiceInput({
             onErrorRef.current?.(
               isAbort
                 ? "音声区間の文字起こしがタイムアウトしました。この区間は取り込めていない可能性があります。"
-                : `Transcription error: ${err}`,
+                : friendlyErrorMessage(err, "voice"),
             );
           }
           return;
@@ -360,7 +364,7 @@ export function useVoiceInput({
 
   const startRecording = useCallback(async () => {
     if (!isSupported) {
-      onErrorRef.current?.("Voice input is not supported");
+      onErrorRef.current?.("このデバイスでは音声入力に対応していません。");
       return;
     }
 
@@ -371,18 +375,18 @@ export function useVoiceInput({
       if (isAndroid) {
         // Android: native AudioRecord via JS bridge
         if (!androidAudio) {
-          throw new Error(
+          throw new FriendlyError(
             "音声キャプチャの初期化中です。数秒後にもう一度お試しください。",
           );
         }
         const bridge = androidAudio;
         if (!bridge.hasPermission()) {
-          throw new Error(
+          throw new FriendlyError(
             "マイクへのアクセスが拒否されました。設定 → アプリ → MarkFlow → 権限 でマイクを許可してください。",
           );
         }
         const ok = bridge.start();
-        if (!ok) throw new Error("マイクの起動に失敗しました。");
+        if (!ok) throw new FriendlyError("マイクの起動に失敗しました。");
         chunkIntervalRef.current = setInterval(async () => {
           try {
             const chunk = bridge.getChunk();
@@ -505,12 +509,17 @@ export function useVoiceInput({
           });
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          console.error("[voice] getUserMedia failed:", msg);
           if (msg.includes("Permission") || msg.includes("NotAllowed")) {
-            throw new Error(
+            throw new FriendlyError(
               "マイクへのアクセスが拒否されました。設定でマイク権限を許可してください。",
             );
           }
-          throw new Error(`マイクの起動に失敗しました: ${msg}`);
+          // Never surface the raw getUserMedia message — keep it mic-specific
+          // and friendly (the raw reason is logged above for debugging).
+          throw new FriendlyError(
+            "マイクの起動に失敗しました。ほかのアプリがマイクを使用していないか、デバイスの接続をご確認のうえ、もう一度お試しください。",
+          );
         }
         streamRef.current = stream;
 
@@ -573,13 +582,11 @@ export function useVoiceInput({
       setFullTranscript("");
       setInterimText("");
     } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : typeof err === "string"
-            ? err
-            : "Failed to start recording";
-      onErrorRef.current?.(msg);
+      // FriendlyError messages (permission/mic guidance above) pass through
+      // verbatim; anything else is classified to a localized reason — the raw
+      // text never reaches the UI.
+      console.error("[voice] startRecording failed:", err);
+      onErrorRef.current?.(friendlyErrorMessage(err, "voice"));
       stopRecording();
     }
   }, [isSupported, stopRecording, sendChunk, deviceName, systemAudio]);

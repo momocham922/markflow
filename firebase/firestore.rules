@@ -91,36 +91,61 @@ service cloud.firestore {
         resource.data.ownerId == request.auth.uid
       );
 
+      // Subcollections (versions, research_sessions) inherit the parent doc's
+      // ACL. The parent is fetched with get(), which THROWS (→ deny) if the doc
+      // does not exist — so we guard with exists() first. Crucially, a brand-new
+      // document is written to its subcollections (autosaved versions, live
+      // research) BEFORE the parent has round-tripped through syncToCloud; the old
+      // `get(parent).data` rule DENIED those writes while the parent wasn't in the
+      // cloud yet, silently dropping the history (observed on Windows, where
+      // auth/sync settle later). This helper grants only the SHARED cases
+      // (collaborators / team), which genuinely require the parent to exist; the
+      // self-owner path is handled by subOwnerSeed* below and needs no parent.
+      function subParentGrants() {
+        let parentPath = /databases/$(database)/documents/documents/$(docId);
+        let parent = exists(parentPath) ? get(parentPath).data : null;
+        return parent != null && (
+          parent.ownerId == request.auth.uid
+          || ('collaborators' in parent && parent.collaborators != null
+              && request.auth.uid in parent.collaborators.keys())
+          || ('collaboratorUids' in parent && parent.collaboratorUids != null
+              && request.auth.uid in parent.collaboratorUids)
+          || ('teamId' in parent && parent.teamId != null && parent.teamId != ""
+              && exists(/databases/$(database)/documents/teams/$(parent.teamId))
+              && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids)
+        );
+      }
+
+      // The self-stamped owner may seed a subcollection under a parent that does
+      // NOT yet exist in the cloud (fresh local doc mid first-sync). This cannot
+      // inject into someone else's document: any EXISTING parent (e.g. a victim's
+      // synced doc) fails !exists() and is forced through subParentGrants()'s real
+      // ACL, and a not-yet-created parent's id is an unguessable random UUID. The
+      // subcollection doc carries its own ownerId (see saveResearchSession /
+      // syncVersionToCloud), so no parent lookup is needed on this path.
+      function subOwnerSeedWrite() {
+        return !exists(/databases/$(database)/documents/documents/$(docId))
+          && request.resource.data.ownerId == request.auth.uid;
+      }
+      function subOwnerSeedRead() {
+        return !exists(/databases/$(database)/documents/documents/$(docId))
+          && resource.data.ownerId == request.auth.uid;
+      }
+
       // Versions subcollection — owner, collaborators (map + array), and team members
       match /versions/{versionId} {
-        function canAccessVersions() {
-          let parent = get(/databases/$(database)/documents/documents/$(docId)).data;
-          return parent.ownerId == request.auth.uid
-            || ('collaborators' in parent && parent.collaborators != null
-                && request.auth.uid in parent.collaborators.keys())
-            || ('collaboratorUids' in parent && parent.collaboratorUids != null
-                && request.auth.uid in parent.collaboratorUids)
-            || ('teamId' in parent && parent.teamId != null && parent.teamId != ""
-                && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids);
-        }
-
-        allow read, write: if request.auth != null && canAccessVersions();
+        allow read, delete: if request.auth != null
+          && (subParentGrants() || subOwnerSeedRead());
+        allow create, update: if request.auth != null
+          && (subParentGrants() || subOwnerSeedWrite());
       }
 
       // Research sessions subcollection — same access as versions
       match /research_sessions/{sessionId} {
-        function canAccessResearch() {
-          let parent = get(/databases/$(database)/documents/documents/$(docId)).data;
-          return parent.ownerId == request.auth.uid
-            || ('collaborators' in parent && parent.collaborators != null
-                && request.auth.uid in parent.collaborators.keys())
-            || ('collaboratorUids' in parent && parent.collaboratorUids != null
-                && request.auth.uid in parent.collaboratorUids)
-            || ('teamId' in parent && parent.teamId != null && parent.teamId != ""
-                && request.auth.uid in get(/databases/$(database)/documents/teams/$(parent.teamId)).data.memberUids);
-        }
-
-        allow read, write: if request.auth != null && canAccessResearch();
+        allow read, delete: if request.auth != null
+          && (subParentGrants() || subOwnerSeedRead());
+        allow create, update: if request.auth != null
+          && (subParentGrants() || subOwnerSeedWrite());
       }
 
       // Comments subcollection
@@ -132,35 +157,62 @@ service cloud.firestore {
       }
     }
 
-    // Teams: members can read/update, owner can delete.
+    // Teams: members can read, managers/owner manage membership, owner can delete.
     //
     // SERVER-ONLY billing fields: `billing` (subscription status/seats/ownerUid)
     // and `seatAssignments` (who may spend the shared AI pool) are written ONLY by
     // the ai-proxy via the Admin SDK (which bypasses these rules). A team member is
-    // allowed to update the doc (rename, add/remove members via sharing.ts), but
-    // MUST NOT be able to touch billing/seatAssignments — otherwise an assigned
-    // member could forge `billing.status:"active"`, inflate `billing.seats`, or
-    // re-add themselves to `seatAssignments` to keep spending the team pool after
-    // being removed. The equality guards freeze both fields on every client update
-    // (unchanged-or-absent), and create forbids seeding them at all.
+    // allowed to update the doc (rename, folders), but MUST NOT be able to touch
+    // billing/seatAssignments — otherwise an assigned member could forge
+    // `billing.status:"active"`, inflate `billing.seats`, or re-add themselves to
+    // `seatAssignments` to keep spending the team pool after being removed. The
+    // equality guards freeze both fields on every client update (unchanged-or-
+    // absent), and create forbids seeding them at all.
+    //
+    // MEMBERSHIP (T3, "最小制約"): growing/shrinking `memberUids` is limited to the
+    // OWNER and MANAGERS (owner + admins, mirrored server-side in `managerUids` by
+    // sharing.ts — Firestore rules cannot read the role off the `members` array of
+    // maps). A regular member may only LEAVE (remove their own uid) or edit
+    // non-membership fields. Previously ANY member could add arbitrary uids or evict
+    // others via a direct client write. `managerUids` is itself owner-frozen (a
+    // member must not escalate itself to manager), with a self-removal exception so a
+    // manager can still leave.
     match /teams/{teamId} {
+      // True when the only membership delta is the caller removing THEIR OWN uid.
+      function removedOnlySelf(oldList, newList) {
+        return !(request.auth.uid in newList)
+          && oldList.toSet().difference(newList.toSet()).hasOnly([request.auth.uid])
+          && newList.toSet().difference(oldList.toSet()).size() == 0;
+      }
+      function membershipChangeOk() {
+        return request.resource.data.memberUids == resource.data.memberUids
+          || request.auth.uid == resource.data.ownerId
+          || request.auth.uid in resource.data.get('managerUids', [])
+          || removedOnlySelf(resource.data.memberUids, request.resource.data.memberUids);
+      }
+      function managerUidsOk() {
+        return request.resource.data.get('managerUids', []) == resource.data.get('managerUids', [])
+          || request.auth.uid == resource.data.ownerId
+          || removedOnlySelf(resource.data.get('managerUids', []), request.resource.data.get('managerUids', []));
+      }
+
       allow create: if request.auth != null
         && !('billing' in request.resource.data)
         && !('seatAssignments' in request.resource.data);
       allow read: if request.auth != null &&
         request.auth.uid in resource.data.memberUids;
-      // Update: a member may edit the team doc, but ownerId is FROZEN (no client
-      // takeover — ownership transfer would be a server op) and the owner must
-      // remain in memberUids (a member cannot lock the owner out). billing and
-      // seatAssignments stay server-only (forge/seat-theft guard). Membership
-      // list changes remain client-writable by design (managers manage members
-      // in-app); the money/access-critical fields above are all fenced.
+      // Update fences: ownerId FROZEN (no client takeover — ownership transfer is a
+      // server op); owner must stay in memberUids (a member cannot lock the owner
+      // out); billing + seatAssignments SERVER-ONLY; managerUids owner-only (with
+      // self-leave exception); membership edits limited per membershipChangeOk().
       allow update: if request.auth != null
         && request.auth.uid in resource.data.memberUids
         && request.resource.data.ownerId == resource.data.ownerId
         && resource.data.ownerId in request.resource.data.memberUids
         && request.resource.data.get('billing', null) == resource.data.get('billing', null)
-        && request.resource.data.get('seatAssignments', null) == resource.data.get('seatAssignments', null);
+        && request.resource.data.get('seatAssignments', null) == resource.data.get('seatAssignments', null)
+        && managerUidsOk()
+        && membershipChangeOk();
       allow delete: if request.auth != null &&
         resource.data.ownerId == request.auth.uid;
     }

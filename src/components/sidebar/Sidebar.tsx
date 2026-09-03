@@ -42,6 +42,7 @@ import {
 import { fetchDocument } from "@/services/firebase";
 import { track } from "@/services/telemetry";
 import { isIOS, isMobile } from "@/platform";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -634,7 +635,7 @@ export function Sidebar() {
     } catch (err) {
       console.error("Failed to move doc to team:", err);
       window.alert(
-        `チームへの移動に失敗しました。ネットワーク接続を確認してください。\n${err instanceof Error ? err.message : String(err)}`,
+        `チームへの移動に失敗しました。${friendlyErrorMessage(err, "team")}`,
       );
     }
   };

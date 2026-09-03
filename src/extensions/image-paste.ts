@@ -2,6 +2,19 @@ import { EditorView } from "@codemirror/view";
 import { auth } from "@/services/firebase";
 import { useAuthStore } from "@/stores/auth-store";
 import { getPlatform } from "@/platform";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
+
+/**
+ * Friendly, localized replacement for a failed-upload placeholder. Routes the
+ * raw error through the shared classifier so the document body NEVER receives a
+ * raw HTTP status / upstream body / English message (「素のエラーを出さない」).
+ * Rendered as a plain blockquote note — not broken `![...]()` image markdown —
+ * so the failure stays clearly visible (サイレントフォールバック禁止) yet is
+ * easy to see and delete.
+ */
+export function uploadFailureNote(err: unknown): string {
+  return `> ${friendlyErrorMessage(err, "upload")}`;
+}
 
 function extFromMime(mime: string): string {
   const map: Record<string, string> = {
@@ -147,8 +160,7 @@ export const imagePaste = EditorView.domEventHandlers({
             replaceUploadPlaceholder(view, placeholder, md);
           })
           .catch((err) => {
-            const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-            replaceUploadPlaceholder(view, placeholder, errMsg);
+            replaceUploadPlaceholder(view, placeholder, uploadFailureNote(err));
           });
 
         return true;
@@ -183,8 +195,7 @@ export const imagePaste = EditorView.domEventHandlers({
         replaceUploadPlaceholder(view, placeholder, markdowns.join("\n"));
       })
       .catch((err) => {
-        const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-        replaceUploadPlaceholder(view, placeholder, errMsg);
+        replaceUploadPlaceholder(view, placeholder, uploadFailureNote(err));
       });
 
     return true;

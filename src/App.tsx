@@ -53,6 +53,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { friendlyErrorMessage, FriendlyError } from "@/lib/friendly-error";
 import { aiProxyHeaders } from "@/services/ai-proxy";
 import { onLocalEdit } from "@/lib/local-edit-signal";
 import TurndownService from "turndown";
@@ -619,7 +620,7 @@ function App() {
       await platform.relaunch();
     } catch (err) {
       setUpdateStatus("error");
-      setUpdateError(err instanceof Error ? err.message : String(err));
+      setUpdateError(friendlyErrorMessage(err, "update"));
     }
   }, [updateInfo]);
 
@@ -908,14 +909,13 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           errCode = JSON.parse(bodyText)?.error || "";
         } catch {}
         if (pubRes.status === 402 || errCode === "plan_required") {
-          throw new Error("Web公開はProプラン以上の機能です。");
+          throw new FriendlyError("Web公開はProプラン以上の機能です。");
         }
         if (pubRes.status === 403) {
-          throw new Error("このドキュメントのオーナーではありません");
+          throw new FriendlyError("このドキュメントのオーナーではありません。");
         }
-        throw new Error(
-          `公開に失敗しました (HTTP ${pubRes.status})${errCode ? `: ${errCode}` : ""}`,
-        );
+        // Generic: never leak the raw status/body — friendlyErrorMessage maps it.
+        throw new Error(`publish failed: ${pubRes.status} ${errCode}`);
       }
       const publishBase =
         import.meta.env.VITE_PUBLISH_BASE_URL || "https://markflow.jp";
@@ -937,9 +937,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         await navigator.clipboard.writeText(url);
       } catch {}
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
       console.error("Publish failed:", e);
-      setPublishError(msg);
+      setPublishError(friendlyErrorMessage(e, "publish"));
     } finally {
       setPublishing(false);
     }
@@ -959,17 +958,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         body: JSON.stringify({ docId: doc.id }),
       });
       if (!res.ok) {
-        const bodyText = await res.text().catch(() => "");
-        throw new Error(
-          `公開停止に失敗しました (HTTP ${res.status}) ${bodyText}`,
-        );
+        // Never leak the raw status/body into the UI — map it in the catch.
+        throw new Error(`unpublish failed: ${res.status}`);
       }
       const { setPublishUrl: saveUrl } = await import("@/services/firebase");
       await saveUrl(doc.id, null);
       setPublishUrl(null);
     } catch (e) {
       console.error("Unpublish failed:", e);
-      setPublishError(e instanceof Error ? e.message : String(e));
+      setPublishError(friendlyErrorMessage(e, "publish"));
     } finally {
       setPublishing(false);
     }

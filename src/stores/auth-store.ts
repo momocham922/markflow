@@ -799,12 +799,29 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               updates.folder = cloudDoc.folder ?? local.folder;
               updates.tags = cloudDoc.tags ?? local.tags;
               updates.docType = (cloudDoc.docType as DocType) || local.docType;
-              updates.voiceTranscript = cloudDoc.voiceTranscript ?? null;
-              updates.voiceGcsUri = cloudDoc.voiceGcsUri ?? null;
-              updates.voiceRecordedAt =
-                cloudDoc.voiceRecordedAt?.toMillis() ?? null;
               // Mark as pulled from cloud — don't re-upload in syncToCloud
               cloudPulledDocIds.add(local.id);
+            }
+            // Voice fields sync INDEPENDENTLY of the content-freshness gate above:
+            // a live transcript does NOT bump updatedAt, so a doc that only gained
+            // a transcript on another device has cloudUpdatedAt == local.updatedAt
+            // and would be missed by that gate — the transcript stayed invisible on
+            // the other device (reported on Windows). Pull the cloud transcript
+            // when it is present and strictly newer than ours (by voiceRecordedAt),
+            // and never clobber a non-empty local transcript with an empty cloud
+            // one. We do NOT add to cloudPulledDocIds here: if local ALSO has newer
+            // content pending, it must still upload this cycle (re-uploading the
+            // just-pulled voice fields is idempotent).
+            const cloudVoiceAt = cloudDoc.voiceRecordedAt?.toMillis() ?? 0;
+            const localVoiceAt = local.voiceRecordedAt ?? 0;
+            if (
+              cloudDoc.voiceTranscript &&
+              cloudVoiceAt > localVoiceAt &&
+              !collabActiveDocIds.has(local.id)
+            ) {
+              updates.voiceTranscript = cloudDoc.voiceTranscript;
+              updates.voiceGcsUri = cloudDoc.voiceGcsUri ?? null;
+              updates.voiceRecordedAt = cloudVoiceAt;
             }
             appStore.updateDocument(local.id, updates);
           }
