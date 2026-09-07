@@ -2377,9 +2377,9 @@ async fn upload_wav_range(
 
 /// Upload the full-session voice archive to Firebase Storage as WAV file(s).
 /// Accepts optional `archive_path` for Android (Kotlin archive) — falls back to Rust archive.
-/// Recordings >58min are split into ≤55min chunks (20s overlap) to stay under
-/// chirp_3 BatchRecognize's 60-minute limit. Uses streaming (seek + limited read)
-/// to avoid loading the whole file into memory (iOS/Android OOM protection).
+/// Recordings >18min are split into ≤18min chunks (20s overlap) to stay under
+/// chirp_3 BatchRecognize's ~20-minute inline-results limit. Uses streaming (seek +
+/// limited read) to avoid loading the whole file into memory (iOS/Android OOM protection).
 #[tauri::command]
 async fn upload_voice_archive(
     uid: String,
@@ -2436,12 +2436,14 @@ async fn upload_voice_archive(
 
     let id = uuid::Uuid::new_v4().to_string();
 
-    // chirp_3 BatchRecognize hard-caps a single file at 60 minutes. Split long
-    // recordings into ≤55min parts with 20s overlap so the server can dedup the
-    // overlap by word timestamp (lossless boundaries). ≤58min → single file.
-    const STEP_SECS: u64 = 55 * 60;
+    // chirp_3 BatchRecognize with inline results caps a single file at ~20 minutes
+    // ("File too long. Only audio files up to 20 minutes"). Split long recordings
+    // into ≤18min parts with 20s overlap so the server dedups the overlap by word
+    // timestamp (lossless boundaries). Max emitted chunk = STEP + 2*OVERLAP =
+    // 18min40s < 20min. ≤18min → single file.
+    const STEP_SECS: u64 = 18 * 60;
     const OVERLAP_SECS: u64 = 20;
-    const SINGLE_MAX_SECS: f64 = 58.0 * 60.0;
+    const SINGLE_MAX_SECS: f64 = 18.0 * 60.0;
 
     let mut chunks: Vec<VoiceArchiveChunk> = Vec::new();
     let mut first_download_url = String::new();
@@ -2515,6 +2517,203 @@ async fn upload_voice_archive(
 
     Ok(VoiceArchiveResult {
         gcs_uri,
+        download_url: first_download_url,
+        chunks,
+    })
+}
+
+/// Locate the PCM `data` chunk in a WAV file from its leading header bytes and
+/// return the byte offset where samples begin. Files we upload use a canonical
+/// 44-byte header (see build_wav_header), but scan the RIFF chunk list
+/// defensively in case an encoder inserted LIST/fact chunks before `data`.
+fn wav_data_offset(head: &[u8]) -> Result<usize, String> {
+    if head.len() < 12 || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return Err("Not a RIFF/WAVE file".into());
+    }
+    let mut pos = 12usize;
+    while pos + 8 <= head.len() {
+        let id = &head[pos..pos + 4];
+        let sz = u32::from_le_bytes([head[pos + 4], head[pos + 5], head[pos + 6], head[pos + 7]])
+            as usize;
+        let body = pos + 8;
+        if id == b"data" {
+            return Ok(body);
+        }
+        // RIFF chunks are word-aligned: an odd size is padded by one byte.
+        pos = body + sz + (sz & 1);
+    }
+    Err("No data chunk found in WAV header".into())
+}
+
+/// Re-derive transcribe chunks from a previously-uploaded voice WAV in Firebase
+/// Storage when the on-device PCM archive is gone (app restart / temp cleanup, or
+/// a doc whose voice metadata was recovered from the cloud). Downloads the stored
+/// WAV; if it exceeds the inline BatchRecognize limit (~20min) it is split into
+/// ≤18min overlapping parts re-uploaded as new objects so re-Refine works. Short
+/// files return the original URI unchanged (no re-upload). Streams the download to
+/// a temp file so a long recording never sits fully in memory.
+#[tauri::command]
+async fn prepare_gcs_voice_chunks(
+    uid: String,
+    token: String,
+    bucket: String,
+    gcs_uri: String,
+) -> Result<VoiceArchiveResult, String> {
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // gs://<bucket>/<object/path> → the object path (strip the gs://bucket/ prefix).
+    let object_path = gcs_uri
+        .strip_prefix("gs://")
+        .and_then(|s| s.split_once('/'))
+        .map(|(_, p)| p.to_string())
+        .ok_or_else(|| format!("Invalid gcs_uri: {}", gcs_uri))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let dl_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+        bucket,
+        urlencoding::encode(&object_path),
+    );
+    let resp = client
+        .get(&dl_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Download failed (HTTP {}): {}", status, body));
+    }
+
+    // Stream to a temp file (cleaned up on every exit path via TmpGuard).
+    let tmp_path = std::env::temp_dir().join(format!("mf-gcs-split-{}.wav", uuid::Uuid::new_v4()));
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+    struct TmpGuard(String);
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _guard = TmpGuard(tmp_str.clone());
+    {
+        let mut out = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(|e| format!("Temp create failed: {}", e))?;
+        let mut stream = resp.bytes_stream();
+        while let Some(item) = stream.next().await {
+            let chunk = item.map_err(|e| format!("Download read failed: {}", e))?;
+            out.write_all(&chunk)
+                .await
+                .map_err(|e| format!("Temp write failed: {}", e))?;
+        }
+        out.flush()
+            .await
+            .map_err(|e| format!("Temp flush failed: {}", e))?;
+    }
+
+    let file_len = tokio::fs::metadata(&tmp_path)
+        .await
+        .map_err(|e| format!("Temp stat failed: {}", e))?
+        .len();
+    // Read enough leading bytes to locate the data chunk (canonical header is 44B).
+    let head_len = std::cmp::min(4096u64, file_len) as usize;
+    let mut head = vec![0u8; head_len];
+    {
+        let mut f = tokio::fs::File::open(&tmp_path)
+            .await
+            .map_err(|e| format!("Temp open failed: {}", e))?;
+        f.read_exact(&mut head)
+            .await
+            .map_err(|e| format!("Temp header read failed: {}", e))?;
+    }
+    let data_offset = wav_data_offset(&head)?;
+    if (data_offset as u64) >= file_len {
+        return Err("WAV data chunk is empty".into());
+    }
+    let data_size = file_len - data_offset as u64;
+
+    let bytes_per_sec: u64 = 16000 * 2; // 16kHz mono 16-bit
+    let duration_secs = data_size as f64 / bytes_per_sec as f64;
+
+    // Keep in lockstep with upload_voice_archive's split constants.
+    const STEP_SECS: u64 = 18 * 60;
+    const OVERLAP_SECS: u64 = 20;
+    const SINGLE_MAX_SECS: f64 = 18.0 * 60.0;
+
+    // Short enough for inline BatchRecognize — reuse the existing object as-is.
+    if duration_secs <= SINGLE_MAX_SECS {
+        return Ok(VoiceArchiveResult {
+            gcs_uri: gcs_uri.clone(),
+            download_url: dl_url,
+            chunks: vec![VoiceArchiveChunk {
+                gcs_uri,
+                start_sec: 0.0,
+                duration_sec: duration_secs,
+            }],
+        });
+    }
+
+    // Too long: slice the PCM data region into overlapping ≤18min WAV objects.
+    // Identical math to upload_voice_archive's split branch, but reading from the
+    // downloaded WAV where samples start at `data_offset` (not byte 0).
+    let id = uuid::Uuid::new_v4().to_string();
+    let step_bytes = STEP_SECS * bytes_per_sec;
+    let span_bytes = (STEP_SECS + OVERLAP_SECS) * bytes_per_sec;
+    let overlap_bytes = OVERLAP_SECS * bytes_per_sec;
+    let mut chunks: Vec<VoiceArchiveChunk> = Vec::new();
+    let mut first_download_url = String::new();
+    let mut i: u64 = 0;
+    loop {
+        let start_byte = i * step_bytes;
+        if start_byte >= data_size {
+            break;
+        }
+        let remaining = data_size - start_byte;
+        // Absorb a tiny tail into this chunk rather than emit an undersized final
+        // chunk the server would trim away (see upload_voice_archive for the why).
+        let len = if remaining <= span_bytes + overlap_bytes {
+            remaining
+        } else {
+            span_bytes
+        };
+        let obj = format!("audio/{}/{}-c{}.wav", uid, id, i);
+        let (c_uri, dl) = upload_wav_range(
+            &client,
+            &bucket,
+            &token,
+            &obj,
+            &tmp_str,
+            data_offset as u64 + start_byte,
+            len,
+        )
+        .await?;
+        if i == 0 {
+            first_download_url = dl;
+        }
+        chunks.push(VoiceArchiveChunk {
+            gcs_uri: c_uri,
+            start_sec: start_byte as f64 / bytes_per_sec as f64,
+            duration_sec: len as f64 / bytes_per_sec as f64,
+        });
+        if start_byte + len >= data_size {
+            break;
+        }
+        i += 1;
+    }
+    let first = chunks.first().ok_or("No chunks produced")?;
+    println!(
+        "[voice] Re-split GCS WAV into {} chunk(s) ({:.1}min)",
+        chunks.len(),
+        duration_secs / 60.0
+    );
+    Ok(VoiceArchiveResult {
+        gcs_uri: first.gcs_uri.clone(),
         download_url: first_download_url,
         chunks,
     })
@@ -2758,7 +2957,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, prepare_gcs_voice_chunks, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
