@@ -28,7 +28,6 @@ import {
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -968,28 +967,6 @@ export async function fetchAiThreadsFromCloud(
     title: string;
     createdAt: number;
   }[];
-}
-
-// ─── Image upload (Firebase Storage) ────────────────────────
-
-const storage = getStorage(app);
-
-/**
- * Upload an image to Firebase Storage and return the download URL.
- * Path: images/{uid}/{uuid}.{ext}
- */
-export async function uploadImage(
-  uid: string,
-  data: Uint8Array,
-  ext: string,
-): Promise<string> {
-  const id = crypto.randomUUID();
-  const path = `images/${uid}/${id}.${ext}`;
-  const storageRef = ref(storage, path);
-  await uploadBytes(storageRef, data, {
-    contentType: `image/${ext === "jpg" ? "jpeg" : ext}`,
-  });
-  return getDownloadURL(storageRef);
 }
 
 // ─── Remote error logging ────────────────────────────────────

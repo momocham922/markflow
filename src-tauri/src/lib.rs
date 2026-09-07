@@ -801,9 +801,16 @@ async fn upload_image_cloud(
         _ => "application/octet-stream",
     };
 
+    // Storage base URL. When MARKFLOW_STORAGE_BASE is set at build time (e.g.
+    // https://storage.markflow.jp — an authenticating reverse proxy that injects
+    // the bucket and hides the googleapis host), the image download URLs embedded
+    // into document content / published pages no longer expose the GCP default
+    // domain or bucket name. Falls back to the direct googleapis host + bucket.
+    let storage_base = image_storage_base(&bucket);
+
     let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
-        bucket,
+        "{}/o?name={}",
+        storage_base,
         urlencoding::encode(&object_path),
     );
 
@@ -836,23 +843,32 @@ async fn upload_image_cloud(
     let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
             format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
-                bucket, encoded_path, token
+                "{}/o/{}?alt=media&token={}",
+                storage_base, encoded_path, token
             )
         } else {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-                bucket, encoded_path
-            )
+            format!("{}/o/{}?alt=media", storage_base, encoded_path)
         }
     } else {
-        format!(
-            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-            bucket, encoded_path
-        )
+        format!("{}/o/{}?alt=media", storage_base, encoded_path)
     };
 
     Ok(download_url)
+}
+
+/// Base URL for Firebase Storage image REST calls. When MARKFLOW_STORAGE_BASE is
+/// set at build time (an authenticating reverse proxy such as
+/// https://storage.markflow.jp that injects the bucket and forwards the Firebase
+/// auth token), image URLs no longer leak the GCP default host or bucket name.
+/// Otherwise falls back to the direct googleapis host including the bucket path.
+/// Voice uploads intentionally stay on the direct host (large WAV chunks would
+/// exceed the Cloud Run 32MB request limit, and voice URLs are never embedded in
+/// public content).
+fn image_storage_base(bucket: &str) -> String {
+    match option_env!("MARKFLOW_STORAGE_BASE") {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => format!("https://firebasestorage.googleapis.com/v0/b/{}", bucket),
+    }
 }
 
 /// Upload image from a file path — reads file and uploads in Rust (no IPC byte transfer).
