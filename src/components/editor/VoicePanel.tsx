@@ -609,7 +609,8 @@ export function VoicePanel({
       if (!bucket) throw new Error("Storage bucket not configured");
 
       // Stage 1: Upload audio archive → chunks (skip if already uploaded this
-      // session). Recordings >58min are split into ≤55min parts (20s overlap).
+      // session). Recordings >18min are split into ≤18min parts (20s overlap) to
+      // stay under BatchRecognize's ~20min inline-results limit.
       let chunks = uploadedChunksRef.current;
       if (chunks) {
         console.log(
@@ -665,16 +666,41 @@ export function VoicePanel({
             voiceRecordedAt: Date.now(),
           });
         } catch (e) {
-          // Archive gone (e.g. after reload) but a prior single-file URI was
-          // saved — fall back to it (correct for short recordings).
+          // Archive gone (app restart / temp cleanup, or a doc whose voice
+          // metadata was recovered from the cloud) but a prior GCS URI was saved.
+          // Re-derive chunks from the stored WAV: a long single file would exceed
+          // BatchRecognize's ~20min inline limit, so Rust downloads it and
+          // re-splits into ≤18min overlapping parts (short files come back
+          // unchanged, no re-upload).
           if (savedVoiceGcsUriRef.current) {
-            chunks = [
-              {
-                gcsUri: savedVoiceGcsUriRef.current,
-                startSec: 0,
-                durationSec: 0,
-              },
-            ];
+            const prepared = await invoke<{
+              gcs_uri: string;
+              download_url: string;
+              chunks: Array<{
+                gcs_uri: string;
+                start_sec: number;
+                duration_sec: number;
+              }>;
+            }>("prepare_gcs_voice_chunks", {
+              uid,
+              token,
+              bucket,
+              gcsUri: savedVoiceGcsUriRef.current,
+            });
+            chunks = (prepared.chunks || []).map((c) => ({
+              gcsUri: c.gcs_uri,
+              startSec: c.start_sec,
+              durationSec: c.duration_sec,
+            }));
+            if (chunks.length === 0) {
+              chunks = [
+                {
+                  gcsUri: savedVoiceGcsUriRef.current,
+                  startSec: 0,
+                  durationSec: 0,
+                },
+              ];
+            }
             uploadedChunksRef.current = chunks;
           } else {
             throw e;
@@ -714,11 +740,13 @@ export function VoicePanel({
           /* not JSON; fall through to the raw-text handling below */
         }
         if (serverMsg) throw new Error(serverMsg);
-        // BatchRecognize (chirp_3) rejects files longer than 60 minutes. Turn
-        // the raw STT error into a clear, actionable message for the user.
-        if (/too long|60 ?minutes|60\s*分/i.test(errText)) {
+        // BatchRecognize rejects an individual file longer than ~20 minutes.
+        // Recordings are auto-split into ≤18min parts (incl. re-split of a stored
+        // GCS file on re-Refine), so this should be unreachable in practice; keep
+        // a clear message as a safety net.
+        if (/too long|20 ?minutes|20\s*分|60 ?minutes|60\s*分/i.test(errText)) {
           throw new Error(
-            "録音が60分を超えているためRefineできません（一括文字起こしの上限）。録音中の自動Structureは全長で機能します。長時間の録音は60分以内で区切ってください。",
+            "文字起こしの一括処理で音声が長すぎると判定されました。お手数ですが再度Refineをお試しください。解消しない場合は録音を短く区切ってください。",
           );
         }
         throw new Error(
