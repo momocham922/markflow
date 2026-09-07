@@ -13,6 +13,7 @@ import {
   MessageSquareWarning,
   BarChart3,
   Github,
+  Plug,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -81,6 +82,10 @@ export function UserMenu() {
   const effectivePlan = useEntitlementStore((s) => s.effectivePlan);
   const openPaywall = useEntitlementStore((s) => s.openPaywall);
   const openTeamManage = useEntitlementStore((s) => s.openTeamManage);
+  // MCP (Claude connector) entry — allowlist-gated server-side; mcpEnabled is
+  // false for everyone but the owner during testing, so this stays hidden.
+  const mcpEnabled = useEntitlementStore((s) => s.mcpEnabled);
+  const openMcpConnector = useEntitlementStore((s) => s.openMcpConnector);
   const openFeedback = useFeedbackStore((s) => s.openFeedback);
   const telemetryConsent = useTelemetryStore((s) => s.consent);
   const telemetryReady = useTelemetryStore((s) => s.ready);
@@ -267,6 +272,18 @@ export function UserMenu() {
               <Users className="h-4 w-4" />
               チーム管理
             </button>
+            {mcpEnabled && (
+              <button
+                className={menuItem}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openMcpConnector();
+                }}
+              >
+                <Plug className="h-4 w-4" />
+                Claude連携
+              </button>
+            )}
             {showUpgrade && (
               <button
                 className={menuItem}
@@ -385,6 +402,17 @@ export function UserMenu() {
           title="利用状況・プラン"
         >
           <CreditCard className={iconSize} />
+        </Button>
+      )}
+      {mcpEnabled && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={() => openMcpConnector()}
+          title="Claude連携（MCP）"
+        >
+          <Plug className={iconSize} />
         </Button>
       )}
       <Button

@@ -35,6 +35,7 @@ import { ResearchSheet } from "@/components/editor/ResearchSheet";
 import { PaywallDialog } from "@/components/PaywallDialog";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
+import { McpConnectorDialog } from "@/components/McpConnectorDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { useTelemetryStore } from "@/stores/telemetry-store";
@@ -1604,6 +1605,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <GlobalTeamManageDialog />
         {/* Bug report / feedback (global; opened from UserMenu and crash-prefill) */}
         <GlobalFeedbackDialog />
+        {/* Claude MCP connector instructions (global; opened from UserMenu,
+            allowlist-gated via mcpEnabled) */}
+        <GlobalMcpConnectorDialog />
         {/* Regional analytics consent surface (once, until the user decides) */}
         <TelemetryConsentBanner />
       </div>
@@ -1645,6 +1649,25 @@ function GlobalTeamManageDialog() {
     <TeamManageDialog
       open={open}
       onOpenChange={(o) => (o ? openTeamManage() : closeTeamManage())}
+    />
+  );
+}
+
+/**
+ * Global mount of the MCP connector-instructions dialog, driven by the
+ * entitlement store's mcpConnectorOpen flag. Opened from the UserMenu "Claude連携"
+ * entry, which is itself gated on mcpEnabled (server allowlist, owner-only during
+ * testing). Mounted once here so there is exactly one instance.
+ */
+function GlobalMcpConnectorDialog() {
+  const open = useEntitlementStore((s) => s.mcpConnectorOpen);
+  const closeMcpConnector = useEntitlementStore((s) => s.closeMcpConnector);
+  return (
+    <McpConnectorDialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) closeMcpConnector();
+      }}
     />
   );
 }

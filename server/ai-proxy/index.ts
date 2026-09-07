@@ -56,6 +56,43 @@ import {
   isProdEnvironment,
   type IapIntentResult,
 } from "./iap";
+import {
+  handleMcpMessage,
+  isRequest,
+  isPersonalDocData,
+  MAX_RPC_BATCH,
+  type McpDoc,
+  type McpDeps,
+  type JsonRpcRequest,
+  type JsonRpcResponse,
+} from "./mcp";
+import {
+  MCP_PATH,
+  PRM_PATH,
+  ASM_PATH,
+  REGISTER_PATH,
+  AUTHORIZE_PATH,
+  TOKEN_PATH,
+  REVOKE_PATH,
+  CODE_TTL_SEC,
+  ACCESS_TTL_SEC,
+  REFRESH_TTL_SEC,
+  hashToken,
+  newOpaqueToken,
+  verifyPkceS256,
+  pickClientIp,
+  allowedRedirectHosts,
+  buildProtectedResourceMetadata,
+  buildAuthServerMetadata,
+  validateDcrRequest,
+  buildDcrResponse,
+  validateAuthorizeRequest,
+  matchRedirectUri,
+  buildSuccessRedirect,
+  buildErrorRedirect,
+  parseTokenRequest,
+  buildTokenResponse,
+} from "./mcp-oauth";
 // Store-SDK verification (impure). Marked --external in the esbuild bundle and
 // installed in the Docker image; the top-level require runs even when IAP is DARK
 // (creds absent), so both packages MUST be present in node_modules at boot.
@@ -1456,6 +1493,37 @@ const INTERNAL_UIDS = parseUidSet(process.env.INTERNAL_UIDS);
 // affects the owner's own usage document.
 const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
 
+// Remote-MCP allowlist: uids permitted to connect Claude to their MarkFlow docs
+// via the /mcp OAuth server. DARK by default — with this unset the ENTIRE MCP
+// feature (discovery, OAuth, /mcp) 404s as if absent, so stable builds ship it
+// off. Set via Cloud Run env MCP_UIDS (comma-separated) to enable per-uid.
+const MCP_UIDS = parseUidSet(process.env.MCP_UIDS);
+
+// Public Firebase web config (JSON) rendered into the MCP /authorize Google
+// sign-in page so the user can authenticate in their browser during the OAuth
+// flow. Injected via Cloud Run env MCP_FIREBASE_WEB_CONFIG. This is the SAME
+// public config that ships in every client binary (apiKey/authDomain/projectId/
+// …) — not a secret — but env-injected so the repo stays config-free. Unset =>
+// /authorize returns 503 (dark-safe).
+const MCP_FIREBASE_WEB_CONFIG = process.env.MCP_FIREBASE_WEB_CONFIG || "";
+
+// Optional: pin the externally-visible origin used to build MCP discovery
+// metadata + OAuth issuer/endpoints, instead of deriving it from the (proxy-
+// supplied, spoofable) Host / X-Forwarded-Host headers. Set to the canonical
+// public URL, e.g. https://markflow-ai-proxy-smgwadzxwq-an.a.run.app. Unset =>
+// derive from headers (previous behaviour).
+const MCP_PUBLIC_ORIGIN = (process.env.MCP_PUBLIC_ORIGIN || "").replace(
+  /\/+$/,
+  "",
+);
+
+// Trusted redirect hosts for MCP OAuth clients (confused-deputy defense).
+// claude.ai/claude.com + loopback are built in; add more (comma-separated) via
+// MCP_ALLOWED_REDIRECT_HOSTS without a code change.
+const MCP_ALLOWED_REDIRECT_HOSTS = allowedRedirectHosts(
+  process.env.MCP_ALLOWED_REDIRECT_HOSTS,
+);
+
 // Slack Agent-notification webhook for the feedback pipeline. Injected via Secret
 // Manager in Cloud Run (never committed). Unset = DARK: feedback is still stored,
 // the notification is just skipped (logged), so the endpoint is safe to ship
@@ -1929,13 +1997,1442 @@ async function refundIfUncommitted(
   await adjustUsage(g.meterKey, g.feature, -g.cost, g.plan, g.ym);
 }
 
+// =====================================================================
+// Remote MCP server + OAuth 2.1 Authorization Server
+// ---------------------------------------------------------------------
+// Exposes the signed-in user's PERSONAL documents (ownerId == uid, read-only) to
+// Claude as an MCP server over Streamable HTTP, protected by an OAuth 2.1 AS we
+// host here. Pure protocol/crypto logic lives in ./mcp + ./mcp-oauth (unit
+// tested); this section is the Firestore/HTTP wiring. All state lives in
+// server-write-only Firestore collections; codes/tokens are stored by SHA-256
+// hash (raw secret never persisted). See firestore.rules.
+// =====================================================================
+
+const MCP_CLIENTS = "mcp_oauth_clients";
+const MCP_CODES = "mcp_oauth_codes";
+const MCP_ACCESS = "mcp_access_tokens";
+const MCP_REFRESH = "mcp_refresh_tokens";
+// Authoritative revocation signal: one tiny doc per revoked token family. It is
+// the SOURCE OF TRUTH for family revocation because the best-effort delete sweep
+// can miss docs (rotation accumulates docs; a query page is bounded). Every token
+// grant/use checks it, so a token that survives the sweep — or is minted racing
+// the sweep — is still rejected the instant its family is tombstoned.
+const MCP_REVOKED_FAMILIES = "mcp_revoked_families";
+
+// Cap the personal-doc set a single MCP tool call scans. get_document fetches a
+// full body on demand, so list/search only need a bounded recent window.
+const MCP_MAX_DOCS = 500;
+
+function mcpNowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+// Escape a string for safe interpolation into HTML text/attribute content.
+function mcpEscHtml(s: string): string {
+  return String(s).replace(
+    /[<>&"']/g,
+    (c) =>
+      ({
+        "<": "&lt;",
+        ">": "&gt;",
+        "&": "&amp;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c] || c,
+  );
+}
+
+// Throttle the unauthenticated MCP surface (in-memory, per instance — sufficient
+// for the small --max-instances pool). Buckets are keyed strings; a GLOBAL key
+// backstops per-IP keys so X-Forwarded-For rotation can't buy unlimited budget.
+// mcpClientIp uses the spoof-resistant rightmost XFF entry.
+const mcpRateBuckets = new Map<string, number[]>();
+// Hard ceiling on distinct keys: an attacker rotating source addresses (e.g. an
+// IPv6 /64 on the dual-stack run.app ingress) would otherwise create a new key
+// per request. When exceeded we evict the OLDEST keys unconditionally (LRU via
+// Map insertion order) rather than only fully-stale ones, so the Map — and the
+// per-request bookkeeping cost — stays bounded regardless of key churn.
+const MCP_RATE_MAX_KEYS = 20000;
+function mcpRateHit(
+  key: string,
+  maxPerWindow: number,
+  windowSec: number,
+): boolean {
+  const now = mcpNowSec();
+  const hits = (mcpRateBuckets.get(key) || []).filter(
+    (t) => now - t < windowSec,
+  );
+  // This request is limited when the in-window count already meets the cap.
+  const limited = hits.length >= maxPerWindow;
+  // Record it, but never let a single hot key's array grow past the cap (+1):
+  // once we know the boolean answer, more timestamps add nothing.
+  if (hits.length <= maxPerWindow) hits.push(now);
+  // Re-insert last so this key becomes most-recently-used (LRU touch).
+  mcpRateBuckets.delete(key);
+  mcpRateBuckets.set(key, hits);
+  while (mcpRateBuckets.size > MCP_RATE_MAX_KEYS) {
+    const oldest = mcpRateBuckets.keys().next().value;
+    if (oldest === undefined) break;
+    mcpRateBuckets.delete(oldest);
+  }
+  return limited;
+}
+function mcpClientIp(req: http.IncomingMessage): string {
+  return pickClientIp(
+    req.headers["x-forwarded-for"],
+    req.socket.remoteAddress || undefined,
+  );
+}
+// Per-IP-FIRST composition: check the per-IP bucket and, if it already tripped,
+// return WITHOUT charging the global bucket — so one flooding source can only
+// spend its own per-IP budget and can never drain the shared global bucket to
+// 429 the legitimate owner. The global cap is still charged (and enforced) for
+// requests that stay under their per-IP cap, which is exactly the distributed /
+// address-rotating case it exists to bound.
+function mcpComposeRateLimit(
+  ipKey: string,
+  maxPerIp: number,
+  globalKey: string,
+  maxGlobal: number,
+  windowSec: number,
+): boolean {
+  if (mcpRateHit(ipKey, maxPerIp, windowSec)) return true;
+  return mcpRateHit(globalKey, maxGlobal, windowSec);
+}
+// DCR is unauthenticated and writes a permanent client doc → tight caps.
+const MCP_DCR_WINDOW_SEC = 3600;
+const MCP_DCR_MAX_PER_IP = 20;
+const MCP_DCR_MAX_GLOBAL = 200;
+function mcpDcrRateLimited(ip: string): boolean {
+  return mcpComposeRateLimit(
+    "dcr:" + ip,
+    MCP_DCR_MAX_PER_IP,
+    "dcr:__global__",
+    MCP_DCR_MAX_GLOBAL,
+    MCP_DCR_WINDOW_SEC,
+  );
+}
+// The unauthenticated MCP OAuth routes (token/authorize/revoke) each touch
+// Firestore before auth can fail; a looser per-minute cap bounds cost/quota DoS.
+// NOTE: /mcp itself is NOT limited here — it is throttled per-authenticated-uid
+// inside mcpHandleRpc AFTER the bearer check, so a flood of the shared pre-auth
+// buckets can never 429 the owner's own authenticated RPC traffic.
+const MCP_ROUTE_WINDOW_SEC = 60;
+const MCP_ROUTE_MAX_PER_IP = 120;
+const MCP_ROUTE_MAX_GLOBAL = 600;
+function mcpRouteRateLimited(ip: string): boolean {
+  return mcpComposeRateLimit(
+    "rt:" + ip,
+    MCP_ROUTE_MAX_PER_IP,
+    "rt:__global__",
+    MCP_ROUTE_MAX_GLOBAL,
+    MCP_ROUTE_WINDOW_SEC,
+  );
+}
+// Per-authenticated-uid throttle for /mcp JSON-RPC, applied only AFTER the bearer
+// token resolves to an MCP_UIDS uid. Generous — a single client legitimately
+// batches calls — but bounds a compromised/looping client's Firestore fan-out.
+const MCP_RPC_WINDOW_SEC = 60;
+const MCP_RPC_MAX_PER_UID = 300;
+function mcpRpcRateLimited(uid: string): boolean {
+  return mcpRateHit("rpc:" + uid, MCP_RPC_MAX_PER_UID, MCP_RPC_WINDOW_SEC);
+}
+// Pre-auth per-IP throttle for /mcp: the bearer-token lookup is a real Firestore
+// read that runs BEFORE the per-uid throttle above, so an UNauthenticated flood of
+// bogus bearer tokens would otherwise drive uncapped Firestore reads (cost/quota)
+// and saturate the small shared instance pool. This is intentionally PER-IP-ONLY
+// (no global bucket): the cap is set well above the owner's own per-uid allowance
+// so the single legitimate owner is never throttled, and omitting the global
+// bucket guarantees other IPs' traffic can never 429 the owner. A trivial
+// single-source flood is stopped here; a botnet-scale distributed flood is not
+// bounded in aggregate by this limiter (accepted — --max-instances caps blast
+// radius and it targets a dark, single-owner endpoint).
+const MCP_MCP_PREAUTH_MAX_PER_IP = 600;
+function mcpMcpPreAuthRateLimited(ip: string): boolean {
+  return mcpRateHit(
+    "mcppre:" + ip,
+    MCP_MCP_PREAUTH_MAX_PER_IP,
+    MCP_ROUTE_WINDOW_SEC,
+  );
+}
+
+// Firestore Timestamp | number | null → epoch ms.
+function mcpToMs(v: unknown): number {
+  const t = v as { toMillis?: () => number } | null;
+  if (t && typeof t.toMillis === "function") return t.toMillis();
+  return typeof v === "number" ? v : 0;
+}
+
+function mcpJson(
+  res: http.ServerResponse,
+  status: number,
+  obj: unknown,
+  extraHeaders?: Record<string, string>,
+): void {
+  if (res.headersSent) {
+    if (!res.writableEnded) res.end();
+    return;
+  }
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    ...(extraHeaders || {}),
+  });
+  res.end(JSON.stringify(obj));
+}
+
+function mcpHtml(res: http.ServerResponse, status: number, html: string): void {
+  if (res.headersSent) return;
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(html);
+}
+
+// Bounded body reader for the MCP routes (they run before the shared readBody).
+function mcpReadBody(
+  req: http.IncomingMessage,
+  maxBytes: number,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let aborted = false;
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        aborted = true;
+        reject(new Error("Request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!aborted) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (e) => {
+      if (!aborted) reject(e);
+    });
+  });
+}
+
+// Escape a value for safe embedding inside an inline <script> as a JS literal.
+function mcpJsonForScript(obj: unknown): string {
+  return JSON.stringify(obj)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function mcpFirestoreDocToMcp(
+  id: string,
+  data: Record<string, unknown>,
+): McpDoc {
+  return {
+    id,
+    title: String(data.title || ""),
+    content: String(data.content || ""),
+    updatedAt: mcpToMs(data.updatedAt),
+    createdAt: mcpToMs(data.createdAt),
+    folder: data.folder ? String(data.folder) : null,
+    tags: Array.isArray(data.tags) ? (data.tags as unknown[]).map(String) : [],
+    docType: data.docType ? String(data.docType) : undefined,
+  };
+}
+
+// I/O deps for handleMcpMessage, scoped to ONE user's personal docs. Both paths
+// enforce the authorization boundary via isPersonalDocData (pure, unit-tested in
+// mcp.test.ts): a doc that is not the caller's personal document — another user's,
+// a team doc (non-empty teamId), or one shared out (non-empty collaboratorUids) —
+// is never returned. Filtered in code because Firestore `where("teamId","==",null)`
+// does not match documents that omit the field entirely.
+function mcpDepsForUid(uid: string): McpDeps {
+  // Memoize the listing for the lifetime of this deps object (== one HTTP
+  // request): a JSON-RPC batch with several list/search calls then costs ONE
+  // Firestore query instead of one per element (read-amplification guard).
+  let listPromise: Promise<McpDoc[]> | null = null;
+  return {
+    listDocs: () => {
+      if (!listPromise) {
+        listPromise = (async () => {
+          const q = await getFirestore()
+            .collection("documents")
+            .where("ownerId", "==", uid)
+            .limit(MCP_MAX_DOCS)
+            .get();
+          const docs = q.docs
+            .filter((d) => isPersonalDocData(uid, d.data()))
+            .map((d) => mcpFirestoreDocToMcp(d.id, d.data()));
+          docs.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+          return docs;
+        })();
+      }
+      return listPromise;
+    },
+    getDoc: async (id) => {
+      const snap = await getFirestore().collection("documents").doc(id).get();
+      if (!snap.exists) return null;
+      const data = snap.data() as Record<string, unknown>;
+      if (!isPersonalDocData(uid, data)) return null; // personal docs only
+      return mcpFirestoreDocToMcp(snap.id, data);
+    },
+  };
+}
+
+async function mcpLoadClient(
+  clientId: string,
+): Promise<{ redirectUris: string[]; clientName: string } | null> {
+  if (!clientId) return null;
+  const snap = await getFirestore().collection(MCP_CLIENTS).doc(clientId).get();
+  if (!snap.exists) return null;
+  const data = snap.data() as Record<string, unknown>;
+  const redirectUris = Array.isArray(data.redirectUris)
+    ? (data.redirectUris as unknown[]).map(String)
+    : [];
+  const clientName = typeof data.clientName === "string" ? data.clientName : "";
+  return { redirectUris, clientName };
+}
+
+// Mint + persist an access/refresh token pair (hashes only) for a granted user.
+// `family` ties every token descended from a single authorization_code grant
+// together so refresh-token reuse can revoke the whole lineage (OAuth 2.1 §6.1).
+// Callers pass the raw token strings so the refresh path can pre-generate the
+// successor and record its hash on the predecessor ATOMICALLY (race-free reuse
+// detection, see mcpHandleRefreshGrant) before persisting the new pair here.
+async function mcpIssueTokens(
+  uid: string,
+  clientId: string,
+  scope: string,
+  resource: string,
+  family: string,
+  access: string,
+  refresh: string,
+): Promise<{ access: string; refresh: string }> {
+  const now = mcpNowSec();
+  await Promise.all([
+    getFirestore()
+      .collection(MCP_ACCESS)
+      .doc(hashToken(access))
+      .set({
+        uid,
+        clientId,
+        scope,
+        resource,
+        family,
+        expiresAt: now + ACCESS_TTL_SEC,
+        createdAt: FieldValue.serverTimestamp(),
+      }),
+    getFirestore()
+      .collection(MCP_REFRESH)
+      .doc(hashToken(refresh))
+      .set({
+        uid,
+        clientId,
+        scope,
+        resource,
+        family,
+        expiresAt: now + REFRESH_TTL_SEC,
+        createdAt: FieldValue.serverTimestamp(),
+      }),
+  ]);
+  return { access, refresh };
+}
+
+// True iff this token family has been revoked (tombstone present). This — not
+// the best-effort delete sweep — is the authoritative "is this lineage dead?"
+// check; it is consulted before honoring an access token and before rotating a
+// refresh token, so a doc the sweep missed (or one minted racing the sweep) is
+// still rejected.
+async function mcpFamilyRevoked(family: string): Promise<boolean> {
+  if (!family) return false;
+  try {
+    const snap = await getFirestore()
+      .collection(MCP_REVOKED_FAMILIES)
+      .doc(family)
+      .get();
+    return snap.exists;
+  } catch (err) {
+    // Fail CLOSED: if we cannot confirm the family is live, treat it as revoked
+    // rather than honor a possibly-compromised token.
+    console.error(
+      `[mcp] family-tombstone read failed for ${family.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)} — failing closed`,
+    );
+    return true;
+  }
+}
+
+// Revoke an entire token family. Writes the authoritative tombstone FIRST (so any
+// surviving/racing descendant is immediately rejected by mcpFamilyRevoked), then
+// best-effort sweeps every access+refresh doc, PAGINATING until the family is
+// empty (a single limit(500) page could otherwise leave live docs behind for a
+// long-lived family). Single-field equality is auto-indexed (no composite index).
+async function mcpRevokeFamily(family: string): Promise<void> {
+  if (!family) return;
+  const db = getFirestore();
+  // The tombstone is the AUTHORITATIVE revocation signal and the read side
+  // (mcpFamilyRevoked) fails CLOSED, so this write must actually land — a
+  // silently-swallowed failure would leave a detected-compromised lineage with
+  // no tombstone, and mcpFamilyRevoked would then read "absent" → honor the
+  // token. Mirror the read side's fail-closed posture on the write side: retry a
+  // bounded number of times, and if it still fails, THROW so the caller does not
+  // proceed as though revocation succeeded (the reuse/refresh paths then surface
+  // a server error instead of a false invalid_grant; /oauth/revoke wraps this in
+  // its own try/catch and still returns 200 per RFC 7009, but logs CRITICAL).
+  let tombstoneWritten = false;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await db
+        .collection(MCP_REVOKED_FAMILIES)
+        .doc(family)
+        .set({ revokedAt: FieldValue.serverTimestamp() });
+      tombstoneWritten = true;
+      break;
+    } catch (err) {
+      console.error(
+        `[mcp] family tombstone write attempt ${attempt}/4 failed for ${family.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  if (!tombstoneWritten) {
+    console.error(
+      `[mcp] CRITICAL: could not persist family tombstone for ${family.slice(0, 8)}… after retries — revocation NOT durable`,
+    );
+    throw new Error("mcp_family_tombstone_write_failed");
+  }
+  for (const coll of [MCP_ACCESS, MCP_REFRESH]) {
+    try {
+      for (;;) {
+        const q = await db
+          .collection(coll)
+          .where("family", "==", family)
+          .limit(500)
+          .get();
+        if (q.empty) break;
+        const batch = db.batch();
+        q.docs.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+        if (q.size < 500) break;
+      }
+    } catch (err) {
+      console.error(
+        `[mcp] family revocation sweep failed for ${coll}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+function mcpLoginPageHtml(
+  params: {
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    codeChallengeMethod: string;
+    state: string;
+    scope: string;
+    resource: string;
+    responseType: string;
+  },
+  clientName: string,
+  firebaseConfig: unknown,
+): string {
+  const payload = {
+    client_id: params.clientId,
+    redirect_uri: params.redirectUri,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: params.codeChallengeMethod,
+    state: params.state,
+    scope: params.scope,
+    resource: params.resource,
+    response_type: params.responseType,
+  };
+  // The redirect host is the un-spoofable trust anchor shown on the consent
+  // screen: it is where the authorization code will be delivered, and it has
+  // already passed the strict redirect-host allowlist. The client_name is
+  // self-asserted at DCR, so it is shown as secondary (labelled "アプリ") only.
+  let redirectHost = "";
+  try {
+    redirectHost = new URL(params.redirectUri).host;
+  } catch {
+    redirectHost = params.redirectUri;
+  }
+  const appLabel = clientName.trim() || "(名称未設定のアプリ)";
+  return `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MarkFlow へのアクセスを許可</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#faf9f7; color:#1c1b1a; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+  @media (prefers-color-scheme: dark){ body{ background:#191817; color:#ececec; } .card{ background:#232221 !important; border-color:#38363400 !important; } .grant{ background:#1c1b1a !important; border-color:#333 !important; } .k{ color:#9a958f !important; } }
+  .card { background:#fff; border:1px solid #eceae7; border-radius:16px; padding:36px 32px; max-width:420px; width:calc(100% - 32px);
+    box-shadow:0 1px 3px rgba(0,0,0,.06); text-align:center; }
+  h1 { font-size:1.15rem; margin:0 0 8px; font-weight:650; }
+  p { font-size:.9rem; line-height:1.6; color:#6b6763; margin:0 0 20px; }
+  button { font:inherit; font-size:.95rem; font-weight:600; cursor:pointer; border:1px solid #dcdad7;
+    background:#fff; color:#1c1b1a; border-radius:10px; padding:11px 18px; display:inline-flex; align-items:center; gap:10px;
+    width:100%; justify-content:center; }
+  button:hover { background:#f5f4f2; }
+  button.primary { background:#1c1b1a; color:#fff; border-color:#1c1b1a; }
+  button.primary:hover { background:#333; }
+  button.secondary { margin-top:10px; background:transparent; border-color:transparent; color:#6b6763; }
+  button.secondary:hover { background:#f5f4f2; }
+  button:disabled { opacity:.55; cursor:default; }
+  .grant { text-align:left; background:#faf9f7; border:1px solid #eceae7; border-radius:12px; padding:14px 16px; margin:0 0 16px; }
+  .row { display:flex; gap:12px; font-size:.85rem; line-height:1.5; padding:4px 0; }
+  .k { flex:0 0 64px; color:#8a857f; }
+  .v { flex:1; font-weight:600; word-break:break-all; }
+  .who { font-size:.82rem; color:#6b6763; margin:0 0 16px; }
+  .who b { color:#1c1b1a; font-weight:650; }
+  .fine { font-size:.78rem; color:#8a857f; margin:16px 0 0; line-height:1.55; }
+  .msg { margin-top:16px; font-size:.85rem; min-height:1.2em; }
+  .err { color:#b3261e; }
+  .g { width:18px; height:18px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <!-- Step 1: sign in -->
+    <div id="step-signin">
+      <h1>MarkFlow と連携</h1>
+      <p>続けるには、MarkFlow にログインしているのと同じ Google アカウントでサインインしてください。</p>
+      <button id="signin" class="primary">
+        <svg class="g" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.7 30.2.5 24 .5 14.6.5 6.5 5.9 2.6 13.8l7.8 6.1C12.3 13.9 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.4 5.7c4.3-4 6.8-9.9 6.8-17.4z"/><path fill="#FBBC05" d="M10.4 28.3c-.5-1.5-.8-3.1-.8-4.8s.3-3.3.8-4.8l-7.8-6.1C.9 15.9 0 19.8 0 23.5s.9 7.6 2.6 10.9l7.8-6.1z"/><path fill="#34A853" d="M24 47.5c6.2 0 11.4-2 15.2-5.5l-7.4-5.7c-2 1.4-4.7 2.3-7.8 2.3-6.4 0-11.7-4.3-13.6-10.1l-7.8 6.1C6.5 42.1 14.6 47.5 24 47.5z"/></svg>
+        Googleでサインイン
+      </button>
+    </div>
+
+    <!-- Step 2: consent -->
+    <div id="step-consent" hidden>
+      <h1>アクセスを許可しますか？</h1>
+      <p class="who">アカウント: <b id="who"></b></p>
+      <div class="grant">
+        <div class="row"><span class="k">接続先</span><span class="v" id="dst">${mcpEscHtml(redirectHost)}</span></div>
+        <div class="row"><span class="k">アプリ</span><span class="v">${mcpEscHtml(appLabel)}</span></div>
+        <div class="row"><span class="k">権限</span><span class="v">個人ドキュメントの検索・閲覧（読み取り専用）</span></div>
+      </div>
+      <p class="fine">許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧できるようになります。共有・チームのドキュメントは対象外で、書き込みはできません。心当たりのない接続先の場合は「許可しない」を選んでください。</p>
+      <button id="approve" class="primary">許可する</button>
+      <button id="deny" class="secondary">許可しない</button>
+    </div>
+
+    <div id="msg" class="msg"></div>
+  </div>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult }
+    from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+
+  const OAUTH = ${mcpJsonForScript(payload)};
+  const firebaseConfig = ${mcpJsonForScript(firebaseConfig)};
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const provider = new GoogleAuthProvider();
+  const stepSignin = document.getElementById("step-signin");
+  const stepConsent = document.getElementById("step-consent");
+  const btn = document.getElementById("signin");
+  const approveBtn = document.getElementById("approve");
+  const denyBtn = document.getElementById("deny");
+  const whoEl = document.getElementById("who");
+  const msg = document.getElementById("msg");
+
+  let pendingIdToken = "";
+
+  function setMsg(t, isErr){ msg.textContent = t || ""; msg.className = "msg" + (isErr ? " err" : ""); }
+
+  // After sign-in, show the consent step (do NOT auto-complete): the user must
+  // explicitly approve the specific destination before a code is minted.
+  function showConsent(user){
+    pendingIdToken = null; // set by caller via getIdToken()
+    whoEl.textContent = (user && user.email) ? user.email : "(サインイン済み)";
+    stepSignin.hidden = true;
+    stepConsent.hidden = false;
+    setMsg("", false);
+  }
+
+  async function complete(){
+    if (!pendingIdToken){ setMsg("サインインの有効期限が切れました。やり直してください。", true); return; }
+    setMsg("接続を確立しています…", false);
+    approveBtn.disabled = true; denyBtn.disabled = true;
+    try {
+      const r = await fetch(${JSON.stringify(AUTHORIZE_PATH)}, {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ idToken: pendingIdToken, ...OAUTH }),
+      });
+      const data = await r.json();
+      if (data && data.redirect){ window.location.href = data.redirect; return; }
+      setMsg((data && data.error_description) || "接続に失敗しました。", true);
+      approveBtn.disabled = false; denyBtn.disabled = false;
+    } catch (e){
+      setMsg("接続に失敗しました: " + (e && e.message ? e.message : e), true);
+      approveBtn.disabled = false; denyBtn.disabled = false;
+    }
+  }
+
+  // Deny: return an OAuth access_denied error to the (already-validated) redirect
+  // URI so the client ends the flow cleanly.
+  function deny(){
+    try {
+      const u = new URL(OAUTH.redirect_uri);
+      u.searchParams.set("error", "access_denied");
+      u.searchParams.set("error_description", "User declined the connection");
+      if (OAUTH.state) u.searchParams.set("state", OAUTH.state);
+      window.location.href = u.toString();
+    } catch {
+      setMsg("接続をキャンセルしました。このタブを閉じてください。", false);
+    }
+  }
+
+  async function afterSignIn(user){
+    showConsent(user);
+    try { pendingIdToken = await user.getIdToken(); }
+    catch (e){ setMsg("サインインに失敗しました: " + (e && e.message ? e.message : e), true); }
+  }
+
+  // Handle return from a redirect-based sign-in (popup fallback).
+  try {
+    const rr = await getRedirectResult(auth);
+    if (rr && rr.user){ await afterSignIn(rr.user); }
+  } catch (e){ setMsg("サインインに失敗しました: " + (e && e.message ? e.message : e), true); }
+
+  btn.addEventListener("click", async () => {
+    setMsg("", false);
+    try {
+      const res = await signInWithPopup(auth, provider);
+      await afterSignIn(res.user);
+    } catch (e){
+      const code = e && e.code ? e.code : "";
+      if (code === "auth/popup-blocked" || code === "auth/cancelled-popup-request" || code === "auth/operation-not-supported-in-this-environment"){
+        // fall back to full-page redirect
+        try { await signInWithRedirect(auth, provider); }
+        catch (e2){ setMsg("サインインに失敗しました: " + (e2 && e2.message ? e2.message : e2), true); }
+      } else if (code === "auth/popup-closed-by-user"){
+        setMsg("", false);
+      } else {
+        setMsg("サインインに失敗しました: " + (e && e.message ? e.message : e), true);
+      }
+    }
+  });
+
+  approveBtn.addEventListener("click", complete);
+  denyBtn.addEventListener("click", deny);
+</script>
+</body>
+</html>`;
+}
+
+function mcpErrorPageHtml(message: string): string {
+  const safe = String(message).replace(/[<>&]/g, (c) =>
+    c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;",
+  );
+  return `<!doctype html><meta charset="utf-8"><title>接続エラー</title>
+<body style="font-family:-apple-system,sans-serif;padding:3rem;text-align:center;color:#555">
+<h1 style="font-size:1.15rem">接続できませんでした</h1>
+<p>${safe}</p></body>`;
+}
+
+// authorization_code grant: verify PKCE + single-use code, issue tokens.
+async function mcpHandleAuthCodeGrant(
+  res: http.ServerResponse,
+  v: ReturnType<typeof parseTokenRequest>,
+): Promise<void> {
+  const ref = getFirestore()
+    .collection(MCP_CODES)
+    .doc(hashToken(v.code || ""));
+  // Atomic single-use consume: read + delete in ONE transaction so two
+  // concurrent /token calls presenting the same code cannot both read it as
+  // valid and mint two token pairs (replay via race). Even a subsequent PKCE
+  // failure must not leave a reusable code behind — the delete already landed.
+  const data = await getFirestore().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return null;
+    tx.delete(ref);
+    return snap.data() as Record<string, unknown>;
+  });
+  if (!data) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "code not found",
+    });
+    return;
+  }
+  if (Number(data.expiresAt || 0) < mcpNowSec()) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "code expired",
+    });
+    return;
+  }
+  if (v.clientId && String(data.clientId || "") !== v.clientId) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "client mismatch",
+    });
+    return;
+  }
+  if (v.redirectUri && String(data.redirectUri || "") !== v.redirectUri) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "redirect_uri mismatch",
+    });
+    return;
+  }
+  if (!verifyPkceS256(v.codeVerifier || "", String(data.codeChallenge || ""))) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "PKCE verification failed",
+    });
+    return;
+  }
+  const uid = String(data.uid || "");
+  if (!uid || !MCP_UIDS.has(uid)) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "user not authorized",
+    });
+    return;
+  }
+  const scope = String(data.scope || "");
+  const resource = String(data.resource || "");
+  // Fresh lineage per authorization: every access/refresh token descended from
+  // this grant shares one `family`, so refresh-token reuse can revoke them all.
+  const family = newOpaqueToken();
+  const { access, refresh } = await mcpIssueTokens(
+    uid,
+    String(data.clientId || ""),
+    scope,
+    resource,
+    family,
+    newOpaqueToken(),
+    newOpaqueToken(),
+  );
+  mcpJson(res, 200, buildTokenResponse(access, refresh, scope), {
+    "Cache-Control": "no-store",
+  });
+}
+
+// refresh_token grant: rotate the refresh token, issue a fresh pair.
+//
+// Reuse detection is lineage-aware, not wall-clock-based. On rotation we SOFT-
+// revoke the presented doc and, ATOMICALLY in the same transaction, record a
+// pointer to its successor (`supersededBy` = hash of the freshly-minted refresh
+// token). A later presentation of an already-revoked token is then classified by
+// its successor's state:
+//   - successor still live (or not yet persisted) → BENIGN: a concurrent double-
+//     submit or a lost-response retry where the chain advanced exactly one step.
+//     Reject this request but keep the lineage (never log the owner out).
+//   - successor itself already revoked → GENUINE REUSE: the chain forked ≥2
+//     generations, proving two concurrent holders (theft). Revoke the family.
+// This removes the fragile 10s wall-clock (a lost response is only detected after
+// the client's read timeout, which routinely exceeds any short grace) while still
+// catching real token theft.
+async function mcpHandleRefreshGrant(
+  res: http.ServerResponse,
+  v: ReturnType<typeof parseTokenRequest>,
+): Promise<void> {
+  const ref = getFirestore()
+    .collection(MCP_REFRESH)
+    .doc(hashToken(v.refreshToken || ""));
+  // Pre-generate the successor pair so the predecessor can record its successor's
+  // hash atomically with the soft-revoke (race-free reuse classification).
+  const newAccess = newOpaqueToken();
+  const newRefresh = newOpaqueToken();
+  const newRefreshHash = hashToken(newRefresh);
+  const outcome = await getFirestore().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return { kind: "missing" as const };
+    const data = snap.data() as Record<string, unknown>;
+    if (data.revoked === true) return { kind: "reuse" as const, data };
+    tx.update(ref, {
+      revoked: true,
+      revokedAt: FieldValue.serverTimestamp(),
+      supersededBy: newRefreshHash,
+    });
+    return { kind: "active" as const, data };
+  });
+
+  if (outcome.kind === "missing") {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token invalid",
+    });
+    return;
+  }
+
+  if (outcome.kind === "reuse") {
+    const fam = String(outcome.data.family || "");
+    const succHash = String(outcome.data.supersededBy || "");
+    let successorRevoked = false;
+    if (succHash) {
+      try {
+        const succ = await getFirestore()
+          .collection(MCP_REFRESH)
+          .doc(succHash)
+          .get();
+        // Successor missing => not yet persisted (mint in flight) or already
+        // swept: treat as benign. Successor present & revoked => chain forked.
+        successorRevoked = succ.exists && succ.data()?.revoked === true;
+      } catch (err) {
+        // Can't classify → assume the worst (compromise) and revoke.
+        console.error(
+          `[mcp] successor lookup failed during reuse check: ${err instanceof Error ? err.message : String(err)} — treating as reuse`,
+        );
+        successorRevoked = true;
+      }
+    }
+    if (successorRevoked) {
+      console.error(
+        `[mcp] refresh-token reuse detected (family=${fam.slice(0, 8)}…) — revoking lineage`,
+      );
+      await mcpRevokeFamily(fam);
+      mcpJson(res, 400, {
+        error: "invalid_grant",
+        error_description: "refresh_token reuse detected",
+      });
+      return;
+    }
+    // Benign concurrent/lost-response retry — reject this one, keep the lineage.
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token invalid",
+    });
+    return;
+  }
+
+  // Active token — already soft-revoked above (consumed). Validate then rotate.
+  const data = outcome.data;
+  if (Number(data.expiresAt || 0) < mcpNowSec()) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token expired",
+    });
+    return;
+  }
+  if (v.clientId && String(data.clientId || "") !== v.clientId) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "client mismatch",
+    });
+    return;
+  }
+  const uid = String(data.uid || "");
+  if (!uid || !MCP_UIDS.has(uid)) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "user not authorized",
+    });
+    return;
+  }
+  // Carry the same family forward so the rotated chain stays revocable as a unit.
+  const family = String(data.family || newOpaqueToken());
+  // Refuse to rotate a token whose family was revoked (e.g. reuse detected on a
+  // sibling): don't resurrect a dead lineage. The RPC-time tombstone check is the
+  // authoritative backstop for any pair minted racing the revoke.
+  if (await mcpFamilyRevoked(family)) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token invalid",
+    });
+    return;
+  }
+  const scope = String(data.scope || "");
+  const resource = String(data.resource || "");
+  const { access, refresh } = await mcpIssueTokens(
+    uid,
+    String(data.clientId || ""),
+    scope,
+    resource,
+    family,
+    newAccess,
+    newRefresh,
+  );
+  mcpJson(res, 200, buildTokenResponse(access, refresh, scope), {
+    "Cache-Control": "no-store",
+  });
+}
+
+// POST /mcp — bearer-authenticated JSON-RPC (stateless Streamable HTTP).
+async function mcpHandleRpc(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  baseUrl: string,
+): Promise<void> {
+  if (req.method !== "POST") {
+    // Stateless server: no server→client SSE stream, no session teardown.
+    mcpJson(
+      res,
+      405,
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Method not allowed; use POST" },
+      },
+      { Allow: "POST" },
+    );
+    return;
+  }
+  const prmUrl = `${baseUrl}${PRM_PATH}`;
+  const challenge = (desc: string) =>
+    `Bearer error="invalid_token", error_description="${desc}", resource_metadata="${prmUrl}"`;
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Missing bearer token") },
+    );
+    return;
+  }
+  const token = authHeader.slice(7).trim();
+  const snap = await getFirestore()
+    .collection(MCP_ACCESS)
+    .doc(hashToken(token))
+    .get();
+  if (!snap.exists) {
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Invalid token") },
+    );
+    return;
+  }
+  const tok = snap.data() as Record<string, unknown>;
+  if (Number(tok.expiresAt || 0) < mcpNowSec()) {
+    await snap.ref.delete().catch(() => {});
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Token expired") },
+    );
+    return;
+  }
+  const uid = String(tok.uid || "");
+  if (!uid || !MCP_UIDS.has(uid)) {
+    mcpJson(res, 403, { error: "forbidden" });
+    return;
+  }
+  // Authoritative revocation backstop: if this token's family was tombstoned
+  // (reuse detected on a sibling, or an explicit revoke), reject even if the
+  // access-token doc itself survived the sweep or was minted racing the revoke.
+  if (await mcpFamilyRevoked(String(tok.family || ""))) {
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Token revoked") },
+    );
+    return;
+  }
+  // Per-uid RPC throttle — the tools are Firestore-backed; cap how many calls a
+  // single authorized identity can drive per window.
+  if (mcpRpcRateLimited(uid)) {
+    mcpJson(
+      res,
+      429,
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Rate limit exceeded" },
+      },
+      { "Retry-After": String(MCP_RPC_WINDOW_SEC) },
+    );
+    return;
+  }
+
+  const body = await mcpReadBody(req, 4 * 1024 * 1024);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "");
+  } catch {
+    mcpJson(res, 400, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Parse error" },
+    });
+    return;
+  }
+
+  const isBatch = Array.isArray(parsed);
+  // Reject an empty batch (JSON-RPC 2.0: invalid) and cap batch size so a client
+  // can't fan one POST out into many Firestore-backed tool calls.
+  if (isBatch && (parsed as unknown[]).length === 0) {
+    mcpJson(res, 400, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid Request: empty batch" },
+    });
+    return;
+  }
+  if (isBatch && (parsed as unknown[]).length > MAX_RPC_BATCH) {
+    mcpJson(res, 400, {
+      jsonrpc: "2.0",
+      id: null,
+      error: {
+        code: -32600,
+        message: `Invalid Request: batch too large (max ${MAX_RPC_BATCH})`,
+      },
+    });
+    return;
+  }
+
+  const deps = mcpDepsForUid(uid);
+  const messages = (isBatch ? parsed : [parsed]) as unknown[];
+  const responses: JsonRpcResponse[] = [];
+  for (const m of messages) {
+    if (!isRequest(m)) continue;
+    const r = await handleMcpMessage(m as JsonRpcRequest, deps);
+    if (r) responses.push(r);
+  }
+
+  if (responses.length === 0) {
+    // Only notifications/responses were sent → 202 Accepted, no body.
+    res.writeHead(202);
+    res.end();
+    return;
+  }
+  mcpJson(res, 200, isBatch ? responses : responses[0]);
+}
+
+/**
+ * Dispatch the MCP + OAuth routes. Returns true if the request was handled (the
+ * caller then returns), false if it is not an MCP route. DARK when MCP_UIDS is
+ * empty: every MCP route 404s as if absent.
+ */
+async function handleMcpRoutes(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<boolean> {
+  const rawUrl = req.url || "";
+  const path = rawUrl.split("?")[0];
+
+  const isPrm =
+    path === PRM_PATH || path === "/.well-known/oauth-protected-resource";
+  const isAsm = path === ASM_PATH || path.startsWith(ASM_PATH + "/");
+  const isMcp = path === MCP_PATH;
+  const isRegister = path === REGISTER_PATH;
+  const isAuthorize = path === AUTHORIZE_PATH;
+  const isToken = path === TOKEN_PATH;
+  const isRevoke = path === REVOKE_PATH;
+
+  if (!(
+    isPrm ||
+    isAsm ||
+    isMcp ||
+    isRegister ||
+    isAuthorize ||
+    isToken ||
+    isRevoke
+  )) {
+    return false;
+  }
+
+  // Dark-launch: feature off unless an allowlist is configured. Return a body
+  // byte-identical to the generic catch-all 404 so the dark feature cannot be
+  // fingerprinted by probing these paths.
+  if (MCP_UIDS.size === 0) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+    return true;
+  }
+
+  // Fail closed: when MCP is enabled the public origin MUST be pinned. Deriving
+  // it from client-supplied Host / X-Forwarded-Host would let a caller steer the
+  // OAuth issuer + endpoint metadata (and the /mcp WWW-Authenticate PRM pointer)
+  // to an attacker origin. Never trust request headers for security metadata.
+  if (!MCP_PUBLIC_ORIGIN) {
+    console.error(
+      "[mcp] MCP_UIDS is set but MCP_PUBLIC_ORIGIN is unset — refusing to serve MCP with a header-derived origin",
+    );
+    mcpJson(res, 503, { error: "server_misconfigured" });
+    return true;
+  }
+  const baseUrl = MCP_PUBLIC_ORIGIN;
+
+  // Throttle the Firestore-touching routes before any lookup (cost/quota DoS).
+  // Register has its own tighter limiter below; discovery (PRM/ASM) is cheap and
+  // header-only, so it is not throttled (Claude fetches it on every connect).
+  if (
+    (isToken || isAuthorize || isRevoke) &&
+    mcpRouteRateLimited(mcpClientIp(req))
+  ) {
+    mcpJson(
+      res,
+      429,
+      { error: "rate_limited", error_description: "Too many requests" },
+      { "Retry-After": String(MCP_ROUTE_WINDOW_SEC) },
+    );
+    return true;
+  }
+  // /mcp has its own generous PER-IP pre-auth limiter (above): the bearer lookup
+  // is a Firestore read that precedes the per-uid throttle, so cap anonymous
+  // floods here without ever charging a shared/global bucket that could 429 the
+  // owner. Kept separate from mcpRouteRateLimited so the owner's authenticated
+  // RPC (≤300/min per-uid) is never clipped by the tighter OAuth-route cap.
+  if (isMcp && mcpMcpPreAuthRateLimited(mcpClientIp(req))) {
+    mcpJson(
+      res,
+      429,
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Rate limit exceeded" },
+      },
+      { "Retry-After": String(MCP_ROUTE_WINDOW_SEC) },
+    );
+    return true;
+  }
+
+  try {
+    // ---- Discovery (public, GET) ----
+    if (isPrm) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      mcpJson(res, 200, buildProtectedResourceMetadata(baseUrl));
+      return true;
+    }
+    if (isAsm) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      mcpJson(res, 200, buildAuthServerMetadata(baseUrl));
+      return true;
+    }
+
+    // ---- Dynamic Client Registration (POST JSON) ----
+    if (isRegister) {
+      if (req.method !== "POST") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      if (mcpDcrRateLimited(mcpClientIp(req))) {
+        mcpJson(
+          res,
+          429,
+          {
+            error: "rate_limited",
+            error_description: "Too many registration requests",
+          },
+          { "Retry-After": String(MCP_DCR_WINDOW_SEC) },
+        );
+        return true;
+      }
+      const body = await mcpReadBody(req, 64 * 1024);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        mcpJson(res, 400, {
+          error: "invalid_client_metadata",
+          error_description: "invalid JSON",
+        });
+        return true;
+      }
+      const v = validateDcrRequest(parsed, MCP_ALLOWED_REDIRECT_HOSTS);
+      if (!v.ok) {
+        mcpJson(res, 400, {
+          error: v.error,
+          error_description: v.error_description,
+        });
+        return true;
+      }
+      const clientId = "mcp_" + newOpaqueToken();
+      const createdAtSec = mcpNowSec();
+      await getFirestore()
+        .collection(MCP_CLIENTS)
+        .doc(clientId)
+        .set({
+          clientId,
+          redirectUris: v.redirectUris,
+          clientName: v.clientName || null,
+          tokenEndpointAuthMethod: "none",
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      mcpJson(
+        res,
+        201,
+        buildDcrResponse(
+          clientId,
+          v.redirectUris || [],
+          v.clientName,
+          createdAtSec,
+        ),
+      );
+      return true;
+    }
+
+    // ---- Authorize (GET login page, POST completes with Firebase id token) ----
+    if (isAuthorize) {
+      if (!MCP_FIREBASE_WEB_CONFIG) {
+        mcpJson(res, 503, { error: "mcp_login_not_configured" });
+        return true;
+      }
+      let firebaseConfig: unknown;
+      try {
+        firebaseConfig = JSON.parse(MCP_FIREBASE_WEB_CONFIG);
+      } catch {
+        console.error("[mcp] MCP_FIREBASE_WEB_CONFIG is not valid JSON");
+        mcpJson(res, 503, { error: "mcp_login_not_configured" });
+        return true;
+      }
+
+      if (req.method === "GET") {
+        const query = Object.fromEntries(new URL(rawUrl, baseUrl).searchParams);
+        const client = await mcpLoadClient(query.client_id || "");
+        const v = validateAuthorizeRequest(query, client);
+        if (!v.ok) {
+          if (
+            v.kind === "redirect" &&
+            query.redirect_uri &&
+            client &&
+            matchRedirectUri(query.redirect_uri, client.redirectUris)
+          ) {
+            res.writeHead(302, {
+              Location: buildErrorRedirect(
+                query.redirect_uri,
+                v.error || "invalid_request",
+                v.error_description || "",
+                query.state || "",
+              ),
+            });
+            res.end();
+            return true;
+          }
+          mcpHtml(
+            res,
+            400,
+            mcpErrorPageHtml(
+              v.error_description || v.error || "invalid request",
+            ),
+          );
+          return true;
+        }
+        mcpHtml(
+          res,
+          200,
+          mcpLoginPageHtml(v.params!, client?.clientName || "", firebaseConfig),
+        );
+        return true;
+      }
+
+      if (req.method === "POST") {
+        const body = await mcpReadBody(req, 64 * 1024);
+        let parsed: Record<string, string>;
+        try {
+          parsed = JSON.parse(body || "{}");
+        } catch {
+          mcpJson(res, 400, {
+            error: "invalid_request",
+            error_description: "invalid JSON",
+          });
+          return true;
+        }
+        const idToken = String(parsed.idToken || "");
+        const query = {
+          response_type: parsed.response_type,
+          client_id: parsed.client_id,
+          redirect_uri: parsed.redirect_uri,
+          code_challenge: parsed.code_challenge,
+          code_challenge_method: parsed.code_challenge_method,
+          state: parsed.state,
+          scope: parsed.scope,
+          resource: parsed.resource,
+        };
+        const client = await mcpLoadClient(query.client_id || "");
+        const v = validateAuthorizeRequest(query, client);
+        if (!v.ok) {
+          mcpJson(res, 400, {
+            error: v.error,
+            error_description: v.error_description,
+          });
+          return true;
+        }
+        let uid: string;
+        try {
+          // checkRevoked=true: this one-time exchange mints a 30-day refresh
+          // token, so a signed-out-everywhere / disabled / password-reset
+          // credential must not be parlayed into durable access. The extra
+          // Firebase round-trip is negligible for a once-per-connect call.
+          uid = (await getAuth().verifyIdToken(idToken, true)).uid;
+        } catch {
+          mcpJson(res, 401, {
+            error: "invalid_token",
+            error_description: "Firebase sign-in failed",
+          });
+          return true;
+        }
+        if (!MCP_UIDS.has(uid)) {
+          // Complete the flow with an OAuth access_denied redirect (protocol-correct).
+          mcpJson(res, 200, {
+            redirect: buildErrorRedirect(
+              v.params!.redirectUri,
+              "access_denied",
+              "This Google account is not authorized for MarkFlow MCP.",
+              v.params!.state,
+            ),
+          });
+          return true;
+        }
+        const code = newOpaqueToken();
+        await getFirestore()
+          .collection(MCP_CODES)
+          .doc(hashToken(code))
+          .set({
+            uid,
+            clientId: v.params!.clientId,
+            redirectUri: v.params!.redirectUri,
+            codeChallenge: v.params!.codeChallenge,
+            codeChallengeMethod: "S256",
+            scope: v.params!.scope,
+            resource: v.params!.resource,
+            expiresAt: mcpNowSec() + CODE_TTL_SEC,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        mcpJson(res, 200, {
+          redirect: buildSuccessRedirect(
+            v.params!.redirectUri,
+            code,
+            v.params!.state,
+          ),
+        });
+        return true;
+      }
+
+      mcpJson(
+        res,
+        405,
+        { error: "method_not_allowed" },
+        { Allow: "GET, POST" },
+      );
+      return true;
+    }
+
+    // ---- Token (POST form) ----
+    if (isToken) {
+      if (req.method !== "POST") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      const body = await mcpReadBody(req, 64 * 1024);
+      const form = Object.fromEntries(new URLSearchParams(body)) as Record<
+        string,
+        string
+      >;
+      const v = parseTokenRequest(form);
+      if (!v.ok) {
+        mcpJson(res, 400, {
+          error: v.error,
+          error_description: v.error_description,
+        });
+        return true;
+      }
+      if (v.grantType === "authorization_code") {
+        await mcpHandleAuthCodeGrant(res, v);
+      } else {
+        await mcpHandleRefreshGrant(res, v);
+      }
+      return true;
+    }
+
+    // ---- Revoke (POST form; RFC 7009 always 200) ----
+    if (isRevoke) {
+      if (req.method !== "POST") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      const body = await mcpReadBody(req, 16 * 1024);
+      const form = Object.fromEntries(new URLSearchParams(body)) as Record<
+        string,
+        string
+      >;
+      const token = String(form.token || "");
+      if (token) {
+        const h = hashToken(token);
+        try {
+          // Resolve the presented token's family and revoke the WHOLE lineage
+          // (RFC 7009 §2.1: revoking a token SHOULD revoke related tokens from
+          // the same authorization grant). Writes the durable tombstone, so any
+          // sibling access/refresh token is rejected at next use even if the
+          // sweep misses its doc.
+          const [acc, ref] = await Promise.all([
+            getFirestore().collection(MCP_ACCESS).doc(h).get(),
+            getFirestore().collection(MCP_REFRESH).doc(h).get(),
+          ]);
+          const family = String(
+            (acc.exists && acc.data()?.family) ||
+              (ref.exists && ref.data()?.family) ||
+              "",
+          );
+          if (family) {
+            await mcpRevokeFamily(family);
+          } else {
+            // No family recorded (shouldn't happen for current tokens) — fall
+            // back to deleting just the presented doc.
+            await Promise.allSettled([
+              getFirestore().collection(MCP_ACCESS).doc(h).delete(),
+              getFirestore().collection(MCP_REFRESH).doc(h).delete(),
+            ]);
+          }
+        } catch (err) {
+          // RFC 7009: respond 200 regardless; never leak token validity/state.
+          console.error(
+            `[mcp] revoke cascade failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      mcpJson(res, 200, {});
+      return true;
+    }
+
+    // ---- MCP JSON-RPC ----
+    if (isMcp) {
+      await mcpHandleRpc(req, res, baseUrl);
+      return true;
+    }
+
+    return false;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[mcp] route error (${path}): ${msg}`);
+    if (!res.headersSent) mcpJson(res, 500, { error: "internal_error" });
+    return true;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
-  // CORS headers
+  // CORS headers. GET/DELETE + the MCP client headers (Mcp-Session-Id,
+  // MCP-Protocol-Version, Last-Event-Id) are allowed so a browser-based MCP
+  // client (e.g. the MCP Inspector) can preflight /mcp; WWW-Authenticate is
+  // exposed so such a client can read the 401 challenge and start OAuth.
+  //
+  // Origin "*" is intentional and safe here: we NEVER set
+  // Access-Control-Allow-Credentials, so browsers do not send cookies and cannot
+  // read credentialed responses cross-origin. All auth is via bearer token /
+  // Firebase idToken carried in the request (never a cookie). Reading anything
+  // sensitive from /oauth/token or /oauth/authorize already requires possessing
+  // the code_verifier / idToken (which a cross-origin page cannot obtain), so the
+  // wildcard is not an exfiltration vector. The token-theft path the review
+  // flagged is closed by the redirect-host allowlist + consent screen above.
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-View-As",
+    "Content-Type, Authorization, X-View-As, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-Id",
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "WWW-Authenticate, Mcp-Session-Id",
   );
 
   if (req.method === "OPTIONS") {
@@ -1943,6 +3440,12 @@ const server = http.createServer(async (req, res) => {
     res.end();
     return;
   }
+
+  // --- Remote MCP server + OAuth 2.1 AS (owner-allowlisted; dark unless
+  // MCP_UIDS is set). Dispatched BEFORE the POST-only 404 guard because several
+  // MCP routes are GET (discovery, the /authorize login page). Self-contained:
+  // reads its own request body, so it must run before the shared readBody. ---
+  if (await handleMcpRoutes(req, res)) return;
 
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -3118,6 +4621,10 @@ const server = http.createServer(async (req, res) => {
           // Subscription period end (epoch ms) for the plan panel's renewal/expiry
           // line; null for free / no dated subscription.
           expiresDate: expiresDate ?? null,
+          // Whether this user may connect Claude to their docs via the remote
+          // MCP server (owner-allowlisted; dark unless MCP_UIDS set). Drives the
+          // in-app "Connect to Claude (MCP)" entry point visibility.
+          mcpEnabled: MCP_UIDS.has(uid),
         }),
       );
       return;

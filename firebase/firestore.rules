@@ -332,5 +332,27 @@ service cloud.firestore {
     match /iapCustomers/{key} {
       allow read, write: if false;
     }
+
+    // Remote MCP server + OAuth 2.1 AS internals: written ONLY by the ai-proxy
+    // MCP/OAuth endpoints via the Admin SDK. Auth codes and access/refresh tokens
+    // are stored by SHA-256 hash (raw secret never persisted). No client ever
+    // reads or writes these — the OAuth flow runs entirely server-side.
+    match /mcp_oauth_clients/{clientId} {
+      allow read, write: if false;
+    }
+    match /mcp_oauth_codes/{codeHash} {
+      allow read, write: if false;
+    }
+    match /mcp_access_tokens/{tokenHash} {
+      allow read, write: if false;
+    }
+    match /mcp_refresh_tokens/{tokenHash} {
+      allow read, write: if false;
+    }
+    // Authoritative token-family revocation tombstones (one doc per revoked
+    // lineage). Server-only, like the token collections above.
+    match /mcp_revoked_families/{family} {
+      allow read, write: if false;
+    }
   }
 }

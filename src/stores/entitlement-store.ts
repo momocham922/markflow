@@ -277,6 +277,15 @@ interface EntitlementState {
   expiresDate: number | null;
   loading: boolean;
   loaded: boolean;
+  /**
+   * Whether the remote MCP server (Claude connector) is enabled for THIS user.
+   * Server-gated by the MCP_UIDS allowlist (owner-only during testing); the
+   * endpoint returns it so the UI can show the "Claude連携" entry + connector
+   * dialog only to allowlisted users. Dark for everyone else.
+   */
+  mcpEnabled: boolean;
+  /** Whether the MCP connector-instructions dialog is open. */
+  mcpConnectorOpen: boolean;
   /** Last 429 quota_exceeded surfaced by an AI call, for upsell UI. */
   lastQuotaError: QuotaError | null;
   /** True while a Checkout/Portal session is being created (spinner + guard). */
@@ -368,6 +377,10 @@ interface EntitlementState {
   openTeamManage: () => void;
   /** Close the global team-management dialog. */
   closeTeamManage: () => void;
+  /** Open the MCP connector-instructions dialog (no-op unless mcpEnabled). */
+  openMcpConnector: () => void;
+  /** Close the MCP connector-instructions dialog. */
+  closeMcpConnector: () => void;
   reset: () => void;
 }
 
@@ -384,6 +397,8 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   expiresDate: null,
   loading: false,
   loaded: false,
+  mcpEnabled: false,
+  mcpConnectorOpen: false,
   lastQuotaError: null,
   billingBusy: false,
   billingError: null,
@@ -433,6 +448,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
           typeof d.expiresDate === "number" && d.expiresDate > 0
             ? d.expiresDate
             : null,
+        mcpEnabled: !!d.mcpEnabled,
         loaded: true,
         loading: false,
       });
@@ -858,6 +874,13 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   openTeamManage: () =>
     set({ teamManageOpen: true, paywallOpen: false, paywallReason: null }),
   closeTeamManage: () => set({ teamManageOpen: false }),
+  openMcpConnector: () => {
+    // Gated: only allowlisted (mcpEnabled) users can open it. Everyone else has
+    // no entry point, but guard here too so a stale caller can't force it open.
+    if (!get().mcpEnabled) return;
+    set({ mcpConnectorOpen: true });
+  },
+  closeMcpConnector: () => set({ mcpConnectorOpen: false }),
 
   reset: () =>
     set({
@@ -878,6 +901,8 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       paywallOpen: false,
       paywallReason: null,
       teamManageOpen: false,
+      mcpEnabled: false,
+      mcpConnectorOpen: false,
       // viewAs is intentionally kept (persisted); it is owner-only and gets
       // reconciled to null on the next fetch if the next user is not the owner.
     }),
