@@ -359,6 +359,18 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   // and give the message list + input row more room while typing.
   const [inputFocused, setInputFocused] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  // The streaming bubble is intentionally throttled and rendered as PLAIN TEXT
+  // (not markdown). Rendering full markdown + syntax-highlight on every SSE
+  // delta re-parses the entire, ever-growing response — O(n²) work across a
+  // turn. On iOS WKWebView that saturates the WebContent main thread, starves
+  // the stream reader (same thread), and kills the request mid-response — the
+  // "AI window stops partway and errors" bug. We keep the latest full text in a
+  // ref, coalesce state updates to ~80ms, and let the finalized message (the
+  // messages map) render full markdown once the turn completes.
+  const streamingTextRef = useRef("");
+  const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [allDocsContext, setAllDocsContext] = useState(false);
   // Web search defaults ON — most questions benefit from up-to-date grounding.
   const [webSearch, setWebSearch] = useState(true);
@@ -1237,6 +1249,27 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   // Surface AI failures with a friendly, localized message — NEVER the raw error
   // string, which can leak model/provider/endpoint/stack details (security). The
   // real detail goes only to the console and telemetry for debugging.
+  // Coalesce streaming UI updates to ~80ms and keep the latest full text in a
+  // ref so a mid-stream error can still salvage the partial answer. See the
+  // streamingText declaration for why the streaming bubble avoids markdown.
+  const pushStreamingText = (text: string) => {
+    streamingTextRef.current = text;
+    if (streamFlushTimerRef.current != null) return;
+    streamFlushTimerRef.current = setTimeout(() => {
+      streamFlushTimerRef.current = null;
+      setStreamingText(streamingTextRef.current);
+    }, 80);
+  };
+
+  const resetStreamingText = () => {
+    if (streamFlushTimerRef.current != null) {
+      clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+    streamingTextRef.current = "";
+    setStreamingText("");
+  };
+
   const pushFriendlyError = (
     where: "chat" | "quick_action" | "image_gen",
     err: unknown,
@@ -1389,7 +1422,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     };
     setMessages((prev) => [...prev, userMsg]);
     setStreaming(true);
-    setStreamingText("");
+    resetStreamingText();
 
     try {
       // Quick actions never edit the document — the user applies the result via
@@ -1405,7 +1438,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           turnSystem,
           [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
           handleToolCall,
-          (text) => setStreamingText(text),
+          pushStreamingText,
           webSearch,
           turnTools,
           (status) => setToolStatus(status),
@@ -1416,7 +1449,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           "",
           turnSystem,
           [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          (text) => setStreamingText(text),
+          pushStreamingText,
           webSearch,
         );
       }
@@ -1427,10 +1460,29 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      pushFriendlyError("quick_action", err);
+      // Salvage a partial quick-action result rather than discarding it (same
+      // rationale as chat below). Abort (stop button) and quota limits fall
+      // through to the friendly-error path.
+      const partial = streamingTextRef.current.trim();
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
+      const detail = err instanceof Error ? err.message : String(err);
+      if (partial && !isAbort && !detail.includes("quota_exceeded")) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content:
+              partial +
+              "\n\n---\n\n*（応答が途中で中断されました。もう一度お試しください。）*",
+          },
+        ]);
+      } else {
+        pushFriendlyError("quick_action", err);
+      }
     } finally {
       setStreaming(false);
-      setStreamingText("");
+      resetStreamingText();
       setToolStatus(null);
     }
   };
@@ -1469,7 +1521,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       },
     ]);
     setStreaming(true);
-    setStreamingText("");
+    resetStreamingText();
 
     try {
       const isFirstMessage = apiMessages.length === 0;
@@ -1515,7 +1567,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           turnSystem,
           newApiMessages,
           handleToolCall,
-          (text) => setStreamingText(text),
+          pushStreamingText,
           webSearch,
           turnTools,
           (status) => setToolStatus(status),
@@ -1526,7 +1578,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
           "",
           turnSystem,
           newApiMessages,
-          (text) => setStreamingText(text),
+          pushStreamingText,
           webSearch,
         );
       }
@@ -1543,10 +1595,27 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
         { id: crypto.randomUUID(), role: "assistant", content: displayResult },
       ]);
     } catch (err) {
-      pushFriendlyError("chat", err);
+      // Salvage any partial streamed answer instead of discarding it — a
+      // mid-stream drop (flaky mobile network) shouldn't wipe a nearly complete
+      // response. AbortError (stop button) and quota limits fall through to the
+      // friendly-error path.
+      const partial = streamingTextRef.current.trim();
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
+      const detail = err instanceof Error ? err.message : String(err);
+      if (partial && !isAbort && !detail.includes("quota_exceeded")) {
+        const salvaged =
+          stripImagePlaceholders(partial) +
+          "\n\n---\n\n*（応答が途中で中断されました。もう一度お試しください。）*";
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "assistant", content: salvaged },
+        ]);
+      } else {
+        pushFriendlyError("chat", err);
+      }
     } finally {
       setStreaming(false);
-      setStreamingText("");
+      resetStreamingText();
       setToolStatus(null);
     }
   };
@@ -1569,6 +1638,15 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   useEffect(() => {
     if (streamingText) scrollToBottom(true);
   }, [streamingText, scrollToBottom]);
+
+  // Cancel any pending throttled streaming flush when the panel unmounts.
+  useEffect(
+    () => () => {
+      if (streamFlushTimerRef.current != null)
+        clearTimeout(streamFlushTimerRef.current);
+    },
+    [],
+  );
 
   // The keyboard shrinks the scroll viewport; re-pin the latest message above it
   // so the newest content stays visible instead of hiding behind the keyboard.
@@ -2203,8 +2281,12 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
               <span className="text-[10px] text-muted-foreground">
                 MarkFlow AI
               </span>
-              <div className="leading-relaxed mt-1 prose ai-markdown select-text">
-                {renderMarkdown(streamingText)}
+              {/* Plain text while streaming — rendering full markdown+highlight
+                  per delta melts the iOS WebKit main thread and kills the
+                  stream. The finalized message (messages map) renders full
+                  markdown once the turn completes. */}
+              <div className="leading-relaxed mt-1 whitespace-pre-wrap break-words select-text">
+                {streamingText}
                 <span className="animate-pulse">|</span>
               </div>
             </div>
