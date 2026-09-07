@@ -14,6 +14,7 @@ import {
   parseOffset,
   clampBatchReserveMinutes,
   measuredBatchMinutes,
+  mergeBatchChunks,
   reconcileBatchDelta,
   failedBatchChargeDelta,
   shouldRefund,
@@ -684,6 +685,147 @@ describe("measuredBatchMinutes", () => {
     expect(measuredBatchMinutes([chunk], 20, [NaN as any])).toBe(2);
     expect(measuredBatchMinutes([chunk], 20, [])).toBe(2);
     expect(measuredBatchMinutes([chunk], 20, [-500])).toBe(2);
+  });
+});
+
+// =====================================================================
+// mergeBatchChunks — de-overlapped transcript assembly + whole-chunk-loss guard
+// =====================================================================
+describe("mergeBatchChunks", () => {
+  // Build one STT result with words carrying start offsets (seconds).
+  const withOffsets = (
+    ws: Array<{ w: string; t: number; spk?: string }>,
+    transcript?: string,
+  ) => [
+    {
+      alternatives: [
+        {
+          transcript,
+          words: ws.map((x) => ({
+            word: x.w,
+            startOffset: `${x.t}s`,
+            speakerLabel: x.spk,
+          })),
+        },
+      ],
+    },
+  ];
+
+  it("keeps a single chunk's full transcript (no cut on chunk 0)", () => {
+    const r = mergeBatchChunks(
+      [
+        withOffsets([
+          { w: "a", t: 0 },
+          { w: "b", t: 30 },
+        ]),
+      ] as any,
+      [{ durationSec: 60 }],
+      false,
+      20,
+    );
+    expect(r.plainSegments).toEqual(["ab"]);
+  });
+
+  it("REGRESSION: missing word offsets must not drop later chunks (the content-loss bug)", () => {
+    // Every startOffset is absent → parseOffset()==0 for all words → the
+    // leadCut filter (t >= 10 for chunk i>0) would drop EVERY word of chunk 1
+    // and silently lose it. The chunkHasOffsets guard must fall back to the
+    // full transcript so BOTH chunks survive. This is exactly the pre-Fix-A
+    // bug that produced a short/truncated structured markdown.
+    const chunk0 = [
+      { alternatives: [{ transcript: "AAA", words: [{ word: "A" }] }] },
+    ];
+    const chunk1 = [
+      { alternatives: [{ transcript: "BBB", words: [{ word: "B" }] }] },
+    ];
+    const r = mergeBatchChunks(
+      [chunk0, chunk1] as any,
+      [{ durationSec: 3300 }, { durationSec: 3300 }],
+      true, // multi-chunk
+      20,
+    );
+    // Both chunks present — nothing silently vanished.
+    expect(r.plainSegments).toEqual(["AAA", "BBB"]);
+  });
+
+  it("reconstructs from words when the transcript field is absent (no offsets)", () => {
+    const chunk = [
+      {
+        alternatives: [{ words: [{ word: "x" }, { word: "y" }] }],
+      },
+    ];
+    const r = mergeBatchChunks([chunk] as any, [{ durationSec: 0 }], false, 20);
+    expect(r.plainSegments).toEqual(["xy"]);
+  });
+
+  it("dedups the 20s overlap at its midpoint when offsets are present", () => {
+    // chunk0 (i=0): leadCut=0, trailCut = 60-10 = 50 → keep [0,50): a,b ; drop c@55
+    const chunk0 = withOffsets([
+      { w: "a", t: 0 },
+      { w: "b", t: 30 },
+      { w: "c", t: 55 },
+    ]);
+    // chunk1 (last): leadCut=10, trailCut=Infinity → drop c@5 (overlap dup); keep d,e
+    const chunk1 = withOffsets([
+      { w: "c", t: 5 },
+      { w: "d", t: 15 },
+      { w: "e", t: 25 },
+    ]);
+    const r = mergeBatchChunks(
+      [chunk0, chunk1] as any,
+      [{ durationSec: 60 }, { durationSec: 60 }],
+      true,
+      20,
+    );
+    expect(r.plainSegments).toEqual(["ab", "de"]);
+  });
+
+  it("drops empty chunks (no segment, no phantom entry)", () => {
+    const r = mergeBatchChunks(
+      [[], [{ alternatives: [{}] }]] as any,
+      [{ durationSec: 0 }, { durationSec: 0 }],
+      true,
+      20,
+    );
+    expect(r.plainSegments).toEqual([]);
+    expect(r.taggedSegments).toEqual([]);
+  });
+
+  it("tags speakers and collects distinct labels when >1 speaker", () => {
+    const chunk = [
+      {
+        alternatives: [
+          {
+            words: [
+              { word: "hi", startOffset: "1s", speakerLabel: "1" },
+              { word: "there", startOffset: "2s", speakerLabel: "2" },
+            ],
+          },
+        ],
+      },
+    ];
+    const r = mergeBatchChunks([chunk] as any, [{ durationSec: 5 }], false, 20);
+    expect(r.speakerLabels.slice().sort()).toEqual(["1", "2"]);
+    expect(r.taggedSegments[0]).toBe("[Speaker 1] hi\n[Speaker 2] there");
+    expect(r.plainSegments[0]).toBe("hithere");
+  });
+
+  it("does not speaker-tag a single-speaker chunk", () => {
+    const chunk = [
+      {
+        alternatives: [
+          {
+            words: [
+              { word: "solo", startOffset: "1s", speakerLabel: "1" },
+              { word: "talk", startOffset: "2s", speakerLabel: "1" },
+            ],
+          },
+        ],
+      },
+    ];
+    const r = mergeBatchChunks([chunk] as any, [{ durationSec: 5 }], false, 20);
+    expect(r.taggedSegments[0]).toBe("solotalk");
+    expect(r.speakerLabels).toEqual(["1"]);
   });
 });
 

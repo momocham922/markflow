@@ -22,6 +22,7 @@ class AudioCapture(private val activity: MainActivity) {
     private var useFloat = true
     private var archiveFile: FileOutputStream? = null
     private var archivePath: String? = null
+    private var captureThread: Thread? = null
 
     fun hasPermission(): Boolean {
         return ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
@@ -96,7 +97,7 @@ class AudioCapture(private val activity: MainActivity) {
             archivePath = null
         }
 
-        thread(isDaemon = true) {
+        captureThread = thread(isDaemon = true) {
             if (useFloat) {
                 val readBuf = FloatArray(1024)
                 while (isRecording) {
@@ -190,7 +191,15 @@ class AudioCapture(private val activity: MainActivity) {
 
     fun stop() {
         isRecording = false
+        // stop() unblocks the capture thread's pending READ_BLOCKING read so it
+        // returns the final buffered samples and writes them to the archive.
         audioRecord?.stop()
+        // Join the capture thread BEFORE closing the archive so its last
+        // writeToArchive() completes into the still-open handle. Otherwise the
+        // close() below races the final write and silently drops the last read
+        // (~sub-100ms). Bounded join so stop() can never hang the UI.
+        try { captureThread?.join(1000) } catch (_: InterruptedException) {}
+        captureThread = null
         audioRecord?.release()
         audioRecord = null
         try { archiveFile?.close() } catch (_: Exception) {}

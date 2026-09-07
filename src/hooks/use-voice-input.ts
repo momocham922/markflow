@@ -245,7 +245,17 @@ export function useVoiceInput({
                 )
               )
                 return true;
-              if (/^[\d、。,.\s-]+$/.test(text)) return true;
+              // Numbers-only fragment: suppress only a lone stray digit or two
+              // (a common silence/noise artifact). KEEP real dictated numbers —
+              // prices, phone numbers, dates, quantities — because losing
+              // user-dictated data is unrecoverable in a note app, while a stray
+              // number is trivial to delete. Repetitive number hallucinations
+              // ("1、2、3、1、2、3…") are still caught by the repetition rules.
+              if (
+                /^[\d、。,.\s-]+$/.test(text) &&
+                (text.match(/\d/g) || []).length <= 2
+              )
+                return true;
               if (
                 text.length <= 2 &&
                 /^[えあうんはへほおいのでがをにと]$/.test(text)

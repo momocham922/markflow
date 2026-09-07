@@ -13,9 +13,9 @@ import {
   checkQuota,
   isChargeable,
   isAutoResearchAllowed,
-  parseOffset,
   clampBatchReserveMinutes,
   measuredBatchMinutes,
+  mergeBatchChunks,
   reconcileBatchDelta,
   failedBatchChargeDelta,
   shouldRefund,
@@ -4387,6 +4387,15 @@ const server = http.createServer(async (req, res) => {
               languageCodes: [language],
               features: {
                 enableAutomaticPunctuation: true,
+                // REQUIRED for multi-chunk (>58min) recordings: the overlap dedup
+                // below filters words by parseOffset(w.startOffset). Per the STT v2
+                // spec, word startOffset/endOffset are ONLY populated when this flag
+                // is set — without it every word offset is absent (→ 0), so for
+                // chunk i>0 the leadCut filter (t >= 10) drops EVERY word and the
+                // entire chunk is silently lost (observed: a 102-min 2-chunk run
+                // transcribed only its first ~55min). measuredBatchMinutes also
+                // reads endOffset, so this fixes the batch billing under-count too.
+                enableWordTimeOffsets: true,
                 diarizationConfig: { minSpeakerCount: 1, maxSpeakerCount: 6 },
               },
               denoiserConfig: { denoiseAudio: true },
@@ -4524,72 +4533,39 @@ const server = http.createServer(async (req, res) => {
       // midpoint so each boundary word is emitted exactly once — then build a
       // speaker-tagged transcript per chunk joined by "---" boundaries (labels
       // are only consistent within a segment; Claude unifies across "---").
-      const allSpeakerLabels = new Set<string>();
-      const taggedSegments: string[] = [];
-      const plainSegments: string[] = [];
+      // The merge (incl. the enableWordTimeOffsets-absent fallback that prevents
+      // whole-chunk loss) lives in mergeBatchChunks() so it is unit-tested in
+      // gating.test.ts independently of this handler.
+      const { taggedSegments, plainSegments, speakerLabels } = mergeBatchChunks(
+        chunkResults,
+        chunks,
+        multi,
+        OVERLAP_SECS,
+      );
+      const allSpeakerLabels = new Set(speakerLabels);
 
-      for (let i = 0; i < chunkResults.length; i++) {
-        const results = chunkResults[i];
-        const c = chunks[i];
-        const leadCut = i === 0 ? 0 : OVERLAP_SECS / 2;
-        const trailCut =
-          i === chunkResults.length - 1 || c.durationSec <= 0
-            ? Infinity
-            : c.durationSec - OVERLAP_SECS / 2;
-
-        const words: Array<{ word: string; speakerLabel: string }> = [];
-        let plain = "";
-        for (const r of results) {
+      // Partial-loss alarm: every chunk that returned any words should yield a
+      // non-empty segment. If a chunk produced text but was dropped by the
+      // overlap filter (e.g. absent offsets slipping past the guard above), it
+      // silently vanishes from the "---"-joined transcript with no gap marker,
+      // and the client only rejects a FULLY empty transcript — so Refine would
+      // replace the document with a plausible-looking but truncated result.
+      // Surface it loudly (no silent fallback). With enableWordTimeOffsets set
+      // this should never fire; it exists to catch regressions in the field.
+      const chunksWithText = chunkResults.filter((results) =>
+        results.some((r) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const alt = (r as any).alternatives?.[0];
-          if (!alt) continue;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const ws: any[] = alt.words || [];
-          if (multi && ws.length > 0) {
-            for (const w of ws) {
-              const t = parseOffset(w.startOffset);
-              if (t >= leadCut && t < trailCut) {
-                words.push({
-                  word: w.word || "",
-                  speakerLabel: w.speakerLabel || "",
-                });
-                plain += w.word || "";
-              }
-            }
-          } else {
-            for (const w of ws)
-              words.push({
-                word: w.word || "",
-                speakerLabel: w.speakerLabel || "",
-              });
-            plain += alt.transcript || "";
-          }
-        }
-
-        const labels = new Set(
-          words.map((w) => w.speakerLabel).filter(Boolean),
+          return (
+            (alt?.transcript && alt.transcript.trim()) ||
+            (Array.isArray(alt?.words) && alt.words.length > 0)
+          );
+        }),
+      ).length;
+      if (plainSegments.length < chunksWithText) {
+        console.error(
+          `[batch] PARTIAL LOSS: ${chunksWithText - plainSegments.length}/${chunkResults.length} chunk(s) had audio/words but produced an empty merged segment — transcript is truncated. Check enableWordTimeOffsets / overlap dedup.`,
         );
-        labels.forEach((l) => allSpeakerLabels.add(l));
-
-        let tagged = plain;
-        if (labels.size > 1 && words.length > 0) {
-          let cur = "";
-          const parts: string[] = [];
-          for (const w of words) {
-            const label = w.speakerLabel || "";
-            if (label && label !== cur) {
-              cur = label;
-              parts.push(`\n[Speaker ${label}] `);
-            }
-            parts.push(w.word);
-          }
-          tagged = parts.join("").trim();
-        }
-
-        if (plain.trim()) {
-          taggedSegments.push(tagged.trim());
-          plainSegments.push(plain.trim());
-        }
       }
 
       const transcript = plainSegments.join("\n");

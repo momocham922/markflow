@@ -1037,6 +1037,12 @@ async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
 static VOICE_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static SYSTEM_AUDIO_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static SYSTEM_AUDIO_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Mic samples discarded by the MIC_BUFFER_MAX_SAMPLES cap because the JS drain
+/// loop (get_voice_chunk) stalled. Reported by get_voice_chunk so the loss is
+/// never silent. On Windows the cpal callback is a real-time thread, so it must
+/// NOT do file I/O — it only bumps this counter (RT-safe). This audio is lost
+/// from both the live transcript AND the Refine archive.
+static MIC_OVERFLOW_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
 static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Safety backstop for system-audio buffers: drop oldest beyond this many samples
 /// if the frontend stops draining (normal drain is every CHUNK_MS = 25s).
@@ -1570,13 +1576,57 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                     buf.extend_from_slice(&temp[..count as usize]);
                     if buf.len() > MIC_BUFFER_MAX_SAMPLES {
                         let drop = buf.len() - MIC_BUFFER_MAX_SAMPLES;
+                        // macOS: the Refine archive is written only by the
+                        // JS-timer-driven get_voice_chunk. When that stalls
+                        // (app backgrounded / screen asleep) the ~120s cap here
+                        // would permanently discard the oldest audio — lost from
+                        // BOTH the live transcript AND the archive, even though
+                        // the UI promises Refine recovers full audio. Spill the
+                        // about-to-be-dropped samples to the archive (resampled
+                        // to 16k mono) so Refine keeps them. iOS already writes
+                        // the archive continuously above (immune), so skip there.
+                        #[cfg(target_os = "macos")]
+                        {
+                            use std::io::Write;
+                            const ARCHIVE_RATE: u32 = 16000;
+                            let src_rate =
+                                VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(ARCHIVE_RATE);
+                            let dropped = &buf[..drop];
+                            let resampled: Vec<f32> = if src_rate > ARCHIVE_RATE {
+                                let ratio = src_rate as f64 / ARCHIVE_RATE as f64;
+                                let new_len = (dropped.len() as f64 / ratio) as usize;
+                                (0..new_len)
+                                    .map(|i| {
+                                        let pos = i as f64 * ratio;
+                                        let idx = pos as usize;
+                                        let frac = pos - idx as f64;
+                                        let s0 = dropped[idx.min(dropped.len() - 1)];
+                                        let s1 = dropped[(idx + 1).min(dropped.len() - 1)];
+                                        s0 + (s1 - s0) * frac as f32
+                                    })
+                                    .collect()
+                            } else {
+                                dropped.to_vec()
+                            };
+                            if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
+                                if let Some(ref mut file) = *archive {
+                                    let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                                    for &s in &resampled {
+                                        let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        bytes.extend_from_slice(&sample.to_le_bytes());
+                                    }
+                                    let _ = file.write_all(&bytes);
+                                }
+                            }
+                        }
                         buf.drain(..drop);
                         // Smoking gun for background loss: the JS drain loop
                         // (get_voice_chunk) stalled long enough that the ~120s
-                        // cap discarded the oldest audio. Previously silent.
+                        // cap discarded the oldest audio from the LIVE transcript
+                        // (macOS spills it to the Refine archive above).
                         let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
                         println!(
-                            "[voice][buffer-overflow] dropped {} samples (~{:.1}s) — drain loop stalled (likely backgrounded)",
+                            "[voice][buffer-overflow] dropped {} samples (~{:.1}s) from live buffer — drain loop stalled (likely backgrounded)",
                             drop,
                             drop as f64 / rate,
                         );
@@ -1658,7 +1708,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                 if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     buf.extend_from_slice(data);
-                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); }
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); MIC_OVERFLOW_DROP_COUNT.fetch_add(d as u32, Ordering::Relaxed); }
                 }
             }, |e| eprintln!("[voice] {}", e), None,
         ).map_err(|e| format!("録音開始失敗: {}", e))?,
@@ -1667,7 +1717,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                 if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     for &s in data { buf.push(s as f32 / 32768.0); }
-                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); }
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); MIC_OVERFLOW_DROP_COUNT.fetch_add(d as u32, Ordering::Relaxed); }
                 }
             }, |e| eprintln!("[voice] {}", e), None,
         ).map_err(|e| format!("録音開始失敗: {}", e))?,
@@ -2010,6 +2060,15 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     if drops > 0 {
         println!("[voice] System audio: {} callback(s) dropped due to lock contention", drops);
     }
+    let mic_drops = MIC_OVERFLOW_DROP_COUNT.swap(0, Ordering::Relaxed);
+    if mic_drops > 0 {
+        let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
+        eprintln!(
+            "[voice][buffer-overflow] mic buffer cap discarded {} samples (~{:.1}s) — drain loop stalled (likely backgrounded); this audio is lost from live + Refine",
+            mic_drops,
+            mic_drops as f64 / rate,
+        );
+    }
 
     if mic_samples.is_empty() && sys_samples.is_empty() {
         return Ok(None);
@@ -2087,11 +2146,28 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         };
         if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
             if let Some(ref mut file) = *archive {
+                // Serialize once and write in a single syscall. The samples were
+                // already drained from VOICE_BUFFER, so a swallowed write error
+                // means that window is permanently absent from the Refine archive
+                // with no other recovery source — log loudly (no silent fallback).
+                let mut bytes = Vec::with_capacity(archive_samples.len() * 2);
                 for &s in &archive_samples {
                     let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                    let _ = file.write_all(&sample.to_le_bytes());
+                    bytes.extend_from_slice(&sample.to_le_bytes());
+                }
+                if let Err(e) = file.write_all(&bytes) {
+                    eprintln!(
+                        "[voice][archive-write-error] dropped {} samples from Refine archive: {}",
+                        archive_samples.len(),
+                        e,
+                    );
                 }
             }
+        } else {
+            eprintln!(
+                "[voice][archive-lock-miss] archive file busy; dropped {} samples from Refine archive",
+                archive_samples.len(),
+            );
         }
     }
 
@@ -2298,6 +2374,28 @@ async fn upload_voice_archive(
     let path = if let Some(p) = archive_path {
         p
     } else {
+        // Flush the recording tail into the archive BEFORE closing the handle.
+        // On macOS/Windows the Refine archive is written only inside
+        // get_voice_chunk, which is driven by a JS setInterval (~25s cadence).
+        // stopRecording clears that timer without a final drain, so the audio
+        // captured since the last tick (up to ~25s) would otherwise stay in
+        // VOICE_BUFFER and be abandoned — the structured doc silently loses the
+        // recording's ending. Recording is already stopped here (voice_active
+        // == false → mic_min == 0), so each get_voice_chunk drains + writes
+        // everything remaining; loop until it returns None. iOS writes the
+        // archive from its native poll thread and get_voice_chunk skips the
+        // archive write there, so this is a harmless no-op on iOS.
+        #[cfg(not(target_os = "ios"))]
+        if !VOICE_ACTIVE.load(Ordering::Relaxed) {
+            // Bounded: each call drains ≤25s and the live buffer caps at ~120s,
+            // so ≤~6 iterations ever have data. Cap defensively at 16.
+            for _ in 0..16 {
+                match get_voice_chunk() {
+                    Ok(Some(_)) => continue,
+                    _ => break,
+                }
+            }
+        }
         // Close the Rust archive file handle before reading
         *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
         VOICE_ARCHIVE_PATH.lock().unwrap().clone()
@@ -2345,13 +2443,26 @@ async fn upload_voice_archive(
     } else {
         let step_bytes = STEP_SECS * bytes_per_sec;
         let span_bytes = (STEP_SECS + OVERLAP_SECS) * bytes_per_sec;
+        let overlap_bytes = OVERLAP_SECS * bytes_per_sec;
         let mut i: u64 = 0;
         loop {
             let start_byte = i * step_bytes;
             if start_byte >= pcm_size {
                 break;
             }
-            let len = std::cmp::min(span_bytes, pcm_size - start_byte);
+            let remaining = pcm_size - start_byte;
+            // If the tail beyond this step is ≤ the overlap, a separate trailing
+            // chunk would be shorter than the server's dedup lead-cut
+            // (OVERLAP_SECS/2) and get discarded entirely — AND the previous
+            // chunk's trail-cut would trim content that doomed chunk was meant to
+            // carry, silently losing the last ~10-20s. Absorb that tail into this
+            // chunk instead. Max chunk = step + 2*overlap ≈ 55min40s < the 60min
+            // BatchRecognize cap, so this stays safe.
+            let len = if remaining <= span_bytes + overlap_bytes {
+                remaining
+            } else {
+                span_bytes
+            };
             let object_path = format!("audio/{}/{}-c{}.wav", uid, id, i);
             let (gcs_uri, dl) =
                 upload_wav_range(&client, &bucket, &token, &object_path, &path, start_byte, len)
@@ -2364,6 +2475,11 @@ async fn upload_voice_archive(
                 start_sec: start_byte as f64 / bytes_per_sec as f64,
                 duration_sec: len as f64 / bytes_per_sec as f64,
             });
+            // This chunk reached EOF (either a full final span or an absorbed
+            // tail) — stop so we never emit an undersized trailing chunk.
+            if start_byte + len >= pcm_size {
+                break;
+            }
             i += 1;
         }
         println!(

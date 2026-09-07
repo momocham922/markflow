@@ -503,12 +503,14 @@ export function VoicePanel({
       }
 
       // No-silent-failure: warn when the model hit the output cap and truncated.
+      // Persistent (no auto-dismiss): the document is about to be replaced with a
+      // possibly-truncated result, so the user MUST see this to recover from
+      // version history. Cleared by the X button or the next run.
       if (structStopReason === "max_tokens") {
-        setVoiceError(
-          "構造化がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
-        );
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+        setVoiceError(
+          "構造化がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。ドキュメントが短くなっていたらバージョン履歴から復元してください。会議が長い場合は分割をおすすめします。",
+        );
       }
 
       if (markdown.trim()) {
@@ -851,12 +853,14 @@ export function VoicePanel({
       }
 
       // No-silent-failure: warn when the model hit the output cap and truncated.
+      // Persistent (no auto-dismiss): Refine REPLACES the whole document, so a
+      // truncated result clobbers the fuller live-structured version. The user
+      // MUST see this to recover from version history. Cleared by X or next run.
       if (refineStopReason === "max_tokens") {
-        setVoiceError(
-          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
-        );
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+        setVoiceError(
+          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。ドキュメントが短くなっていたらバージョン履歴から復元してください。会議が長い場合は分割をおすすめします。",
+        );
       }
 
       if (refinedOutput.trim()) {

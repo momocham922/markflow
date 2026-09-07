@@ -365,3 +365,122 @@ export function measuredBatchMinutes(
   if (totalSec < 0) totalSec = 0;
   return Math.ceil(totalSec / 60);
 }
+
+export interface BatchMergeResult {
+  /** Speaker-tagged transcript per chunk (joined by "---" by the caller). */
+  taggedSegments: string[];
+  /** Plain transcript per chunk (joined by "\n" by the caller). */
+  plainSegments: string[];
+  /** Distinct speaker labels seen across all chunks. */
+  speakerLabels: string[];
+}
+
+/**
+ * Merge per-chunk BatchRecognize results into a de-overlapped transcript.
+ *
+ * For a multi-chunk recording each pair of adjacent chunks shares a 20s overlap;
+ * the overlap is split at its midpoint (leadCut/trailCut by word start offset) so
+ * every boundary word is emitted exactly once.
+ *
+ * CRITICAL guard (`chunkHasOffsets`): the leadCut filter (t >= overlap/2 for any
+ * chunk after the first) drops EVERY word when the STT output carries no usable
+ * word offsets (every startOffset ~0) — which silently loses whole 55-min chunks.
+ * This is exactly the content-loss bug that shipped before `enableWordTimeOffsets`
+ * was set on the BatchRecognize request. When a chunk carries no offsets we fall
+ * back to its full transcript (no cut); the ≤20s overlap dup is smoothed by the
+ * structuring model at the "---" boundary — far better than losing the chunk.
+ * Extracted here as a pure function so this loss path is regression-tested
+ * (gating.test.ts) independently of the HTTP handler.
+ */
+export function mergeBatchChunks(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  chunkResults: any[][],
+  chunks: ReadonlyArray<{ durationSec: number }>,
+  multi: boolean,
+  overlapSecs: number,
+): BatchMergeResult {
+  const allSpeakerLabels = new Set<string>();
+  const taggedSegments: string[] = [];
+  const plainSegments: string[] = [];
+
+  for (let i = 0; i < chunkResults.length; i++) {
+    const results = chunkResults[i];
+    const c = chunks[i];
+    const leadCut = i === 0 ? 0 : overlapSecs / 2;
+    const trailCut =
+      i === chunkResults.length - 1 || !c || c.durationSec <= 0
+        ? Infinity
+        : c.durationSec - overlapSecs / 2;
+
+    // Only dedup by timestamp when this chunk's words actually carry offsets;
+    // otherwise the leadCut filter would drop every word. See docstring above.
+    const chunkHasOffsets = results.some((r) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ws: any[] = (r as any)?.alternatives?.[0]?.words || [];
+      return ws.some((w) => parseOffset(w.startOffset) > 0);
+    });
+
+    const words: Array<{ word: string; speakerLabel: string }> = [];
+    let plain = "";
+    for (const r of results) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const alt = (r as any).alternatives?.[0];
+      if (!alt) continue;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ws: any[] = alt.words || [];
+      if (multi && chunkHasOffsets && ws.length > 0) {
+        for (const w of ws) {
+          const t = parseOffset(w.startOffset);
+          if (t >= leadCut && t < trailCut) {
+            words.push({
+              word: w.word || "",
+              speakerLabel: w.speakerLabel || "",
+            });
+            plain += w.word || "";
+          }
+        }
+      } else {
+        for (const w of ws)
+          words.push({
+            word: w.word || "",
+            speakerLabel: w.speakerLabel || "",
+          });
+        // Prefer the result-level transcript; if the model returned only words
+        // (no transcript string), reconstruct from them so the chunk is never
+        // dropped for lack of a transcript field.
+        plain +=
+          alt.transcript ||
+          ws.map((w: { word?: string }) => w.word || "").join("");
+      }
+    }
+
+    const labels = new Set(words.map((w) => w.speakerLabel).filter(Boolean));
+    labels.forEach((l) => allSpeakerLabels.add(l));
+
+    let tagged = plain;
+    if (labels.size > 1 && words.length > 0) {
+      let cur = "";
+      const parts: string[] = [];
+      for (const w of words) {
+        const label = w.speakerLabel || "";
+        if (label && label !== cur) {
+          cur = label;
+          parts.push(`\n[Speaker ${label}] `);
+        }
+        parts.push(w.word);
+      }
+      tagged = parts.join("").trim();
+    }
+
+    if (plain.trim()) {
+      taggedSegments.push(tagged.trim());
+      plainSegments.push(plain.trim());
+    }
+  }
+
+  return {
+    taggedSegments,
+    plainSegments,
+    speakerLabels: Array.from(allSpeakerLabels),
+  };
+}

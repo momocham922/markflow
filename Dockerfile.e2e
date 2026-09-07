@@ -50,6 +50,10 @@ COPY src-tauri/src/ src-tauri/src/
 COPY src-tauri/build.rs src-tauri/
 COPY src-tauri/capabilities/ src-tauri/capabilities/
 COPY src-tauri/icons/ src-tauri/icons/
+# Vendored path dependency (tauri-plugin-iap = { path = "plugins/..." } in
+# Cargo.toml) must be present before `cargo fetch` or dependency resolution
+# fails with "failed to read plugins/tauri-plugin-iap/Cargo.toml".
+COPY src-tauri/plugins/ src-tauri/plugins/
 
 # Pre-build Rust dependencies
 RUN cd src-tauri && cargo fetch
