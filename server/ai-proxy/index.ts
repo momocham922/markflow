@@ -1758,6 +1758,26 @@ async function loadEntitlement(uid: string): Promise<ResolvedEntitlement> {
   return resolved;
 }
 
+// MCP eligibility: who may connect Claude to their MarkFlow docs via the /mcp
+// OAuth server. MCP_UIDS is BOTH the master switch and an explicit allowlist —
+// unset (size 0) keeps the ENTIRE feature dark (the route-level 404 stays), and
+// any uid listed there is ALWAYS allowed (owner / named testers), so a Firestore
+// blip can never lock them out. Beyond that, internal staff (INTERNAL_UIDS) and
+// paid users (Pro/Team) are eligible, so the feature is usable by a limited set
+// without hand-listing every uid. Plan is read via the same 15s-cached
+// entitlement as metering: a plan lapse revokes access within ~15s cross-instance
+// and, for a live session, by the next access-token mint (≤1h) or refresh. Owner
+// / internal / listed uids short-circuit BEFORE the Firestore read (zero extra
+// cost on the hot /mcp path); only paid non-listed users incur the cached lookup.
+async function mcpEligible(uid: string): Promise<boolean> {
+  if (MCP_UIDS.size === 0) return false; // feature dark
+  if (!uid) return false;
+  if (MCP_UIDS.has(uid)) return true; // explicit allowlist (owner / named testers)
+  if (INTERNAL_UIDS.has(uid)) return true; // internal staff, never blocked by a blip
+  const ent = await loadEntitlement(uid);
+  return ent.realPlan === "pro" || ent.realPlan === "team";
+}
+
 /**
  * Resolve a uid's metered identity from Firestore (no cache). Order of precedence:
  *  1. Own entitlement is a paid Team subscription → meter under the funded team
@@ -2130,7 +2150,7 @@ function mcpRouteRateLimited(ip: string): boolean {
   );
 }
 // Per-authenticated-uid throttle for /mcp JSON-RPC, applied only AFTER the bearer
-// token resolves to an MCP_UIDS uid. Generous — a single client legitimately
+// token resolves to an MCP-eligible uid. Generous — a single client legitimately
 // batches calls — but bounds a compromised/looping client's Firestore fan-out.
 const MCP_RPC_WINDOW_SEC = 60;
 const MCP_RPC_MAX_PER_UID = 300;
@@ -2690,7 +2710,7 @@ async function mcpHandleAuthCodeGrant(
     return;
   }
   const uid = String(data.uid || "");
-  if (!uid || !MCP_UIDS.has(uid)) {
+  if (!(await mcpEligible(uid))) {
     mcpJson(res, 400, {
       error: "invalid_grant",
       error_description: "user not authorized",
@@ -2821,7 +2841,7 @@ async function mcpHandleRefreshGrant(
     return;
   }
   const uid = String(data.uid || "");
-  if (!uid || !MCP_UIDS.has(uid)) {
+  if (!(await mcpEligible(uid))) {
     mcpJson(res, 400, {
       error: "invalid_grant",
       error_description: "user not authorized",
@@ -2916,7 +2936,7 @@ async function mcpHandleRpc(
     return;
   }
   const uid = String(tok.uid || "");
-  if (!uid || !MCP_UIDS.has(uid)) {
+  if (!(await mcpEligible(uid))) {
     mcpJson(res, 403, { error: "forbidden" });
     return;
   }
@@ -3272,7 +3292,7 @@ async function handleMcpRoutes(
           });
           return true;
         }
-        if (!MCP_UIDS.has(uid)) {
+        if (!(await mcpEligible(uid))) {
           // Complete the flow with an OAuth access_denied redirect (protocol-correct).
           mcpJson(res, 200, {
             redirect: buildErrorRedirect(
@@ -4622,9 +4642,10 @@ const server = http.createServer(async (req, res) => {
           // line; null for free / no dated subscription.
           expiresDate: expiresDate ?? null,
           // Whether this user may connect Claude to their docs via the remote
-          // MCP server (owner-allowlisted; dark unless MCP_UIDS set). Drives the
-          // in-app "Connect to Claude (MCP)" entry point visibility.
-          mcpEnabled: MCP_UIDS.has(uid),
+          // MCP server (owner / named-testers allowlist, internal staff, or a paid
+          // Pro/Team plan; dark unless MCP_UIDS set). Drives the in-app "Connect to
+          // Claude (MCP)" entry point visibility — mirrors the server-side gate.
+          mcpEnabled: await mcpEligible(uid),
         }),
       );
       return;
