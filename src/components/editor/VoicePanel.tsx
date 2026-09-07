@@ -49,6 +49,12 @@ export interface VoiceDataUpdate {
   voiceTranscript?: string | null;
   voiceGcsUri?: string | null;
   voiceRecordedAt?: number | null;
+  // Internal intent flag (never persisted). When true, the app-store voice-loss
+  // guard is bypassed so a deliberate reset — the "Clear transcript" button or
+  // starting a fresh recording — may null the voice fields. Absent/false means
+  // any null over an existing non-empty voice value is treated as accidental
+  // (e.g. a passive re-render) and dropped. See app-store.updateDocument.
+  __voiceClear?: boolean;
 }
 
 interface VoicePanelProps {
@@ -280,9 +286,12 @@ export function VoicePanel({
     if (isRecording) {
       setHasArchive(true);
       uploadedChunksRef.current = null;
+      // A fresh recording supersedes any prior archive reference — this null is
+      // intentional, so bypass the voice-loss guard.
       onVoiceDataChangeRef.current?.({
         voiceGcsUri: null,
         voiceRecordedAt: null,
+        __voiceClear: true,
       });
     }
   }, [isRecording]);
@@ -872,16 +881,26 @@ export function VoicePanel({
           for (const c of refineIncludedCards) store.markIntegrated(c.id);
         }
       }
-      setHasArchive(false);
-      uploadedChunksRef.current = null;
-      onVoiceDataChangeRef.current?.({
-        voiceTranscript: null,
-        voiceGcsUri: null,
-        voiceRecordedAt: null,
-      });
-      import("@tauri-apps/api/core")
-        .then(({ invoke }) => invoke("clear_voice_archive"))
-        .catch(() => {});
+      // A successful Refine consumes the recording INTO the structured document,
+      // but we deliberately KEEP the voice metadata (and the on-device archive)
+      // so the transcript stays viewable and the recording can be re-Refined
+      // later — e.g. after a server-side transcription improvement, or if the
+      // refined output was truncated at max_tokens (warned above). Persist the
+      // full batch-diarized transcript (higher fidelity than the live one, which
+      // can be empty for a backgrounded session). voiceGcsUri / voiceRecordedAt
+      // were already stamped at upload (see the upload block) and are left intact
+      // so the Refine render gate survives a reload/restart. Only the explicit
+      // "Clear transcript" button discards voice data.
+      //
+      // (Before 2026-09-07 this nulled all three voice fields AND deleted the
+      // local archive on every Refine, so the transcript + Refine button
+      // "mysteriously vanished" after refining — reported as data loss. Do not
+      // reintroduce a null-emit or clear_voice_archive here.)
+      if (diarizedTranscript.trim()) {
+        onVoiceDataChangeRef.current?.({
+          voiceTranscript: diarizedTranscript.trim(),
+        });
+      }
     } catch (err) {
       console.error("[voice] Refine failed:", err);
       // Audio is already uploaded on failure, so retrying skips re-upload.
@@ -1177,10 +1196,12 @@ export function VoicePanel({
             sttVocabRef.current.clear();
             uploadedChunksRef.current = null;
             setHasArchive(false);
+            // Explicit user intent to discard voice data — bypass the guard.
             onVoiceDataChangeRef.current?.({
               voiceTranscript: null,
               voiceGcsUri: null,
               voiceRecordedAt: null,
+              __voiceClear: true,
             });
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))
