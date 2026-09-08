@@ -3557,9 +3557,15 @@ const server = http.createServer(async (req, res) => {
   // flagged is closed by the redirect-host allowlist + consent screen above.
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  // Idempotency-Key is sent by the frontend on EVERY /v1/chat (and quick-action)
+  // request so error-retries / 再生成 collapse onto one charge (see aiProxyHeaders
+  // + gating.decideIdempotencyReuse). It MUST be listed here or the browser's CORS
+  // preflight fails and the actual POST is never sent — i.e. AI silently dies for
+  // every client that stamps the key (regression: header was added client-side in
+  // beta.16 but never allowlisted server-side).
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-View-As, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-Id",
+    "Content-Type, Authorization, X-View-As, Idempotency-Key, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-Id",
   );
   res.setHeader(
     "Access-Control-Expose-Headers",
