@@ -19,6 +19,8 @@
 // or server→client streaming.
 // =====================================================================
 
+import { MCP_ICON_DATA_URI } from "./mcp-assets";
+
 // ---------------------------------------------------------------------
 // JSON-RPC 2.0 framing
 // ---------------------------------------------------------------------
@@ -124,7 +126,16 @@ export function buildInitializeResult(requestedVersion: unknown) {
   return {
     protocolVersion: negotiateProtocolVersion(requestedVersion),
     capabilities: { tools: { listChanged: false } },
-    serverInfo: SERVER_INFO,
+    // serverInfo.icons per MCP SEP-973 (rev 2025-11-25+): a self-contained data:
+    // URI so no origin/plumbing is needed. NOTE: Claude's custom-connector UI
+    // ignores this today (verified 2026-09) — it renders in other MCP clients and
+    // future-proofs for when Anthropic ships icon rendering. See mcp-assets.ts.
+    serverInfo: {
+      ...SERVER_INFO,
+      icons: [
+        { src: MCP_ICON_DATA_URI, mimeType: "image/png", sizes: "128x128" },
+      ],
+    },
     instructions: SERVER_INSTRUCTIONS,
   };
 }

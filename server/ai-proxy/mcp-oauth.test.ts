@@ -24,6 +24,13 @@ import {
   ACCESS_TTL_SEC,
   MCP_PATH,
   MCP_SCOPE,
+  GOOGLE_CALLBACK_PATH,
+  deriveStateKey,
+  signState,
+  verifyState,
+  base64urlDecode,
+  decodeJwtPayload,
+  validateGoogleIdToken,
 } from "./mcp-oauth";
 
 describe("crypto helpers", () => {
@@ -112,6 +119,7 @@ describe("discovery metadata", () => {
     expect(prm.resource).toBe(`${base}${MCP_PATH}`);
     expect(prm.authorization_servers).toEqual([base]);
     expect(prm.scopes_supported).toContain(MCP_SCOPE);
+    expect(prm.resource_name).toBe("MarkFlow Documents");
   });
   it("AS metadata advertises S256-only PKCE + public client auth", () => {
     const asm = buildAuthServerMetadata(base);
@@ -122,6 +130,10 @@ describe("discovery metadata", () => {
     expect(asm.code_challenge_methods_supported).toEqual(["S256"]);
     expect(asm.token_endpoint_auth_methods_supported).toEqual(["none"]);
     expect(asm.grant_types_supported).toContain("refresh_token");
+  });
+  it("AS metadata carries a logo_uri served by this origin", () => {
+    const asm = buildAuthServerMetadata(base);
+    expect(asm.logo_uri).toBe(`${base}/mcp-icon.png`);
   });
 });
 
@@ -342,5 +354,247 @@ describe("buildTokenResponse", () => {
     expect(r.refresh_token).toBe("RT");
     expect(r.expires_in).toBe(ACCESS_TTL_SEC);
     expect(r.scope).toBe("mcp");
+  });
+});
+
+// ---------------------------------------------------------------------
+// Server-side Google OAuth (Option b): callback path + signed state + id_token
+// ---------------------------------------------------------------------
+
+describe("Google OAuth (Option b) constants", () => {
+  it("callback path is under this origin (no firebaseapp.com)", () => {
+    expect(GOOGLE_CALLBACK_PATH).toBe("/oauth/google/callback");
+  });
+});
+
+describe("deriveStateKey", () => {
+  it("derives a stable hex subkey and is empty for an empty secret", () => {
+    expect(deriveStateKey("")).toBe("");
+    const k = deriveStateKey("super-secret");
+    expect(k).toMatch(/^[0-9a-f]{64}$/);
+    // Deterministic + domain-separated (never equals the raw secret).
+    expect(deriveStateKey("super-secret")).toBe(k);
+    expect(k).not.toBe("super-secret");
+    expect(deriveStateKey("other")).not.toBe(k);
+  });
+});
+
+describe("signState / verifyState", () => {
+  const key = deriveStateKey("k");
+  const params = {
+    responseType: "code",
+    clientId: "mcp_abc",
+    redirectUri: "https://claude.ai/api/mcp/auth_callback",
+    codeChallenge: "chal",
+    codeChallengeMethod: "S256",
+    state: "xyz",
+    scope: "mcp",
+    resource: "https://api.markflow.jp/mcp",
+  };
+
+  it("round-trips a payload and stamps iat", () => {
+    const now = 1_000_000;
+    const tok = signState(params, key, now);
+    expect(tok).toContain(".");
+    const out = verifyState(tok, key, 600, now);
+    expect(out).not.toBeNull();
+    expect(out!.clientId).toBe("mcp_abc");
+    expect(out!.redirectUri).toBe(params.redirectUri);
+    expect(out!.iat).toBe(now);
+  });
+
+  it("rejects a tampered body", () => {
+    const now = 1_000_000;
+    const tok = signState(params, key, now);
+    const [body, mac] = tok.split(".");
+    const forged = JSON.parse(base64urlDecode(body).toString("utf8"));
+    forged.redirectUri = "https://evil.example/steal";
+    const forgedBody = base64url(Buffer.from(JSON.stringify(forged), "utf8"));
+    // Same MAC, different body → must fail.
+    expect(verifyState(`${forgedBody}.${mac}`, key, 600, now)).toBeNull();
+  });
+
+  it("rejects a wrong key", () => {
+    const now = 1_000_000;
+    const tok = signState(params, key, now);
+    expect(verifyState(tok, deriveStateKey("different"), 600, now)).toBeNull();
+  });
+
+  it("rejects an expired state", () => {
+    const iat = 1_000_000;
+    const tok = signState(params, key, iat);
+    expect(verifyState(tok, key, 600, iat + 601)).toBeNull();
+    expect(verifyState(tok, key, 600, iat + 599)).not.toBeNull();
+  });
+
+  it("rejects a future-dated state (clock abuse)", () => {
+    const iat = 1_000_000;
+    const tok = signState(params, key, iat);
+    expect(verifyState(tok, key, 600, iat - 61)).toBeNull();
+  });
+
+  it("returns null for malformed tokens and an empty key", () => {
+    expect(verifyState("", key, 600, 1)).toBeNull();
+    expect(verifyState("nodot", key, 600, 1)).toBeNull();
+    expect(verifyState("a.", key, 600, 1)).toBeNull();
+    expect(verifyState(".b", key, 600, 1)).toBeNull();
+    expect(verifyState(signState(params, key, 1), "", 600, 1)).toBeNull();
+  });
+});
+
+describe("decodeJwtPayload", () => {
+  const mkJwt = (payload: unknown) =>
+    `${base64url(Buffer.from('{"alg":"RS256"}'))}.${base64url(
+      Buffer.from(JSON.stringify(payload)),
+    )}.sig`;
+
+  it("decodes the payload segment", () => {
+    const p = decodeJwtPayload(mkJwt({ email: "a@b.com", sub: "123" }));
+    expect(p).not.toBeNull();
+    expect(p!.email).toBe("a@b.com");
+  });
+
+  it("returns null for non-JWT input", () => {
+    expect(decodeJwtPayload("")).toBeNull();
+    expect(decodeJwtPayload("a.b")).toBeNull();
+    expect(decodeJwtPayload("a.b.c.d")).toBeNull();
+    // valid segments count but invalid JSON body
+    expect(
+      decodeJwtPayload(`${base64url(Buffer.from("x"))}.@@@.sig`),
+    ).toBeNull();
+  });
+});
+
+describe("validateGoogleIdToken", () => {
+  const AUD = "1234.apps.googleusercontent.com";
+  const now = 2_000_000_000;
+  const good = {
+    aud: AUD,
+    iss: "https://accounts.google.com",
+    exp: now + 3600,
+    email: "User@Example.com",
+    email_verified: true,
+  };
+
+  it("accepts a well-formed token and normalises the email", () => {
+    const r = validateGoogleIdToken(good, { expectedAud: AUD, nowSec: now });
+    expect(r.ok).toBe(true);
+    expect(r.email).toBe("user@example.com");
+  });
+
+  it("accepts the bare-host issuer and string email_verified", () => {
+    const r = validateGoogleIdToken(
+      { ...good, iss: "accounts.google.com", email_verified: "true" },
+      { expectedAud: AUD, nowSec: now },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("accepts an aud array containing our client", () => {
+    const r = validateGoogleIdToken(
+      { ...good, aud: ["other", AUD] },
+      { expectedAud: AUD, nowSec: now },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects a mismatched audience", () => {
+    expect(
+      validateGoogleIdToken(
+        { ...good, aud: "someone-else" },
+        { expectedAud: AUD, nowSec: now },
+      ).reason,
+    ).toBe("aud_mismatch");
+  });
+
+  it("rejects a non-Google issuer", () => {
+    expect(
+      validateGoogleIdToken(
+        { ...good, iss: "https://evil.example" },
+        { expectedAud: AUD, nowSec: now },
+      ).reason,
+    ).toBe("iss_mismatch");
+  });
+
+  it("rejects an expired token (beyond skew)", () => {
+    expect(
+      validateGoogleIdToken(
+        { ...good, exp: now - 61 },
+        { expectedAud: AUD, nowSec: now },
+      ).reason,
+    ).toBe("expired");
+  });
+
+  it("rejects an unverified email", () => {
+    expect(
+      validateGoogleIdToken(
+        { ...good, email_verified: false },
+        { expectedAud: AUD, nowSec: now },
+      ).reason,
+    ).toBe("email_unverified");
+  });
+
+  it("rejects a missing email and a null payload", () => {
+    expect(
+      validateGoogleIdToken(
+        { ...good, email: "" },
+        { expectedAud: AUD, nowSec: now },
+      ).reason,
+    ).toBe("no_email");
+    expect(
+      validateGoogleIdToken(null, { expectedAud: AUD, nowSec: now }).reason,
+    ).toBe("no_payload");
+  });
+
+  it("ignores nonce when no expectedNonce is supplied (back-compat)", () => {
+    // Absence of expectedNonce disables the check entirely.
+    expect(
+      validateGoogleIdToken(good, { expectedAud: AUD, nowSec: now }).ok,
+    ).toBe(true);
+    expect(
+      validateGoogleIdToken(
+        { ...good, nonce: "n-abc" },
+        { expectedAud: AUD, nowSec: now },
+      ).ok,
+    ).toBe(true);
+  });
+
+  it("accepts a matching nonce", () => {
+    const r = validateGoogleIdToken(
+      { ...good, nonce: "n-abc" },
+      { expectedAud: AUD, nowSec: now, expectedNonce: "n-abc" },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.email).toBe("user@example.com");
+  });
+
+  it("rejects a mismatched nonce (auth-code injection defense)", () => {
+    expect(
+      validateGoogleIdToken(
+        { ...good, nonce: "victim-nonce" },
+        { expectedAud: AUD, nowSec: now, expectedNonce: "attacker-nonce" },
+      ).reason,
+    ).toBe("nonce_mismatch");
+  });
+
+  it("rejects a missing id_token nonce when one is expected", () => {
+    expect(
+      validateGoogleIdToken(good, {
+        expectedAud: AUD,
+        nowSec: now,
+        expectedNonce: "n-abc",
+      }).reason,
+    ).toBe("nonce_mismatch");
+  });
+
+  it("fails closed on an empty expectedNonce (never matches)", () => {
+    // An empty-but-defined expectedNonce must not be satisfiable by an empty/absent
+    // id_token nonce — it signals a misconfigured caller and must fail closed.
+    expect(
+      validateGoogleIdToken(
+        { ...good, nonce: "" },
+        { expectedAud: AUD, nowSec: now, expectedNonce: "" },
+      ).reason,
+    ).toBe("nonce_mismatch");
   });
 });

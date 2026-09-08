@@ -111,6 +111,19 @@ describe("buildInitializeResult", () => {
     expect(r.serverInfo.name).toBe("markflow");
     expect(typeof r.instructions).toBe("string");
   });
+
+  it("advertises a brand icon (SEP-973) as a PNG data URI", () => {
+    const r = buildInitializeResult("2025-11-25");
+    const icons = (
+      r.serverInfo as {
+        icons?: { src: string; mimeType?: string; sizes?: string }[];
+      }
+    ).icons;
+    expect(Array.isArray(icons)).toBe(true);
+    expect(icons?.[0]?.src.startsWith("data:image/png;base64,")).toBe(true);
+    expect(icons?.[0]?.mimeType).toBe("image/png");
+    expect(icons?.[0]?.sizes).toBe("128x128");
+  });
 });
 
 describe("TOOLS catalogue", () => {

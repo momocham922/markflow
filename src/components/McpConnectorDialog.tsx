@@ -16,22 +16,30 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 // discovery + login flow is bootstrapped from here automatically by the client.
 const MCP_URL = AI_PROXY_URL ? `${AI_PROXY_URL}/mcp` : "";
 
+// Steps reflect Claude's CURRENT connector flow (verified 2026-09 against
+// Anthropic's Custom Connectors docs). Claude's UI labels are English; the exact
+// Japanese translations are unverified, so each label is shown 原文ママ with a
+// Japanese gloss rather than guessed.
 const STEPS: { title: string; body: string }[] = [
   {
-    title: "Claudeの設定を開く",
-    body: "claude.ai（またはClaudeデスクトップアプリ）で「設定 → コネクタ」を開きます。",
+    title: "「Customize」→「Connectors」を開く",
+    body: "Claude web は claude.ai/customize/connectors を開きます（デスクトップアプリは「Customize（カスタマイズ）」→「Connectors（コネクタ）」）。以前の「Settings（設定）」配下ではありません。",
   },
   {
     title: "カスタムコネクタを追加",
-    body: "「カスタムコネクタを追加」を選び、下のMCPサーバーURLを貼り付けます。名前は任意（例: MarkFlow）でかまいません。",
+    body: "「+」をクリックし、続けて「Add custom connector（カスタムコネクタを追加）」を選びます。",
   },
   {
-    title: "Googleでサインイン",
-    body: "追加すると認証画面が開きます。MarkFlowにログインしているのと同じGoogleアカウントでサインインしてください。",
+    title: "URLを入力",
+    body: "「Name」に表示名（例: MarkFlow）、「Remote MCP server URL」に下のURLを入力します。認証は自動検出されるので（「Detected」と表示・既定のままでOK）、「Advanced settings」やOAuthの入力は不要です。",
+  },
+  {
+    title: "追加してサインイン",
+    body: "「Add（追加）」→「Connect（接続）」の順にクリックし、MarkFlowにログインしているのと同じGoogleアカウントでサインインして、個人ドキュメントへの読み取り専用アクセスを許可します。",
   },
   {
     title: "接続完了",
-    body: "接続されると、Claudeがあなたの個人ドキュメントを検索・閲覧できるようになります（読み取り専用）。",
+    body: "接続されると、Claudeがあなたの個人ドキュメントを検索・閲覧できるようになります（読み取り専用・あなた本人のみ）。",
   },
 ];
 
@@ -143,6 +151,14 @@ export function McpConnectorDialog({
           <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
             共有・チームのドキュメントは連携の対象外です。連携されるのは
             あなたが所有する個人ドキュメントのみで、Claudeからの書き込みはできません。
+          </p>
+
+          <p className="text-[11px] text-muted-foreground">
+            カスタムコネクタの追加はClaude
+            web・デスクトップアプリで行います（モバイルアプリは既製コネクタのみ）。
+            Team/Enterpriseでは、まず管理者が「Organization
+            settings」→「Connectors」→「Add」→「Custom」→「Web」で追加し、
+            その後メンバーが各自「Connect」で認証します。
           </p>
         </div>
 

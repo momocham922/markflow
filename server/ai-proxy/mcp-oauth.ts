@@ -16,7 +16,12 @@
 // Kept free of firebase-admin / http imports so it unit-tests without mocks.
 // =====================================================================
 
-import { createHash, randomBytes } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 
 // ---------------------------------------------------------------------
 // Endpoint paths (single source shared by metadata + routing in index.ts)
@@ -29,6 +34,11 @@ export const REGISTER_PATH = "/oauth/register";
 export const AUTHORIZE_PATH = "/oauth/authorize";
 export const TOKEN_PATH = "/oauth/token";
 export const REVOKE_PATH = "/oauth/revoke";
+// Server-side Google OAuth callback (Option b): the /authorize consent page sends
+// the user to Google, which returns here. We redeem the code with the SERVER-held
+// GOOGLE_OAUTH_CLIENT_SECRET, resolve the Firebase uid by email, and mint the MCP
+// authorization code — so NO firebaseapp.com URL is ever exposed to the user.
+export const GOOGLE_CALLBACK_PATH = "/oauth/google/callback";
 
 export const MCP_SCOPE = "mcp";
 
@@ -74,6 +84,166 @@ export function verifyPkceS256(verifier: string, challenge: string): boolean {
   // early so a malformed verifier can't be coerced into a match.
   if (verifier.length < 43 || verifier.length > 128) return false;
   return sha256base64url(verifier) === challenge;
+}
+
+// ---------------------------------------------------------------------
+// Signed state (Google OAuth round-trip integrity) — Option b
+// ---------------------------------------------------------------------
+// The /authorize consent page hands the user to Google carrying the MCP OAuth
+// params in Google's `state`. We MUST be able to trust those params on return, so
+// we HMAC-sign the state with a server-only key (a subkey derived from
+// GOOGLE_OAUTH_CLIENT_SECRET). This gives integrity + a short expiry; the callback
+// ALSO re-validates the params against the registered client (defense in depth).
+// The value carries no secret, only the already-public authorize params + iat.
+
+/**
+ * Derive the state-signing HMAC key from a server secret (domain-separated so the
+ * OAuth client_secret is never used verbatim as an HMAC key). Returns "" for an
+ * empty secret so callers fail closed.
+ */
+export function deriveStateKey(secret: string): string {
+  if (!secret) return "";
+  return createHash("sha256")
+    .update("mcp-google-state:" + secret)
+    .digest("hex");
+}
+
+/** base64url-decode a string back to a Buffer (inverse of base64url()). */
+export function base64urlDecode(s: string): Buffer {
+  const norm = s.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(norm, "base64");
+}
+
+/**
+ * Sign an arbitrary JSON-serialisable payload into a compact `<body>.<mac>` token
+ * (both parts base64url). `iat` (issued-at, seconds) is stamped in so verifyState
+ * can enforce a max age. `key` is a server-only secret; `nowSec` is injected so
+ * this stays pure/testable.
+ */
+export function signState(
+  payload: Record<string, unknown>,
+  key: string,
+  nowSec: number,
+): string {
+  const body = base64url(
+    Buffer.from(JSON.stringify({ ...payload, iat: nowSec }), "utf8"),
+  );
+  const mac = base64url(createHmac("sha256", key).update(body).digest());
+  return `${body}.${mac}`;
+}
+
+/**
+ * Verify + decode a signState() token. Returns the payload object (including
+ * `iat`) when the MAC is valid AND it is at most `maxAgeSec` old, else null.
+ * Uses a constant-time MAC comparison. Any malformed/expired/tampered token → null.
+ */
+export function verifyState(
+  token: string,
+  key: string,
+  maxAgeSec: number,
+  nowSec: number,
+): Record<string, unknown> | null {
+  if (!token || !key) return null;
+  const dot = token.indexOf(".");
+  if (dot <= 0 || dot === token.length - 1) return null;
+  const body = token.slice(0, dot);
+  const mac = token.slice(dot + 1);
+  const expected = base64url(createHmac("sha256", key).update(body).digest());
+  const macBuf = Buffer.from(mac, "utf8");
+  const expBuf = Buffer.from(expected, "utf8");
+  if (macBuf.length !== expBuf.length) return null;
+  if (!timingSafeEqual(macBuf, expBuf)) return null;
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(base64urlDecode(body).toString("utf8"));
+  } catch {
+    return null;
+  }
+  const iat = Number(payload.iat);
+  if (!Number.isFinite(iat)) return null;
+  // Reject future-dated (clock abuse) and expired tokens.
+  if (iat > nowSec + 60) return null;
+  if (nowSec - iat > maxAgeSec) return null;
+  return payload;
+}
+
+// ---------------------------------------------------------------------
+// Google id_token claims (Option b) — decode + validate
+// ---------------------------------------------------------------------
+// The id_token is obtained directly from Google's token endpoint over TLS in
+// response to our client_secret-authenticated request, so it arrives on a trusted
+// channel (no signature re-verification needed — the standard token-endpoint trust
+// model). We still validate aud/iss/exp and require a verified email before
+// trusting the identity.
+
+/** Decode a JWT's payload (2nd segment) to an object. Null on any malformation. */
+export function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
+  if (typeof jwt !== "string") return null;
+  const parts = jwt.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const obj = JSON.parse(base64urlDecode(parts[1]).toString("utf8"));
+    return obj && typeof obj === "object"
+      ? (obj as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+const GOOGLE_ISSUERS = new Set([
+  "https://accounts.google.com",
+  "accounts.google.com",
+]);
+
+export interface GoogleIdTokenCheck {
+  ok: boolean;
+  email?: string;
+  reason?: string;
+}
+
+/**
+ * Validate the security-relevant claims of a Google id_token payload: audience
+ * must be our client, issuer must be Google, not expired, and the email must be
+ * present AND verified. `nowSec` injected for testability. Returns the normalised
+ * (lower-cased) email on success.
+ */
+export function validateGoogleIdToken(
+  payload: Record<string, unknown> | null,
+  opts: { expectedAud: string; nowSec: number; expectedNonce?: string },
+): GoogleIdTokenCheck {
+  if (!payload) return { ok: false, reason: "no_payload" };
+  const aud = payload.aud;
+  const audOk = Array.isArray(aud)
+    ? aud.map(String).includes(opts.expectedAud)
+    : String(aud || "") === opts.expectedAud;
+  if (!opts.expectedAud || !audOk) return { ok: false, reason: "aud_mismatch" };
+  if (!GOOGLE_ISSUERS.has(String(payload.iss || "")))
+    return { ok: false, reason: "iss_mismatch" };
+  const exp = Number(payload.exp);
+  // Allow 60s of clock skew.
+  if (!Number.isFinite(exp) || exp <= opts.nowSec - 60)
+    return { ok: false, reason: "expired" };
+  // Bind the id_token to the nonce minted at /authorize (OIDC replay / auth-code
+  // injection defense: a captured victim code carries the victim-flow nonce, which
+  // will not match an attacker-crafted state's nonce). When a nonce is expected it
+  // MUST be present and match exactly — fail closed on an empty expected value too.
+  if (opts.expectedNonce !== undefined) {
+    if (
+      !opts.expectedNonce ||
+      String(payload.nonce || "") !== opts.expectedNonce
+    )
+      return { ok: false, reason: "nonce_mismatch" };
+  }
+  // email_verified can arrive as boolean true or the string "true".
+  const ev = payload.email_verified;
+  const verified = ev === true || ev === "true";
+  const email = String(payload.email || "")
+    .trim()
+    .toLowerCase();
+  if (!email) return { ok: false, reason: "no_email" };
+  if (!verified) return { ok: false, reason: "email_unverified" };
+  return { ok: true, email };
 }
 
 // ---------------------------------------------------------------------
@@ -133,6 +303,8 @@ export function buildProtectedResourceMetadata(baseUrl: string) {
     scopes_supported: [MCP_SCOPE],
     bearer_methods_supported: ["header"],
     resource_documentation: "https://markflow.jp",
+    // Human-readable resource name (RFC 9728 §2). Harmless if a client ignores it.
+    resource_name: "MarkFlow Documents",
   };
 }
 
@@ -150,6 +322,10 @@ export function buildAuthServerMetadata(baseUrl: string) {
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
+    // Non-standard extension: some MCP clients (community-reported, unconfirmed
+    // against Anthropic docs as of 2026-09) read logo_uri here to brand a custom
+    // connector. Zero cost, ignored by clients that don't. Served at /mcp-icon.png.
+    logo_uri: `${baseUrl}/mcp-icon.png`,
   };
 }
 

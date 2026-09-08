@@ -1,7 +1,7 @@
 import http from "http";
 import Stripe from "stripe";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
+import { getAuth, type UserRecord } from "firebase-admin/auth";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   PLAN_LIMITS,
@@ -78,6 +78,7 @@ import {
   AUTHORIZE_PATH,
   TOKEN_PATH,
   REVOKE_PATH,
+  GOOGLE_CALLBACK_PATH,
   CODE_TTL_SEC,
   ACCESS_TTL_SEC,
   REFRESH_TTL_SEC,
@@ -96,7 +97,13 @@ import {
   buildErrorRedirect,
   parseTokenRequest,
   buildTokenResponse,
+  deriveStateKey,
+  signState,
+  verifyState,
+  decodeJwtPayload,
+  validateGoogleIdToken,
 } from "./mcp-oauth";
+import { mcpIconBuffer } from "./mcp-assets";
 // Store-SDK verification (impure). Marked --external in the esbuild bundle and
 // installed in the Docker image; the top-level require runs even when IAP is DARK
 // (creds absent), so both packages MUST be present in node_modules at boot.
@@ -1608,13 +1615,12 @@ const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
 // off. Set via Cloud Run env MCP_UIDS (comma-separated) to enable per-uid.
 const MCP_UIDS = parseUidSet(process.env.MCP_UIDS);
 
-// Public Firebase web config (JSON) rendered into the MCP /authorize Google
-// sign-in page so the user can authenticate in their browser during the OAuth
-// flow. Injected via Cloud Run env MCP_FIREBASE_WEB_CONFIG. This is the SAME
-// public config that ships in every client binary (apiKey/authDomain/projectId/
-// …) — not a secret — but env-injected so the repo stays config-free. Unset =>
-// /authorize returns 503 (dark-safe).
-const MCP_FIREBASE_WEB_CONFIG = process.env.MCP_FIREBASE_WEB_CONFIG || "";
+// HMAC key for signing the Google-OAuth round-trip `state` (Option b). Derived
+// from the server-only GOOGLE_OAUTH_CLIENT_SECRET (domain-separated), so no new
+// secret/env is needed. Empty when the secret is unset => /authorize + the Google
+// callback fail closed (503). The MCP /authorize page no longer loads any Firebase
+// SDK, so firebaseapp.com is never exposed to the user during sign-in.
+const MCP_STATE_KEY = deriveStateKey(GOOGLE_OAUTH_CLIENT_SECRET);
 
 // Optional: pin the externally-visible origin used to build MCP discovery
 // metadata + OAuth issuer/endpoints, instead of deriving it from the (proxy-
@@ -2347,14 +2353,6 @@ function mcpReadBody(
   });
 }
 
-// Escape a value for safe embedding inside an inline <script> as a JS literal.
-function mcpJsonForScript(obj: unknown): string {
-  return JSON.stringify(obj)
-    .replace(/</g, "\\u003c")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
-}
-
 function mcpFirestoreDocToMcp(
   id: string,
   data: Record<string, unknown>,
@@ -2552,30 +2550,12 @@ async function mcpRevokeFamily(family: string): Promise<void> {
   }
 }
 
-function mcpLoginPageHtml(
-  params: {
-    clientId: string;
-    redirectUri: string;
-    codeChallenge: string;
-    codeChallengeMethod: string;
-    state: string;
-    scope: string;
-    resource: string;
-    responseType: string;
-  },
+function mcpConsentPageHtml(
+  params: { redirectUri: string },
   clientName: string,
-  firebaseConfig: unknown,
+  googleAuthUrl: string,
+  denyUrl: string,
 ): string {
-  const payload = {
-    client_id: params.clientId,
-    redirect_uri: params.redirectUri,
-    code_challenge: params.codeChallenge,
-    code_challenge_method: params.codeChallengeMethod,
-    state: params.state,
-    scope: params.scope,
-    resource: params.resource,
-    response_type: params.responseType,
-  };
   // The redirect host is the un-spoofable trust anchor shown on the consent
   // screen: it is where the authorization code will be delivered, and it has
   // already passed the strict redirect-host allowlist. The client_name is
@@ -2587,6 +2567,9 @@ function mcpLoginPageHtml(
     redirectHost = params.redirectUri;
   }
   const appLabel = clientName.trim() || "(名称未設定のアプリ)";
+  // Server-side Google OAuth (Option b): the consent is shown FIRST (destination +
+  // permission), then "許可" is a plain link to Google — no Firebase SDK, so no
+  // firebaseapp.com URL is ever surfaced. The buttons are anchors (no JS needed).
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -2600,157 +2583,42 @@ function mcpLoginPageHtml(
   @media (prefers-color-scheme: dark){ body{ background:#191817; color:#ececec; } .card{ background:#232221 !important; border-color:#38363400 !important; } .grant{ background:#1c1b1a !important; border-color:#333 !important; } .k{ color:#9a958f !important; } }
   .card { background:#fff; border:1px solid #eceae7; border-radius:16px; padding:36px 32px; max-width:420px; width:calc(100% - 32px);
     box-shadow:0 1px 3px rgba(0,0,0,.06); text-align:center; }
+  .brand { width:56px; height:56px; border-radius:13px; margin:0 auto 18px; display:block; }
   h1 { font-size:1.15rem; margin:0 0 8px; font-weight:650; }
   p { font-size:.9rem; line-height:1.6; color:#6b6763; margin:0 0 20px; }
-  button { font:inherit; font-size:.95rem; font-weight:600; cursor:pointer; border:1px solid #dcdad7;
+  a.btn { font:inherit; font-size:.95rem; font-weight:600; cursor:pointer; border:1px solid #dcdad7; text-decoration:none;
     background:#fff; color:#1c1b1a; border-radius:10px; padding:11px 18px; display:inline-flex; align-items:center; gap:10px;
-    width:100%; justify-content:center; }
-  button:hover { background:#f5f4f2; }
-  button.primary { background:#1c1b1a; color:#fff; border-color:#1c1b1a; }
-  button.primary:hover { background:#333; }
-  button.secondary { margin-top:10px; background:transparent; border-color:transparent; color:#6b6763; }
-  button.secondary:hover { background:#f5f4f2; }
-  button:disabled { opacity:.55; cursor:default; }
+    width:100%; justify-content:center; box-sizing:border-box; }
+  a.btn:hover { background:#f5f4f2; }
+  a.btn.primary { background:#1c1b1a; color:#fff; border-color:#1c1b1a; }
+  a.btn.primary:hover { background:#333; }
+  a.btn.secondary { margin-top:10px; background:transparent; border-color:transparent; color:#6b6763; }
+  a.btn.secondary:hover { background:#f5f4f2; }
   .grant { text-align:left; background:#faf9f7; border:1px solid #eceae7; border-radius:12px; padding:14px 16px; margin:0 0 16px; }
   .row { display:flex; gap:12px; font-size:.85rem; line-height:1.5; padding:4px 0; }
   .k { flex:0 0 64px; color:#8a857f; }
   .v { flex:1; font-weight:600; word-break:break-all; }
-  .who { font-size:.82rem; color:#6b6763; margin:0 0 16px; }
-  .who b { color:#1c1b1a; font-weight:650; }
   .fine { font-size:.78rem; color:#8a857f; margin:16px 0 0; line-height:1.55; }
-  .msg { margin-top:16px; font-size:.85rem; min-height:1.2em; }
-  .err { color:#b3261e; }
   .g { width:18px; height:18px; }
-  [hidden] { display:none !important; }
 </style>
 </head>
 <body>
   <div class="card">
-    <!-- Step 1: sign in -->
-    <div id="step-signin">
-      <h1>MarkFlow と連携</h1>
-      <p>続けるには、MarkFlow にログインしているのと同じ Google アカウントでサインインしてください。</p>
-      <button id="signin" class="primary">
-        <svg class="g" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.7 30.2.5 24 .5 14.6.5 6.5 5.9 2.6 13.8l7.8 6.1C12.3 13.9 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.4 5.7c4.3-4 6.8-9.9 6.8-17.4z"/><path fill="#FBBC05" d="M10.4 28.3c-.5-1.5-.8-3.1-.8-4.8s.3-3.3.8-4.8l-7.8-6.1C.9 15.9 0 19.8 0 23.5s.9 7.6 2.6 10.9l7.8-6.1z"/><path fill="#34A853" d="M24 47.5c6.2 0 11.4-2 15.2-5.5l-7.4-5.7c-2 1.4-4.7 2.3-7.8 2.3-6.4 0-11.7-4.3-13.6-10.1l-7.8 6.1C6.5 42.1 14.6 47.5 24 47.5z"/></svg>
-        Googleでサインイン
-      </button>
+    <img class="brand" src="/mcp-icon.png" alt="MarkFlow" width="56" height="56" />
+    <h1>アクセスを許可しますか？</h1>
+    <p>MarkFlow にログインしているのと同じ Google アカウントでサインインすると、下記の接続先が連携されます。</p>
+    <div class="grant">
+      <div class="row"><span class="k">接続先</span><span class="v">${mcpEscHtml(redirectHost)}</span></div>
+      <div class="row"><span class="k">アプリ</span><span class="v">${mcpEscHtml(appLabel)}</span></div>
+      <div class="row"><span class="k">権限</span><span class="v">個人ドキュメントの検索・閲覧（読み取り専用）</span></div>
     </div>
-
-    <!-- Step 2: consent -->
-    <div id="step-consent" hidden>
-      <h1>アクセスを許可しますか？</h1>
-      <p class="who">アカウント: <b id="who"></b></p>
-      <div class="grant">
-        <div class="row"><span class="k">接続先</span><span class="v" id="dst">${mcpEscHtml(redirectHost)}</span></div>
-        <div class="row"><span class="k">アプリ</span><span class="v">${mcpEscHtml(appLabel)}</span></div>
-        <div class="row"><span class="k">権限</span><span class="v">個人ドキュメントの検索・閲覧（読み取り専用）</span></div>
-      </div>
-      <p class="fine">許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧できるようになります。共有・チームのドキュメントは対象外で、書き込みはできません。心当たりのない接続先の場合は「許可しない」を選んでください。</p>
-      <button id="approve" class="primary">許可する</button>
-      <button id="deny" class="secondary">許可しない</button>
-    </div>
-
-    <div id="msg" class="msg"></div>
+    <p class="fine">許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧できるようになります。共有・チームのドキュメントは対象外で、書き込みはできません。心当たりのない接続先の場合は「許可しない」を選んでください。</p>
+    <a class="btn primary" href="${mcpEscHtml(googleAuthUrl)}" rel="nofollow">
+      <svg class="g" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.7 30.2.5 24 .5 14.6.5 6.5 5.9 2.6 13.8l7.8 6.1C12.3 13.9 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.4 5.7c4.3-4 6.8-9.9 6.8-17.4z"/><path fill="#FBBC05" d="M10.4 28.3c-.5-1.5-.8-3.1-.8-4.8s.3-3.3.8-4.8l-7.8-6.1C.9 15.9 0 19.8 0 23.5s.9 7.6 2.6 10.9l7.8-6.1z"/><path fill="#34A853" d="M24 47.5c6.2 0 11.4-2 15.2-5.5l-7.4-5.7c-2 1.4-4.7 2.3-7.8 2.3-6.4 0-11.7-4.3-13.6-10.1l-7.8 6.1C6.5 42.1 14.6 47.5 24 47.5z"/></svg>
+      Googleでサインインして許可
+    </a>
+    <a class="btn secondary" href="${mcpEscHtml(denyUrl)}" rel="nofollow">許可しない</a>
   </div>
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult }
-    from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
-
-  const OAUTH = ${mcpJsonForScript(payload)};
-  const firebaseConfig = ${mcpJsonForScript(firebaseConfig)};
-  const app = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const provider = new GoogleAuthProvider();
-  const stepSignin = document.getElementById("step-signin");
-  const stepConsent = document.getElementById("step-consent");
-  const btn = document.getElementById("signin");
-  const approveBtn = document.getElementById("approve");
-  const denyBtn = document.getElementById("deny");
-  const whoEl = document.getElementById("who");
-  const msg = document.getElementById("msg");
-
-  let pendingIdToken = "";
-
-  function setMsg(t, isErr){ msg.textContent = t || ""; msg.className = "msg" + (isErr ? " err" : ""); }
-
-  // After sign-in, show the consent step (do NOT auto-complete): the user must
-  // explicitly approve the specific destination before a code is minted.
-  function showConsent(user){
-    pendingIdToken = null; // set by caller via getIdToken()
-    whoEl.textContent = (user && user.email) ? user.email : "(サインイン済み)";
-    stepSignin.hidden = true;
-    stepConsent.hidden = false;
-    setMsg("", false);
-  }
-
-  async function complete(){
-    if (!pendingIdToken){ setMsg("サインインの有効期限が切れました。やり直してください。", true); return; }
-    setMsg("接続を確立しています…", false);
-    approveBtn.disabled = true; denyBtn.disabled = true;
-    try {
-      const r = await fetch(${JSON.stringify(AUTHORIZE_PATH)}, {
-        method:"POST", headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ idToken: pendingIdToken, ...OAUTH }),
-      });
-      const data = await r.json();
-      if (data && data.redirect){ window.location.href = data.redirect; return; }
-      setMsg((data && data.error_description) || "接続に失敗しました。", true);
-      approveBtn.disabled = false; denyBtn.disabled = false;
-    } catch (e){
-      setMsg("接続に失敗しました: " + (e && e.message ? e.message : e), true);
-      approveBtn.disabled = false; denyBtn.disabled = false;
-    }
-  }
-
-  // Deny: return an OAuth access_denied error to the (already-validated) redirect
-  // URI so the client ends the flow cleanly.
-  function deny(){
-    try {
-      const u = new URL(OAUTH.redirect_uri);
-      u.searchParams.set("error", "access_denied");
-      u.searchParams.set("error_description", "User declined the connection");
-      if (OAUTH.state) u.searchParams.set("state", OAUTH.state);
-      window.location.href = u.toString();
-    } catch {
-      setMsg("接続をキャンセルしました。このタブを閉じてください。", false);
-    }
-  }
-
-  async function afterSignIn(user){
-    showConsent(user);
-    try { pendingIdToken = await user.getIdToken(); }
-    catch (e){ setMsg("サインインに失敗しました: " + (e && e.message ? e.message : e), true); }
-  }
-
-  // Handle return from a redirect-based sign-in (popup fallback).
-  try {
-    const rr = await getRedirectResult(auth);
-    if (rr && rr.user){ await afterSignIn(rr.user); }
-  } catch (e){ setMsg("サインインに失敗しました: " + (e && e.message ? e.message : e), true); }
-
-  btn.addEventListener("click", async () => {
-    setMsg("", false);
-    try {
-      const res = await signInWithPopup(auth, provider);
-      await afterSignIn(res.user);
-    } catch (e){
-      const code = e && e.code ? e.code : "";
-      if (code === "auth/popup-blocked" || code === "auth/cancelled-popup-request" || code === "auth/operation-not-supported-in-this-environment"){
-        // fall back to full-page redirect
-        try { await signInWithRedirect(auth, provider); }
-        catch (e2){ setMsg("サインインに失敗しました: " + (e2 && e2.message ? e2.message : e2), true); }
-      } else if (code === "auth/popup-closed-by-user"){
-        setMsg("", false);
-      } else {
-        setMsg("サインインに失敗しました: " + (e && e.message ? e.message : e), true);
-      }
-    }
-  });
-
-  approveBtn.addEventListener("click", complete);
-  denyBtn.addEventListener("click", deny);
-</script>
 </body>
 </html>`;
 }
@@ -3149,6 +3017,7 @@ async function handleMcpRoutes(
   const isMcp = path === MCP_PATH;
   const isRegister = path === REGISTER_PATH;
   const isAuthorize = path === AUTHORIZE_PATH;
+  const isGoogleCallback = path === GOOGLE_CALLBACK_PATH;
   const isToken = path === TOKEN_PATH;
   const isRevoke = path === REVOKE_PATH;
 
@@ -3158,6 +3027,7 @@ async function handleMcpRoutes(
     isMcp ||
     isRegister ||
     isAuthorize ||
+    isGoogleCallback ||
     isToken ||
     isRevoke
   )) {
@@ -3190,7 +3060,7 @@ async function handleMcpRoutes(
   // Register has its own tighter limiter below; discovery (PRM/ASM) is cheap and
   // header-only, so it is not throttled (Claude fetches it on every connect).
   if (
-    (isToken || isAuthorize || isRevoke) &&
+    (isToken || isAuthorize || isGoogleCallback || isRevoke) &&
     mcpRouteRateLimited(mcpClientIp(req))
   ) {
     mcpJson(
@@ -3301,149 +3171,277 @@ async function handleMcpRoutes(
       return true;
     }
 
-    // ---- Authorize (GET login page, POST completes with Firebase id token) ----
+    // ---- Authorize (GET consent page → server-side Google OAuth, Option b) ----
+    // No Firebase SDK: the consent page shows the destination + permission, then
+    // "許可" is a plain link to Google. Google returns to /oauth/google/callback,
+    // which redeems the code server-side. firebaseapp.com is never surfaced.
     if (isAuthorize) {
-      if (!MCP_FIREBASE_WEB_CONFIG) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      if (!GOOGLE_OAUTH_CLIENT_ID || !MCP_STATE_KEY) {
+        // GOOGLE_OAUTH_CLIENT_SECRET (→ MCP_STATE_KEY) or CLIENT_ID unset.
         mcpJson(res, 503, { error: "mcp_login_not_configured" });
         return true;
       }
-      let firebaseConfig: unknown;
-      try {
-        firebaseConfig = JSON.parse(MCP_FIREBASE_WEB_CONFIG);
-      } catch {
-        console.error("[mcp] MCP_FIREBASE_WEB_CONFIG is not valid JSON");
-        mcpJson(res, 503, { error: "mcp_login_not_configured" });
-        return true;
-      }
-
-      if (req.method === "GET") {
-        const query = Object.fromEntries(new URL(rawUrl, baseUrl).searchParams);
-        const client = await mcpLoadClient(query.client_id || "");
-        const v = validateAuthorizeRequest(query, client);
-        if (!v.ok) {
-          if (
-            v.kind === "redirect" &&
-            query.redirect_uri &&
-            client &&
-            matchRedirectUri(query.redirect_uri, client.redirectUris)
-          ) {
-            res.writeHead(302, {
-              Location: buildErrorRedirect(
-                query.redirect_uri,
-                v.error || "invalid_request",
-                v.error_description || "",
-                query.state || "",
-              ),
-            });
-            res.end();
-            return true;
-          }
-          mcpHtml(
-            res,
-            400,
-            mcpErrorPageHtml(
-              v.error_description || v.error || "invalid request",
+      const query = Object.fromEntries(new URL(rawUrl, baseUrl).searchParams);
+      const client = await mcpLoadClient(query.client_id || "");
+      const v = validateAuthorizeRequest(query, client);
+      if (!v.ok) {
+        if (
+          v.kind === "redirect" &&
+          query.redirect_uri &&
+          client &&
+          matchRedirectUri(query.redirect_uri, client.redirectUris)
+        ) {
+          res.writeHead(302, {
+            Location: buildErrorRedirect(
+              query.redirect_uri,
+              v.error || "invalid_request",
+              v.error_description || "",
+              query.state || "",
             ),
-          );
+          });
+          res.end();
           return true;
         }
         mcpHtml(
           res,
-          200,
-          mcpLoginPageHtml(v.params!, client?.clientName || "", firebaseConfig),
+          400,
+          mcpErrorPageHtml(v.error_description || v.error || "invalid request"),
         );
         return true;
       }
+      // Carry the (validated) authorize params through the Google round-trip in a
+      // signed, short-lived state so we can trust them on return (and re-validate).
+      // Fresh per-flow nonce, carried in the signed state AND sent to Google, so the
+      // returned id_token can be bound back to THIS authorize request. Blocks OIDC
+      // authorization-code injection: a captured victim code redeems to an id_token
+      // whose nonce won't match an attacker-crafted state's nonce.
+      const nonce = newOpaqueToken();
+      const signedState = signState(
+        { ...v.params, nonce },
+        MCP_STATE_KEY,
+        mcpNowSec(),
+      );
+      const googleAuthUrl =
+        "https://accounts.google.com/o/oauth2/v2/auth?" +
+        new URLSearchParams({
+          client_id: GOOGLE_OAUTH_CLIENT_ID,
+          redirect_uri: `${baseUrl}${GOOGLE_CALLBACK_PATH}`,
+          response_type: "code",
+          scope: "openid email",
+          state: signedState,
+          nonce,
+          access_type: "online",
+          prompt: "select_account",
+        }).toString();
+      const denyUrl = buildErrorRedirect(
+        v.params!.redirectUri,
+        "access_denied",
+        "User declined the connection",
+        v.params!.state,
+      );
+      mcpHtml(
+        res,
+        200,
+        mcpConsentPageHtml(
+          v.params!,
+          client?.clientName || "",
+          googleAuthUrl,
+          denyUrl,
+        ),
+      );
+      return true;
+    }
 
-      if (req.method === "POST") {
-        const body = await mcpReadBody(req, 64 * 1024);
-        let parsed: Record<string, string>;
-        try {
-          parsed = JSON.parse(body || "{}");
-        } catch {
-          mcpJson(res, 400, {
-            error: "invalid_request",
-            error_description: "invalid JSON",
-          });
-          return true;
-        }
-        const idToken = String(parsed.idToken || "");
-        const query = {
-          response_type: parsed.response_type,
-          client_id: parsed.client_id,
-          redirect_uri: parsed.redirect_uri,
-          code_challenge: parsed.code_challenge,
-          code_challenge_method: parsed.code_challenge_method,
-          state: parsed.state,
-          scope: parsed.scope,
-          resource: parsed.resource,
-        };
-        const client = await mcpLoadClient(query.client_id || "");
-        const v = validateAuthorizeRequest(query, client);
-        if (!v.ok) {
-          mcpJson(res, 400, {
-            error: v.error,
-            error_description: v.error_description,
-          });
-          return true;
-        }
-        let uid: string;
-        try {
-          // checkRevoked=true: this one-time exchange mints a 30-day refresh
-          // token, so a signed-out-everywhere / disabled / password-reset
-          // credential must not be parlayed into durable access. The extra
-          // Firebase round-trip is negligible for a once-per-connect call.
-          uid = (await getAuth().verifyIdToken(idToken, true)).uid;
-        } catch {
-          mcpJson(res, 401, {
-            error: "invalid_token",
-            error_description: "Firebase sign-in failed",
-          });
-          return true;
-        }
-        if (!(await mcpEligible(uid))) {
-          // Complete the flow with an OAuth access_denied redirect (protocol-correct).
-          mcpJson(res, 200, {
-            redirect: buildErrorRedirect(
-              v.params!.redirectUri,
-              "access_denied",
-              "This Google account is not authorized for MarkFlow MCP.",
-              v.params!.state,
-            ),
-          });
-          return true;
-        }
-        const code = newOpaqueToken();
-        await getFirestore()
-          .collection(MCP_CODES)
-          .doc(hashToken(code))
-          .set({
-            uid,
-            clientId: v.params!.clientId,
-            redirectUri: v.params!.redirectUri,
-            codeChallenge: v.params!.codeChallenge,
-            codeChallengeMethod: "S256",
-            scope: v.params!.scope,
-            resource: v.params!.resource,
-            expiresAt: mcpNowSec() + CODE_TTL_SEC,
-            createdAt: FieldValue.serverTimestamp(),
-          });
-        mcpJson(res, 200, {
-          redirect: buildSuccessRedirect(
+    // ---- Google OAuth callback (Option b) — server-side code redemption ----
+    if (isGoogleCallback) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      if (
+        !GOOGLE_OAUTH_CLIENT_ID ||
+        !GOOGLE_OAUTH_CLIENT_SECRET ||
+        !MCP_STATE_KEY
+      ) {
+        mcpJson(res, 503, { error: "mcp_login_not_configured" });
+        return true;
+      }
+      const cbUrl = new URL(rawUrl, baseUrl);
+      const gState = cbUrl.searchParams.get("state") || "";
+      const gCode = cbUrl.searchParams.get("code") || "";
+      const gError = cbUrl.searchParams.get("error") || "";
+      // Recover + re-validate the original authorize params from the signed state.
+      // Max age 10 min (the user just clicked through Google). A tampered/expired
+      // state cannot be tied to a trusted redirect_uri, so it renders an error page
+      // rather than redirecting anywhere.
+      const payload = verifyState(gState, MCP_STATE_KEY, 600, mcpNowSec());
+      if (!payload) {
+        mcpHtml(
+          res,
+          400,
+          mcpErrorPageHtml(
+            "セッションの有効期限が切れました。お手数ですが、Claude 側からもう一度お試しください。",
+          ),
+        );
+        return true;
+      }
+      const query = {
+        response_type: String(payload.responseType || ""),
+        client_id: String(payload.clientId || ""),
+        redirect_uri: String(payload.redirectUri || ""),
+        code_challenge: String(payload.codeChallenge || ""),
+        code_challenge_method: String(payload.codeChallengeMethod || ""),
+        state: String(payload.state || ""),
+        scope: String(payload.scope || ""),
+        resource: String(payload.resource || ""),
+      };
+      const client = await mcpLoadClient(query.client_id);
+      const v = validateAuthorizeRequest(query, client);
+      if (!v.ok) {
+        // The signed params no longer validate (e.g. client deleted) — cannot
+        // safely deliver a code; end on an error page.
+        mcpHtml(
+          res,
+          400,
+          mcpErrorPageHtml(v.error_description || v.error || "invalid request"),
+        );
+        return true;
+      }
+      // From here we have a trusted redirect_uri, so protocol errors go back to it.
+      const failRedirect = (error: string, description: string): true => {
+        res.writeHead(302, {
+          Location: buildErrorRedirect(
             v.params!.redirectUri,
-            code,
+            error,
+            description,
             v.params!.state,
           ),
         });
+        res.end();
         return true;
+      };
+      if (gError) {
+        // User denied / errored at Google's screen.
+        return failRedirect("access_denied", "Google sign-in was cancelled");
       }
-
-      mcpJson(
-        res,
-        405,
-        { error: "method_not_allowed" },
-        { Allow: "GET, POST" },
+      if (!gCode) {
+        return failRedirect("invalid_request", "Missing authorization code");
+      }
+      // Redeem the Google code server-side with the confidential client_secret.
+      let idToken = "";
+      try {
+        const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code: gCode,
+            client_id: GOOGLE_OAUTH_CLIENT_ID,
+            client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+            redirect_uri: `${baseUrl}${GOOGLE_CALLBACK_PATH}`,
+            grant_type: "authorization_code",
+          }),
+        });
+        const text = await tokenRes.text();
+        if (!tokenRes.ok) {
+          console.error(
+            `[mcp] google exchange failed: ${tokenRes.status} ${text}`,
+          );
+          return failRedirect("server_error", "Google token exchange failed");
+        }
+        idToken = String(JSON.parse(text).id_token || "");
+      } catch (err) {
+        console.error(
+          `[mcp] google exchange error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return failRedirect("server_error", "Google token exchange failed");
+      }
+      // The id_token arrived on a trusted channel (direct TLS from Google's token
+      // endpoint, authenticated by our client_secret). Validate aud/iss/exp and
+      // require a verified email before trusting the identity.
+      const claims = validateGoogleIdToken(decodeJwtPayload(idToken), {
+        expectedAud: GOOGLE_OAUTH_CLIENT_ID,
+        expectedNonce: String(payload.nonce || ""),
+        nowSec: mcpNowSec(),
+      });
+      if (!claims.ok || !claims.email) {
+        return failRedirect(
+          "access_denied",
+          "Could not verify a Google account",
+        );
+      }
+      // Map the verified email → Firebase uid (Firebase Auth is the authoritative
+      // registry). Never signed into MarkFlow → not authorized.
+      let userRecord: UserRecord;
+      try {
+        userRecord = await getAuth().getUserByEmail(claims.email);
+      } catch (err) {
+        const code = (err as { code?: string })?.code || "";
+        if (code === "auth/user-not-found") {
+          return failRedirect(
+            "access_denied",
+            "This Google account has no MarkFlow account.",
+          );
+        }
+        throw err;
+      }
+      // Fail closed on a disabled account: the removed verifyIdToken(checkRevoked=true)
+      // path rejected disabled/revoked credentials, but getUserByEmail returns the
+      // record regardless — so an admin-disabled account could otherwise still mint a
+      // 30-day MCP grant.
+      if (userRecord.disabled) {
+        return failRedirect(
+          "access_denied",
+          "This MarkFlow account is disabled.",
+        );
+      }
+      // Bind identity to the Google provider, not to the email string alone. MarkFlow
+      // also ships GitHub sign-in, so an account whose email was established via GitHub
+      // must NOT be claimable by whoever later controls that Google mailbox. (The old
+      // Firebase consent page was Google-only, so this is no functional regression.)
+      const hasGoogleProvider = userRecord.providerData.some(
+        (p) => p.providerId === "google.com",
       );
+      if (!hasGoogleProvider || !userRecord.emailVerified) {
+        return failRedirect(
+          "access_denied",
+          "This Google account is not linked to a MarkFlow account.",
+        );
+      }
+      const uid = userRecord.uid;
+      if (!(await mcpEligible(uid))) {
+        return failRedirect(
+          "access_denied",
+          "This Google account is not authorized for MarkFlow MCP.",
+        );
+      }
+      // Mint the single-use MCP authorization code bound to the PKCE challenge.
+      const code = newOpaqueToken();
+      await getFirestore()
+        .collection(MCP_CODES)
+        .doc(hashToken(code))
+        .set({
+          uid,
+          clientId: v.params!.clientId,
+          redirectUri: v.params!.redirectUri,
+          codeChallenge: v.params!.codeChallenge,
+          codeChallengeMethod: "S256",
+          scope: v.params!.scope,
+          resource: v.params!.resource,
+          expiresAt: mcpNowSec() + CODE_TTL_SEC,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      res.writeHead(302, {
+        Location: buildSuccessRedirect(
+          v.params!.redirectUri,
+          code,
+          v.params!.state,
+        ),
+      });
+      res.end();
       return true;
     }
 
@@ -3579,6 +3577,28 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("MarkFlow AI Proxy");
+    return;
+  }
+
+  // --- Brand icon (favicon + MCP connector logo). api.markflow.jp maps directly
+  // to this service, so /favicon.ico is served at the domain root. Referenced by
+  // the RFC 8414 logo_uri, the OAuth consent page <img>, and other MCP clients.
+  // NOTE (verified 2026-09): Claude's connector UI does NOT fetch this — it only
+  // brands via a Connectors Directory listing. Served anyway for other clients,
+  // our own consent page, and the Google favicon crawler. ---
+  if (
+    req.method === "GET" &&
+    (req.url === "/favicon.ico" ||
+      req.url === "/favicon.png" ||
+      req.url === "/mcp-icon.png")
+  ) {
+    const png = mcpIconBuffer();
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": String(png.length),
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(png);
     return;
   }
 
