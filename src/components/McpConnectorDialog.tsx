@@ -35,7 +35,7 @@ const STEPS: { title: string; body: string }[] = [
   },
   {
     title: "追加してサインイン",
-    body: "「Add（追加）」→「Connect（接続）」の順にクリックし、MarkFlowにログインしているのと同じGoogleアカウントでサインインして、個人ドキュメントへの読み取り専用アクセスを許可します。",
+    body: "「Add（追加）」→「Connect（接続）」の順にクリックし、MarkFlowにログインしているのと同じGoogleアカウントでサインインして、個人ドキュメントへの読み取り専用アクセスを許可します。サインイン画面の上部に MarkFlow のロゴと「markflow.jp の公式サインインページ」と表示されていれば、正しい接続先です。",
   },
   {
     title: "接続完了",
@@ -151,6 +151,12 @@ export function McpConnectorDialog({
           <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
             共有・チームのドキュメントは連携の対象外です。連携されるのは
             あなたが所有する個人ドキュメントのみで、Claudeからの書き込みはできません。
+          </p>
+
+          <p className="text-[11px] text-muted-foreground">
+            Claudeのコネクタ一覧では、カスタムコネクタのアイコンは汎用のもので表示されます（Claude側の仕様で、独自ロゴは現在設定できません）。
+            接続先が正しいかは、サインイン画面に表示されるMarkFlowのロゴと「markflow.jp
+            の公式サインインページ」の表記でご確認いただけます。
           </p>
 
           <p className="text-[11px] text-muted-foreground">

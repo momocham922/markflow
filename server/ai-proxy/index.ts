@@ -2583,7 +2583,9 @@ function mcpConsentPageHtml(
   @media (prefers-color-scheme: dark){ body{ background:#191817; color:#ececec; } .card{ background:#232221 !important; border-color:#38363400 !important; } .grant{ background:#1c1b1a !important; border-color:#333 !important; } .k{ color:#9a958f !important; } }
   .card { background:#fff; border:1px solid #eceae7; border-radius:16px; padding:36px 32px; max-width:420px; width:calc(100% - 32px);
     box-shadow:0 1px 3px rgba(0,0,0,.06); text-align:center; }
-  .brand { width:56px; height:56px; border-radius:13px; margin:0 auto 18px; display:block; }
+  .brand { width:56px; height:56px; border-radius:13px; margin:0 auto 12px; display:block; }
+  .wordmark { font-size:1.05rem; font-weight:700; letter-spacing:.01em; margin:0 0 3px; }
+  .official { font-size:.75rem; color:#8a857f; margin:0 0 20px; letter-spacing:.02em; }
   h1 { font-size:1.15rem; margin:0 0 8px; font-weight:650; }
   p { font-size:.9rem; line-height:1.6; color:#6b6763; margin:0 0 20px; }
   a.btn { font:inherit; font-size:.95rem; font-weight:600; cursor:pointer; border:1px solid #dcdad7; text-decoration:none;
@@ -2605,6 +2607,8 @@ function mcpConsentPageHtml(
 <body>
   <div class="card">
     <img class="brand" src="/mcp-icon.png" alt="MarkFlow" width="56" height="56" />
+    <div class="wordmark">MarkFlow</div>
+    <div class="official">markflow.jp の公式サインインページ</div>
     <h1>アクセスを許可しますか？</h1>
     <p>MarkFlow にログインしているのと同じ Google アカウントでサインインすると、下記の接続先が連携されます。</p>
     <div class="grant">
