@@ -256,13 +256,22 @@ input {
   -webkit-user-select: text !important;
 }
 
-/* Visible selection highlight — only in content areas */
+/* Visible selection highlight — only in content areas.
+   The global chrome rule above sets `::selection { background: transparent
+   !important }` to kill phantom highlights on user-select:none elements. An
+   !important declaration always beats a non-!important one regardless of
+   specificity, so these content-area rules MUST also be !important or the
+   transparent global wins and selection is invisible in the preview pane and
+   AI panel (both .prose/.select-text). The CodeMirror editor was unaffected
+   because it paints its own .cm-selectionBackground overlay (editor-themes.ts),
+   not the native ::selection pseudo — which is why only prose/AI looked broken.
+   Color matches the editor's focused selection (oklch 0.7 0.15 250 / 0.3). */
 .cm-editor ::selection,
 .prose ::selection,
 .select-text ::selection,
 textarea::selection,
 input::selection {
-  background: oklch(0.7 0.15 250 / 0.3);
+  background: oklch(0.7 0.15 250 / 0.3) !important;
   color: inherit;
 }
 
