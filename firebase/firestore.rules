@@ -354,5 +354,15 @@ service cloud.firestore {
     match /mcp_revoked_families/{family} {
       allow read, write: if false;
     }
+
+    // AI request idempotency ledger (aiRequests/{sha256(uid:idempotencyKey)}):
+    // written ONLY by the ai-proxy /v1/chat endpoint via the Admin SDK. Records
+    // whether a logical AI request was charged + its content hash + regen count,
+    // so an error-retry / 再生成 of the SAME request collapses onto ONE charge.
+    // A client that could write here could forge a "charged" record to run AI
+    // for free, so no client ever reads or writes it — it is server-only truth.
+    match /aiRequests/{requestHash} {
+      allow read, write: if false;
+    }
   }
 }

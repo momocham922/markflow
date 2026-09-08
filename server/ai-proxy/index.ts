@@ -20,6 +20,10 @@ import {
   failedBatchChargeDelta,
   shouldRefund,
   deriveSeatAccess,
+  decideIdempotencyReuse,
+  sseProducedOutput,
+  chatResponseHasOutput,
+  AI_IDEM_TTL_MS,
   type Plan,
   type Feature,
 } from "./gating";
@@ -1101,6 +1105,111 @@ const serverValues: ServerValues = {
   increment: (n) => FieldValue.increment(n),
   serverTimestamp: () => FieldValue.serverTimestamp(),
 };
+
+// =====================================================================
+// AI request idempotency wiring (see gating.ts decideIdempotencyReuse)
+// ---------------------------------------------------------------------
+// Collapses a logical AI request's error-retries / 再生成 onto ONE charge. The
+// client stamps a stable Idempotency-Key header per logical request and re-sends
+// it on every retry/regenerate; we key aiRequests/{sha256(uid:key)} by it. The
+// content hash binds the record to the exact prompt so the same key can never be
+// reused to bill a DIFFERENT generation for free. Server-write-only (see
+// firestore.rules aiRequests). All calls are best-effort and FAIL TOWARD
+// CHARGING (an infra blip never grants a free generation — the safe money
+// direction).
+// =====================================================================
+
+/** Read the client's per-logical-request idempotency key, if any. */
+function readIdempotencyKey(req: http.IncomingMessage): string {
+  const raw = req.headers["idempotency-key"];
+  const v = (Array.isArray(raw) ? raw[0] : raw)?.trim() || "";
+  // Bound the length so a hostile client can't stuff a huge header; the value is
+  // hashed anyway, so any opaque token up to this cap is fine.
+  return v.slice(0, 200);
+}
+
+/** Stable content hash for the chat request body (prompt + system + tools). */
+function chatContentHash(parsed: {
+  messages?: unknown;
+  system?: unknown;
+  tools?: unknown;
+}): string {
+  return hashToken(
+    JSON.stringify({
+      messages: parsed.messages ?? null,
+      system: parsed.system ?? null,
+      tools: parsed.tools ?? null,
+    }),
+  );
+}
+
+function aiIdemDoc(uid: string, key: string) {
+  return getFirestore()
+    .collection("aiRequests")
+    .doc(hashToken(`${uid}:${key}`));
+}
+
+/**
+ * Decide (atomically) whether this request may REUSE a prior charge. When it
+ * may, the regen counter is incremented in the same transaction so the cap is
+ * enforced, and the caller SKIPS reserving a fresh aiCall. Returns false (charge
+ * fresh) on no/expired/different/at-cap record OR any infra error.
+ */
+async function checkAiIdempotency(
+  uid: string,
+  key: string,
+  contentHash: string,
+): Promise<boolean> {
+  const ref = aiIdemDoc(uid, key);
+  const now = Date.now();
+  try {
+    return await getFirestore().runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const state = snap.exists ? snap.data() : null;
+      if (!decideIdempotencyReuse(state, contentHash, now)) return false;
+      tx.set(
+        ref,
+        {
+          regenCount: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return true;
+    });
+  } catch (err) {
+    console.error(`[chat] idempotency check failed for ${uid}:`, err);
+    return false; // fail toward charging — never grant a free run on infra error
+  }
+}
+
+/**
+ * Record that a fresh charge succeeded so subsequent same-key, same-content
+ * re-runs reuse it (free) within the TTL. Resets regenCount to 0 (a new paid
+ * window). Best-effort — a failed mark only means a would-be-free regenerate
+ * charges again, never a double charge or a leak.
+ */
+async function markAiIdempotencyCharged(
+  uid: string,
+  key: string,
+  contentHash: string,
+): Promise<void> {
+  try {
+    await aiIdemDoc(uid, key).set(
+      {
+        uid,
+        charged: true,
+        contentHash,
+        regenCount: 0,
+        expiresAt: Date.now() + AI_IDEM_TTL_MS,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  } catch (err) {
+    console.error(`[chat] idempotency mark failed for ${uid}:`, err);
+  }
+}
 
 // Safely send a JSON error. If headers were already sent (a stream started, or the
 // client disconnected mid-response), writing a status throws ERR_HTTP_HEADERS_SENT,
@@ -6460,8 +6569,11 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         : vertexData.content?.text || "";
 
       if (!text) {
+        // Model produced NO text — a failed generation from the user's view (no
+        // cards). Owner rule 「生成されない＝課金しない」: leave committed=false so
+        // the reserved aiCall refunds in `finally`. (Q2: research empty/error
+        // results are refunded; only a genuine parsed decision is charged.)
         console.log("[research] analyze: empty response from Claude");
-        committed = true; // Vertex was invoked (cost incurred) — keep the charge.
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ searches: [], questions: null }));
         return;
@@ -6469,8 +6581,9 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
+        // Text came back but not the expected JSON brief — degraded output, no
+        // user-facing result. Refund (committed stays false).
         console.error("[research] analyze: no JSON found in response");
-        committed = true; // Vertex was invoked (cost incurred) — keep the charge.
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ searches: [], questions: null }));
         return;
@@ -6480,7 +6593,8 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
       // thinking-truncated response can leave the JSON malformed — an unguarded
       // JSON.parse here throws, and the outer catch turned that into a raw 500
       // (the "素の500エラー" users saw). Degrade to an empty result on any parse
-      // failure; Vertex was invoked so the charge is kept (committed=true).
+      // failure; this is a failed generation (no cards) so committed stays false
+      // → the reserved aiCall refunds (owner rule 「生成されない＝課金しない」).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let result: any;
       try {
@@ -6491,7 +6605,6 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
             parseErr instanceof Error ? parseErr.message : String(parseErr)
           }`,
         );
-        committed = true; // Vertex was invoked (cost incurred) — keep the charge.
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ searches: [], questions: null }));
         return;
@@ -6663,7 +6776,11 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
       console.log(
         `[research] grounded-search: queryLen=${query.length} sources=${sources.length} searches=${webSearchQueries.length}`,
       );
-      committed = true;
+      // Charge only when the model actually produced answer text. An empty
+      // summary (all thought-parts, or a post-200 error event with no content)
+      // = no card for the user = failed generation → committed stays false → the
+      // reserved aiCall refunds (Q2 / owner rule 「生成されない＝課金しない」).
+      if (summary.trim()) committed = true;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ summary, sources, webSearchQueries }));
     } catch (err) {
@@ -6697,8 +6814,23 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
     const parsed = JSON.parse(body);
     const isStream = parsed.stream === true;
 
-    g = await guard(req, res, uid, "aiCalls", 1);
-    if (!g.ok) return;
+    // Idempotency: a retry / 再生成 of the SAME logical request (same key + same
+    // content) within the TTL REUSES the original charge instead of billing a new
+    // aiCall (owner rule: 「エラー起因の再生成・リトライは利用カウントに含めない」).
+    // A fresh / expired / different-prompt / at-cap key charges normally; no key
+    // at all → always charges (old clients behave exactly as before).
+    const idemKey = readIdempotencyKey(req);
+    const contentHash = idemKey ? chatContentHash(parsed) : "";
+    const reused = idemKey
+      ? await checkAiIdempotency(uid, idemKey, contentHash)
+      : false;
+
+    // Reserve a fresh aiCall only when NOT reusing a prior charge. On reuse `g`
+    // stays null → the finally never refunds (nothing was reserved this run).
+    if (!reused) {
+      g = await guard(req, res, uid, "aiCalls", 1);
+      if (!g.ok) return;
+    }
 
     // Build Vertex AI request (model is in URL, not body)
     const vertexBody: Record<string, unknown> = {
@@ -6751,10 +6883,14 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
       return;
     }
 
-    // Vertex accepted the request (200) — the cost is incurred, so keep the
-    // charge even if the client disconnects mid-stream.
-    committed = true;
-
+    // Vertex accepted the request (200), but a 200 alone is NOT proof of output:
+    // Anthropic can stream a 200 then emit an `error` event with no content, and
+    // an empty completion produces no deltas. So the charge is committed ONLY
+    // after we observe the model actually produced usable output (streamed text /
+    // a tool call, or — non-streaming — a non-empty text/tool_use block). This
+    // honors 「生成されない＝課金しない」 while still charging a client that
+    // disconnects AFTER receiving content (we scan the UPSTREAM bytes, not client
+    // delivery — closing the disconnect-after-output free-generation vector).
     if (isStream) {
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -6765,20 +6901,55 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
       const reader = vertexRes.body?.getReader();
       if (!reader) {
         res.end();
-        return;
+        return; // no stream body = no output → committed stays false → refund
       }
 
       const decoder = new TextDecoder();
+      let scanBuf = "";
+      let producedOutput = false;
+      let clientGone = false;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(decoder.decode(value, { stream: true }));
+        const chunk = decoder.decode(value, { stream: true });
+        // Detect usable output from the UPSTREAM stream (independent of client
+        // delivery). Bounded tail buffer catches a marker split across chunks
+        // without unbounded growth; stop scanning once output is confirmed.
+        if (!producedOutput) {
+          scanBuf += chunk;
+          if (sseProducedOutput(scanBuf)) producedOutput = true;
+          else if (scanBuf.length > 4096) scanBuf = scanBuf.slice(-1024);
+        }
+        if (!clientGone && !res.writableEnded) {
+          try {
+            res.write(chunk);
+          } catch {
+            // Client vanished mid-stream; keep draining upstream so the billing
+            // decision reflects what the model produced, not delivery success.
+            clientGone = true;
+          }
+        }
       }
-      res.end();
+      if (!res.writableEnded) res.end();
+      if (producedOutput) committed = true;
     } else {
       const data = await vertexRes.text();
+      let hasOutput = false;
+      try {
+        hasOutput = chatResponseHasOutput(JSON.parse(data));
+      } catch {
+        hasOutput = false; // unparseable/empty upstream body → refund
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(data);
+      if (hasOutput) committed = true;
+    }
+
+    // Record the successful charge so a same-key, same-content retry/regenerate
+    // reuses it (free) within the TTL. Only when a real charge happened (skip
+    // reuse runs and internal/unlimited callers whose g.charged is false).
+    if (idemKey && !reused && committed && g && g.ok && g.charged) {
+      await markAiIdempotencyCharged(uid, idemKey, contentHash);
     }
   } catch (err) {
     const message =

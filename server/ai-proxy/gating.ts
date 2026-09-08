@@ -281,6 +281,121 @@ export function shouldRefund(
   return !!g && g.ok && !!g.charged && !committed;
 }
 
+// =====================================================================
+// AI request idempotency (「エラー起因の再生成・リトライは利用カウントに含めない」)
+// ---------------------------------------------------------------------
+// A user-facing AI answer is ONE logical request. When it fails (empty output,
+// mid-stream drop) the client retries / offers "再生成"; those must NOT each burn
+// a fresh aiCall. The client stamps a stable Idempotency-Key per logical request
+// and re-sends it on every retry/regenerate; the server collapses same-key,
+// same-content re-runs onto the ORIGINAL charge (owner decision: 「再生成に集約し
+// 1課金」). A DIFFERENT prompt under the same key, an expired window, or exceeding
+// the regen cap all charge fresh — so the mechanism can never be turned into a
+// free-generation faucet for arbitrary new prompts. STT paths are intentionally
+// excluded (Google real-charges STT compute; see index.ts).
+// =====================================================================
+
+/**
+ * Idempotency window for AI chat requests. A retry/regenerate bearing the SAME
+ * key + same content within this window collapses onto the original charge;
+ * after it, the key is stale and a re-run charges fresh. Short enough to bound
+ * abuse, long enough to cover a user reading a broken answer then hitting 再生成.
+ */
+export const AI_IDEM_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Max FREE retries/regenerations per charged idempotency key. Bounds cost
+ * amplification: one paid answer yields at most 1 + this many re-runs of the
+ * SAME request before the next re-run charges again. Keeps a stuck "always
+ * regenerate" client from fanning out unbounded free upstream calls.
+ */
+export const AI_IDEM_MAX_REGEN = 2;
+
+/** The persisted idempotency record (aiRequests/{hash}) fields this logic reads. */
+export interface IdemState {
+  charged?: unknown;
+  contentHash?: unknown;
+  regenCount?: unknown;
+  /** Epoch ms after which the record is stale. */
+  expiresAt?: unknown;
+}
+
+/**
+ * Decide whether an AI request bearing an idempotency key may REUSE a prior
+ * charge (run for free) or must charge fresh. Pure so it is exhaustively unit
+ * tested; index.ts wires the Firestore read/increment around it.
+ *
+ * Reuse ONLY when the stored record is: actually charged, not expired, bound to
+ * the SAME content hash, and still under the regen cap. EVERY other case (no
+ * record, not-yet-charged, expired, different prompt, cap reached) charges
+ * fresh — that is what keeps this from ever GRANTING free generations for a new
+ * prompt or beyond the cap. `reuse:false` on cap-reached is deliberate: the
+ * caller charges again and re-opens a fresh window (the user paid again).
+ */
+export function decideIdempotencyReuse(
+  state: IdemState | null | undefined,
+  contentHash: string,
+  nowMs: number,
+): boolean {
+  if (!state || !contentHash) return false;
+  if (state.charged !== true) return false;
+  const expiresAt = Number(state.expiresAt) || 0;
+  if (expiresAt > 0 && nowMs >= expiresAt) return false;
+  const hash = typeof state.contentHash === "string" ? state.contentHash : "";
+  if (!hash || hash !== contentHash) return false;
+  const count = Number(state.regenCount) || 0;
+  if (count >= AI_IDEM_MAX_REGEN) return false;
+  return true;
+}
+
+/**
+ * True when an Anthropic/Vertex SSE stream (raw concatenated text) shows the
+ * model produced USABLE output — streamed answer text (`text_delta`) or a tool
+ * call (`input_json_delta`). The /v1/chat billing commit keys off this instead
+ * of the bare HTTP 200: Anthropic can stream a 200 and then emit an `error`
+ * event (overloaded) with no content, and an empty completion produces no
+ * deltas. Produced → keep the charge (the COGS was incurred AND — since we scan
+ * the UPSTREAM bytes, not client delivery — a client that disconnects AFTER
+ * receiving content is still charged, closing that free-generation vector).
+ * Not produced → refund (owner rule: 「生成されない＝課金しない」).
+ *
+ * Deliberately excludes `thinking_delta` / `content_block_stop`: a thinking-only
+ * stream that dies before any answer text gave the user nothing, so it must
+ * refund. Substring probes (not a full JSON parse) keep this cheap enough to run
+ * on the hot passthrough path against a bounded tail buffer.
+ */
+export function sseProducedOutput(sse: string): boolean {
+  if (!sse) return false;
+  return (
+    /"type"\s*:\s*"text_delta"/.test(sse) ||
+    /"type"\s*:\s*"input_json_delta"/.test(sse)
+  );
+}
+
+/**
+ * True when a NON-streaming Anthropic/Vertex response body carries usable output
+ * — at least one non-empty `text` block or any `tool_use` block. The
+ * non-streaming /v1/chat commit keys off this (mirror of sseProducedOutput for
+ * the buffered path): an empty `content` array or text-only-whitespace answer
+ * refunds instead of charging for nothing.
+ */
+export function chatResponseHasOutput(data: unknown): boolean {
+  const content = (data as { content?: unknown })?.content;
+  if (!Array.isArray(content)) return false;
+  for (const b of content) {
+    const block = b as { type?: unknown; text?: unknown };
+    if (block?.type === "tool_use" || block?.type === "server_tool_use")
+      return true;
+    if (
+      block?.type === "text" &&
+      typeof block.text === "string" &&
+      block.text.trim()
+    )
+      return true;
+  }
+  return false;
+}
+
 /** Speech-to-Text v2 duration string ("1.200s") → seconds. */
 export function parseOffset(v: unknown): number {
   if (v == null) return 0;

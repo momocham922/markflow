@@ -19,6 +19,11 @@ import {
   failedBatchChargeDelta,
   shouldRefund,
   deriveSeatAccess,
+  decideIdempotencyReuse,
+  sseProducedOutput,
+  chatResponseHasOutput,
+  AI_IDEM_TTL_MS,
+  AI_IDEM_MAX_REGEN,
   type Plan,
   type Feature,
 } from "./gating";
@@ -453,6 +458,188 @@ describe("shouldRefund", () => {
     expect(shouldRefund({ ok: false }, false)).toBe(false);
     expect(shouldRefund(null, false)).toBe(false);
     expect(shouldRefund(undefined, false)).toBe(false);
+  });
+});
+
+// =====================================================================
+// decideIdempotencyReuse — collapse a logical request's retries/再生成 onto ONE
+// charge without ever GRANTING a free generation for a new/expired/different req
+// =====================================================================
+describe("decideIdempotencyReuse", () => {
+  const HASH = "abc123";
+  const NOW = 1_000_000_000_000;
+  const charged = (over: Record<string, unknown> = {}) => ({
+    charged: true,
+    contentHash: HASH,
+    regenCount: 0,
+    expiresAt: NOW + AI_IDEM_TTL_MS,
+    ...over,
+  });
+
+  it("reuses a charged, unexpired, same-content, under-cap record", () => {
+    expect(decideIdempotencyReuse(charged(), HASH, NOW)).toBe(true);
+  });
+
+  it("charges fresh when there is no record", () => {
+    expect(decideIdempotencyReuse(null, HASH, NOW)).toBe(false);
+    expect(decideIdempotencyReuse(undefined, HASH, NOW)).toBe(false);
+  });
+
+  it("charges fresh when the caller has no content hash", () => {
+    expect(decideIdempotencyReuse(charged(), "", NOW)).toBe(false);
+  });
+
+  it("charges fresh when the record was never actually charged", () => {
+    expect(decideIdempotencyReuse(charged({ charged: false }), HASH, NOW)).toBe(
+      false,
+    );
+    expect(
+      decideIdempotencyReuse(charged({ charged: undefined }), HASH, NOW),
+    ).toBe(false);
+  });
+
+  it("charges fresh once the record has expired", () => {
+    const state = charged({ expiresAt: NOW - 1 });
+    expect(decideIdempotencyReuse(state, HASH, NOW)).toBe(false);
+    // exactly at expiry is stale (>=)
+    expect(decideIdempotencyReuse(charged({ expiresAt: NOW }), HASH, NOW)).toBe(
+      false,
+    );
+  });
+
+  it("NEVER reuses a charge for a DIFFERENT prompt (content-hash binding)", () => {
+    expect(decideIdempotencyReuse(charged(), "different-hash", NOW)).toBe(
+      false,
+    );
+    // a record missing its content hash also cannot be reused
+    expect(
+      decideIdempotencyReuse(charged({ contentHash: undefined }), HASH, NOW),
+    ).toBe(false);
+  });
+
+  it("charges fresh once the free-regen cap is reached (re-opens a paid window)", () => {
+    expect(
+      decideIdempotencyReuse(
+        charged({ regenCount: AI_IDEM_MAX_REGEN }),
+        HASH,
+        NOW,
+      ),
+    ).toBe(false); // at the cap → charge again, re-opening a fresh paid window
+    expect(
+      decideIdempotencyReuse(
+        charged({ regenCount: AI_IDEM_MAX_REGEN - 1 }),
+        HASH,
+        NOW,
+      ),
+    ).toBe(true);
+    expect(
+      decideIdempotencyReuse(
+        charged({ regenCount: AI_IDEM_MAX_REGEN + 5 }),
+        HASH,
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a missing/zero expiresAt as non-expiring (only >0 is checked)", () => {
+    expect(decideIdempotencyReuse(charged({ expiresAt: 0 }), HASH, NOW)).toBe(
+      true,
+    );
+    expect(
+      decideIdempotencyReuse(charged({ expiresAt: undefined }), HASH, NOW),
+    ).toBe(true);
+  });
+});
+
+// =====================================================================
+// sseProducedOutput — the streamed-/v1/chat billing commit gate. Charge only
+// when the UPSTREAM stream actually carried answer text or a tool call.
+// =====================================================================
+describe("sseProducedOutput", () => {
+  it("is true for a text_delta stream", () => {
+    expect(
+      sseProducedOutput(
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+      ),
+    ).toBe(true);
+  });
+
+  it("is true for a tool call (input_json_delta) stream", () => {
+    expect(
+      sseProducedOutput(
+        '{"delta":{"type":"input_json_delta","partial_json":"{"}}',
+      ),
+    ).toBe(true);
+  });
+
+  it("tolerates whitespace variants in the JSON", () => {
+    expect(sseProducedOutput('"type" : "text_delta"')).toBe(true);
+  });
+
+  it("is FALSE for an empty stream (empty completion → refund)", () => {
+    expect(sseProducedOutput("")).toBe(false);
+  });
+
+  it("is FALSE for a thinking-only stream that dies before any answer text", () => {
+    // thinking_delta gave the user nothing → must refund
+    expect(
+      sseProducedOutput(
+        '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}',
+      ),
+    ).toBe(false);
+  });
+
+  it("is FALSE for a 200-then-error overloaded stream with no content", () => {
+    expect(
+      sseProducedOutput(
+        'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}',
+      ),
+    ).toBe(false);
+  });
+});
+
+// =====================================================================
+// chatResponseHasOutput — non-streaming /v1/chat billing commit gate
+// =====================================================================
+describe("chatResponseHasOutput", () => {
+  it("is true for a non-empty text block", () => {
+    expect(
+      chatResponseHasOutput({ content: [{ type: "text", text: "answer" }] }),
+    ).toBe(true);
+  });
+
+  it("is true for a tool_use / server_tool_use block", () => {
+    expect(chatResponseHasOutput({ content: [{ type: "tool_use" }] })).toBe(
+      true,
+    );
+    expect(
+      chatResponseHasOutput({ content: [{ type: "server_tool_use" }] }),
+    ).toBe(true);
+  });
+
+  it("is FALSE for an empty content array (empty completion → refund)", () => {
+    expect(chatResponseHasOutput({ content: [] })).toBe(false);
+  });
+
+  it("is FALSE for a whitespace-only text block", () => {
+    expect(
+      chatResponseHasOutput({ content: [{ type: "text", text: "   " }] }),
+    ).toBe(false);
+  });
+
+  it("is FALSE for a thinking-only response (no answer text)", () => {
+    expect(
+      chatResponseHasOutput({
+        content: [{ type: "thinking", thinking: "..." }],
+      }),
+    ).toBe(false);
+  });
+
+  it("is FALSE for malformed / missing content", () => {
+    expect(chatResponseHasOutput(null)).toBe(false);
+    expect(chatResponseHasOutput(undefined)).toBe(false);
+    expect(chatResponseHasOutput({})).toBe(false);
+    expect(chatResponseHasOutput({ content: "not-an-array" })).toBe(false);
   });
 });
 

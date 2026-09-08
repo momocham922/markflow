@@ -49,17 +49,133 @@ export function abortClaude() {
   activeAbortController = null;
 }
 
-// Raw API call — returns full response JSON (non-streaming) or text (streaming)
+// =====================================================================
+// Automatic pre-output retry (owner rule: 「エラーなら原則リトライ」)
+// ---------------------------------------------------------------------
+// A logical AI request that fails BEFORE any output was delivered (a flaky
+// network drop, or the server returning a transient 503/504) is retried
+// automatically a bounded number of times with backoff. Because the client
+// re-sends the SAME Idempotency-Key, a retry can NEVER double-charge: the failed
+// attempt produced no output → the server refunded it (output-aware commit), and
+// a retry that finally succeeds charges exactly once. Once ANY output has been
+// delivered we NEVER retry (the answer is already streaming; a retry would
+// duplicate it). Aborts and real limits (401/403/429/422) are never retried;
+// after auto-retry is exhausted the UI surfaces a 再生成 CTA (the next stage).
+// =====================================================================
+const AUTO_RETRY_MAX = 1; // automatic retries AFTER the first attempt (2 tries total)
+
+/** Whether a pre-output failure is a transient class worth auto-retrying. */
+function shouldAutoRetry(status: number | null, body: string): boolean {
+  if (status != null) {
+    // 429 = real quota/rate limit (retry never helps). 401/403/402/422/400 and
+    // the server's non-retryable upstream 502 are permanent for this request.
+    if (status === 503 || status === 504) return true;
+    // Honor the server's explicit retryable flag on ai_upstream_error too.
+    return /"retryable"\s*:\s*true/.test(body);
+  }
+  // No HTTP status → a fetch/transport failure (never reached the server, so it
+  // never charged). Same connectivity class as friendlyErrorMessage's network arm.
+  const s = body.toLowerCase();
+  return /failed to fetch|load failed|networkerror|network error|err_network|err_connection|econnreset|econnrefused|ehostunreach|enotfound|net::|timed out|timeout/.test(
+    s,
+  );
+}
+
+/** Backoff for retry attempt N (1-based): ~0.6s, 1.2s … + jitter, capped. */
+function retryDelayMs(attempt: number): number {
+  const base = Math.min(600 * 2 ** (attempt - 1), 4000);
+  return base + Math.floor(Math.random() * 300);
+}
+
+/** Sleep that rejects with an AbortError the instant `signal` aborts. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted)
+      return reject(new DOMException("Aborted", "AbortError"));
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort);
+  });
+}
+
+/**
+ * Retry wrapper around callClaudeApiOnce. Retries ONLY pre-output transient
+ * failures (see shouldAutoRetry); once output has been delivered, or on abort /
+ * non-transient errors, it rethrows immediately.
+ */
 async function callClaudeApi(
   idToken: string,
   body: Record<string, unknown>,
+  idempotencyKey?: string,
   onChunk?: (text: string) => void,
   signal?: AbortSignal,
+  onRetry?: (attempt: number) => void,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any> {
+  for (let attempt = 0; ; attempt++) {
+    let delivered = false;
+    try {
+      return await callClaudeApiOnce(
+        idToken,
+        body,
+        idempotencyKey,
+        onChunk,
+        signal,
+        () => {
+          delivered = true;
+        },
+      );
+    } catch (err) {
+      // A user-initiated abort is final — never retry it.
+      if (
+        signal?.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        throw err;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const status: number | null = (err as any)?.httpStatus ?? null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bodyText: string =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (err as any)?.httpBody ??
+        (err instanceof Error ? err.message : String(err));
+      if (
+        delivered ||
+        attempt >= AUTO_RETRY_MAX ||
+        !shouldAutoRetry(status, bodyText)
+      ) {
+        throw err;
+      }
+      onRetry?.(attempt + 1);
+      await abortableDelay(retryDelayMs(attempt + 1), signal);
+      // fall through to next iteration → retry with the SAME idempotency key
+    }
+  }
+}
+
+// Single attempt — returns full response JSON (non-streaming) or text (streaming).
+// `onFirstOutput` fires the first time any content delta arrives so the retry
+// wrapper knows output has begun (and must not retry past this point).
+async function callClaudeApiOnce(
+  idToken: string,
+  body: Record<string, unknown>,
+  idempotencyKey?: string,
+  onChunk?: (text: string) => void,
+  signal?: AbortSignal,
+  onFirstOutput?: () => void,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
   const response = await fetch(`${AI_PROXY_URL}/v1/chat`, {
     method: "POST",
-    headers: aiProxyHeaders(idToken),
+    headers: aiProxyHeaders(idToken, idempotencyKey),
     body: JSON.stringify(body),
     signal,
   });
@@ -67,8 +183,23 @@ async function callClaudeApi(
   if (!response.ok) {
     const error = await response.text();
     reportIfQuota(response.status, error);
-    throw new Error(`AI error: ${response.status} ${error}`);
+    // Attach the status/body so the retry wrapper can classify transience
+    // without re-parsing the message string.
+    const e = new Error(`AI error: ${response.status} ${error}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (e as any).httpStatus = response.status;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (e as any).httpBody = error;
+    throw e;
   }
+
+  let firstOutputFired = false;
+  const markOutput = () => {
+    if (!firstOutputFired) {
+      firstOutputFired = true;
+      onFirstOutput?.();
+    }
+  };
 
   if (onChunk) {
     const reader = response.body?.getReader();
@@ -114,6 +245,7 @@ async function callClaudeApi(
               case "content_block_delta": {
                 const d = parsed.delta ?? {};
                 if (d.type === "text_delta" && typeof d.text === "string") {
+                  markOutput();
                   fullText += d.text;
                   if (blocks[idx])
                     blocks[idx].text = (blocks[idx].text || "") + d.text;
@@ -123,9 +255,12 @@ async function callClaudeApi(
                   d.type === "input_json_delta" &&
                   typeof d.partial_json === "string"
                 ) {
+                  // A tool call is real output too — once it starts, don't retry.
+                  markOutput();
                   jsonBuf[idx] = (jsonBuf[idx] || "") + d.partial_json;
                 } else if (typeof d.text === "string") {
                   // Backward-compat with any delta shape that only carries text.
+                  markOutput();
                   fullText += d.text;
                   onChunk(fullText);
                 }
@@ -193,6 +328,11 @@ export async function sendToClaude(
   onChunk?: (text: string) => void,
   tools?: boolean,
   customTools?: CustomTool[],
+  // Stable per-logical-request key so error-retries / 再生成 collapse onto ONE
+  // charge server-side. Omit for internal helper calls (e.g. doc summarize).
+  idempotencyKey?: string,
+  // Fired before each automatic pre-output retry so the UI can show a hint.
+  onRetry?: (attempt: number) => void,
 ): Promise<string> {
   const idToken = await getFirebaseIdToken();
 
@@ -224,8 +364,10 @@ export async function sendToClaude(
     const result = await callClaudeApi(
       idToken,
       body,
+      idempotencyKey,
       onChunk,
       controller.signal,
+      onRetry,
     );
 
     if (onChunk) return (result as { text: string }).text;
@@ -259,6 +401,12 @@ export async function sendWithToolLoop(
   tools?: boolean,
   customTools?: CustomTool[],
   onToolStatus?: (status: string) => void,
+  // Stable per-logical-request key. Applied ONLY to the FIRST iteration so a
+  // whole-request 再生成 dedupes at least that opening call; later iterations
+  // grow the message list (different content) and always charge as real calls.
+  idempotencyKey?: string,
+  // Fired before each automatic pre-output retry so the UI can show a hint.
+  onRetry?: (attempt: number) => void,
 ): Promise<string> {
   const idToken = await getFirebaseIdToken();
 
@@ -292,8 +440,11 @@ export async function sendWithToolLoop(
       const streamed = (await callClaudeApi(
         idToken,
         body,
+        // Only the opening call carries the key (see signature note above).
+        i === 0 ? idempotencyKey : undefined,
         (text) => onChunk?.(text),
         controller.signal,
+        onRetry,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       )) as { text: string; content: any[] };
 

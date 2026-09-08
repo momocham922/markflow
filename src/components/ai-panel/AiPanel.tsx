@@ -26,6 +26,7 @@ import {
   MessageSquare,
   ChevronDown,
   Zap,
+  RotateCcw,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -66,6 +67,7 @@ import {
 } from "@/services/firebase";
 import { isIOS, isMobile } from "@/platform";
 import { cn } from "@/lib/utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import { track } from "@/services/telemetry";
 import * as db from "@/services/database";
 
@@ -258,7 +260,24 @@ interface ChatMessage {
   content: string;
   images?: { data: string; mediaType: string }[];
   generatedImage?: { url: string; markdown: string };
+  // Marks an assistant message that came from an error or an interrupted
+  // (incomplete) response. The last such message shows a 再生成 button that
+  // replays the SAME logical request — see `lastTurnRef` / handleRegenerate.
+  // Errors and their 再生成 are NEVER double-charged (same Idempotency-Key).
+  failed?: boolean;
 }
+
+// A replayable snapshot of one LOGICAL AI request (chat turn or quick action).
+// The stable `idempotencyKey` is what lets an error-retry or a user-initiated
+// 再生成 collapse onto ONE server-side charge (ai-proxy decideIdempotencyReuse).
+type AiTurn = {
+  kind: "chat" | "action";
+  system: string;
+  messages: ClaudeMessage[];
+  tools: CustomTool[] | undefined;
+  webSearch: boolean;
+  idempotencyKey: string;
+};
 
 interface ChatThread {
   id: string;
@@ -413,6 +432,10 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prevDocIdRef = useRef<string | null>(null);
   const threadListRef = useRef<HTMLDivElement>(null);
+  // The last logical AI request, retained so 再生成 can replay it with the SAME
+  // idempotency key (no double charge). Cleared on a clean success, an abort, or
+  // a non-retryable limit (quota) where retrying can't help.
+  const lastTurnRef = useRef<AiTurn | null>(null);
 
   // Load custom rules from DB on mount
   useEffect(() => {
@@ -1280,23 +1303,161 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     console.error(`[AiPanel] ${where} failed:`, detail);
     track("ai_error", { where, detail: detail.slice(0, 300) });
     let friendly: string;
-    if (detail.includes("quota_exceeded")) {
-      friendly =
-        "AIの利用回数が上限に達しました。プランをご確認のうえ、時間をおいて再度お試しください。";
-    } else if (where === "image_gen") {
+    if (
+      where === "image_gen" &&
+      err instanceof Error &&
+      err.name === "ImagePromptDeclined"
+    ) {
       // The model declined this specific prompt (recitation/safety) — tell the
       // user to rephrase rather than implying a system failure.
       friendly =
-        err instanceof Error && err.name === "ImagePromptDeclined"
-          ? "このプロンプトでは画像を生成できませんでした。より具体的で独自性のある表現に変えて、もう一度お試しください。"
-          : "画像の生成に失敗しました。もう一度お試しください。";
+        "このプロンプトでは画像を生成できませんでした。より具体的で独自性のある表現に変えて、もう一度お試しください。";
     } else {
-      friendly = "AIの応答に失敗しました。もう一度お試しください。";
+      // All other cases route through the single friendly classifier so we never
+      // leak a raw status / upstream body, and quota / network / auth all read
+      // naturally in one voice.
+      friendly = friendlyErrorMessage(err, "ai");
     }
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), role: "assistant", content: friendly },
     ]);
+  };
+
+  // Show a transient "retrying" hint in the thinking indicator while the client
+  // auto-retries a pre-output transient failure (see claude.ts callClaudeApi).
+  const onAiRetry = (attempt: number) =>
+    setToolStatus(`通信が不安定です。再試行しています…（${attempt}回目）`);
+
+  // Send ONE logical AI turn with its stable idempotency key + auto-retry hook.
+  // Chooses the tool-loop or plain streaming path exactly like the old handlers.
+  const runAiTurn = async (turn: AiTurn): Promise<string> => {
+    if (turn.tools) {
+      setToolStatus(null);
+      const r = await sendWithToolLoop(
+        turn.system,
+        turn.messages,
+        handleToolCall,
+        pushStreamingText,
+        turn.webSearch,
+        turn.tools,
+        (status) => setToolStatus(status),
+        turn.idempotencyKey,
+        onAiRetry,
+      );
+      setToolStatus(null);
+      return r;
+    }
+    return await sendToClaude(
+      "",
+      turn.system,
+      turn.messages,
+      pushStreamingText,
+      turn.webSearch,
+      undefined,
+      turn.idempotencyKey,
+      onAiRetry,
+    );
+  };
+
+  // Run a prepared turn and commit / salvage / mark-failed uniformly. Both the
+  // initial send (handleChat / handleAction) and 再生成 go through here so the
+  // error-handling, partial-salvage, and apiMessages-commit logic lives once.
+  // `prepare` builds the AiTurn inside the streaming try so any prep error is
+  // surfaced the same way as a request error (regenerate passes the stored turn).
+  const executeTurn = async (prepare: () => AiTurn | Promise<AiTurn>) => {
+    setStreaming(true);
+    resetStreamingText();
+    let turn: AiTurn | null = null;
+    try {
+      turn = await prepare();
+      lastTurnRef.current = turn;
+      const result = await runAiTurn(turn);
+      const displayResult = stripImagePlaceholders(result);
+      if (turn.kind === "chat") {
+        setApiMessages([
+          ...turn.messages,
+          { role: "assistant", content: displayResult },
+        ]);
+      }
+      setMessages((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "assistant", content: displayResult },
+      ]);
+      // Clean success — drop the replay handle so no stale 再生成 lingers.
+      lastTurnRef.current = null;
+    } catch (err) {
+      const partial = streamingTextRef.current.trim();
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
+      const detail = err instanceof Error ? err.message : String(err);
+      const where = turn?.kind === "action" ? "quick_action" : "chat";
+      if (isAbort) {
+        // User stopped — not a failure; discard the partial and offer no CTA.
+        lastTurnRef.current = null;
+      } else if (partial) {
+        // Show the partial answer AND mark it failed so 再生成 is offered. A
+        // partial-then-drop already produced output → the server charged it, and
+        // 再生成 reuses that one charge (same key), so recovery is free.
+        console.error(`[AiPanel] ${where} interrupted:`, detail);
+        track("ai_error", { where, detail: detail.slice(0, 300) });
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content:
+              stripImagePlaceholders(partial) +
+              "\n\n---\n\n*（応答が途中で中断されました。下の「再生成」でやり直せます。）*",
+            failed: true,
+          },
+        ]);
+      } else {
+        // No output at all. Route through the shared friendly classifier and
+        // mark it failed so a 再生成 button appears — EXCEPT for quota, where a
+        // retry can't help (suppress the CTA and clear the replay handle).
+        const isQuota =
+          detail.includes("quota_exceeded") || /\b429\b/.test(detail);
+        console.error(`[AiPanel] ${where} failed:`, detail);
+        track("ai_error", { where, detail: detail.slice(0, 300) });
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: friendlyErrorMessage(err, "ai"),
+            failed: !isQuota,
+          },
+        ]);
+        if (isQuota) lastTurnRef.current = null;
+      }
+    } finally {
+      setStreaming(false);
+      resetStreamingText();
+      setToolStatus(null);
+    }
+  };
+
+  // Replay the last failed/interrupted turn with the SAME idempotency key. The
+  // server collapses it onto the original charge (or charges once if the failed
+  // attempt was refunded), so an error-driven 再生成 never counts extra usage.
+  const handleRegenerate = async () => {
+    const turn = lastTurnRef.current;
+    if (!turn || streaming || generatingImage) return;
+    // Drop the trailing failed assistant message(s) so the retry replaces them
+    // instead of stacking a second answer under the same question.
+    setMessages((prev) => {
+      const next = [...prev];
+      while (
+        next.length > 0 &&
+        next[next.length - 1].role === "assistant" &&
+        next[next.length - 1].failed
+      ) {
+        next.pop();
+      }
+      return next;
+    });
+    track("ai_regenerate", { where: turn.kind });
+    await executeTurn(() => turn);
   };
 
   const handleImageGen = async () => {
@@ -1421,70 +1582,26 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       content: displayLabel,
     };
     setMessages((prev) => [...prev, userMsg]);
-    setStreaming(true);
-    resetStreamingText();
 
-    try {
+    // A fresh logical request gets a fresh idempotency key; a later 再生成 of
+    // THIS action reuses it (see handleRegenerate) so an error retry is free.
+    await executeTurn(() => {
       // Quick actions never edit the document — the user applies the result via
       // the Replace/Append buttons on the answer instead.
       const { tools: turnTools, system: turnSystem } = buildTurnTools({
         allowWrite: false,
       });
-      let result: string;
-
-      if (turnTools) {
-        setToolStatus(null);
-        result = await sendWithToolLoop(
-          turnSystem,
-          [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          handleToolCall,
-          pushStreamingText,
-          webSearch,
-          turnTools,
-          (status) => setToolStatus(status),
-        );
-        setToolStatus(null);
-      } else {
-        result = await sendToClaude(
-          "",
-          turnSystem,
-          [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          pushStreamingText,
-          webSearch,
-        );
-      }
-      const assistantMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: result,
+      return {
+        kind: "action",
+        system: turnSystem,
+        messages: [
+          { role: "user", content: `${action.prompt}\n\n${targetText}` },
+        ],
+        tools: turnTools,
+        webSearch,
+        idempotencyKey: crypto.randomUUID(),
       };
-      setMessages((prev) => [...prev, assistantMsg]);
-    } catch (err) {
-      // Salvage a partial quick-action result rather than discarding it (same
-      // rationale as chat below). Abort (stop button) and quota limits fall
-      // through to the friendly-error path.
-      const partial = streamingTextRef.current.trim();
-      const isAbort = err instanceof DOMException && err.name === "AbortError";
-      const detail = err instanceof Error ? err.message : String(err);
-      if (partial && !isAbort && !detail.includes("quota_exceeded")) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content:
-              partial +
-              "\n\n---\n\n*（応答が途中で中断されました。もう一度お試しください。）*",
-          },
-        ]);
-      } else {
-        pushFriendlyError("quick_action", err);
-      }
-    } finally {
-      setStreaming(false);
-      resetStreamingText();
-      setToolStatus(null);
-    }
+    });
   };
 
   const handleChat = async () => {
@@ -1520,10 +1637,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             : undefined,
       },
     ]);
-    setStreaming(true);
-    resetStreamingText();
-
-    try {
+    // A fresh logical request gets a fresh idempotency key; a later 再生成 of
+    // THIS turn reuses it (handleRegenerate) so an error retry never re-bills.
+    // The turn is BUILT inside executeTurn's try so a prep error (e.g. context
+    // assembly) surfaces through the same friendly-error path as a request error.
+    await executeTurn(async () => {
       const isFirstMessage = apiMessages.length === 0;
       const context = await buildContextPrefix();
 
@@ -1559,65 +1677,15 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       const { tools: turnTools, system: turnSystem } = buildTurnTools({
         allowWrite: true,
       });
-      let result: string;
-
-      if (turnTools) {
-        setToolStatus(null);
-        result = await sendWithToolLoop(
-          turnSystem,
-          newApiMessages,
-          handleToolCall,
-          pushStreamingText,
-          webSearch,
-          turnTools,
-          (status) => setToolStatus(status),
-        );
-        setToolStatus(null);
-      } else {
-        result = await sendToClaude(
-          "",
-          turnSystem,
-          newApiMessages,
-          pushStreamingText,
-          webSearch,
-        );
-      }
-
-      // Strip any [[MARKFLOW_IMAGE_n]] placeholder the model may have echoed into
-      // its reply — it's only meant to travel to write_document, never to the user.
-      const displayResult = stripImagePlaceholders(result);
-      setApiMessages([
-        ...newApiMessages,
-        { role: "assistant", content: displayResult },
-      ]);
-      setMessages((prev) => [
-        ...prev,
-        { id: crypto.randomUUID(), role: "assistant", content: displayResult },
-      ]);
-    } catch (err) {
-      // Salvage any partial streamed answer instead of discarding it — a
-      // mid-stream drop (flaky mobile network) shouldn't wipe a nearly complete
-      // response. AbortError (stop button) and quota limits fall through to the
-      // friendly-error path.
-      const partial = streamingTextRef.current.trim();
-      const isAbort = err instanceof DOMException && err.name === "AbortError";
-      const detail = err instanceof Error ? err.message : String(err);
-      if (partial && !isAbort && !detail.includes("quota_exceeded")) {
-        const salvaged =
-          stripImagePlaceholders(partial) +
-          "\n\n---\n\n*（応答が途中で中断されました。もう一度お試しください。）*";
-        setMessages((prev) => [
-          ...prev,
-          { id: crypto.randomUUID(), role: "assistant", content: salvaged },
-        ]);
-      } else {
-        pushFriendlyError("chat", err);
-      }
-    } finally {
-      setStreaming(false);
-      resetStreamingText();
-      setToolStatus(null);
-    }
+      return {
+        kind: "chat",
+        system: turnSystem,
+        messages: newApiMessages,
+        tools: turnTools,
+        webSearch,
+        idempotencyKey: crypto.randomUUID(),
+      };
+    });
   };
 
   // Scroll to bottom within the native scroll container only
@@ -2063,7 +2131,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
               <span className="text-[10px]">Cmd+Enter to send</span>
             </p>
           )}
-          {messages.map((msg) => (
+          {messages.map((msg, mi) => (
             <div
               key={msg.id}
               className={`text-xs ${
@@ -2210,6 +2278,31 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
                   </div>
                 )}
               </div>
+              {/* 再生成 CTA — offered only on the LAST assistant message that
+                  failed or was interrupted. Replays the same logical request
+                  with the same idempotency key, so the error attempt is not
+                  billed and the eventual success counts as a single use. */}
+              {msg.role === "assistant" &&
+                msg.failed &&
+                mi === messages.length - 1 &&
+                !streaming &&
+                !generatingImage &&
+                lastTurnRef.current && (
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className={cn(
+                        "gap-1 cursor-pointer",
+                        isMobile ? "h-9 text-sm" : "h-7 text-[11px]",
+                      )}
+                      onClick={handleRegenerate}
+                    >
+                      <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} />
+                      再生成
+                    </Button>
+                  </div>
+                )}
             </div>
           ))}
           {/* Write-to-document proposal — the AI decided to edit the doc; apply

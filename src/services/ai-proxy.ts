@@ -10,14 +10,26 @@ import { useEntitlementStore, type Feature } from "@/stores/entitlement-store";
 // OWNER_UIDS — it is a no-op (and never an escalation) for anyone else.
 // =====================================================================
 
-/** Build auth headers for an ai-proxy call, adding X-View-As when previewing. */
-export function aiProxyHeaders(token: string): Record<string, string> {
+/**
+ * Build auth headers for an ai-proxy call, adding X-View-As when previewing.
+ *
+ * `idempotencyKey` (optional) stamps a stable key for a LOGICAL AI request so the
+ * server can collapse its error-retries / 再生成 onto ONE charge (see ai-proxy
+ * /v1/chat + gating.decideIdempotencyReuse). The client MUST reuse the same key
+ * across every automatic retry and user-initiated regenerate of that one request;
+ * a new logical request gets a new key.
+ */
+export function aiProxyHeaders(
+  token: string,
+  idempotencyKey?: string,
+): Record<string, string> {
   const viewAs = useEntitlementStore.getState().viewAs;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
   if (viewAs) headers["X-View-As"] = viewAs;
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   return headers;
 }
 
