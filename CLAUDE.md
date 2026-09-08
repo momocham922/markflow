@@ -112,18 +112,25 @@ TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
 git checkout release/beta
 ./scripts/bump-version.sh X.Y.Z-beta.N
 git add -A && git commit
-# VITE_BILLING_ENABLED=true はベータ限定で課金UIを点灯させる（StripeテストモードでPro/Team
-# 購入フローを実費ゼロ検証するため）。iOS(release-testflight.sh)/Android(release-android-
-# internal.sh)/Windows(release-beta.yml)は既にインライン点灯済み。**macOSだけはこのローカル
-# ビルドコマンドで明示しないと点灯が抜け、デスクトップだけ課金ダークの非対称配信になる**
-# （beta.9で実際に踏んだ回帰）。Stableビルドは絶対に付けない（stableはStripe本番GOまでダーク）。
+# macOSローカルビルドは2つのenvが必須（どちらも欠けると欠陥ビルド・stableには絶対付けない）:
+# ・VITE_BILLING_ENABLED=true — ベータ限定で課金UI点灯（StripeテストモードでPro/Team購入を
+#   実費ゼロ検証）。iOS/Android/Windows(CI)はインライン点灯済。**macOSだけ欠けると課金ダークの
+#   非対称配信**（beta.9で踏んだ回帰）。
+# ・MARKFLOW_UPDATE_BASE=https://markflow.jp/updates — 自社ドメイン更新配信への移行ビルド
+#   （決定①）。option_env!でコンパイル時に焼き込む。**欠けるとmacOSクライアントがGitHubを
+#   ポーリングし続け移行が巻き戻る**（beta.16で欠落ビルドを踏んだ回帰）。Windows CIは点灯済。
 TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+  MARKFLOW_UPDATE_BASE="https://markflow.jp/updates" \
   VITE_BILLING_ENABLED=true pnpm tauri build
-./scripts/release-beta.sh
+# ビルド後に焼き込み実測: strings src-tauri/target/release/markflow で
+#   github.com/.../releases が0件・markflow.jp/updates が≥1件であること。
+./scripts/release-beta.sh              # GitHub beta タグ（旧クライアント向け）
+./scripts/release-updates-gcs.sh beta  # GCS 自社ドメイン（移行ビルド向け）— dual-publish必須
 ```
 
 - Creates/replaces the `beta` tag release on GitHub as a prerelease
+- **Dual-publish必須**: `release-beta.sh`（GitHub＝旧クライアント）と `release-updates-gcs.sh beta`（GCS＝markflow.jp/updatesをポーリングする移行ビルド）の両方を実行しないと未完了。片方だけだと片系のクライアントに更新が届かない
 - Beta channel users receive update automatically
 
 #### Beta → Stable 昇格
@@ -176,8 +183,8 @@ git add -A && git commit && git push
 
 1. `./scripts/bump-version.sh X.Y.Z-beta.N`
 2. `git add -A && git commit && git push`
-3. **macOS**: ローカルで署名ビルド → `./scripts/release-beta.sh`（または `release-stable.sh`）
-4. **Windows**: GitHub Actionsが `package.json` 変更を検知して自動ビルド → 既存リリースにWindows版を追加
+3. **macOS**: ローカルで署名ビルド → `./scripts/release-beta.sh` ＋ `./scripts/release-updates-gcs.sh beta`（dual-publish）
+4. **Windows**: GitHub Actionsが `package.json` 変更を検知して自動ビルド → 既存リリースにWindows版を追加（`release-updates-gcs.sh beta` がGitHubからGCSへミラー）
 5. **iOS**: ローカルで `./scripts/release-testflight.sh`
 6. **Android**: `ANDROID_KEYSTORE_PASS=<REDACTED: local secret store> ./scripts/release-android-internal.sh`
 
@@ -190,8 +197,11 @@ TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/markflow.key)" \
   APPLE_API_KEY="<APPLE_API_KEY>" \
   APPLE_API_ISSUER="<APPLE_API_ISSUER>" \
   APPLE_API_KEY_PATH="~/.tauri/AuthKey_<APPLE_API_KEY>.p8" \
-  VITE_BILLING_ENABLED=true pnpm tauri build   # ベータのみ点灯（stableは付けない）
-./scripts/release-beta.sh
+  MARKFLOW_UPDATE_BASE="https://markflow.jp/updates" \
+  VITE_BILLING_ENABLED=true pnpm tauri build   # 両envともベータ必須（stableは付けない）
+./scripts/release-beta.sh              # GitHub（旧クライアント）
+# Windows CI が beta exe を GitHub beta にアップロード後に実行（GCS beta.json に windows も入る）:
+./scripts/release-updates-gcs.sh beta  # GCS 自社ドメイン（移行ビルド）— dual-publish必須
 ./scripts/release-testflight.sh
 ANDROID_KEYSTORE_PASS=<REDACTED: local secret store> ./scripts/release-android-internal.sh
 ```
