@@ -216,12 +216,19 @@
     touch-action: manipulation;
   }
 
-  /* Suppress selection highlight on non-editable chrome.
-     WebKit/WKWebView can leave phantom ::selection renders on
-     user-select:none elements — making them transparent prevents
-     any visible artifact even if the browser fails to repaint. */
+  /* Base: suppress selection highlight on non-editable chrome (app-like feel).
+     WebKit/WKWebView can leave phantom ::selection renders on user-select:none
+     elements — a transparent base prevents any visible artifact.
+     - `background-color` LONGHAND, not the `background` shorthand: per CSS
+       Pseudo-4 §highlight-styling / MDN, ::selection only honors a whitelist
+       (color, background-color, text-decoration, text-shadow, -webkit-text-*);
+       the `background` shorthand is NOT in it, so it was silently ignored.
+     - NON-!important on purpose: the content-area rules below use !important so
+       they win by IMPORTANCE (the strongest, engine-agnostic cascade signal) —
+       we do NOT rely on ::selection specificity, whose WebKit behavior we can't
+       verify. UA default selection is still overridden (author > UA). */
   ::selection {
-    background: transparent !important;
+    background-color: transparent;
   }
 
   /* Cursor: pointer on all interactive elements */
@@ -256,23 +263,61 @@ input {
   -webkit-user-select: text !important;
 }
 
-/* Visible selection highlight — only in content areas.
-   The global chrome rule above sets `::selection { background: transparent
-   !important }` to kill phantom highlights on user-select:none elements. An
-   !important declaration always beats a non-!important one regardless of
-   specificity, so these content-area rules MUST also be !important or the
-   transparent global wins and selection is invisible in the preview pane and
-   AI panel (both .prose/.select-text). The CodeMirror editor was unaffected
-   because it paints its own .cm-selectionBackground overlay (editor-themes.ts),
-   not the native ::selection pseudo — which is why only prose/AI looked broken.
-   Color matches the editor's focused selection (oklch 0.7 0.15 250 / 0.3). */
+/* Visible selection highlight — only in content areas (preview pane + AI panel +
+   editor + inputs). Three hard-won facts drive the exact form of these rules:
+
+   1. THEME-AWARE (light/dark split). A single semi-transparent blue cannot be
+      clearly visible on BOTH backgrounds: the old ~30% alpha (#4ba3f74d) was fine
+      on light but VANISHED on the app's dark backgrounds — which is the exact bug
+      the user reported (selection worked but didn't visibly invert). Verified in
+      the real WKWebView: native ::selection paints correctly (an opaque diagnostic
+      color showed), so the defect was purely colour FAINTNESS over the dark bg, not
+      cascade/shorthand/compositing. The CodeMirror editor sidesteps this by using
+      per-theme OPAQUE selection colours (editor-themes.ts); we mirror that here with
+      a `.dark`-keyed override that is brighter and higher-alpha so it pops on dark.
+   2. `background-color` LONGHAND, never the `background` shorthand. On ::selection
+      WebKit only applies a property whitelist (color, background-color,
+      text-decoration, text-shadow, -webkit-text-*); the `background` shorthand is
+      silently ignored (CSS Pseudo-4 / MDN).
+   3. These MUST be !important so they beat the non-!important base
+      `::selection { background-color: transparent }` by IMPORTANCE — the strongest
+      cascade signal, which every engine (incl. WebKit) respects. We deliberately
+      do NOT lean on ::selection specificity.
+
+   BOTH combinator forms are listed per class:
+   - `.prose ::selection` (descendant) matches selection inside child text nodes
+     (e.g. <p> inside .prose).
+   - `.prose::selection` (no space) matches selection of the element's OWN direct
+     text (AI user bubble <span class="select-text">, voice panel <div>).
+
+   No `color` override: selected text keeps its own color and shows through the
+   translucent highlight (avoids the color:inherit undefined-parent foot-gun). */
 .cm-editor ::selection,
+.cm-editor::selection,
 .prose ::selection,
+.prose::selection,
+.ai-markdown ::selection,
+.ai-markdown::selection,
 .select-text ::selection,
+.select-text::selection,
 textarea::selection,
 input::selection {
-  background: oklch(0.7 0.15 250 / 0.3) !important;
-  color: inherit;
+  /* Light mode: mid blue at 40% — clearly visible on light bg, dark text readable. */
+  background-color: oklch(0.7 0.15 250 / 0.4) !important;
+}
+.dark .cm-editor ::selection,
+.dark .cm-editor::selection,
+.dark .prose ::selection,
+.dark .prose::selection,
+.dark .ai-markdown ::selection,
+.dark .ai-markdown::selection,
+.dark .select-text ::selection,
+.dark .select-text::selection,
+.dark textarea::selection,
+.dark input::selection {
+  /* Dark mode: brighter, higher-alpha blue so it pops on dark bg (a low-alpha
+     colour is invisible here — the original bug). Light prose text stays readable. */
+  background-color: oklch(0.62 0.17 250 / 0.6) !important;
 }
 
 .tiptap,
@@ -724,7 +769,9 @@ input::selection {
   -webkit-user-select: none !important;
 }
 .cm-editor .cm-gutters ::selection {
-  background: transparent !important;
+  /* background-color longhand (shorthand is ignored on ::selection); !important
+     to override the content-area selection rule above for the non-text gutter. */
+  background-color: transparent !important;
 }
 
 /* ---- Global custom scrollbar ---- */

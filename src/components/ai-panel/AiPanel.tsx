@@ -2509,7 +2509,9 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             rows={1}
             disabled={streaming}
             className={cn(
-              "flex-1 rounded-md border border-input bg-background outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border",
+              // Hide the scrollbar entirely (still scrollable past the 120px cap
+              // via cursor/keyboard) — the visible bar was distracting.
+              "flex-1 rounded-md border border-input bg-background outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:hidden [scrollbar-width:none]",
               // Mobile: min-h matches the compact 36px buttons and text-base
               // (16px) prevents iOS focus-zoom. Desktop keeps the compact sizing.
               isMobile
