@@ -1,15 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   negotiateProtocolVersion,
   LATEST_PROTOCOL_VERSION,
   buildInitializeResult,
   TOOLS,
+  CREATE_DOCUMENT_TOOL,
+  toolsFor,
   MAX_LIST_LIMIT,
   DEFAULT_LIST_LIMIT,
+  MAX_CREATE_CONTENT_CHARS,
+  MAX_CREATE_TITLE_CHARS,
+  MAX_CREATE_TAGS,
+  MAX_CREATE_TAG_CHARS,
   searchDocuments,
   formatDocList,
   formatDocFull,
   formatSearchResults,
+  deriveTitleFromMarkdown,
+  formatCreatedDoc,
   snippet,
   callTool,
   handleMcpMessage,
@@ -18,6 +26,8 @@ import {
   isPersonalDocData,
   type McpDoc,
   type McpDeps,
+  type CreateDocInput,
+  type CreateDocResult,
 } from "./mcp";
 
 const DOCS: McpDoc[] = [
@@ -356,5 +366,278 @@ describe("JSON-RPC helpers", () => {
   it("hasId distinguishes requests from notifications", () => {
     expect(hasId({ jsonrpc: "2.0", id: 0, method: "x" })).toBe(true);
     expect(hasId({ jsonrpc: "2.0", method: "x" })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Write surface — create_document (create-only import "inbox")
+// ---------------------------------------------------------------------
+
+// A deps object WITH a createDoc spy → write-enabled connection. The spy echoes a
+// synthetic McpDoc so callTool's success path (formatCreatedDoc) can be asserted.
+function depsForWrite(
+  docs: McpDoc[],
+  createImpl?: (input: CreateDocInput) => Promise<CreateDocResult>,
+): McpDeps & { createDoc: ReturnType<typeof vi.fn> } {
+  const createDoc = vi.fn(
+    createImpl ??
+      (async (input: CreateDocInput): Promise<CreateDocResult> => ({
+        ok: true,
+        doc: {
+          id: "new-id",
+          title: input.title,
+          content: input.content,
+          updatedAt: 5000,
+          createdAt: 5000,
+          folder: "/Claude",
+          tags: input.tags,
+          docType: "markdown",
+        },
+      })),
+  );
+  return {
+    listDocs: async () => [...docs].sort((x, y) => y.updatedAt - x.updatedAt),
+    getDoc: async (id) => docs.find((d) => d.id === id) || null,
+    createDoc,
+  };
+}
+
+describe("toolsFor (write tool advertised only when write-enabled)", () => {
+  it("read-only → exactly the three read tools, no create_document", () => {
+    const names = toolsFor(false).map((t) => t.name);
+    expect(names).toEqual([
+      "list_documents",
+      "search_documents",
+      "get_document",
+    ]);
+    expect(names).not.toContain("create_document");
+  });
+  it("write-enabled → read tools plus create_document (4 total)", () => {
+    const names = toolsFor(true).map((t) => t.name);
+    expect(names).toContain("create_document");
+    expect(names.length).toBe(4);
+    // Read tools are still present + unchanged.
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "list_documents",
+        "search_documents",
+        "get_document",
+      ]),
+    );
+  });
+});
+
+describe("CREATE_DOCUMENT_TOOL schema + hints", () => {
+  it("requires only content, rejects unknown args (additionalProperties:false)", () => {
+    expect(CREATE_DOCUMENT_TOOL.name).toBe("create_document");
+    const schema = CREATE_DOCUMENT_TOOL.inputSchema as {
+      required?: string[];
+      additionalProperties?: boolean;
+      properties: Record<string, unknown>;
+    };
+    expect(schema.required).toEqual(["content"]);
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties).sort()).toEqual([
+      "content",
+      "tags",
+      "title",
+    ]);
+  });
+  it("declares accurate mutating-but-additive annotations", () => {
+    const a = CREATE_DOCUMENT_TOOL.annotations as Record<string, boolean>;
+    expect(a.readOnlyHint).toBe(false); // it writes
+    expect(a.destructiveHint).toBe(false); // never overwrites/deletes
+    expect(a.idempotentHint).toBe(false); // each call creates another doc
+    expect(a.openWorldHint).toBe(false);
+  });
+});
+
+describe("callTool create_document", () => {
+  it("is refused when the connection is read-only (no deps.createDoc)", async () => {
+    const r = await callTool(
+      "create_document",
+      { content: "hello" },
+      depsFor(DOCS),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("not enabled");
+  });
+
+  it("rejects missing/empty/whitespace content without calling createDoc", async () => {
+    const deps = depsForWrite(DOCS);
+    for (const args of [{}, { content: "" }, { content: "   \n\t  " }]) {
+      const r = await callTool("create_document", args, deps);
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain("content");
+    }
+    expect(deps.createDoc).not.toHaveBeenCalled();
+  });
+
+  it("rejects content over the size cap without calling createDoc", async () => {
+    const deps = depsForWrite(DOCS);
+    const huge = "x".repeat(MAX_CREATE_CONTENT_CHARS + 1);
+    const r = await callTool("create_document", { content: huge }, deps);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("too large");
+    expect(deps.createDoc).not.toHaveBeenCalled();
+  });
+
+  it("creates with a derived title when none is supplied, returns confirmation", async () => {
+    const deps = depsForWrite(DOCS);
+    const r = await callTool(
+      "create_document",
+      { content: "# My Heading\n\nbody text" },
+      deps,
+    );
+    expect(r.isError).toBeFalsy();
+    expect(deps.createDoc).toHaveBeenCalledTimes(1);
+    const passed = deps.createDoc.mock.calls[0][0] as CreateDocInput;
+    expect(passed.title).toBe("My Heading");
+    expect(passed.content).toBe("# My Heading\n\nbody text");
+    expect(r.content[0].text).toContain("Created a new document");
+    expect(r.content[0].text).toContain("My Heading");
+  });
+
+  it("uses an explicit title (trimmed + capped)", async () => {
+    const deps = depsForWrite(DOCS);
+    const longTitle = "T".repeat(MAX_CREATE_TITLE_CHARS + 50);
+    await callTool(
+      "create_document",
+      { content: "body", title: `   ${longTitle}   ` },
+      deps,
+    );
+    const passed = deps.createDoc.mock.calls[0][0] as CreateDocInput;
+    expect(passed.title.length).toBe(MAX_CREATE_TITLE_CHARS);
+    expect(passed.title).toBe(longTitle.slice(0, MAX_CREATE_TITLE_CHARS));
+  });
+
+  it("normalizes tags: trims, drops blanks/non-strings, de-dupes, caps count + length", async () => {
+    const deps = depsForWrite(DOCS);
+    const many = Array.from(
+      { length: MAX_CREATE_TAGS + 10 },
+      (_, i) => `tag${i}`,
+    );
+    await callTool(
+      "create_document",
+      {
+        content: "body",
+        tags: [
+          "  alpha  ",
+          "alpha", // duplicate → dropped
+          "", // blank → dropped
+          42 as unknown as string, // non-string → dropped
+          "z".repeat(MAX_CREATE_TAG_CHARS + 20), // over-long → capped
+          ...many,
+        ],
+      },
+      deps,
+    );
+    const passed = deps.createDoc.mock.calls[0][0] as CreateDocInput;
+    expect(passed.tags.length).toBeLessThanOrEqual(MAX_CREATE_TAGS);
+    expect(passed.tags).toContain("alpha");
+    // de-dup: "alpha" appears once
+    expect(passed.tags.filter((t) => t === "alpha").length).toBe(1);
+    // no blank / non-string leaked
+    expect(passed.tags).not.toContain("");
+    // each tag within the per-tag cap
+    for (const t of passed.tags) {
+      expect(t.length).toBeLessThanOrEqual(MAX_CREATE_TAG_CHARS);
+    }
+  });
+
+  it("surfaces a createDoc failure ({ok:false}) as an in-band tool error", async () => {
+    const deps = depsForWrite(DOCS, async () => ({
+      ok: false,
+      message: "Rate limit exceeded. Try again later.",
+    }));
+    const r = await callTool("create_document", { content: "body" }, deps);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("Rate limit exceeded");
+  });
+});
+
+describe("handleMcpMessage tools/list reflects write-eligibility", () => {
+  it("lists 4 tools including create_document for a write-enabled connection", async () => {
+    const res = await handleMcpMessage(
+      { jsonrpc: "2.0", id: 20, method: "tools/list" },
+      depsForWrite(DOCS),
+    );
+    const tools = (res?.result as { tools: Array<{ name: string }> }).tools;
+    expect(tools.length).toBe(4);
+    expect(tools.map((t) => t.name)).toContain("create_document");
+  });
+  it("still lists only 3 tools for a read-only connection", async () => {
+    const res = await handleMcpMessage(
+      { jsonrpc: "2.0", id: 21, method: "tools/list" },
+      depsFor(DOCS),
+    );
+    const tools = (res?.result as { tools: Array<{ name: string }> }).tools;
+    expect(tools.length).toBe(3);
+    expect(tools.map((t) => t.name)).not.toContain("create_document");
+  });
+  it("dispatches a create_document tools/call end-to-end", async () => {
+    const deps = depsForWrite(DOCS);
+    const res = await handleMcpMessage(
+      {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: {
+          name: "create_document",
+          arguments: { content: "hello world" },
+        },
+      },
+      deps,
+    );
+    const result = res?.result as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain("Created a new document");
+    expect(deps.createDoc).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("deriveTitleFromMarkdown", () => {
+  it("prefers the first ATX heading", () => {
+    expect(deriveTitleFromMarkdown("## Section Two\n\nbody")).toBe(
+      "Section Two",
+    );
+    expect(deriveTitleFromMarkdown("intro line\n# Real Title\nmore")).toBe(
+      "intro line",
+    ); // first non-blank wins when it precedes the heading
+  });
+  it("uses the first non-blank line and strips list/quote markers", () => {
+    expect(deriveTitleFromMarkdown("- bullet point")).toBe("bullet point");
+    expect(deriveTitleFromMarkdown("> quoted")).toBe("quoted");
+    expect(deriveTitleFromMarkdown("1. numbered")).toBe("numbered");
+    expect(deriveTitleFromMarkdown("\n\n   spaced   \n")).toBe("spaced");
+  });
+  it("falls back to 'Untitled' for empty/whitespace content", () => {
+    expect(deriveTitleFromMarkdown("")).toBe("Untitled");
+    expect(deriveTitleFromMarkdown("   \n\t\n  ")).toBe("Untitled");
+  });
+  it("caps the derived title length", () => {
+    const long = "w".repeat(MAX_CREATE_TITLE_CHARS + 100);
+    expect(deriveTitleFromMarkdown(long).length).toBe(MAX_CREATE_TITLE_CHARS);
+  });
+});
+
+describe("formatCreatedDoc", () => {
+  it("includes title, id, folder and tags", () => {
+    const out = formatCreatedDoc({
+      id: "xyz",
+      title: "Imported note",
+      content: "…",
+      updatedAt: 1,
+      folder: "/Claude",
+      tags: ["a", "b"],
+    });
+    expect(out).toContain("Created a new document");
+    expect(out).toContain("Title: Imported note");
+    expect(out).toContain("Id: xyz");
+    expect(out).toContain("Folder: /Claude");
+    expect(out).toContain("Tags: a, b");
   });
 });

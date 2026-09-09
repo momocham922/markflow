@@ -1,4 +1,5 @@
 import http from "http";
+import { randomUUID } from "crypto";
 import Stripe from "stripe";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
 import { getAuth, type UserRecord } from "firebase-admin/auth";
@@ -64,7 +65,12 @@ import {
   handleMcpMessage,
   isRequest,
   isPersonalDocData,
+  deriveTitleFromMarkdown,
   MAX_RPC_BATCH,
+  MAX_CREATE_CONTENT_CHARS,
+  MAX_CREATE_TITLE_CHARS,
+  MAX_CREATE_TAGS,
+  MAX_CREATE_TAG_CHARS,
   type McpDoc,
   type McpDeps,
   type JsonRpcRequest,
@@ -1615,6 +1621,25 @@ const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
 // off. Set via Cloud Run env MCP_UIDS (comma-separated) to enable per-uid.
 const MCP_UIDS = parseUidSet(process.env.MCP_UIDS);
 
+// MCP *write* allowlist (create_document import "inbox"): uids permitted to have
+// the MCP connection CREATE new documents, on top of read access. SEPARATE + even
+// darker than MCP_UIDS: with this unset the connection is read-only (create tool
+// neither advertised nor callable), so write ships dark independently of read. A
+// uid here still must also pass mcpEligible (read gate); this is strictly additive
+// and allowlist-only (no plan-based fallback — write is never auto-granted).
+const MCP_IMPORT_UIDS = parseUidSet(process.env.MCP_IMPORT_UIDS);
+
+// Fixed destination folder for MCP-created documents. The create_document tool
+// CANNOT choose a folder — every import lands here so the blast radius is one
+// known, user-reviewable folder. Normalized to exactly one leading slash (the
+// sidebar keys its folder tree on a leading-slash path; see Sidebar.buildTree),
+// no trailing slash. Overridable via MCP_IMPORT_FOLDER; defaults to "/Claude".
+const MCP_IMPORT_FOLDER = (() => {
+  const raw = (process.env.MCP_IMPORT_FOLDER || "/Claude").trim();
+  const collapsed = raw.replace(/^\/+/, "").replace(/\/+$/, "");
+  return "/" + (collapsed || "Claude");
+})();
+
 // HMAC key for signing the Google-OAuth round-trip `state` (Option b). Derived
 // from the server-only GOOGLE_OAUTH_CLIENT_SECRET (domain-separated), so no new
 // secret/env is needed. Empty when the secret is unset => /authorize + the Google
@@ -1891,6 +1916,18 @@ async function mcpEligible(uid: string): Promise<boolean> {
   if (INTERNAL_UIDS.has(uid)) return true; // internal staff, never blocked by a blip
   const ent = await loadEntitlement(uid);
   return ent.realPlan === "pro" || ent.realPlan === "team";
+}
+
+// MCP *write* eligibility (create_document import "inbox"). Synchronous + purely
+// allowlist-based: a uid may create documents ONLY if MCP_IMPORT_UIDS is set AND
+// lists them. Unlike mcpEligible there is NO plan-based or internal-staff fallback
+// — write is never auto-granted by tier, only by explicit opt-in. Read access is
+// still required separately (the caller only wires createDoc for read-eligible
+// uids), so this is strictly additive. Dark by default: unset => always false.
+function mcpImportEligible(uid: string): boolean {
+  if (MCP_IMPORT_UIDS.size === 0) return false; // write dark
+  if (!uid) return false;
+  return MCP_IMPORT_UIDS.has(uid);
 }
 
 /**
@@ -2272,6 +2309,19 @@ const MCP_RPC_MAX_PER_UID = 300;
 function mcpRpcRateLimited(uid: string): boolean {
   return mcpRateHit("rpc:" + uid, MCP_RPC_MAX_PER_UID, MCP_RPC_WINDOW_SEC);
 }
+// Per-uid throttle specifically for create_document (write). Much tighter than the
+// generic RPC cap: a create is a permanent Firestore WRITE, so this bounds how
+// many documents a looping/compromised client can spawn into the user's library.
+// 60/hour is ample for a human-driven import flow and caps runaway writes.
+const MCP_CREATE_WINDOW_SEC = 3600;
+const MCP_CREATE_MAX_PER_UID = 60;
+function mcpCreateRateLimited(uid: string): boolean {
+  return mcpRateHit(
+    "mcpcreate:" + uid,
+    MCP_CREATE_MAX_PER_UID,
+    MCP_CREATE_WINDOW_SEC,
+  );
+}
 // Pre-auth per-IP throttle for /mcp: the bearer-token lookup is a real Firestore
 // read that runs BEFORE the per-uid throttle above, so an UNauthenticated flood of
 // bogus bearer tokens would otherwise drive uncapped Firestore reads (cost/quota)
@@ -2380,7 +2430,7 @@ function mcpDepsForUid(uid: string): McpDeps {
   // request): a JSON-RPC batch with several list/search calls then costs ONE
   // Firestore query instead of one per element (read-amplification guard).
   let listPromise: Promise<McpDoc[]> | null = null;
-  return {
+  const deps: McpDeps = {
     listDocs: () => {
       if (!listPromise) {
         listPromise = (async () => {
@@ -2406,6 +2456,95 @@ function mcpDepsForUid(uid: string): McpDeps {
       return mcpFirestoreDocToMcp(snap.id, data);
     },
   };
+
+  // Write surface (create_document) is wired ONLY for uids on the write allowlist
+  // (mcpImportEligible). Its mere presence is what advertises + enables the tool
+  // (see mcp.ts toolsFor / callTool); read-only connections never get it.
+  if (mcpImportEligible(uid)) {
+    deps.createDoc = async (input) => {
+      // Per-uid write throttle: create is a permanent Firestore write, so bound
+      // how many docs a looping/compromised client can spawn (60/hour).
+      if (mcpCreateRateLimited(uid)) {
+        return {
+          ok: false,
+          message: "Too many documents created recently. Try again later.",
+        };
+      }
+      // Defense in depth: callTool already normalized + capped these, but the
+      // Firestore boundary must not trust a single upstream choke point. Re-cap
+      // content/title/tags here so no oversized/malformed write can ever land.
+      const content = typeof input.content === "string" ? input.content : "";
+      if (!content.trim()) {
+        return { ok: false, message: "Content must not be empty." };
+      }
+      if (content.length > MAX_CREATE_CONTENT_CHARS) {
+        return { ok: false, message: "Content is too large." };
+      }
+      const rawTitle =
+        typeof input.title === "string" ? input.title.trim() : "";
+      const title =
+        rawTitle.slice(0, MAX_CREATE_TITLE_CHARS) ||
+        deriveTitleFromMarkdown(content);
+      const tags = Array.isArray(input.tags)
+        ? input.tags
+            .filter((t): t is string => typeof t === "string")
+            .map((t) => t.trim().slice(0, MAX_CREATE_TAG_CHARS))
+            .filter((t) => t.length > 0)
+            .slice(0, MAX_CREATE_TAGS)
+        : [];
+
+      // Fresh UUID + `.create()` = HARD create-only: `.create()` fails with
+      // ALREADY_EXISTS rather than overwriting, so this path can never clobber an
+      // existing document even on an (astronomically unlikely) id collision. The
+      // shape mirrors saveDocumentToFirestore's create branch so the doc renders
+      // identically in-app, and every field that determines ownership/placement/
+      // classification is HARD-BOUND server-side (never client-controlled):
+      //   ownerId          = the authenticated uid          (not from the tool args)
+      //   folder           = MCP_IMPORT_FOLDER (fixed)       (tool cannot choose)
+      //   teamId/collab*   = personal-doc invariants         (never a team/shared doc)
+      const id = randomUUID();
+      const now = FieldValue.serverTimestamp();
+      const payload = {
+        title,
+        content,
+        ownerId: uid,
+        folder: MCP_IMPORT_FOLDER,
+        tags,
+        titlePinned: false,
+        docType: "markdown",
+        teamId: null,
+        collaborators: {},
+        collaboratorUids: [],
+        createdAt: now,
+        updatedAt: now,
+        source: "mcp_import", // provenance marker (ignored by the client mapper)
+      };
+      try {
+        await getFirestore().collection("documents").doc(id).create(payload);
+      } catch (err) {
+        console.error(
+          `[mcp] create_document failed for ${uid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { ok: false, message: "Failed to create the document." };
+      }
+      const nowMs = Date.now(); // display echo only; Firestore holds server time
+      return {
+        ok: true,
+        doc: {
+          id,
+          title,
+          content,
+          updatedAt: nowMs,
+          createdAt: nowMs,
+          folder: MCP_IMPORT_FOLDER,
+          tags,
+          docType: "markdown",
+        },
+      };
+    };
+  }
+
+  return deps;
 }
 
 async function mcpLoadClient(
@@ -2555,6 +2694,12 @@ function mcpConsentPageHtml(
   clientName: string,
   googleAuthUrl: string,
   denyUrl: string,
+  // Whether THIS user's connection can also create documents (write). When true,
+  // the consent copy discloses the added write scope + the fixed destination
+  // folder; when false, the copy stays read-only. Must reflect the same env-gated
+  // decision as mcpImportEligible so consent never overstates or understates scope.
+  canImport: boolean,
+  importFolder: string,
 ): string {
   // The redirect host is the un-spoofable trust anchor shown on the consent
   // screen: it is where the authorization code will be delivered, and it has
@@ -2567,6 +2712,14 @@ function mcpConsentPageHtml(
     redirectHost = params.redirectUri;
   }
   const appLabel = clientName.trim() || "(名称未設定のアプリ)";
+  // Permission copy reflects the actual granted scope: read-only, or read + create
+  // (import) into the fixed folder. Never claim a scope the connection won't have.
+  const permText = canImport
+    ? `個人ドキュメントの検索・閲覧＋「${importFolder}」フォルダへの新規作成`
+    : "個人ドキュメントの検索・閲覧（読み取り専用）";
+  const fineText = canImport
+    ? `許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧でき、さらに「${importFolder}」フォルダに新しいドキュメントを作成できるようになります。既存のドキュメントの上書き・編集・削除はできず、共有・チームのドキュメントは対象外です。心当たりのない接続先の場合は「許可しない」を選んでください。`
+    : "許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧できるようになります。共有・チームのドキュメントは対象外で、書き込みはできません。心当たりのない接続先の場合は「許可しない」を選んでください。";
   // Server-side Google OAuth (Option b): the consent is shown FIRST (destination +
   // permission), then "許可" is a plain link to Google — no Firebase SDK, so no
   // firebaseapp.com URL is ever surfaced. The buttons are anchors (no JS needed).
@@ -2614,9 +2767,9 @@ function mcpConsentPageHtml(
     <div class="grant">
       <div class="row"><span class="k">接続先</span><span class="v">${mcpEscHtml(redirectHost)}</span></div>
       <div class="row"><span class="k">アプリ</span><span class="v">${mcpEscHtml(appLabel)}</span></div>
-      <div class="row"><span class="k">権限</span><span class="v">個人ドキュメントの検索・閲覧（読み取り専用）</span></div>
+      <div class="row"><span class="k">権限</span><span class="v">${mcpEscHtml(permText)}</span></div>
     </div>
-    <p class="fine">許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧できるようになります。共有・チームのドキュメントは対象外で、書き込みはできません。心当たりのない接続先の場合は「許可しない」を選んでください。</p>
+    <p class="fine">${mcpEscHtml(fineText)}</p>
     <a class="btn primary" href="${mcpEscHtml(googleAuthUrl)}" rel="nofollow">
       <svg class="g" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.7 30.2.5 24 .5 14.6.5 6.5 5.9 2.6 13.8l7.8 6.1C12.3 13.9 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.4 5.7c4.3-4 6.8-9.9 6.8-17.4z"/><path fill="#FBBC05" d="M10.4 28.3c-.5-1.5-.8-3.1-.8-4.8s.3-3.3.8-4.8l-7.8-6.1C.9 15.9 0 19.8 0 23.5s.9 7.6 2.6 10.9l7.8-6.1z"/><path fill="#34A853" d="M24 47.5c6.2 0 11.4-2 15.2-5.5l-7.4-5.7c-2 1.4-4.7 2.3-7.8 2.3-6.4 0-11.7-4.3-13.6-10.1l-7.8 6.1C6.5 42.1 14.6 47.5 24 47.5z"/></svg>
       Googleでサインインして許可
@@ -3255,6 +3408,13 @@ async function handleMcpRoutes(
           client?.clientName || "",
           googleAuthUrl,
           denyUrl,
+          // Consent is shown BEFORE Google sign-in, so the authenticating uid is
+          // not yet known. Disclose write whenever the import feature is enabled
+          // for anyone (MCP_IMPORT_UIDS set): a uid that turns out NOT to be on the
+          // write allowlist simply gets a read-only token (LESS than disclosed) —
+          // this never UNDERSTATES the scope the resulting token could carry.
+          MCP_IMPORT_UIDS.size > 0,
+          MCP_IMPORT_FOLDER,
         ),
       );
       return true;

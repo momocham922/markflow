@@ -216,6 +216,83 @@ export const TOOLS = [
 ] as const;
 
 // ---------------------------------------------------------------------
+// Write surface — create_document (create-only "inbox")
+// ---------------------------------------------------------------------
+// The ONLY write tool. It is deliberately a constrained, low-blast-radius
+// capability, NOT a general document-editing surface:
+//   • create-ONLY — every call makes a brand-new document; it never edits,
+//     overwrites, moves or deletes an existing one (so no content-destruction
+//     path and the client's 3-layer content protection is never bypassed).
+//   • confined — the destination folder + ownerId are forced server-side
+//     (index.ts); the tool cannot choose a folder, target another user, or
+//     write a team / shared document.
+//   • gated — advertised + callable only when the connection is write-enabled
+//     (index.ts wires deps.createDoc per-uid + env; dark by default).
+// Rationale: lets an MCP client (e.g. Claude Code) deposit Markdown it produced
+// into a dedicated MarkFlow folder for the user to review/refine, without any of
+// the risks of arbitrary write. See callTool + mcpDepsForUid.
+
+// Bound a single create so one call can't write an unbounded blob (the 4 MB RPC
+// body cap is a coarser backstop). Enforced in callTool AND re-checked in the
+// Firestore-backed createDoc (defense in depth).
+export const MAX_CREATE_CONTENT_CHARS = 500_000;
+export const MAX_CREATE_TITLE_CHARS = 200;
+export const MAX_CREATE_TAGS = 20;
+export const MAX_CREATE_TAG_CHARS = 64;
+
+export const CREATE_DOCUMENT_TOOL = {
+  name: "create_document",
+  title: "Create document",
+  description:
+    "Create a NEW Markdown document in the user's MarkFlow library. It is " +
+    "always placed in a dedicated import folder (the folder cannot be chosen) " +
+    "and a fresh document is created on every call — this tool NEVER edits, " +
+    "overwrites, moves or deletes an existing document. Use it to save Markdown " +
+    "you produced (e.g. notes drafted in this session) into MarkFlow for the " +
+    "user to review and refine later.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      content: {
+        type: "string",
+        description: `The Markdown body of the new document (required, non-empty, max ${MAX_CREATE_CONTENT_CHARS} characters).`,
+      },
+      title: {
+        type: "string",
+        description: `Optional title (max ${MAX_CREATE_TITLE_CHARS} characters). If omitted, a title is derived from the first heading or line of the content.`,
+      },
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        description: `Optional list of tags (max ${MAX_CREATE_TAGS}).`,
+      },
+    },
+    required: ["content"],
+    additionalProperties: false,
+  },
+  // Accurate MCP hints: this tool mutates state (not read-only), but it only
+  // ADDS a new document — it is non-destructive and non-idempotent (each call
+  // creates another document).
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+} as const;
+
+/**
+ * The tool catalogue advertised to a client. The create_document (write) tool is
+ * offered ONLY when the connection is write-enabled; a read-only connection sees
+ * exactly the three read tools. index.ts decides write-eligibility per-uid (env
+ * MCP_IMPORT_UIDS) and reflects it by setting deps.createDoc, so `canWrite` here
+ * is simply `!!deps.createDoc`.
+ */
+export function toolsFor(canWrite: boolean) {
+  return canWrite ? [...TOOLS, CREATE_DOCUMENT_TOOL] : [...TOOLS];
+}
+
+// ---------------------------------------------------------------------
 // Document shape + formatting / search (pure)
 // ---------------------------------------------------------------------
 
@@ -300,6 +377,50 @@ export function formatDocFull(doc: McpDoc): string {
   return `${meta.join("\n")}\n\n---\n\n${body}`;
 }
 
+/**
+ * Derive a document title from Markdown when the client didn't supply one.
+ * Prefers the first ATX heading (`# ...`), else the first non-blank line, with
+ * leading list/quote/heading markers stripped; capped to MAX_CREATE_TITLE_CHARS.
+ * Returns "Untitled" for empty/whitespace-only content (never an empty title).
+ */
+export function deriveTitleFromMarkdown(content: string): string {
+  const lines = (content || "").split(/\r?\n/);
+  let candidate = "";
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const heading = line.match(/^#{1,6}\s+(.*\S)\s*$/);
+    if (heading) {
+      candidate = heading[1];
+      break;
+    }
+    // First non-blank, non-heading line: strip common leading markers.
+    candidate = line
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/^[-*+]\s+/, "")
+      .replace(/^>\s+/, "")
+      .replace(/^\d+\.\s+/, "")
+      .trim();
+    if (candidate) break;
+  }
+  candidate = candidate.trim();
+  if (!candidate) return "Untitled";
+  return candidate.length > MAX_CREATE_TITLE_CHARS
+    ? candidate.slice(0, MAX_CREATE_TITLE_CHARS)
+    : candidate;
+}
+
+/** Confirmation text returned to the client after a successful create_document. */
+export function formatCreatedDoc(doc: McpDoc): string {
+  const meta: string[] = [
+    `Title: ${doc.title?.trim() || "(untitled)"}`,
+    `Id: ${doc.id}`,
+  ];
+  if (doc.folder) meta.push(`Folder: ${doc.folder}`);
+  if (doc.tags && doc.tags.length) meta.push(`Tags: ${doc.tags.join(", ")}`);
+  return `Created a new document in MarkFlow.\n${meta.join("\n")}`;
+}
+
 /** Build a ~160-char snippet around the first query hit (or the head of the body). */
 export function snippet(content: string, query: string): string {
   const body = (content || "").replace(/\s+/g, " ").trim();
@@ -364,13 +485,34 @@ export function errorResult(text: string): ToolResult {
 // Dispatch
 // ---------------------------------------------------------------------
 
+// Already-validated arguments for a create — callTool normalizes/caps the raw
+// tool args into this before handing them to the Firestore-backed createDoc.
+// `content` is guaranteed non-empty and within MAX_CREATE_CONTENT_CHARS; `title`
+// is a trimmed, capped, non-empty string; `tags` is a de-duped, capped list.
+export interface CreateDocInput {
+  title: string;
+  content: string;
+  tags: string[];
+}
+
+// Discriminated result so failures (rate limit, disabled, re-validation) surface
+// as an in-band tool error rather than throwing — the model sees the message and
+// the client never gets a 5xx for an expected refusal.
+export type CreateDocResult =
+  { ok: true; doc: McpDoc } | { ok: false; message: string };
+
 // I/O the pure dispatcher needs, injected by index.ts (Firestore-backed).
 // listDocs returns the user's personal docs (ownerId == uid), most-recent
 // first; getDoc returns one doc iff it belongs to the user (else null — the
 // authorization check lives in index.ts's implementation, never here).
+// createDoc is PRESENT ONLY for write-enabled connections (index.ts sets it per
+// uid + env); its presence is exactly what flips the advertised tool catalogue
+// to include create_document (see toolsFor / tools/list). When absent, the
+// create_document tool is neither listed nor callable.
 export interface McpDeps {
   listDocs: () => Promise<McpDoc[]>;
   getDoc: (id: string) => Promise<McpDoc | null>;
+  createDoc?: (input: CreateDocInput) => Promise<CreateDocResult>;
 }
 
 export async function callTool(
@@ -398,6 +540,45 @@ export async function callTool(
       const doc = await deps.getDoc(id);
       if (!doc) return errorResult(`No document found with id "${id}".`);
       return textResult(formatDocFull(doc));
+    }
+    case "create_document": {
+      // Gate: only write-enabled connections carry deps.createDoc. A read-only
+      // connection never advertises this tool, but re-check here so a hand-rolled
+      // tools/call can't invoke it regardless.
+      if (!deps.createDoc) {
+        return errorResult("The create_document tool is not enabled.");
+      }
+      const content = typeof args.content === "string" ? args.content : "";
+      // Trim only for the emptiness check; store the content as authored so
+      // leading/trailing structure the client intended is preserved.
+      if (!content.trim()) {
+        return errorResult(
+          "The 'content' argument is required and must be non-empty.",
+        );
+      }
+      if (content.length > MAX_CREATE_CONTENT_CHARS) {
+        return errorResult(
+          `Content is too large (${content.length} characters; max ${MAX_CREATE_CONTENT_CHARS}).`,
+        );
+      }
+      // Title: explicit if provided & non-blank (capped), else derived.
+      const rawTitle = typeof args.title === "string" ? args.title.trim() : "";
+      const title = rawTitle
+        ? rawTitle.slice(0, MAX_CREATE_TITLE_CHARS)
+        : deriveTitleFromMarkdown(content);
+      // Tags: strings only, trimmed, non-empty, de-duped, each capped, list capped.
+      const tags: string[] = [];
+      if (Array.isArray(args.tags)) {
+        for (const t of args.tags) {
+          if (typeof t !== "string") continue;
+          const tag = t.trim().slice(0, MAX_CREATE_TAG_CHARS);
+          if (tag && !tags.includes(tag)) tags.push(tag);
+          if (tags.length >= MAX_CREATE_TAGS) break;
+        }
+      }
+      const result = await deps.createDoc({ title, content, tags });
+      if (!result.ok) return errorResult(result.message);
+      return textResult(formatCreatedDoc(result.doc));
     }
     default:
       return errorResult(`Unknown tool: ${name}`);
@@ -431,7 +612,9 @@ export async function handleMcpMessage(
       return rpcResult(id, {});
 
     case "tools/list":
-      return rpcResult(id, { tools: TOOLS });
+      // Advertise the write tool only to write-enabled connections (deps.createDoc
+      // present). Read-only connections see exactly the three read tools.
+      return rpcResult(id, { tools: toolsFor(!!deps.createDoc) });
 
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
