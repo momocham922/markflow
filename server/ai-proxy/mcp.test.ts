@@ -126,13 +126,13 @@ describe("buildInitializeResult", () => {
     const r = buildInitializeResult("2025-11-25");
     const icons = (
       r.serverInfo as {
-        icons?: { src: string; mimeType?: string; sizes?: string }[];
+        icons?: { src: string; mimeType?: string; sizes?: string[] }[];
       }
     ).icons;
     expect(Array.isArray(icons)).toBe(true);
     expect(icons?.[0]?.src.startsWith("data:image/png;base64,")).toBe(true);
     expect(icons?.[0]?.mimeType).toBe("image/png");
-    expect(icons?.[0]?.sizes).toBe("128x128");
+    expect(icons?.[0]?.sizes).toEqual(["128x128"]);
   });
 });
 

@@ -133,7 +133,7 @@ export function buildInitializeResult(requestedVersion: unknown) {
     serverInfo: {
       ...SERVER_INFO,
       icons: [
-        { src: MCP_ICON_DATA_URI, mimeType: "image/png", sizes: "128x128" },
+        { src: MCP_ICON_DATA_URI, mimeType: "image/png", sizes: ["128x128"] },
       ],
     },
     instructions: SERVER_INSTRUCTIONS,
