@@ -1621,13 +1621,22 @@ const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
 // off. Set via Cloud Run env MCP_UIDS (comma-separated) to enable per-uid.
 const MCP_UIDS = parseUidSet(process.env.MCP_UIDS);
 
-// MCP *write* allowlist (create_document import "inbox"): uids permitted to have
-// the MCP connection CREATE new documents, on top of read access. SEPARATE + even
-// darker than MCP_UIDS: with this unset the connection is read-only (create tool
-// neither advertised nor callable), so write ships dark independently of read. A
-// uid here still must also pass mcpEligible (read gate); this is strictly additive
-// and allowlist-only (no plan-based fallback — write is never auto-granted).
+// MCP *write* allowlist (create_document import "inbox"): uids ALWAYS permitted to
+// have the MCP connection CREATE new documents, on top of read access. An explicit
+// per-uid opt-in that works even when the broad switch below is off (surgical
+// testing / hand-listing). A uid here still must also pass mcpEligible (read gate);
+// write is strictly additive.
 const MCP_IMPORT_UIDS = parseUidSet(process.env.MCP_IMPORT_UIDS);
+
+// MCP *write* broad switch. When enabled, create_document is granted to any uid
+// that is itself MCP-eligible for READ (owner / internal staff / Pro / Team) —
+// mirroring mcpEligible's audience so paid + internal users get the import inbox
+// without hand-listing every uid. Free users NEVER receive write (they cannot
+// even read). Kept as a SEPARATE switch from MCP_UIDS so write can be turned off
+// independently of read. Unset (the default) => write stays allowlist-only
+// (MCP_IMPORT_UIDS), i.e. dark for everyone else.
+const MCP_IMPORT_ALL =
+  process.env.MCP_IMPORT_ALL === "1" || process.env.MCP_IMPORT_ALL === "true";
 
 // Fixed destination folder for MCP-created documents. The create_document tool
 // CANNOT choose a folder — every import lands here so the blast radius is one
@@ -1918,16 +1927,21 @@ async function mcpEligible(uid: string): Promise<boolean> {
   return ent.realPlan === "pro" || ent.realPlan === "team";
 }
 
-// MCP *write* eligibility (create_document import "inbox"). Synchronous + purely
-// allowlist-based: a uid may create documents ONLY if MCP_IMPORT_UIDS is set AND
-// lists them. Unlike mcpEligible there is NO plan-based or internal-staff fallback
-// — write is never auto-granted by tier, only by explicit opt-in. Read access is
-// still required separately (the caller only wires createDoc for read-eligible
-// uids), so this is strictly additive. Dark by default: unset => always false.
-function mcpImportEligible(uid: string): boolean {
-  if (MCP_IMPORT_UIDS.size === 0) return false; // write dark
+// MCP *write* eligibility (create_document import "inbox"). Two independent grants:
+//   1. MCP_IMPORT_UIDS.has(uid)  — explicit per-uid opt-in, always allowed.
+//   2. MCP_IMPORT_ALL && mcpEligible(uid) — broad grant: when the switch is on,
+//      write mirrors READ eligibility (owner / internal staff / Pro / Team).
+// Self-contained (does NOT rely on the caller having pre-gated read): re-checks
+// mcpEligible so a future call site can't accidentally grant write to a
+// read-ineligible uid. Fail-closed via mcpEligible: a Firestore blip meters the
+// uid as free (loadEntitlement never caches a degraded result), which DENIES write
+// rather than granting it. Free users never receive write. Dark by default: with
+// MCP_IMPORT_ALL off and MCP_IMPORT_UIDS empty this is always false.
+async function mcpImportEligible(uid: string): Promise<boolean> {
   if (!uid) return false;
-  return MCP_IMPORT_UIDS.has(uid);
+  if (MCP_IMPORT_UIDS.has(uid)) return true; // explicit opt-in (even if broad off)
+  if (!MCP_IMPORT_ALL) return false; // broad grant disabled => allowlist-only
+  return await mcpEligible(uid); // owner / internal / Pro / Team
 }
 
 /**
@@ -2425,7 +2439,7 @@ function mcpFirestoreDocToMcp(
 // a team doc (non-empty teamId), or one shared out (non-empty collaboratorUids) —
 // is never returned. Filtered in code because Firestore `where("teamId","==",null)`
 // does not match documents that omit the field entirely.
-function mcpDepsForUid(uid: string): McpDeps {
+async function mcpDepsForUid(uid: string): Promise<McpDeps> {
   // Memoize the listing for the lifetime of this deps object (== one HTTP
   // request): a JSON-RPC batch with several list/search calls then costs ONE
   // Firestore query instead of one per element (read-amplification guard).
@@ -2460,7 +2474,7 @@ function mcpDepsForUid(uid: string): McpDeps {
   // Write surface (create_document) is wired ONLY for uids on the write allowlist
   // (mcpImportEligible). Its mere presence is what advertises + enables the tool
   // (see mcp.ts toolsFor / callTool); read-only connections never get it.
-  if (mcpImportEligible(uid)) {
+  if (await mcpImportEligible(uid)) {
     deps.createDoc = async (input) => {
       // Per-uid write throttle: create is a permanent Firestore write, so bound
       // how many docs a looping/compromised client can spawn (60/hour).
@@ -3138,7 +3152,7 @@ async function mcpHandleRpc(
     return;
   }
 
-  const deps = mcpDepsForUid(uid);
+  const deps = await mcpDepsForUid(uid);
   const messages = (isBatch ? parsed : [parsed]) as unknown[];
   const responses: JsonRpcResponse[] = [];
   for (const m of messages) {
@@ -3410,10 +3424,11 @@ async function handleMcpRoutes(
           denyUrl,
           // Consent is shown BEFORE Google sign-in, so the authenticating uid is
           // not yet known. Disclose write whenever the import feature is enabled
-          // for anyone (MCP_IMPORT_UIDS set): a uid that turns out NOT to be on the
-          // write allowlist simply gets a read-only token (LESS than disclosed) —
+          // for anyone — either the broad switch (MCP_IMPORT_ALL) or a non-empty
+          // explicit allowlist (MCP_IMPORT_UIDS). A uid that turns out NOT to be
+          // write-eligible simply gets a read-only token (LESS than disclosed) —
           // this never UNDERSTATES the scope the resulting token could carry.
-          MCP_IMPORT_UIDS.size > 0,
+          MCP_IMPORT_ALL || MCP_IMPORT_UIDS.size > 0,
           MCP_IMPORT_FOLDER,
         ),
       );

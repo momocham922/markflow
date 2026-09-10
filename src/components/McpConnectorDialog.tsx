@@ -16,39 +16,38 @@ const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 // discovery + login flow is bootstrapped from here automatically by the client.
 const MCP_URL = AI_PROXY_URL ? `${AI_PROXY_URL}/mcp` : "";
 
+// Destination folder Claude-created documents land in. Mirrors the server's
+// MCP_IMPORT_FOLDER default (see index.ts) and the folder named on the OAuth
+// consent screen. Shown for scope transparency; the create tool cannot pick
+// another folder.
+const MCP_IMPORT_FOLDER_LABEL = "/Claude";
+
 // Steps reflect Claude's CURRENT connector flow (verified 2026-09 against
-// Anthropic's Custom Connectors docs). Claude's UI labels are English; the exact
-// Japanese translations are unverified, so each label is shown 原文ママ with a
-// Japanese gloss rather than guessed.
+// Anthropic's Custom Connectors docs). Claude's UI labels are English (shown 原文
+// ママ). Condensed to the essentials — this connector is only surfaced to
+// MCP-eligible (advanced) users, who do not need a click-by-click walkthrough.
 const STEPS: { title: string; body: string }[] = [
   {
-    title: "「Customize」→「Connectors」を開く",
-    body: "Claude web は claude.ai/customize/connectors を開きます（デスクトップアプリは「Customize（カスタマイズ）」→「Connectors（コネクタ）」）。以前の「Settings（設定）」配下ではありません。",
+    title: "Claudeでカスタムコネクタを追加",
+    body: "Claude web / デスクトップの「Customize」→「Connectors」→「+」→「Add custom connector」を開きます（モバイルアプリは非対応）。",
   },
   {
-    title: "カスタムコネクタを追加",
-    body: "「+」をクリックし、続けて「Add custom connector（カスタムコネクタを追加）」を選びます。",
+    title: "URLを貼り付けて接続",
+    body: "「Remote MCP server URL」に下のURLを入力し「Add」→「Connect」。認証は自動検出され、追加設定は不要です。",
   },
   {
-    title: "URLを入力",
-    body: "「Name」に表示名（例: MarkFlow）、「Remote MCP server URL」に下のURLを入力します。認証は自動検出されるので（「Detected」と表示・既定のままでOK）、「Advanced settings」やOAuthの入力は不要です。",
-  },
-  {
-    title: "追加してサインイン",
-    body: "「Add（追加）」→「Connect（接続）」の順にクリックし、MarkFlowにログインしているのと同じGoogleアカウントでサインインして、個人ドキュメントへの読み取り専用アクセスを許可します。サインイン画面の上部に MarkFlow のロゴと「markflow.jp の公式サインインページ」と表示されていれば、正しい接続先です。",
-  },
-  {
-    title: "接続完了",
-    body: "接続されると、Claudeがあなたの個人ドキュメントを検索・閲覧できるようになります（読み取り専用・あなた本人のみ）。",
+    title: "同じGoogleアカウントでサインイン",
+    body: "MarkFlowと同じGoogleアカウントで許可します。サインイン画面に「markflow.jp の公式サインインページ」と表示されていれば正しい接続先です。",
   },
 ];
 
 /**
  * Instructions for connecting Claude to MarkFlow's remote MCP server. Shown only
- * to allowlisted users (entitlement.mcpEnabled — owner-only during testing); the
- * UserMenu entry that opens it is gated the same way. The server exposes the
- * signed-in user's OWN personal documents, read-only, over an OAuth 2.1 flow that
- * Claude drives automatically from the URL below.
+ * to MCP-eligible users (entitlement.mcpEnabled — owner / internal / Pro / Team);
+ * the UserMenu entry that opens it is gated the same way. The server exposes the
+ * signed-in user's OWN personal documents (search/read) plus create-only import
+ * into a fixed folder, over an OAuth 2.1 flow that Claude drives automatically
+ * from the URL below. No editing/deletion of existing docs; no team/shared access.
  */
 export function McpConnectorDialog({
   open,
@@ -87,8 +86,9 @@ export function McpConnectorDialog({
             ClaudeとMarkFlowを連携（MCP）
           </DialogTitle>
           <DialogDescription>
-            Claudeにこのコネクタを追加すると、あなたの個人ドキュメントを
-            Claudeから検索・閲覧できるようになります（読み取り専用・あなた本人のみ）。
+            下のURLをClaudeにカスタムコネクタとして追加すると、あなたの個人ドキュメントを
+            Claudeから検索・閲覧でき、「{MCP_IMPORT_FOLDER_LABEL}
+            」フォルダへの新規作成もできます（あなた本人のみ）。
           </DialogDescription>
         </DialogHeader>
 
@@ -149,22 +149,9 @@ export function McpConnectorDialog({
           </ol>
 
           <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
-            共有・チームのドキュメントは連携の対象外です。連携されるのは
-            あなたが所有する個人ドキュメントのみで、Claudeからの書き込みはできません。
-          </p>
-
-          <p className="text-[11px] text-muted-foreground">
-            Claudeのコネクタ一覧では、カスタムコネクタのアイコンは汎用のもので表示されます（Claude側の仕様で、独自ロゴは現在設定できません）。
-            接続先が正しいかは、サインイン画面に表示されるMarkFlowのロゴと「markflow.jp
-            の公式サインインページ」の表記でご確認いただけます。
-          </p>
-
-          <p className="text-[11px] text-muted-foreground">
-            カスタムコネクタの追加はClaude
-            web・デスクトップアプリで行います（モバイルアプリは既製コネクタのみ）。
-            Team/Enterpriseでは、まず管理者が「Organization
-            settings」→「Connectors」→「Add」→「Custom」→「Web」で追加し、
-            その後メンバーが各自「Connect」で認証します。
+            対象はあなた本人の個人ドキュメントのみ（共有・チームは対象外）。既存の編集・削除はできません。
+            Team/Enterpriseでは管理者が「Organization
+            settings」→「Connectors」から追加します。
           </p>
         </div>
 

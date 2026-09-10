@@ -2019,6 +2019,11 @@ export function Sidebar() {
             const y = openUp
               ? Math.max(margin, contextMenu.y - maxMenuH)
               : contextMenu.y;
+            // Hover feedback for the menu rows. These buttons use inline styles
+            // (inline `background` beats any Tailwind `hover:` class in
+            // specificity), so the highlight is applied via JS on enter/leave.
+            const hoverBg = isDark ? "#333333" : "#f3f4f6";
+            const deleteHoverBg = isDark ? "rgba(239,68,68,0.16)" : "#fef2f2";
             return (
               <>
                 <div
@@ -2080,6 +2085,13 @@ export function Sidebar() {
                               color: isCurrent ? "#999" : "inherit",
                             }}
                             disabled={isCurrent}
+                            onMouseEnter={(e) => {
+                              if (!isCurrent)
+                                e.currentTarget.style.background = hoverBg;
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = "transparent";
+                            }}
                             onClick={() => {
                               onMove(contextMenu.docId, f);
                               setContextMenu(null);
@@ -2120,6 +2132,12 @@ export function Sidebar() {
                       cursor: "pointer",
                       color: "inherit",
                     }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = hoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
+                    }}
                     onClick={() => {
                       setRenamingDocId(contextMenu.docId);
                       setRenameValue(title);
@@ -2142,6 +2160,12 @@ export function Sidebar() {
                       background: "transparent",
                       cursor: "pointer",
                       color: "#ef4444",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = deleteHoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
                     }}
                     onClick={() => {
                       // Deleting a document also removes it from the cloud and
