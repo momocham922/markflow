@@ -84,13 +84,22 @@ if [ -f "$WIN_EXE_LOCAL" ] && [ -f "$WIN_SIG_LOCAL" ]; then
   WIN_SIG=$(cat "$WIN_SIG_LOCAL")
   echo "Using local Windows artifact: $WIN_EXE_LOCAL"
 fi
-# Transition helper: pull Windows exe+sig from the GitHub beta release if present.
-if [ -z "$WIN_SIG" ] && [ "$CHANNEL" = "beta" ] && command -v gh >/dev/null 2>&1; then
-  if gh release download beta --pattern "${WIN_EXE_NAME}" --dir /tmp --clobber 2>/dev/null \
-     && gh release download beta --pattern "${WIN_EXE_NAME}.sig" --dir /tmp --clobber 2>/dev/null; then
+# Transition helper: pull Windows exe+sig from the matching GitHub release if
+# present. The Windows binary is built by CI and attached to the channel's GitHub
+# release — beta → the `beta` tag; stable → the `v${VERSION}` tag. Without this,
+# the stable manifest would ship darwin-only and Windows clients baked with
+# markflow.jp/updates would never see a windows entry (no forward updates).
+if [ -z "$WIN_SIG" ] && command -v gh >/dev/null 2>&1; then
+  if [ "$CHANNEL" = "beta" ]; then
+    GH_TAG="beta"
+  else
+    GH_TAG="v${VERSION}"
+  fi
+  if gh release download "$GH_TAG" --pattern "${WIN_EXE_NAME}" --dir /tmp --clobber 2>/dev/null \
+     && gh release download "$GH_TAG" --pattern "${WIN_EXE_NAME}.sig" --dir /tmp --clobber 2>/dev/null; then
     WIN_EXE_LOCAL="/tmp/${WIN_EXE_NAME}"
     WIN_SIG=$(cat "/tmp/${WIN_EXE_NAME}.sig")
-    echo "Mirrored Windows artifact from GitHub beta release"
+    echo "Mirrored Windows artifact from GitHub ${GH_TAG} release"
   fi
 fi
 
