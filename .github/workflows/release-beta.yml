@@ -35,6 +35,22 @@ env:
   VITE_AI_PROXY_URL: ${{ secrets.VITE_AI_PROXY_URL }}
   VITE_YJS_WEBSOCKET_URL: ${{ secrets.VITE_YJS_WEBSOCKET_URL }}
   VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+  # Self-hosted auto-updater base (Rust compile-time option_env, src-tauri/src/lib.rs).
+  # When set, the updater checks {base}/beta.json|latest.json on our own domain
+  # (GCS-backed markflow.jp/updates) instead of the GitHub releases CDN. Desktop-only;
+  # iOS/Android update via the App Store / Play Store. The transition release is still
+  # ALSO published to GitHub so already-installed builds (which check GitHub) can pick
+  # up this build; after this build propagates, future checks go to markflow.jp.
+  MARKFLOW_UPDATE_BASE: "https://markflow.jp/updates"
+  # Billing (Stripe) purchase UI. BETA-ONLY: lit here so beta testers can verify
+  # the Pro/Team upgrade flow against the server's Stripe TEST mode (zero real
+  # money). The macOS beta build sets this inline too (release-testflight.sh /
+  # release-android-internal.sh already do). The STABLE workflow deliberately
+  # OMITS this so the stable channel stays dark until Stripe goes to production —
+  # otherwise real stable users would hit a test-mode checkout. Enabling it also
+  # activates the freemium gates on desktop (Web publish = Pro+, collaborator
+  # caps); existing internal testers are unlimited so are unaffected.
+  VITE_BILLING_ENABLED: "true"
 
 jobs:
   build-and-release:

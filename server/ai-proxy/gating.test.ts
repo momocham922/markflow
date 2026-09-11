@@ -5,6 +5,8 @@ import {
   parseUidSet,
   resolveViewAs,
   derivePlan,
+  iapExpiryBackstop,
+  IAP_EXPIRY_GRACE_SEC,
   periodKey,
   checkQuota,
   isChargeable,
@@ -12,9 +14,16 @@ import {
   parseOffset,
   clampBatchReserveMinutes,
   measuredBatchMinutes,
+  mergeBatchChunks,
   reconcileBatchDelta,
+  failedBatchChargeDelta,
   shouldRefund,
   deriveSeatAccess,
+  decideIdempotencyReuse,
+  sseProducedOutput,
+  chatResponseHasOutput,
+  AI_IDEM_TTL_MS,
+  AI_IDEM_MAX_REGEN,
   type Plan,
   type Feature,
 } from "./gating";
@@ -330,6 +339,52 @@ describe("derivePlan", () => {
 });
 
 // =====================================================================
+// iapExpiryBackstop — read-time money-leak guard for lost IAP notifications
+// =====================================================================
+describe("iapExpiryBackstop", () => {
+  const DAY = 24 * 60 * 60;
+  const NOW = 1_756_700_000; // fixed epoch seconds (injected clock)
+
+  it("downgrades an app_store sub whose period end is well past", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - DAY; // > grace ago
+    expect(iapExpiryBackstop("pro", "app_store", periodEnd, NOW)).toBe("free");
+    expect(iapExpiryBackstop("team", "app_store", periodEnd, NOW)).toBe("free");
+  });
+
+  it("downgrades a play sub whose period end is well past", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - 1;
+    expect(iapExpiryBackstop("pro", "play", periodEnd, NOW)).toBe("free");
+  });
+
+  it("keeps access inside the grace window (skew + delivery lag)", () => {
+    const justPast = NOW - Math.floor(IAP_EXPIRY_GRACE_SEC / 2);
+    expect(iapExpiryBackstop("pro", "app_store", justPast, NOW)).toBe("pro");
+    const future = NOW + DAY;
+    expect(iapExpiryBackstop("pro", "play", future, NOW)).toBe("pro");
+  });
+
+  it("never touches Stripe or founder rails (no lost-notification failure mode)", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - DAY;
+    expect(iapExpiryBackstop("pro", "stripe", periodEnd, NOW)).toBe("pro");
+    expect(iapExpiryBackstop("pro", "founder", periodEnd, NOW)).toBe("pro");
+    expect(iapExpiryBackstop("pro", null, periodEnd, NOW)).toBe("pro");
+  });
+
+  it("never upgrades free or touches internal", () => {
+    const periodEnd = NOW - IAP_EXPIRY_GRACE_SEC - DAY;
+    expect(iapExpiryBackstop("free", "app_store", periodEnd, NOW)).toBe("free");
+    expect(iapExpiryBackstop("internal", "app_store", periodEnd, NOW)).toBe(
+      "internal",
+    );
+  });
+
+  it("no-ops when there is no stored period end", () => {
+    expect(iapExpiryBackstop("pro", "app_store", 0, NOW)).toBe("pro");
+    expect(iapExpiryBackstop("pro", "play", -1, NOW)).toBe("pro");
+  });
+});
+
+// =====================================================================
 // reconcileBatchDelta — measured-minus-reserve counter correction
 // =====================================================================
 describe("reconcileBatchDelta", () => {
@@ -344,6 +399,39 @@ describe("reconcileBatchDelta", () => {
 
   it("is zero when the reserve was exact", () => {
     expect(reconcileBatchDelta(60, 60)).toBe(0);
+  });
+});
+
+// =====================================================================
+// failedBatchChargeDelta — charge started ops, refund only unlaunched
+// =====================================================================
+describe("failedBatchChargeDelta", () => {
+  it("full refund when nothing launched (pre-flight start failure)", () => {
+    // 0 ops started, reserve 48 → refund all 48 (delta -48).
+    expect(failedBatchChargeDelta(0, 48)).toBe(-48);
+  });
+
+  it("charges everything when all ops launched then failed (the abuse case)", () => {
+    // N valid + 1 poisoned: all 48 ops started (Google billed each) → delta 0,
+    // so the reserve STANDS. The counter is not reset, so the repeat-loop draws
+    // down quota and self-terminates at the user's limit.
+    expect(failedBatchChargeDelta(48, 48)).toBe(0);
+  });
+
+  it("refunds only the unlaunched remainder on a partial launch", () => {
+    // 20 of 48 ops started before the failure → keep 20, refund 28 (delta -28).
+    expect(failedBatchChargeDelta(20, 48)).toBe(-28);
+  });
+
+  it("never over-charges: startedCount above reserve is capped at reserve", () => {
+    // Defensive: even if startedCount somehow exceeded reserveMin, the delta
+    // clamps to 0 (never a positive/extra charge on the failure path).
+    expect(failedBatchChargeDelta(60, 48)).toBe(0);
+  });
+
+  it("clamps negative/fractional inputs", () => {
+    expect(failedBatchChargeDelta(-5, 10)).toBe(-10);
+    expect(failedBatchChargeDelta(3.9, 10)).toBe(-7);
   });
 });
 
@@ -370,6 +458,188 @@ describe("shouldRefund", () => {
     expect(shouldRefund({ ok: false }, false)).toBe(false);
     expect(shouldRefund(null, false)).toBe(false);
     expect(shouldRefund(undefined, false)).toBe(false);
+  });
+});
+
+// =====================================================================
+// decideIdempotencyReuse — collapse a logical request's retries/再生成 onto ONE
+// charge without ever GRANTING a free generation for a new/expired/different req
+// =====================================================================
+describe("decideIdempotencyReuse", () => {
+  const HASH = "abc123";
+  const NOW = 1_000_000_000_000;
+  const charged = (over: Record<string, unknown> = {}) => ({
+    charged: true,
+    contentHash: HASH,
+    regenCount: 0,
+    expiresAt: NOW + AI_IDEM_TTL_MS,
+    ...over,
+  });
+
+  it("reuses a charged, unexpired, same-content, under-cap record", () => {
+    expect(decideIdempotencyReuse(charged(), HASH, NOW)).toBe(true);
+  });
+
+  it("charges fresh when there is no record", () => {
+    expect(decideIdempotencyReuse(null, HASH, NOW)).toBe(false);
+    expect(decideIdempotencyReuse(undefined, HASH, NOW)).toBe(false);
+  });
+
+  it("charges fresh when the caller has no content hash", () => {
+    expect(decideIdempotencyReuse(charged(), "", NOW)).toBe(false);
+  });
+
+  it("charges fresh when the record was never actually charged", () => {
+    expect(decideIdempotencyReuse(charged({ charged: false }), HASH, NOW)).toBe(
+      false,
+    );
+    expect(
+      decideIdempotencyReuse(charged({ charged: undefined }), HASH, NOW),
+    ).toBe(false);
+  });
+
+  it("charges fresh once the record has expired", () => {
+    const state = charged({ expiresAt: NOW - 1 });
+    expect(decideIdempotencyReuse(state, HASH, NOW)).toBe(false);
+    // exactly at expiry is stale (>=)
+    expect(decideIdempotencyReuse(charged({ expiresAt: NOW }), HASH, NOW)).toBe(
+      false,
+    );
+  });
+
+  it("NEVER reuses a charge for a DIFFERENT prompt (content-hash binding)", () => {
+    expect(decideIdempotencyReuse(charged(), "different-hash", NOW)).toBe(
+      false,
+    );
+    // a record missing its content hash also cannot be reused
+    expect(
+      decideIdempotencyReuse(charged({ contentHash: undefined }), HASH, NOW),
+    ).toBe(false);
+  });
+
+  it("charges fresh once the free-regen cap is reached (re-opens a paid window)", () => {
+    expect(
+      decideIdempotencyReuse(
+        charged({ regenCount: AI_IDEM_MAX_REGEN }),
+        HASH,
+        NOW,
+      ),
+    ).toBe(false); // at the cap → charge again, re-opening a fresh paid window
+    expect(
+      decideIdempotencyReuse(
+        charged({ regenCount: AI_IDEM_MAX_REGEN - 1 }),
+        HASH,
+        NOW,
+      ),
+    ).toBe(true);
+    expect(
+      decideIdempotencyReuse(
+        charged({ regenCount: AI_IDEM_MAX_REGEN + 5 }),
+        HASH,
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a missing/zero expiresAt as non-expiring (only >0 is checked)", () => {
+    expect(decideIdempotencyReuse(charged({ expiresAt: 0 }), HASH, NOW)).toBe(
+      true,
+    );
+    expect(
+      decideIdempotencyReuse(charged({ expiresAt: undefined }), HASH, NOW),
+    ).toBe(true);
+  });
+});
+
+// =====================================================================
+// sseProducedOutput — the streamed-/v1/chat billing commit gate. Charge only
+// when the UPSTREAM stream actually carried answer text or a tool call.
+// =====================================================================
+describe("sseProducedOutput", () => {
+  it("is true for a text_delta stream", () => {
+    expect(
+      sseProducedOutput(
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+      ),
+    ).toBe(true);
+  });
+
+  it("is true for a tool call (input_json_delta) stream", () => {
+    expect(
+      sseProducedOutput(
+        '{"delta":{"type":"input_json_delta","partial_json":"{"}}',
+      ),
+    ).toBe(true);
+  });
+
+  it("tolerates whitespace variants in the JSON", () => {
+    expect(sseProducedOutput('"type" : "text_delta"')).toBe(true);
+  });
+
+  it("is FALSE for an empty stream (empty completion → refund)", () => {
+    expect(sseProducedOutput("")).toBe(false);
+  });
+
+  it("is FALSE for a thinking-only stream that dies before any answer text", () => {
+    // thinking_delta gave the user nothing → must refund
+    expect(
+      sseProducedOutput(
+        '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}',
+      ),
+    ).toBe(false);
+  });
+
+  it("is FALSE for a 200-then-error overloaded stream with no content", () => {
+    expect(
+      sseProducedOutput(
+        'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}',
+      ),
+    ).toBe(false);
+  });
+});
+
+// =====================================================================
+// chatResponseHasOutput — non-streaming /v1/chat billing commit gate
+// =====================================================================
+describe("chatResponseHasOutput", () => {
+  it("is true for a non-empty text block", () => {
+    expect(
+      chatResponseHasOutput({ content: [{ type: "text", text: "answer" }] }),
+    ).toBe(true);
+  });
+
+  it("is true for a tool_use / server_tool_use block", () => {
+    expect(chatResponseHasOutput({ content: [{ type: "tool_use" }] })).toBe(
+      true,
+    );
+    expect(
+      chatResponseHasOutput({ content: [{ type: "server_tool_use" }] }),
+    ).toBe(true);
+  });
+
+  it("is FALSE for an empty content array (empty completion → refund)", () => {
+    expect(chatResponseHasOutput({ content: [] })).toBe(false);
+  });
+
+  it("is FALSE for a whitespace-only text block", () => {
+    expect(
+      chatResponseHasOutput({ content: [{ type: "text", text: "   " }] }),
+    ).toBe(false);
+  });
+
+  it("is FALSE for a thinking-only response (no answer text)", () => {
+    expect(
+      chatResponseHasOutput({
+        content: [{ type: "thinking", thinking: "..." }],
+      }),
+    ).toBe(false);
+  });
+
+  it("is FALSE for malformed / missing content", () => {
+    expect(chatResponseHasOutput(null)).toBe(false);
+    expect(chatResponseHasOutput(undefined)).toBe(false);
+    expect(chatResponseHasOutput({})).toBe(false);
+    expect(chatResponseHasOutput({ content: "not-an-array" })).toBe(false);
   });
 });
 
@@ -474,14 +744,41 @@ describe("clampBatchReserveMinutes", () => {
     ).toBe(90);
   });
 
-  it("floors at 1 even for zero/absent durations", () => {
+  it("floors at 1 minute PER CHUNK for zero/absent durations", () => {
+    // Single zero-duration chunk still reserves 1.
     expect(clampBatchReserveMinutes([{ durationSec: 0 }])).toBe(1);
     expect(clampBatchReserveMinutes([{}])).toBe(1);
-    expect(clampBatchReserveMinutes([{ durationSec: 0 }, {}])).toBe(1);
+    // TWO zero-duration chunks reserve 2 (per-chunk floor) — this is the
+    // money-leak fix: N chunks draw down ≥ N minutes up front regardless of the
+    // (untrusted) declared durations, so a user at their limit cannot fan out
+    // dozens of paid BatchRecognize jobs on a 1-minute total reserve.
+    expect(clampBatchReserveMinutes([{ durationSec: 0 }, {}])).toBe(2);
+    expect(
+      clampBatchReserveMinutes([
+        { durationSec: 0 },
+        { durationSec: 0 },
+        { durationSec: 0 },
+      ]),
+    ).toBe(3);
   });
 
-  it("clamps negative durations to zero (never a negative reserve)", () => {
+  it("reserves >= chunk count even when declared minutes are smaller", () => {
+    // 12 chunks each claiming 1s: total 12s → ceil = 1 min, but the per-chunk
+    // floor forces a 12-minute reserve (one job per chunk).
+    const chunks = Array.from({ length: 12 }, () => ({ durationSec: 1 }));
+    expect(clampBatchReserveMinutes(chunks)).toBe(12);
+  });
+
+  it("uses the declared minutes when they exceed the chunk count", () => {
+    // 2 long chunks: the ceil'd total (90) dominates the per-chunk floor (2).
+    expect(
+      clampBatchReserveMinutes([{ durationSec: 3300 }, { durationSec: 2100 }]),
+    ).toBe(90);
+  });
+
+  it("clamps negative durations to zero (never below the per-chunk floor)", () => {
     expect(clampBatchReserveMinutes([{ durationSec: -9999 }])).toBe(1);
+    // 2 chunks: ceil(120/60)=2 and chunk-count floor=2 → 2.
     expect(
       clampBatchReserveMinutes([{ durationSec: -100 }, { durationSec: 120 }]),
     ).toBe(2);
@@ -542,6 +839,180 @@ describe("measuredBatchMinutes", () => {
     // measures to 50 → the counter is corrected upward regardless of the claim.
     const fiftyMin = chunkFromEndOffset(3000);
     expect(measuredBatchMinutes([fiftyMin], 20)).toBe(50);
+  });
+
+  it("floors the bill at the declared duration (silence-tail defense, M1)", () => {
+    // 30s of speech followed by a long silence tail: Google bills the real audio
+    // length, so a 600s chunk with only 30s of detected speech must bill 600s
+    // (10 min), NOT 30s. Passing the declared duration as a floor closes the
+    // "speak briefly then pad with silence for near-free STT" hole.
+    const chunk = chunkFromEndOffset(30); // speech ends at 30s
+    expect(measuredBatchMinutes([chunk], 20)).toBe(1); // without declared: 30s→1
+    expect(measuredBatchMinutes([chunk], 20, [600])).toBe(10); // declared 600s→10
+  });
+
+  it("never bills below the detected speech offset even if under-declared", () => {
+    // A client that under-declares (claims 10s for a 50-min file) cannot lower
+    // the bill below the server-measured speech offset (3000s → 50 min).
+    const fiftyMin = chunkFromEndOffset(3000);
+    expect(measuredBatchMinutes([fiftyMin], 20, [10])).toBe(50);
+  });
+
+  it("applies the declared floor per chunk and still subtracts overlaps", () => {
+    // Two chunks, each 30s of speech but 1800s (30min) of real audio; 20s
+    // overlap subtracted once → 3600s - 20s = 3580s → ceil = 60 min.
+    const a = chunkFromEndOffset(30);
+    const b = chunkFromEndOffset(30);
+    expect(measuredBatchMinutes([a, b], 20, [1800, 1800])).toBe(60);
+  });
+
+  it("ignores missing/garbage declared entries (falls back to offset)", () => {
+    const chunk = chunkFromEndOffset(90); // 90s speech → 2 min
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(measuredBatchMinutes([chunk], 20, [NaN as any])).toBe(2);
+    expect(measuredBatchMinutes([chunk], 20, [])).toBe(2);
+    expect(measuredBatchMinutes([chunk], 20, [-500])).toBe(2);
+  });
+});
+
+// =====================================================================
+// mergeBatchChunks — de-overlapped transcript assembly + whole-chunk-loss guard
+// =====================================================================
+describe("mergeBatchChunks", () => {
+  // Build one STT result with words carrying start offsets (seconds).
+  const withOffsets = (
+    ws: Array<{ w: string; t: number; spk?: string }>,
+    transcript?: string,
+  ) => [
+    {
+      alternatives: [
+        {
+          transcript,
+          words: ws.map((x) => ({
+            word: x.w,
+            startOffset: `${x.t}s`,
+            speakerLabel: x.spk,
+          })),
+        },
+      ],
+    },
+  ];
+
+  it("keeps a single chunk's full transcript (no cut on chunk 0)", () => {
+    const r = mergeBatchChunks(
+      [
+        withOffsets([
+          { w: "a", t: 0 },
+          { w: "b", t: 30 },
+        ]),
+      ] as any,
+      [{ durationSec: 60 }],
+      false,
+      20,
+    );
+    expect(r.plainSegments).toEqual(["ab"]);
+  });
+
+  it("REGRESSION: missing word offsets must not drop later chunks (the content-loss bug)", () => {
+    // Every startOffset is absent → parseOffset()==0 for all words → the
+    // leadCut filter (t >= 10 for chunk i>0) would drop EVERY word of chunk 1
+    // and silently lose it. The chunkHasOffsets guard must fall back to the
+    // full transcript so BOTH chunks survive. This is exactly the pre-Fix-A
+    // bug that produced a short/truncated structured markdown.
+    const chunk0 = [
+      { alternatives: [{ transcript: "AAA", words: [{ word: "A" }] }] },
+    ];
+    const chunk1 = [
+      { alternatives: [{ transcript: "BBB", words: [{ word: "B" }] }] },
+    ];
+    const r = mergeBatchChunks(
+      [chunk0, chunk1] as any,
+      [{ durationSec: 3300 }, { durationSec: 3300 }],
+      true, // multi-chunk
+      20,
+    );
+    // Both chunks present — nothing silently vanished.
+    expect(r.plainSegments).toEqual(["AAA", "BBB"]);
+  });
+
+  it("reconstructs from words when the transcript field is absent (no offsets)", () => {
+    const chunk = [
+      {
+        alternatives: [{ words: [{ word: "x" }, { word: "y" }] }],
+      },
+    ];
+    const r = mergeBatchChunks([chunk] as any, [{ durationSec: 0 }], false, 20);
+    expect(r.plainSegments).toEqual(["xy"]);
+  });
+
+  it("dedups the 20s overlap at its midpoint when offsets are present", () => {
+    // chunk0 (i=0): leadCut=0, trailCut = 60-10 = 50 → keep [0,50): a,b ; drop c@55
+    const chunk0 = withOffsets([
+      { w: "a", t: 0 },
+      { w: "b", t: 30 },
+      { w: "c", t: 55 },
+    ]);
+    // chunk1 (last): leadCut=10, trailCut=Infinity → drop c@5 (overlap dup); keep d,e
+    const chunk1 = withOffsets([
+      { w: "c", t: 5 },
+      { w: "d", t: 15 },
+      { w: "e", t: 25 },
+    ]);
+    const r = mergeBatchChunks(
+      [chunk0, chunk1] as any,
+      [{ durationSec: 60 }, { durationSec: 60 }],
+      true,
+      20,
+    );
+    expect(r.plainSegments).toEqual(["ab", "de"]);
+  });
+
+  it("drops empty chunks (no segment, no phantom entry)", () => {
+    const r = mergeBatchChunks(
+      [[], [{ alternatives: [{}] }]] as any,
+      [{ durationSec: 0 }, { durationSec: 0 }],
+      true,
+      20,
+    );
+    expect(r.plainSegments).toEqual([]);
+    expect(r.taggedSegments).toEqual([]);
+  });
+
+  it("tags speakers and collects distinct labels when >1 speaker", () => {
+    const chunk = [
+      {
+        alternatives: [
+          {
+            words: [
+              { word: "hi", startOffset: "1s", speakerLabel: "1" },
+              { word: "there", startOffset: "2s", speakerLabel: "2" },
+            ],
+          },
+        ],
+      },
+    ];
+    const r = mergeBatchChunks([chunk] as any, [{ durationSec: 5 }], false, 20);
+    expect(r.speakerLabels.slice().sort()).toEqual(["1", "2"]);
+    expect(r.taggedSegments[0]).toBe("[Speaker 1] hi\n[Speaker 2] there");
+    expect(r.plainSegments[0]).toBe("hithere");
+  });
+
+  it("does not speaker-tag a single-speaker chunk", () => {
+    const chunk = [
+      {
+        alternatives: [
+          {
+            words: [
+              { word: "solo", startOffset: "1s", speakerLabel: "1" },
+              { word: "talk", startOffset: "2s", speakerLabel: "1" },
+            ],
+          },
+        ],
+      },
+    ];
+    const r = mergeBatchChunks([chunk] as any, [{ durationSec: 5 }], false, 20);
+    expect(r.taggedSegments[0]).toBe("solotalk");
+    expect(r.speakerLabels).toEqual(["1"]);
   });
 });
 

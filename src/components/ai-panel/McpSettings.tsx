@@ -10,6 +10,7 @@ import {
 import * as db from "@/services/database";
 import { useAuthStore } from "@/stores/auth-store";
 import { saveUserSettingsToFirestore } from "@/services/firebase";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 
 interface McpSettingsProps {
   open: boolean;
@@ -103,9 +104,7 @@ export function McpSettings({
       refreshConnected();
       onToolsChanged();
     } catch (err) {
-      setError(
-        `${config.name}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      setError(`${config.name}: ${friendlyErrorMessage(err, "mcp")}`);
     } finally {
       setConnecting(null);
     }

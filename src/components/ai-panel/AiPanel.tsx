@@ -26,6 +26,7 @@ import {
   MessageSquare,
   ChevronDown,
   Zap,
+  RotateCcw,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -66,6 +67,7 @@ import {
 } from "@/services/firebase";
 import { isIOS, isMobile } from "@/platform";
 import { cn } from "@/lib/utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import { track } from "@/services/telemetry";
 import * as db from "@/services/database";
 
@@ -258,7 +260,24 @@ interface ChatMessage {
   content: string;
   images?: { data: string; mediaType: string }[];
   generatedImage?: { url: string; markdown: string };
+  // Marks an assistant message that came from an error or an interrupted
+  // (incomplete) response. The last such message shows a 再生成 button that
+  // replays the SAME logical request — see `lastTurnRef` / handleRegenerate.
+  // Errors and their 再生成 are NEVER double-charged (same Idempotency-Key).
+  failed?: boolean;
 }
+
+// A replayable snapshot of one LOGICAL AI request (chat turn or quick action).
+// The stable `idempotencyKey` is what lets an error-retry or a user-initiated
+// 再生成 collapse onto ONE server-side charge (ai-proxy decideIdempotencyReuse).
+type AiTurn = {
+  kind: "chat" | "action";
+  system: string;
+  messages: ClaudeMessage[];
+  tools: CustomTool[] | undefined;
+  webSearch: boolean;
+  idempotencyKey: string;
+};
 
 interface ChatThread {
   id: string;
@@ -359,6 +378,18 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   // and give the message list + input row more room while typing.
   const [inputFocused, setInputFocused] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  // The streaming bubble is intentionally throttled and rendered as PLAIN TEXT
+  // (not markdown). Rendering full markdown + syntax-highlight on every SSE
+  // delta re-parses the entire, ever-growing response — O(n²) work across a
+  // turn. On iOS WKWebView that saturates the WebContent main thread, starves
+  // the stream reader (same thread), and kills the request mid-response — the
+  // "AI window stops partway and errors" bug. We keep the latest full text in a
+  // ref, coalesce state updates to ~80ms, and let the finalized message (the
+  // messages map) render full markdown once the turn completes.
+  const streamingTextRef = useRef("");
+  const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [allDocsContext, setAllDocsContext] = useState(false);
   // Web search defaults ON — most questions benefit from up-to-date grounding.
   const [webSearch, setWebSearch] = useState(true);
@@ -401,6 +432,10 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prevDocIdRef = useRef<string | null>(null);
   const threadListRef = useRef<HTMLDivElement>(null);
+  // The last logical AI request, retained so 再生成 can replay it with the SAME
+  // idempotency key (no double charge). Cleared on a clean success, an abort, or
+  // a non-retryable limit (quota) where retrying can't help.
+  const lastTurnRef = useRef<AiTurn | null>(null);
 
   // Load custom rules from DB on mount
   useEffect(() => {
@@ -1237,6 +1272,27 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   // Surface AI failures with a friendly, localized message — NEVER the raw error
   // string, which can leak model/provider/endpoint/stack details (security). The
   // real detail goes only to the console and telemetry for debugging.
+  // Coalesce streaming UI updates to ~80ms and keep the latest full text in a
+  // ref so a mid-stream error can still salvage the partial answer. See the
+  // streamingText declaration for why the streaming bubble avoids markdown.
+  const pushStreamingText = (text: string) => {
+    streamingTextRef.current = text;
+    if (streamFlushTimerRef.current != null) return;
+    streamFlushTimerRef.current = setTimeout(() => {
+      streamFlushTimerRef.current = null;
+      setStreamingText(streamingTextRef.current);
+    }, 80);
+  };
+
+  const resetStreamingText = () => {
+    if (streamFlushTimerRef.current != null) {
+      clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+    streamingTextRef.current = "";
+    setStreamingText("");
+  };
+
   const pushFriendlyError = (
     where: "chat" | "quick_action" | "image_gen",
     err: unknown,
@@ -1247,23 +1303,161 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
     console.error(`[AiPanel] ${where} failed:`, detail);
     track("ai_error", { where, detail: detail.slice(0, 300) });
     let friendly: string;
-    if (detail.includes("quota_exceeded")) {
-      friendly =
-        "AIの利用回数が上限に達しました。プランをご確認のうえ、時間をおいて再度お試しください。";
-    } else if (where === "image_gen") {
+    if (
+      where === "image_gen" &&
+      err instanceof Error &&
+      err.name === "ImagePromptDeclined"
+    ) {
       // The model declined this specific prompt (recitation/safety) — tell the
       // user to rephrase rather than implying a system failure.
       friendly =
-        err instanceof Error && err.name === "ImagePromptDeclined"
-          ? "このプロンプトでは画像を生成できませんでした。より具体的で独自性のある表現に変えて、もう一度お試しください。"
-          : "画像の生成に失敗しました。もう一度お試しください。";
+        "このプロンプトでは画像を生成できませんでした。より具体的で独自性のある表現に変えて、もう一度お試しください。";
     } else {
-      friendly = "AIの応答に失敗しました。もう一度お試しください。";
+      // All other cases route through the single friendly classifier so we never
+      // leak a raw status / upstream body, and quota / network / auth all read
+      // naturally in one voice.
+      friendly = friendlyErrorMessage(err, "ai");
     }
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), role: "assistant", content: friendly },
     ]);
+  };
+
+  // Show a transient "retrying" hint in the thinking indicator while the client
+  // auto-retries a pre-output transient failure (see claude.ts callClaudeApi).
+  const onAiRetry = (attempt: number) =>
+    setToolStatus(`通信が不安定です。再試行しています…（${attempt}回目）`);
+
+  // Send ONE logical AI turn with its stable idempotency key + auto-retry hook.
+  // Chooses the tool-loop or plain streaming path exactly like the old handlers.
+  const runAiTurn = async (turn: AiTurn): Promise<string> => {
+    if (turn.tools) {
+      setToolStatus(null);
+      const r = await sendWithToolLoop(
+        turn.system,
+        turn.messages,
+        handleToolCall,
+        pushStreamingText,
+        turn.webSearch,
+        turn.tools,
+        (status) => setToolStatus(status),
+        turn.idempotencyKey,
+        onAiRetry,
+      );
+      setToolStatus(null);
+      return r;
+    }
+    return await sendToClaude(
+      "",
+      turn.system,
+      turn.messages,
+      pushStreamingText,
+      turn.webSearch,
+      undefined,
+      turn.idempotencyKey,
+      onAiRetry,
+    );
+  };
+
+  // Run a prepared turn and commit / salvage / mark-failed uniformly. Both the
+  // initial send (handleChat / handleAction) and 再生成 go through here so the
+  // error-handling, partial-salvage, and apiMessages-commit logic lives once.
+  // `prepare` builds the AiTurn inside the streaming try so any prep error is
+  // surfaced the same way as a request error (regenerate passes the stored turn).
+  const executeTurn = async (prepare: () => AiTurn | Promise<AiTurn>) => {
+    setStreaming(true);
+    resetStreamingText();
+    let turn: AiTurn | null = null;
+    try {
+      turn = await prepare();
+      lastTurnRef.current = turn;
+      const result = await runAiTurn(turn);
+      const displayResult = stripImagePlaceholders(result);
+      if (turn.kind === "chat") {
+        setApiMessages([
+          ...turn.messages,
+          { role: "assistant", content: displayResult },
+        ]);
+      }
+      setMessages((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "assistant", content: displayResult },
+      ]);
+      // Clean success — drop the replay handle so no stale 再生成 lingers.
+      lastTurnRef.current = null;
+    } catch (err) {
+      const partial = streamingTextRef.current.trim();
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
+      const detail = err instanceof Error ? err.message : String(err);
+      const where = turn?.kind === "action" ? "quick_action" : "chat";
+      if (isAbort) {
+        // User stopped — not a failure; discard the partial and offer no CTA.
+        lastTurnRef.current = null;
+      } else if (partial) {
+        // Show the partial answer AND mark it failed so 再生成 is offered. A
+        // partial-then-drop already produced output → the server charged it, and
+        // 再生成 reuses that one charge (same key), so recovery is free.
+        console.error(`[AiPanel] ${where} interrupted:`, detail);
+        track("ai_error", { where, detail: detail.slice(0, 300) });
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content:
+              stripImagePlaceholders(partial) +
+              "\n\n---\n\n*（応答が途中で中断されました。下の「再生成」でやり直せます。）*",
+            failed: true,
+          },
+        ]);
+      } else {
+        // No output at all. Route through the shared friendly classifier and
+        // mark it failed so a 再生成 button appears — EXCEPT for quota, where a
+        // retry can't help (suppress the CTA and clear the replay handle).
+        const isQuota =
+          detail.includes("quota_exceeded") || /\b429\b/.test(detail);
+        console.error(`[AiPanel] ${where} failed:`, detail);
+        track("ai_error", { where, detail: detail.slice(0, 300) });
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: friendlyErrorMessage(err, "ai"),
+            failed: !isQuota,
+          },
+        ]);
+        if (isQuota) lastTurnRef.current = null;
+      }
+    } finally {
+      setStreaming(false);
+      resetStreamingText();
+      setToolStatus(null);
+    }
+  };
+
+  // Replay the last failed/interrupted turn with the SAME idempotency key. The
+  // server collapses it onto the original charge (or charges once if the failed
+  // attempt was refunded), so an error-driven 再生成 never counts extra usage.
+  const handleRegenerate = async () => {
+    const turn = lastTurnRef.current;
+    if (!turn || streaming || generatingImage) return;
+    // Drop the trailing failed assistant message(s) so the retry replaces them
+    // instead of stacking a second answer under the same question.
+    setMessages((prev) => {
+      const next = [...prev];
+      while (
+        next.length > 0 &&
+        next[next.length - 1].role === "assistant" &&
+        next[next.length - 1].failed
+      ) {
+        next.pop();
+      }
+      return next;
+    });
+    track("ai_regenerate", { where: turn.kind });
+    await executeTurn(() => turn);
   };
 
   const handleImageGen = async () => {
@@ -1388,51 +1582,26 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       content: displayLabel,
     };
     setMessages((prev) => [...prev, userMsg]);
-    setStreaming(true);
-    setStreamingText("");
 
-    try {
+    // A fresh logical request gets a fresh idempotency key; a later 再生成 of
+    // THIS action reuses it (see handleRegenerate) so an error retry is free.
+    await executeTurn(() => {
       // Quick actions never edit the document — the user applies the result via
       // the Replace/Append buttons on the answer instead.
       const { tools: turnTools, system: turnSystem } = buildTurnTools({
         allowWrite: false,
       });
-      let result: string;
-
-      if (turnTools) {
-        setToolStatus(null);
-        result = await sendWithToolLoop(
-          turnSystem,
-          [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          handleToolCall,
-          (text) => setStreamingText(text),
-          webSearch,
-          turnTools,
-          (status) => setToolStatus(status),
-        );
-        setToolStatus(null);
-      } else {
-        result = await sendToClaude(
-          "",
-          turnSystem,
-          [{ role: "user", content: `${action.prompt}\n\n${targetText}` }],
-          (text) => setStreamingText(text),
-          webSearch,
-        );
-      }
-      const assistantMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: result,
+      return {
+        kind: "action",
+        system: turnSystem,
+        messages: [
+          { role: "user", content: `${action.prompt}\n\n${targetText}` },
+        ],
+        tools: turnTools,
+        webSearch,
+        idempotencyKey: crypto.randomUUID(),
       };
-      setMessages((prev) => [...prev, assistantMsg]);
-    } catch (err) {
-      pushFriendlyError("quick_action", err);
-    } finally {
-      setStreaming(false);
-      setStreamingText("");
-      setToolStatus(null);
-    }
+    });
   };
 
   const handleChat = async () => {
@@ -1468,10 +1637,11 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             : undefined,
       },
     ]);
-    setStreaming(true);
-    setStreamingText("");
-
-    try {
+    // A fresh logical request gets a fresh idempotency key; a later 再生成 of
+    // THIS turn reuses it (handleRegenerate) so an error retry never re-bills.
+    // The turn is BUILT inside executeTurn's try so a prep error (e.g. context
+    // assembly) surfaces through the same friendly-error path as a request error.
+    await executeTurn(async () => {
       const isFirstMessage = apiMessages.length === 0;
       const context = await buildContextPrefix();
 
@@ -1507,48 +1677,15 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
       const { tools: turnTools, system: turnSystem } = buildTurnTools({
         allowWrite: true,
       });
-      let result: string;
-
-      if (turnTools) {
-        setToolStatus(null);
-        result = await sendWithToolLoop(
-          turnSystem,
-          newApiMessages,
-          handleToolCall,
-          (text) => setStreamingText(text),
-          webSearch,
-          turnTools,
-          (status) => setToolStatus(status),
-        );
-        setToolStatus(null);
-      } else {
-        result = await sendToClaude(
-          "",
-          turnSystem,
-          newApiMessages,
-          (text) => setStreamingText(text),
-          webSearch,
-        );
-      }
-
-      // Strip any [[MARKFLOW_IMAGE_n]] placeholder the model may have echoed into
-      // its reply — it's only meant to travel to write_document, never to the user.
-      const displayResult = stripImagePlaceholders(result);
-      setApiMessages([
-        ...newApiMessages,
-        { role: "assistant", content: displayResult },
-      ]);
-      setMessages((prev) => [
-        ...prev,
-        { id: crypto.randomUUID(), role: "assistant", content: displayResult },
-      ]);
-    } catch (err) {
-      pushFriendlyError("chat", err);
-    } finally {
-      setStreaming(false);
-      setStreamingText("");
-      setToolStatus(null);
-    }
+      return {
+        kind: "chat",
+        system: turnSystem,
+        messages: newApiMessages,
+        tools: turnTools,
+        webSearch,
+        idempotencyKey: crypto.randomUUID(),
+      };
+    });
   };
 
   // Scroll to bottom within the native scroll container only
@@ -1569,6 +1706,15 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
   useEffect(() => {
     if (streamingText) scrollToBottom(true);
   }, [streamingText, scrollToBottom]);
+
+  // Cancel any pending throttled streaming flush when the panel unmounts.
+  useEffect(
+    () => () => {
+      if (streamFlushTimerRef.current != null)
+        clearTimeout(streamFlushTimerRef.current);
+    },
+    [],
+  );
 
   // The keyboard shrinks the scroll viewport; re-pin the latest message above it
   // so the newest content stays visible instead of hiding behind the keyboard.
@@ -1985,7 +2131,7 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
               <span className="text-[10px]">Cmd+Enter to send</span>
             </p>
           )}
-          {messages.map((msg) => (
+          {messages.map((msg, mi) => (
             <div
               key={msg.id}
               className={`text-xs ${
@@ -2132,6 +2278,31 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
                   </div>
                 )}
               </div>
+              {/* 再生成 CTA — offered only on the LAST assistant message that
+                  failed or was interrupted. Replays the same logical request
+                  with the same idempotency key, so the error attempt is not
+                  billed and the eventual success counts as a single use. */}
+              {msg.role === "assistant" &&
+                msg.failed &&
+                mi === messages.length - 1 &&
+                !streaming &&
+                !generatingImage &&
+                lastTurnRef.current && (
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className={cn(
+                        "gap-1 cursor-pointer",
+                        isMobile ? "h-9 text-sm" : "h-7 text-[11px]",
+                      )}
+                      onClick={handleRegenerate}
+                    >
+                      <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} />
+                      再生成
+                    </Button>
+                  </div>
+                )}
             </div>
           ))}
           {/* Write-to-document proposal — the AI decided to edit the doc; apply
@@ -2203,8 +2374,12 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
               <span className="text-[10px] text-muted-foreground">
                 MarkFlow AI
               </span>
-              <div className="leading-relaxed mt-1 prose ai-markdown select-text">
-                {renderMarkdown(streamingText)}
+              {/* Plain text while streaming — rendering full markdown+highlight
+                  per delta melts the iOS WebKit main thread and kills the
+                  stream. The finalized message (messages map) renders full
+                  markdown once the turn completes. */}
+              <div className="leading-relaxed mt-1 whitespace-pre-wrap break-words select-text">
+                {streamingText}
                 <span className="animate-pulse">|</span>
               </div>
             </div>
@@ -2334,7 +2509,9 @@ export function AiPanel({ onClose, keyboardVisible = false }: AiPanelProps) {
             rows={1}
             disabled={streaming}
             className={cn(
-              "flex-1 rounded-md border border-input bg-background outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:w-[3px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border",
+              // Hide the scrollbar entirely (still scrollable past the 120px cap
+              // via cursor/keyboard) — the visible bar was distracting.
+              "flex-1 rounded-md border border-input bg-background outline-none focus:ring-1 focus:ring-ring resize-none select-text [&::-webkit-scrollbar]:hidden [scrollbar-width:none]",
               // Mobile: min-h matches the compact 36px buttons and text-base
               // (16px) prevents iOS focus-zoom. Desktop keeps the compact sizing.
               isMobile

@@ -35,6 +35,7 @@ import { ResearchSheet } from "@/components/editor/ResearchSheet";
 import { PaywallDialog } from "@/components/PaywallDialog";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
+import { McpConnectorDialog } from "@/components/McpConnectorDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { useTelemetryStore } from "@/stores/telemetry-store";
@@ -53,6 +54,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { friendlyErrorMessage, FriendlyError } from "@/lib/friendly-error";
 import { aiProxyHeaders } from "@/services/ai-proxy";
 import { onLocalEdit } from "@/lib/local-edit-signal";
 import TurndownService from "turndown";
@@ -119,6 +121,9 @@ function App() {
   // Only show blocking overlay for the very first sync (login/startup)
   const prevSyncingRef = useRef(false);
   const initialSyncDoneRef = useRef(false);
+  // Throttle for the foreground entitlement re-fetch (see visibilitychange
+  // effect below); epoch ms of the last fired fetch.
+  const lastEntitlementFetchRef = useRef(0);
   useEffect(() => {
     if (prevSyncingRef.current && !syncing) {
       initialSyncDoneRef.current = true;
@@ -327,6 +332,31 @@ function App() {
     window.addEventListener("hashchange", handleHash);
     return () => window.removeEventListener("hashchange", handleHash);
   }, [parseShareToken, handleBillingReturn]);
+
+  // Re-pull the entitlement when the app returns to the foreground. A store
+  // subscription changed outside the app — most importantly an IAP CANCELLATION
+  // made in Apple's/Google's manage-subscriptions sheet — only reflects in the
+  // UI once we re-query /v1/me/entitlement. Without this a user who cancels and
+  // (in the accelerated sandbox) whose sub then EXPIRES sees the CTA stay stuck
+  // on "現在のプラン" instead of switching back to the Pro upgrade button, because
+  // nothing re-fetched. Throttled so rapid focus toggles don't spam the endpoint;
+  // fetchEntitlement is a no-op when signed out.
+  useEffect(() => {
+    const MIN_INTERVAL_MS = 15_000;
+    const refetch = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastEntitlementFetchRef.current < MIN_INTERVAL_MS) return;
+      lastEntitlementFetchRef.current = now;
+      void useEntitlementStore.getState().fetchEntitlement();
+    };
+    document.addEventListener("visibilitychange", refetch);
+    window.addEventListener("focus", refetch);
+    return () => {
+      document.removeEventListener("visibilitychange", refetch);
+      window.removeEventListener("focus", refetch);
+    };
+  }, []);
 
   // Listen for deep link events (markflow://share/{token}, markflow://billing/*)
   useEffect(() => {
@@ -591,7 +621,7 @@ function App() {
       await platform.relaunch();
     } catch (err) {
       setUpdateStatus("error");
-      setUpdateError(err instanceof Error ? err.message : String(err));
+      setUpdateError(friendlyErrorMessage(err, "update"));
     }
   }, [updateInfo]);
 
@@ -880,14 +910,13 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
           errCode = JSON.parse(bodyText)?.error || "";
         } catch {}
         if (pubRes.status === 402 || errCode === "plan_required") {
-          throw new Error("Web公開はProプラン以上の機能です。");
+          throw new FriendlyError("Web公開はProプラン以上の機能です。");
         }
         if (pubRes.status === 403) {
-          throw new Error("このドキュメントのオーナーではありません");
+          throw new FriendlyError("このドキュメントのオーナーではありません。");
         }
-        throw new Error(
-          `公開に失敗しました (HTTP ${pubRes.status})${errCode ? `: ${errCode}` : ""}`,
-        );
+        // Generic: never leak the raw status/body — friendlyErrorMessage maps it.
+        throw new Error(`publish failed: ${pubRes.status} ${errCode}`);
       }
       const publishBase =
         import.meta.env.VITE_PUBLISH_BASE_URL || "https://markflow.jp";
@@ -909,9 +938,8 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         await navigator.clipboard.writeText(url);
       } catch {}
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
       console.error("Publish failed:", e);
-      setPublishError(msg);
+      setPublishError(friendlyErrorMessage(e, "publish"));
     } finally {
       setPublishing(false);
     }
@@ -931,17 +959,15 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         body: JSON.stringify({ docId: doc.id }),
       });
       if (!res.ok) {
-        const bodyText = await res.text().catch(() => "");
-        throw new Error(
-          `公開停止に失敗しました (HTTP ${res.status}) ${bodyText}`,
-        );
+        // Never leak the raw status/body into the UI — map it in the catch.
+        throw new Error(`unpublish failed: ${res.status}`);
       }
       const { setPublishUrl: saveUrl } = await import("@/services/firebase");
       await saveUrl(doc.id, null);
       setPublishUrl(null);
     } catch (e) {
       console.error("Unpublish failed:", e);
-      setPublishError(e instanceof Error ? e.message : String(e));
+      setPublishError(friendlyErrorMessage(e, "publish"));
     } finally {
       setPublishing(false);
     }
@@ -1579,6 +1605,9 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <GlobalTeamManageDialog />
         {/* Bug report / feedback (global; opened from UserMenu and crash-prefill) */}
         <GlobalFeedbackDialog />
+        {/* Claude MCP connector instructions (global; opened from UserMenu,
+            allowlist-gated via mcpEnabled) */}
+        <GlobalMcpConnectorDialog />
         {/* Regional analytics consent surface (once, until the user decides) */}
         <TelemetryConsentBanner />
       </div>
@@ -1620,6 +1649,25 @@ function GlobalTeamManageDialog() {
     <TeamManageDialog
       open={open}
       onOpenChange={(o) => (o ? openTeamManage() : closeTeamManage())}
+    />
+  );
+}
+
+/**
+ * Global mount of the MCP connector-instructions dialog, driven by the
+ * entitlement store's mcpConnectorOpen flag. Opened from the UserMenu "Claude連携"
+ * entry, which is itself gated on mcpEnabled (server allowlist, owner-only during
+ * testing). Mounted once here so there is exactly one instance.
+ */
+function GlobalMcpConnectorDialog() {
+  const open = useEntitlementStore((s) => s.mcpConnectorOpen);
+  const closeMcpConnector = useEntitlementStore((s) => s.closeMcpConnector);
+  return (
+    <McpConnectorDialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) closeMcpConnector();
+      }}
     />
   );
 }

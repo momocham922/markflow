@@ -42,6 +42,7 @@ import {
 import { fetchDocument } from "@/services/firebase";
 import { track } from "@/services/telemetry";
 import { isIOS, isMobile } from "@/platform";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -634,7 +635,7 @@ export function Sidebar() {
     } catch (err) {
       console.error("Failed to move doc to team:", err);
       window.alert(
-        `チームへの移動に失敗しました。ネットワーク接続を確認してください。\n${err instanceof Error ? err.message : String(err)}`,
+        `チームへの移動に失敗しました。${friendlyErrorMessage(err, "team")}`,
       );
     }
   };
@@ -1494,23 +1495,24 @@ export function Sidebar() {
 
   return (
     <div className="flex h-full w-full flex-col border-r border-border bg-sidebar-background">
-      {/* Header */}
+      {/* Header. On mobile the sidebar is a drawer — it closes by tapping the
+          backdrop, swiping, or the hardware back button — so the explicit close
+          button is redundant clutter and is shown on desktop only (where it is
+          the collapse control). */}
       <div className="flex items-center justify-between px-3 pt-2 pb-2">
         <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">
           MarkFlow
         </span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className={
-            isMobile
-              ? "h-11 w-11 text-sidebar-foreground"
-              : "h-7 w-7 text-sidebar-foreground"
-          }
-          onClick={toggleSidebar}
-        >
-          <PanelLeftClose className={isMobile ? "h-5 w-5" : "h-4 w-4"} />
-        </Button>
+        {!isMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-sidebar-foreground"
+            onClick={toggleSidebar}
+          >
+            <PanelLeftClose className="h-4 w-4" />
+          </Button>
+        )}
       </div>
 
       {/* Search */}
@@ -2017,6 +2019,11 @@ export function Sidebar() {
             const y = openUp
               ? Math.max(margin, contextMenu.y - maxMenuH)
               : contextMenu.y;
+            // Hover feedback for the menu rows. These buttons use inline styles
+            // (inline `background` beats any Tailwind `hover:` class in
+            // specificity), so the highlight is applied via JS on enter/leave.
+            const hoverBg = isDark ? "#333333" : "#f3f4f6";
+            const deleteHoverBg = isDark ? "rgba(239,68,68,0.16)" : "#fef2f2";
             return (
               <>
                 <div
@@ -2078,6 +2085,13 @@ export function Sidebar() {
                               color: isCurrent ? "#999" : "inherit",
                             }}
                             disabled={isCurrent}
+                            onMouseEnter={(e) => {
+                              if (!isCurrent)
+                                e.currentTarget.style.background = hoverBg;
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = "transparent";
+                            }}
                             onClick={() => {
                               onMove(contextMenu.docId, f);
                               setContextMenu(null);
@@ -2118,6 +2132,12 @@ export function Sidebar() {
                       cursor: "pointer",
                       color: "inherit",
                     }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = hoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
+                    }}
                     onClick={() => {
                       setRenamingDocId(contextMenu.docId);
                       setRenameValue(title);
@@ -2140,6 +2160,12 @@ export function Sidebar() {
                       background: "transparent",
                       cursor: "pointer",
                       color: "#ef4444",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = deleteHoverBg;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
                     }}
                     onClick={() => {
                       // Deleting a document also removes it from the cloud and

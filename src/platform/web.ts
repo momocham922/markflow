@@ -97,7 +97,13 @@ export const webAdapter: PlatformAdapter = {
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
     const uuid = crypto.randomUUID();
     const path = `images/${uid}/${uuid}.${ext}`;
-    const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(path)}`;
+    // Storage base. When VITE_STORAGE_BASE_URL is set (e.g. https://storage.markflow.jp,
+    // an authenticating reverse proxy that injects the bucket and hides the googleapis
+    // host), embedded image URLs no longer expose the GCP default domain or bucket name.
+    const storageBase =
+      import.meta.env.VITE_STORAGE_BASE_URL ||
+      `https://firebasestorage.googleapis.com/v0/b/${bucket}`;
+    const uploadUrl = `${storageBase}/o/${encodeURIComponent(path)}`;
 
     const response = await fetch(`${uploadUrl}?uploadType=media`, {
       method: "POST",

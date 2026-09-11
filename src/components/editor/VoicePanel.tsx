@@ -20,6 +20,7 @@ import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
 import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
 import { extractHints } from "@/lib/text-utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
@@ -48,6 +49,12 @@ export interface VoiceDataUpdate {
   voiceTranscript?: string | null;
   voiceGcsUri?: string | null;
   voiceRecordedAt?: number | null;
+  // Internal intent flag (never persisted). When true, the app-store voice-loss
+  // guard is bypassed so a deliberate reset — the "Clear transcript" button or
+  // starting a fresh recording — may null the voice fields. Absent/false means
+  // any null over an existing non-empty voice value is treated as accidental
+  // (e.g. a passive re-render) and dropped. See app-store.updateDocument.
+  __voiceClear?: boolean;
 }
 
 interface VoicePanelProps {
@@ -230,7 +237,7 @@ export function VoicePanel({
     },
     onInfo: (msg) => setVoiceInfo(msg),
     onMaxDuration: () =>
-      setVoiceError("Recording stopped: maximum duration (4 hours) reached."),
+      setVoiceError("録音を停止しました（最長4時間に達しました）。"),
     initialTranscript: savedVoiceTranscript || "",
     onTranscriptUpdate: (text) => {
       onVoiceDataChangeRef.current?.({ voiceTranscript: text || null });
@@ -279,9 +286,12 @@ export function VoicePanel({
     if (isRecording) {
       setHasArchive(true);
       uploadedChunksRef.current = null;
+      // A fresh recording supersedes any prior archive reference — this null is
+      // intentional, so bypass the voice-loss guard.
       onVoiceDataChangeRef.current?.({
         voiceGcsUri: null,
         voiceRecordedAt: null,
+        __voiceClear: true,
       });
     }
   }, [isRecording]);
@@ -502,12 +512,14 @@ export function VoicePanel({
       }
 
       // No-silent-failure: warn when the model hit the output cap and truncated.
+      // Persistent (no auto-dismiss): the document is about to be replaced with a
+      // possibly-truncated result, so the user MUST see this to recover from
+      // version history. Cleared by the X button or the next run.
       if (structStopReason === "max_tokens") {
-        setVoiceError(
-          "構造化がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
-        );
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+        setVoiceError(
+          "構造化がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。ドキュメントが短くなっていたらバージョン履歴から復元してください。会議が長い場合は分割をおすすめします。",
+        );
       }
 
       if (markdown.trim()) {
@@ -553,16 +565,9 @@ export function VoicePanel({
       // stay quiet — they retry on the next interval, and quota 429s already
       // raise the global banner via reportIfQuota().
       if (manual) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const isNetwork =
-          /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
-            msg,
-          );
-        setVoiceError(
-          isNetwork
-            ? "構造化中に通信エラーが発生しました。もう一度「Structure」を押して再試行してください。"
-            : `構造化に失敗しました: ${msg}`,
-        );
+        // Never echo the raw upstream message/status — route through the shared
+        // classifier so the user only ever sees a localized, friendly reason.
+        setVoiceError(friendlyErrorMessage(err, "voice"));
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
         errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
       }
@@ -604,7 +609,8 @@ export function VoicePanel({
       if (!bucket) throw new Error("Storage bucket not configured");
 
       // Stage 1: Upload audio archive → chunks (skip if already uploaded this
-      // session). Recordings >58min are split into ≤55min parts (20s overlap).
+      // session). Recordings >18min are split into ≤18min parts (20s overlap) to
+      // stay under BatchRecognize's ~20min inline-results limit.
       let chunks = uploadedChunksRef.current;
       if (chunks) {
         console.log(
@@ -660,16 +666,41 @@ export function VoicePanel({
             voiceRecordedAt: Date.now(),
           });
         } catch (e) {
-          // Archive gone (e.g. after reload) but a prior single-file URI was
-          // saved — fall back to it (correct for short recordings).
+          // Archive gone (app restart / temp cleanup, or a doc whose voice
+          // metadata was recovered from the cloud) but a prior GCS URI was saved.
+          // Re-derive chunks from the stored WAV: a long single file would exceed
+          // BatchRecognize's ~20min inline limit, so Rust downloads it and
+          // re-splits into ≤18min overlapping parts (short files come back
+          // unchanged, no re-upload).
           if (savedVoiceGcsUriRef.current) {
-            chunks = [
-              {
-                gcsUri: savedVoiceGcsUriRef.current,
-                startSec: 0,
-                durationSec: 0,
-              },
-            ];
+            const prepared = await invoke<{
+              gcs_uri: string;
+              download_url: string;
+              chunks: Array<{
+                gcs_uri: string;
+                start_sec: number;
+                duration_sec: number;
+              }>;
+            }>("prepare_gcs_voice_chunks", {
+              uid,
+              token,
+              bucket,
+              gcsUri: savedVoiceGcsUriRef.current,
+            });
+            chunks = (prepared.chunks || []).map((c) => ({
+              gcsUri: c.gcs_uri,
+              startSec: c.start_sec,
+              durationSec: c.duration_sec,
+            }));
+            if (chunks.length === 0) {
+              chunks = [
+                {
+                  gcsUri: savedVoiceGcsUriRef.current,
+                  startSec: 0,
+                  durationSec: 0,
+                },
+              ];
+            }
             uploadedChunksRef.current = chunks;
           } else {
             throw e;
@@ -709,11 +740,13 @@ export function VoicePanel({
           /* not JSON; fall through to the raw-text handling below */
         }
         if (serverMsg) throw new Error(serverMsg);
-        // BatchRecognize (chirp_3) rejects files longer than 60 minutes. Turn
-        // the raw STT error into a clear, actionable message for the user.
-        if (/too long|60 ?minutes|60\s*分/i.test(errText)) {
+        // BatchRecognize rejects an individual file longer than ~20 minutes.
+        // Recordings are auto-split into ≤18min parts (incl. re-split of a stored
+        // GCS file on re-Refine), so this should be unreachable in practice; keep
+        // a clear message as a safety net.
+        if (/too long|20 ?minutes|20\s*分|60 ?minutes|60\s*分/i.test(errText)) {
           throw new Error(
-            "録音が60分を超えているためRefineできません（一括文字起こしの上限）。録音中の自動Structureは全長で機能します。長時間の録音は60分以内で区切ってください。",
+            "文字起こしの一括処理で音声が長すぎると判定されました。お手数ですが再度Refineをお試しください。解消しない場合は録音を短く区切ってください。",
           );
         }
         throw new Error(
@@ -857,12 +890,14 @@ export function VoicePanel({
       }
 
       // No-silent-failure: warn when the model hit the output cap and truncated.
+      // Persistent (no auto-dismiss): Refine REPLACES the whole document, so a
+      // truncated result clobbers the fuller live-structured version. The user
+      // MUST see this to recover from version history. Cleared by X or next run.
       if (refineStopReason === "max_tokens") {
-        setVoiceError(
-          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。会議が長い場合はドキュメントを分割してください。",
-        );
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+        setVoiceError(
+          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。ドキュメントが短くなっていたらバージョン履歴から復元してください。会議が長い場合は分割をおすすめします。",
+        );
       }
 
       if (refinedOutput.trim()) {
@@ -874,28 +909,33 @@ export function VoicePanel({
           for (const c of refineIncludedCards) store.markIntegrated(c.id);
         }
       }
-      setHasArchive(false);
-      uploadedChunksRef.current = null;
-      onVoiceDataChangeRef.current?.({
-        voiceTranscript: null,
-        voiceGcsUri: null,
-        voiceRecordedAt: null,
-      });
-      import("@tauri-apps/api/core")
-        .then(({ invoke }) => invoke("clear_voice_archive"))
-        .catch(() => {});
+      // A successful Refine consumes the recording INTO the structured document,
+      // but we deliberately KEEP the voice metadata (and the on-device archive)
+      // so the transcript stays viewable and the recording can be re-Refined
+      // later — e.g. after a server-side transcription improvement, or if the
+      // refined output was truncated at max_tokens (warned above). Persist the
+      // full batch-diarized transcript (higher fidelity than the live one, which
+      // can be empty for a backgrounded session). voiceGcsUri / voiceRecordedAt
+      // were already stamped at upload (see the upload block) and are left intact
+      // so the Refine render gate survives a reload/restart. Only the explicit
+      // "Clear transcript" button discards voice data.
+      //
+      // (Before 2026-09-07 this nulled all three voice fields AND deleted the
+      // local archive on every Refine, so the transcript + Refine button
+      // "mysteriously vanished" after refining — reported as data loss. Do not
+      // reintroduce a null-emit or clear_voice_archive here.)
+      if (diarizedTranscript.trim()) {
+        onVoiceDataChangeRef.current?.({
+          voiceTranscript: diarizedTranscript.trim(),
+        });
+      }
     } catch (err) {
       console.error("[voice] Refine failed:", err);
-      const msg = err instanceof Error ? err.message : String(err);
-      const isNetwork =
-        /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
-          msg,
-        );
       // Audio is already uploaded on failure, so retrying skips re-upload.
-      const friendly = isNetwork
-        ? `${stageLabel}中に通信エラー。時間がかかりすぎたか回線が不安定な可能性があります。「Refine」をもう一度押して再試行してください。`
-        : `${stageLabel}で失敗: ${msg}`;
-      setVoiceError(`Refine failed: ${friendly}`);
+      // Route the reason through the shared classifier (never leak the raw
+      // message/status or an English "Refine failed:" prefix); keep only the
+      // localized stage label so the user knows which step failed.
+      setVoiceError(`${stageLabel}: ${friendlyErrorMessage(err, "voice")}`);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
     } finally {
@@ -1184,10 +1224,12 @@ export function VoicePanel({
             sttVocabRef.current.clear();
             uploadedChunksRef.current = null;
             setHasArchive(false);
+            // Explicit user intent to discard voice data — bypass the guard.
             onVoiceDataChangeRef.current?.({
               voiceTranscript: null,
               voiceGcsUri: null,
               voiceRecordedAt: null,
+              __voiceClear: true,
             });
             import("@tauri-apps/api/core")
               .then(({ invoke }) => invoke("clear_voice_archive"))

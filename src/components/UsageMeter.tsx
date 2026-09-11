@@ -3,6 +3,8 @@ import {
   useEntitlementStore,
   featureLabel,
   planLabel,
+  billingSourceGuidance,
+  formatExpiryDate,
   type Feature,
 } from "@/stores/entitlement-store";
 
@@ -111,10 +113,22 @@ export function UsageMeter({
   const usage = useEntitlementStore((s) => s.usage);
   const seats = useEntitlementStore((s) => s.seats);
   const loaded = useEntitlementStore((s) => s.loaded);
+  const source = useEntitlementStore((s) => s.source);
+  const expiresDate = useEntitlementStore((s) => s.expiresDate);
 
   if (!loaded || !effectivePlan) return null;
 
   const unlimited = limits === null; // internal/owner
+  const isPaid = effectivePlan === "pro" || effectivePlan === "team";
+  // `source` records where a subscription WAS billed and can linger as
+  // "app_store"/"play" on the entitlement doc after a cancel/expiry downgrades
+  // the user to Free (the server does not clear it, and the read-time expiry
+  // backstop returns effectivePlan=free without rewriting source). Only surface
+  // the store-management guidance ("このプランはiOSアプリ経由でご購入…") when the
+  // user actually HOLDS a paid plan — otherwise a Free user is told they have an
+  // active iOS purchase they no longer have.
+  const guidance = isPaid ? billingSourceGuidance(source) : "";
+  const renewOn = isPaid ? formatExpiryDate(expiresDate) : "";
 
   return (
     <div className="rounded-lg border border-border bg-muted/30 p-3">
@@ -146,7 +160,13 @@ export function UsageMeter({
       )}
       <p className="mt-2 px-1 text-[10px] text-muted-foreground/80">
         毎月1日（日本時間）にリセットされます。
+        {renewOn ? `　次回更新日: ${renewOn}` : ""}
       </p>
+      {guidance ? (
+        <p className="mt-2 rounded-md bg-muted/60 px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground">
+          {guidance}
+        </p>
+      ) : null}
     </div>
   );
 }

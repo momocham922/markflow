@@ -295,6 +295,13 @@ export interface Team {
   createdAt: Timestamp | null;
   /** Denormalized uid list (Firestore array-contains queries + rules). */
   memberUids?: string[];
+  /**
+   * Denormalized manager set (owner + admins) that the Firestore rules read to
+   * authorize membership-list changes — rules cannot inspect the role inside the
+   * `members` maps. Maintained by sharing.ts via deriveManagerUids() on every
+   * membership mutation; owner-frozen client-side.
+   */
+  managerUids?: string[];
   /** Team-level folder list (see get/setTeamFolders). */
   folders?: string[];
   /** Server-written subscription state (see TeamBilling). Read-only for clients. */
@@ -336,6 +343,20 @@ export function isTeamManager(
 
 const TEAMS_COLLECTION = "teams";
 
+/**
+ * Mirror of the manager set (owner + admins) that the Firestore rules read to
+ * authorize membership-list changes. Rules cannot inspect the role stored inside
+ * the `members` array of maps, so sharing.ts keeps this flat uid array in sync on
+ * every membership mutation. Kept deduped; owner is always included.
+ */
+function deriveManagerUids(members: TeamMember[], ownerId: string): string[] {
+  const uids = members
+    .filter((m) => m.uid && (m.role === "owner" || m.role === "admin"))
+    .map((m) => m.uid);
+  if (ownerId && !uids.includes(ownerId)) uids.push(ownerId);
+  return Array.from(new Set(uids));
+}
+
 /** Create a new team */
 export async function createTeam(
   name: string,
@@ -347,6 +368,7 @@ export async function createTeam(
     name,
     ownerId: owner.uid,
     memberUids: [owner.uid],
+    managerUids: [owner.uid],
     members: [
       {
         uid: owner.uid,
@@ -397,11 +419,16 @@ export async function addTeamMember(
     const data = snap.data() || {};
     const members = [...((data.members || []) as TeamMember[])];
     const memberUids = [...((data.memberUids || []) as string[])];
+    const ownerId = (data.ownerId as string) || "";
 
     if (!members.some((m) => m.email === member.email)) {
       members.push(teamMember);
       if (uid && !memberUids.includes(uid)) memberUids.push(uid);
-      transaction.update(ref, { members, memberUids });
+      transaction.update(ref, {
+        members,
+        memberUids,
+        managerUids: deriveManagerUids(members, ownerId),
+      });
     }
   });
 }
@@ -416,12 +443,17 @@ export async function removeTeamMember(
   await runTransaction(firestore, async (transaction) => {
     const snap = await transaction.get(ref);
     const data = snap.data() || {};
+    const ownerId = (data.ownerId as string) || "";
     const members = ((data.members || []) as TeamMember[]).filter(
       (m) => m.email !== member.email,
     );
     // Rebuild memberUids from remaining members with valid UIDs
     const memberUids = members.map((m) => m.uid).filter(Boolean);
-    transaction.update(ref, { members, memberUids });
+    transaction.update(ref, {
+      members,
+      memberUids,
+      managerUids: deriveManagerUids(members, ownerId),
+    });
   });
 }
 

@@ -5,12 +5,12 @@ import { useAuthStore } from "@/stores/auth-store";
 import {
   useEntitlementStore,
   planLabel,
-  BILLING_ENABLED,
   type ViewAsPlan,
 } from "@/stores/entitlement-store";
 import { isIOS, isMobile, isTauri } from "@/platform";
 import { cn } from "@/lib/utils";
 import { countWords } from "@/lib/editor-utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import * as db from "@/services/database";
 
 export function StatusBar() {
@@ -108,7 +108,10 @@ function DesktopStatusBar() {
         await relaunch();
       } catch (err) {
         setDowngrading(false);
-        window.alert(`Stable版のインストールに失敗しました: ${err}`);
+        console.error("[statusbar] force_install_stable failed:", err);
+        window.alert(
+          `Stable版のインストールに失敗しました。${friendlyErrorMessage(err, "update")}`,
+        );
       }
       return;
     }
@@ -165,32 +168,32 @@ function DesktopStatusBar() {
             </select>
           </label>
         )}
-        {/* Plan badge for general users (and owner while previewing a plan).
-            When billing is live, a Free badge is a click-to-upgrade entry. */}
+        {/* Plan badge = entry to the plan/usage dialog. Clickable for EVERY
+            non-internal plan (Free/Pro/Team) regardless of BILLING_ENABLED: the
+            dialog always shows the usage meter, Free adds the upgrade path, and
+            Pro/Team get 利用状況 + サブスク管理 ("契約を管理"). Gating clickability on
+            BILLING_ENABLED left Free users with a dead badge the moment they
+            downgraded (the reported PC dead-end — the mirror of the earlier
+            paid-user one). Owner previewing a plan (viewAs) is shown as that
+            plan; internal-real (viewAs === null) renders nothing. */}
         {user &&
           effectivePlan &&
           (viewAs !== null || effectivePlan !== "internal") &&
-          (BILLING_ENABLED && effectivePlan === "free" ? (
+          effectivePlan !== "internal" && (
             <button
               className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
-              title="プランをアップグレード"
+              title={
+                effectivePlan === "free"
+                  ? "利用状況の確認・プランのアップグレード"
+                  : "利用状況・契約の管理"
+              }
               onClick={() => openPaywall()}
             >
-              Free · アップグレード
+              {effectivePlan === "free"
+                ? "Free · アップグレード"
+                : planLabel(effectivePlan)}
             </button>
-          ) : (
-            <span
-              className={cn(
-                "rounded px-1.5 py-0.5 text-[10px] font-medium",
-                effectivePlan === "free"
-                  ? "bg-muted text-muted-foreground"
-                  : "bg-primary/10 text-primary",
-              )}
-              title={`現在のプラン: ${planLabel(effectivePlan)}`}
-            >
-              {planLabel(effectivePlan)}
-            </span>
-          ))}
+          )}
         {downgrading && (
           <span className="text-amber-500 font-medium animate-pulse">
             Installing Stable...

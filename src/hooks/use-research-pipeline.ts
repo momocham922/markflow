@@ -12,6 +12,7 @@ import {
   fetchResearchSessions,
 } from "@/services/firebase";
 import { isMobile } from "@/platform";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import type { ResearchCard, ResearchSource } from "@/stores/research-store";
 
 const FIRST_ANALYSIS_MS = 15_000;
@@ -58,6 +59,14 @@ export function useResearchPipeline({
   const { startSession, endSession, addCard, updateCard, addSearchedTopic } =
     useResearchStore();
 
+  // Subscribe to the uid reactively so the hydrate effect below RE-RUNS once
+  // auth resolves. On a cold launch (esp. Windows/WebView2 where auth handshake
+  // is slower) the active doc is restored from SQLite BEFORE Firebase auth is
+  // ready; without this the hydrate bails on `!user` and — since the effect
+  // only depended on activeDocId — never retried, so the document's saved
+  // research history stayed invisible for the whole session.
+  const userUid = useAuthStore((s) => s.user?.uid ?? null);
+
   const sessionStartRef = useRef<number>(0);
   const sessionIdRef = useRef<string>("");
 
@@ -81,8 +90,7 @@ export function useResearchPipeline({
     if (store.sessionActive) store.endSession();
     store.clearCards();
 
-    const user = useAuthStore.getState().user;
-    if (!user) return; // already cleared above
+    if (!userUid) return; // not signed in yet — re-runs when userUid resolves
 
     let cancelled = false;
     fetchResearchSessions(activeDocId)
@@ -107,7 +115,7 @@ export function useResearchPipeline({
     return () => {
       cancelled = true;
     };
-  }, [activeDocId]);
+  }, [activeDocId, userUid]);
 
   useEffect(() => {
     if (isRecording) {
@@ -258,7 +266,7 @@ export function useResearchPipeline({
             } catch (err) {
               updateCard(cardId, {
                 loading: false,
-                error: err instanceof Error ? err.message : "Search failed",
+                error: friendlyErrorMessage(err, "research"),
               });
             }
           });
@@ -314,18 +322,12 @@ export function useResearchPipeline({
           // silently. Auto ticks stay quiet (the next interval retries), and
           // quota 429s already raise the global upsell banner via reportIfQuota.
           if (manual && stillActive) {
-            const msg = err instanceof Error ? err.message : String(err);
-            const isNetwork =
-              /load failed|failed to fetch|network|aborted|the operation was aborted/i.test(
-                msg,
-              );
+            // NEVER surface the raw status/body (this is where the owner saw the
+            // "素の500エラー"). friendlyErrorMessage maps network/timeout/auth/
+            // quota/5xx to localized copy and drops the raw text otherwise.
             useResearchStore
               .getState()
-              .setAnalysisError(
-                isNetwork
-                  ? "リサーチ解析中に通信エラーが発生しました。もう一度お試しください。"
-                  : `リサーチ解析に失敗しました: ${msg}`,
-              );
+              .setAnalysisError(friendlyErrorMessage(err, "research"));
           }
         } finally {
           pendingRef.current = false;

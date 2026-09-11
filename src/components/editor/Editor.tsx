@@ -34,6 +34,7 @@ import {
   processImagePath,
   makeUploadPlaceholder,
   replaceUploadPlaceholder,
+  uploadFailureNote,
 } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
@@ -1038,8 +1039,11 @@ export function Editor() {
             } catch (err: unknown) {
               const v = viewRef.current;
               if (v) {
-                const errMsg = `![Upload failed: ${err instanceof Error ? err.message : String(err)}]()`;
-                replaceUploadPlaceholder(v, placeholder, errMsg);
+                replaceUploadPlaceholder(
+                  v,
+                  placeholder,
+                  uploadFailureNote(err),
+                );
               }
             }
           })) ?? undefined;
@@ -1132,7 +1136,23 @@ export function Editor() {
   const handleVoiceDataChange = useCallback(
     (update: VoiceDataUpdate) => {
       if (!activeDocId) return;
-      updateDocument(activeDocId, update);
+      // A live transcript update carries only { voiceTranscript } and — unlike a
+      // content edit (bumps updatedAt) or a Refine archive (sets voiceRecordedAt)
+      // — touches NONE of the fields syncToCloud's filter uses to pick what to
+      // upload. So an OLD document (createdAt & updatedAt both < lastSyncAt) that
+      // gains only a live transcript was silently skipped by sync and the
+      // transcript never reached other devices (reported missing on Windows).
+      // Stamp voiceRecordedAt — the filter's designated "voice data changed"
+      // signal — so live transcripts sync too. Respect an explicit voiceRecordedAt
+      // in the update (recording-start / clear reset it to null; Refine sets its
+      // own), and never stamp for an empty transcript.
+      const patch: VoiceDataUpdate =
+        "voiceTranscript" in update &&
+        update.voiceTranscript &&
+        !("voiceRecordedAt" in update)
+          ? { ...update, voiceRecordedAt: Date.now() }
+          : update;
+      updateDocument(activeDocId, patch);
     },
     [activeDocId, updateDocument],
   );

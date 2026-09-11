@@ -1,23 +1,30 @@
 import http from "http";
+import { randomUUID } from "crypto";
 import Stripe from "stripe";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
+import { getAuth, type UserRecord } from "firebase-admin/auth";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import {
   PLAN_LIMITS,
   parseUidSet,
   resolveViewAs,
   derivePlan,
+  iapExpiryBackstop,
   periodKey,
   checkQuota,
   isChargeable,
   isAutoResearchAllowed,
-  parseOffset,
   clampBatchReserveMinutes,
   measuredBatchMinutes,
+  mergeBatchChunks,
   reconcileBatchDelta,
+  failedBatchChargeDelta,
   shouldRefund,
   deriveSeatAccess,
+  decideIdempotencyReuse,
+  sseProducedOutput,
+  chatResponseHasOutput,
+  AI_IDEM_TTL_MS,
   type Plan,
   type Feature,
 } from "./gating";
@@ -54,6 +61,55 @@ import {
   isProdEnvironment,
   type IapIntentResult,
 } from "./iap";
+import {
+  handleMcpMessage,
+  isRequest,
+  isPersonalDocData,
+  deriveTitleFromMarkdown,
+  MAX_RPC_BATCH,
+  MAX_CREATE_CONTENT_CHARS,
+  MAX_CREATE_TITLE_CHARS,
+  MAX_CREATE_TAGS,
+  MAX_CREATE_TAG_CHARS,
+  type McpDoc,
+  type McpDeps,
+  type JsonRpcRequest,
+  type JsonRpcResponse,
+} from "./mcp";
+import {
+  MCP_PATH,
+  PRM_PATH,
+  ASM_PATH,
+  REGISTER_PATH,
+  AUTHORIZE_PATH,
+  TOKEN_PATH,
+  REVOKE_PATH,
+  GOOGLE_CALLBACK_PATH,
+  CODE_TTL_SEC,
+  ACCESS_TTL_SEC,
+  REFRESH_TTL_SEC,
+  hashToken,
+  newOpaqueToken,
+  verifyPkceS256,
+  pickClientIp,
+  allowedRedirectHosts,
+  buildProtectedResourceMetadata,
+  buildAuthServerMetadata,
+  validateDcrRequest,
+  buildDcrResponse,
+  validateAuthorizeRequest,
+  matchRedirectUri,
+  buildSuccessRedirect,
+  buildErrorRedirect,
+  parseTokenRequest,
+  buildTokenResponse,
+  deriveStateKey,
+  signState,
+  verifyState,
+  decodeJwtPayload,
+  validateGoogleIdToken,
+} from "./mcp-oauth";
+import { mcpIconBuffer } from "./mcp-assets";
 // Store-SDK verification (impure). Marked --external in the esbuild bundle and
 // installed in the Docker image; the top-level require runs even when IAP is DARK
 // (creds absent), so both packages MUST be present in node_modules at boot.
@@ -177,10 +233,15 @@ const IAP_ALLOW_SANDBOX =
 // Sandbox (TestFlight) / License-tester purchase so the owner can validate the
 // IAP flow end-to-end WITHOUT flipping the global IAP_ALLOW_SANDBOX, which would
 // hand real Pro to ANY sandbox tester. This is production-SAFE to keep set: a
-// non-listed real user still gets `sandbox_not_allowed`. Only consulted at the
-// authed /iap/verify sites (the acting uid is the VERIFIED Firebase uid there);
-// the server-to-server notification handlers carry no acting uid and stay on the
-// global flag (they ack-but-don't-apply sandbox events in production).
+// non-listed real user still gets `sandbox_not_allowed`. Consulted at BOTH the
+// authed /iap/verify sites (acting uid = VERIFIED Firebase uid) AND the
+// server-to-server notification handlers (Apple ASSN / Play RTDN), which resolve
+// the bound uid from the transaction/token FIRST, then gate per-uid. Grant and
+// revoke MUST use the same gate: if a tester may sandbox-PURCHASE, that tester's
+// sandbox EXPIRED/refund must also APPLY, else the entitlement sticks on Pro
+// after the sandbox sub expires (the grant/revoke asymmetry that stranded a
+// TestFlight tester on stale Pro). Real production events (env=Production /
+// non-test) skip the gate and apply as before.
 const IAP_SANDBOX_UIDS = new Set(
   (process.env.IAP_SANDBOX_UIDS || "")
     .split(",")
@@ -621,6 +682,14 @@ async function markIapEventProcessed(eventId: string): Promise<void> {
     .create({ at: FieldValue.serverTimestamp() });
 }
 
+/**
+ * Sentinel returned by bindIapCustomer when ownership cannot be proven (the
+ * owner read failed, or create() failed leaving no binding on record). Callers
+ * MUST treat it as "cannot verify → do not grant" and return a retryable error,
+ * never as this uid owning the sub (fail closed — no silent grant).
+ */
+const IAP_OWNER_UNVERIFIABLE = "__iap_owner_unverifiable__";
+
 /** iapCustomers doc for a store subscription id (Firestore ids cannot hold "/"). */
 function iapCustomerRef(subId: string) {
   return getFirestore()
@@ -628,27 +697,57 @@ function iapCustomerRef(subId: string) {
     .doc(subId.replace(/\//g, "_"));
 }
 /**
- * Bind a store subscription id → firebase uid, CREATE-ONCE (first claimant wins).
- * A different uid claiming an already-bound subId is an anomaly (account transfer
- * / abuse) and is refused + logged — never silently reassigned.
+ * Bind a store subscription id → firebase uid, CREATE-ONCE (first claimant wins),
+ * and return the EFFECTIVE owner uid the subId is bound to. A different uid
+ * claiming an already-bound subId is an anomaly (a second app account signing in
+ * on the same device's Apple ID / Play account, or abuse) and is refused + logged
+ * — never silently reassigned. Returning the owner lets /iap/verify refuse to
+ * grant Pro to a NON-owner, so one paid store subscription can never leak Pro to
+ * multiple Firebase accounts (越境課金防止).
  */
 async function bindIapCustomer(
   subId: string,
   uid: string,
   meta: Record<string, unknown> = {},
-): Promise<void> {
-  if (!subId || !uid) return;
+): Promise<string | null> {
+  if (!subId || !uid) return null;
   const ref = iapCustomerRef(subId);
   try {
     await ref.create({ uid, ...meta, createdAt: FieldValue.serverTimestamp() });
-  } catch {
-    const snap = await ref.get();
+    return uid; // first claimant wins → this uid now owns the subId
+  } catch (createErr) {
+    // create() failed — normally ALREADY_EXISTS (someone already claimed this
+    // subId). Read the existing owner to decide. If the READ also fails, or the
+    // create failed for a NON-exists reason and left no binding on record, we
+    // CANNOT prove ownership — fail CLOSED (never grant on an unverifiable
+    // binding) rather than returning this uid and leaking Pro across accounts.
+    let snap;
+    try {
+      snap = await ref.get();
+    } catch (readErr) {
+      console.error(
+        `[iap] bindIapCustomer ${subId} owner read failed:`,
+        readErr,
+      );
+      return IAP_OWNER_UNVERIFIABLE;
+    }
     const existing = snap.exists ? String(snap.data()?.uid || "") : "";
-    if (existing && existing !== uid) {
+    if (!existing) {
+      // No binding recorded but create() failed → transient/unverifiable, not a
+      // real first-claim. Fail closed instead of granting to this uid.
+      console.error(
+        `[iap] bindIapCustomer ${subId} create failed with no record:`,
+        createErr,
+      );
+      return IAP_OWNER_UNVERIFIABLE;
+    }
+    if (existing !== uid) {
       console.error(
         `[iap] subId ${subId} already bound to ${existing}; refused ${uid}`,
       );
+      return existing; // subId belongs to a DIFFERENT account
     }
+    return existing; // same uid re-verifying (idempotent restore)
   }
 }
 async function lookupIapCustomer(subId: string): Promise<string | null> {
@@ -1009,10 +1108,121 @@ const meteringStore: MeteringStore = {
 // exceed the Cloud Run request timeout (900s) so a legitimately long batch is
 // never reclaimed as "stale" while it is still running.
 const BATCH_LEASE_STALE_MS = 20 * 60 * 1000;
+// Hard cap on chunks per batch-transcribe request. Each chunk launches its own
+// paid BatchRecognize job, so an unbounded chunk array is a parallel cost bomb;
+// the pre-flight reserve now floors at 1 min/chunk (clampBatchReserveMinutes) but
+// this cap bounds the fan-out independently. The client splits recordings into
+// ≤55-min chunks, so 48 chunks covers ~44h — far beyond any real recording.
+const MAX_BATCH_CHUNKS = 48;
 const serverValues: ServerValues = {
   increment: (n) => FieldValue.increment(n),
   serverTimestamp: () => FieldValue.serverTimestamp(),
 };
+
+// =====================================================================
+// AI request idempotency wiring (see gating.ts decideIdempotencyReuse)
+// ---------------------------------------------------------------------
+// Collapses a logical AI request's error-retries / 再生成 onto ONE charge. The
+// client stamps a stable Idempotency-Key header per logical request and re-sends
+// it on every retry/regenerate; we key aiRequests/{sha256(uid:key)} by it. The
+// content hash binds the record to the exact prompt so the same key can never be
+// reused to bill a DIFFERENT generation for free. Server-write-only (see
+// firestore.rules aiRequests). All calls are best-effort and FAIL TOWARD
+// CHARGING (an infra blip never grants a free generation — the safe money
+// direction).
+// =====================================================================
+
+/** Read the client's per-logical-request idempotency key, if any. */
+function readIdempotencyKey(req: http.IncomingMessage): string {
+  const raw = req.headers["idempotency-key"];
+  const v = (Array.isArray(raw) ? raw[0] : raw)?.trim() || "";
+  // Bound the length so a hostile client can't stuff a huge header; the value is
+  // hashed anyway, so any opaque token up to this cap is fine.
+  return v.slice(0, 200);
+}
+
+/** Stable content hash for the chat request body (prompt + system + tools). */
+function chatContentHash(parsed: {
+  messages?: unknown;
+  system?: unknown;
+  tools?: unknown;
+}): string {
+  return hashToken(
+    JSON.stringify({
+      messages: parsed.messages ?? null,
+      system: parsed.system ?? null,
+      tools: parsed.tools ?? null,
+    }),
+  );
+}
+
+function aiIdemDoc(uid: string, key: string) {
+  return getFirestore()
+    .collection("aiRequests")
+    .doc(hashToken(`${uid}:${key}`));
+}
+
+/**
+ * Decide (atomically) whether this request may REUSE a prior charge. When it
+ * may, the regen counter is incremented in the same transaction so the cap is
+ * enforced, and the caller SKIPS reserving a fresh aiCall. Returns false (charge
+ * fresh) on no/expired/different/at-cap record OR any infra error.
+ */
+async function checkAiIdempotency(
+  uid: string,
+  key: string,
+  contentHash: string,
+): Promise<boolean> {
+  const ref = aiIdemDoc(uid, key);
+  const now = Date.now();
+  try {
+    return await getFirestore().runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const state = snap.exists ? snap.data() : null;
+      if (!decideIdempotencyReuse(state, contentHash, now)) return false;
+      tx.set(
+        ref,
+        {
+          regenCount: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return true;
+    });
+  } catch (err) {
+    console.error(`[chat] idempotency check failed for ${uid}:`, err);
+    return false; // fail toward charging — never grant a free run on infra error
+  }
+}
+
+/**
+ * Record that a fresh charge succeeded so subsequent same-key, same-content
+ * re-runs reuse it (free) within the TTL. Resets regenCount to 0 (a new paid
+ * window). Best-effort — a failed mark only means a would-be-free regenerate
+ * charges again, never a double charge or a leak.
+ */
+async function markAiIdempotencyCharged(
+  uid: string,
+  key: string,
+  contentHash: string,
+): Promise<void> {
+  try {
+    await aiIdemDoc(uid, key).set(
+      {
+        uid,
+        charged: true,
+        contentHash,
+        regenCount: 0,
+        expiresAt: Date.now() + AI_IDEM_TTL_MS,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  } catch (err) {
+    console.error(`[chat] idempotency mark failed for ${uid}:`, err);
+  }
+}
 
 // Safely send a JSON error. If headers were already sent (a stream started, or the
 // client disconnected mid-response), writing a status throws ERR_HTTP_HEADERS_SENT,
@@ -1116,6 +1326,39 @@ async function getGcpAccessToken(): Promise<string> {
     throw new Error("Failed to get access token from metadata server");
   const data = (await res.json()) as { access_token: string };
   return data.access_token;
+}
+
+// Upstream statuses that are worth a retry: rate limits and transient overload.
+// 529 is Anthropic/Vertex "overloaded"; 503 is Gemini/Vertex unavailable. A 4xx
+// other than 429 is a caller/config error and is NOT retried.
+const TRANSIENT_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 529]);
+
+// Retry a fetch thunk on transient upstream failures with exponential backoff.
+// Returns the FINAL Response (which may still be non-OK) so the caller decides
+// how to degrade — this helper never throws on an HTTP error status and never
+// reads the returned body (the caller owns it). The discarded body of a failed
+// intermediate attempt is drained so the socket can be reused.
+async function fetchUpstreamWithRetry(
+  make: () => Promise<Response>,
+  opts?: { attempts?: number; baseDelayMs?: number },
+): Promise<Response> {
+  const attempts = opts?.attempts ?? 3;
+  const baseDelayMs = opts?.baseDelayMs ?? 500;
+  let last: Response | null = null;
+  for (let i = 0; i < attempts; i++) {
+    const r = await make();
+    if (r.ok || !TRANSIENT_UPSTREAM_STATUS.has(r.status)) return r;
+    last = r;
+    if (i < attempts - 1) {
+      try {
+        await r.text(); // drain the discarded body before retrying
+      } catch {
+        /* ignore */
+      }
+      await new Promise((res) => setTimeout(res, baseDelayMs * 2 ** i));
+    }
+  }
+  return last as Response;
 }
 
 // Revocation / disabled-account check for the metered (cost-incurring) paths.
@@ -1311,7 +1554,7 @@ async function deleteStoragePrefix(prefix: string): Promise<number> {
  * is unconfigured (DARK) or the user has no customer. Never throws.
  */
 async function cancelPersonalStripeSubscription(uid: string): Promise<void> {
-  if (!isBillingConfigured()) return;
+  if (!billingConfigured()) return;
   try {
     const entSnap = await getFirestore()
       .collection("entitlements")
@@ -1371,6 +1614,64 @@ const INTERNAL_UIDS = parseUidSet(process.env.INTERNAL_UIDS);
 // downgrade/lateral move; it can never escalate privileges, and it only ever
 // affects the owner's own usage document.
 const OWNER_UIDS = parseUidSet(process.env.OWNER_UIDS);
+
+// Remote-MCP allowlist: uids permitted to connect Claude to their MarkFlow docs
+// via the /mcp OAuth server. DARK by default — with this unset the ENTIRE MCP
+// feature (discovery, OAuth, /mcp) 404s as if absent, so stable builds ship it
+// off. Set via Cloud Run env MCP_UIDS (comma-separated) to enable per-uid.
+const MCP_UIDS = parseUidSet(process.env.MCP_UIDS);
+
+// MCP *write* allowlist (create_document import "inbox"): uids ALWAYS permitted to
+// have the MCP connection CREATE new documents, on top of read access. An explicit
+// per-uid opt-in that works even when the broad switch below is off (surgical
+// testing / hand-listing). A uid here still must also pass mcpEligible (read gate);
+// write is strictly additive.
+const MCP_IMPORT_UIDS = parseUidSet(process.env.MCP_IMPORT_UIDS);
+
+// MCP *write* broad switch. When enabled, create_document is granted to any uid
+// that is itself MCP-eligible for READ (owner / internal staff / Pro / Team) —
+// mirroring mcpEligible's audience so paid + internal users get the import inbox
+// without hand-listing every uid. Free users NEVER receive write (they cannot
+// even read). Kept as a SEPARATE switch from MCP_UIDS so write can be turned off
+// independently of read. Unset (the default) => write stays allowlist-only
+// (MCP_IMPORT_UIDS), i.e. dark for everyone else.
+const MCP_IMPORT_ALL =
+  process.env.MCP_IMPORT_ALL === "1" || process.env.MCP_IMPORT_ALL === "true";
+
+// Fixed destination folder for MCP-created documents. The create_document tool
+// CANNOT choose a folder — every import lands here so the blast radius is one
+// known, user-reviewable folder. Normalized to exactly one leading slash (the
+// sidebar keys its folder tree on a leading-slash path; see Sidebar.buildTree),
+// no trailing slash. Overridable via MCP_IMPORT_FOLDER; defaults to "/Claude".
+const MCP_IMPORT_FOLDER = (() => {
+  const raw = (process.env.MCP_IMPORT_FOLDER || "/Claude").trim();
+  const collapsed = raw.replace(/^\/+/, "").replace(/\/+$/, "");
+  return "/" + (collapsed || "Claude");
+})();
+
+// HMAC key for signing the Google-OAuth round-trip `state` (Option b). Derived
+// from the server-only GOOGLE_OAUTH_CLIENT_SECRET (domain-separated), so no new
+// secret/env is needed. Empty when the secret is unset => /authorize + the Google
+// callback fail closed (503). The MCP /authorize page no longer loads any Firebase
+// SDK, so firebaseapp.com is never exposed to the user during sign-in.
+const MCP_STATE_KEY = deriveStateKey(GOOGLE_OAUTH_CLIENT_SECRET);
+
+// Optional: pin the externally-visible origin used to build MCP discovery
+// metadata + OAuth issuer/endpoints, instead of deriving it from the (proxy-
+// supplied, spoofable) Host / X-Forwarded-Host headers. Set to the canonical
+// public URL, e.g. https://markflow-ai-proxy-smgwadzxwq-an.a.run.app. Unset =>
+// derive from headers (previous behaviour).
+const MCP_PUBLIC_ORIGIN = (process.env.MCP_PUBLIC_ORIGIN || "").replace(
+  /\/+$/,
+  "",
+);
+
+// Trusted redirect hosts for MCP OAuth clients (confused-deputy defense).
+// claude.ai/claude.com + loopback are built in; add more (comma-separated) via
+// MCP_ALLOWED_REDIRECT_HOSTS without a code change.
+const MCP_ALLOWED_REDIRECT_HOSTS = allowedRedirectHosts(
+  process.env.MCP_ALLOWED_REDIRECT_HOSTS,
+);
 
 // Slack Agent-notification webhook for the feedback pipeline. Injected via Secret
 // Manager in Cloud Run (never committed). Unset = DARK: feedback is still stored,
@@ -1523,11 +1824,18 @@ async function resolvePlan(
   meterKey: string;
   seats: number;
   source: string | null;
+  expiresDate: number | null;
 }> {
   let real: ResolvedEntitlement;
   if (INTERNAL_UIDS.has(uid)) {
     // Internal allowlist is unmetered — meter under the uid (never consulted).
-    real = { realPlan: "internal", meterKey: uid, seats: 1, source: null };
+    real = {
+      realPlan: "internal",
+      meterKey: uid,
+      seats: 1,
+      source: null,
+      expiresDate: null,
+    };
   } else {
     real = await loadEntitlement(uid);
   }
@@ -1542,6 +1850,7 @@ async function resolvePlan(
     meterKey: real.meterKey,
     seats: real.seats,
     source: real.source ?? null,
+    expiresDate: real.expiresDate ?? null,
   };
 }
 
@@ -1562,6 +1871,12 @@ interface ResolvedEntitlement {
    * so an IAP subscriber must be sent to the store's own management UI instead.
    */
   source?: string | null;
+  /**
+   * Subscription period end (epoch MILLISECONDS) for a paid own-subscription, or
+   * null. Surfaced to the client so the plan panel can show the renewal/expiry
+   * date; also the input to computeEntitlement's read-time IAP expiry backstop.
+   */
+  expiresDate?: number | null;
   // Set when the plan could NOT be resolved (Firestore error) and we fell back to
   // "free". Lets callers that must fail OPEN (the publish serve-gate) tell a
   // genuine free plan apart from a lookup blip. The AI metering path ignores it
@@ -1592,6 +1907,43 @@ async function loadEntitlement(uid: string): Promise<ResolvedEntitlement> {
   return resolved;
 }
 
+// MCP eligibility: who may connect Claude to their MarkFlow docs via the /mcp
+// OAuth server. MCP_UIDS is BOTH the master switch and an explicit allowlist —
+// unset (size 0) keeps the ENTIRE feature dark (the route-level 404 stays), and
+// any uid listed there is ALWAYS allowed (owner / named testers), so a Firestore
+// blip can never lock them out. Beyond that, internal staff (INTERNAL_UIDS) and
+// paid users (Pro/Team) are eligible, so the feature is usable by a limited set
+// without hand-listing every uid. Plan is read via the same 15s-cached
+// entitlement as metering: a plan lapse revokes access within ~15s cross-instance
+// and, for a live session, by the next access-token mint (≤1h) or refresh. Owner
+// / internal / listed uids short-circuit BEFORE the Firestore read (zero extra
+// cost on the hot /mcp path); only paid non-listed users incur the cached lookup.
+async function mcpEligible(uid: string): Promise<boolean> {
+  if (MCP_UIDS.size === 0) return false; // feature dark
+  if (!uid) return false;
+  if (MCP_UIDS.has(uid)) return true; // explicit allowlist (owner / named testers)
+  if (INTERNAL_UIDS.has(uid)) return true; // internal staff, never blocked by a blip
+  const ent = await loadEntitlement(uid);
+  return ent.realPlan === "pro" || ent.realPlan === "team";
+}
+
+// MCP *write* eligibility (create_document import "inbox"). Two independent grants:
+//   1. MCP_IMPORT_UIDS.has(uid)  — explicit per-uid opt-in, always allowed.
+//   2. MCP_IMPORT_ALL && mcpEligible(uid) — broad grant: when the switch is on,
+//      write mirrors READ eligibility (owner / internal staff / Pro / Team).
+// Self-contained (does NOT rely on the caller having pre-gated read): re-checks
+// mcpEligible so a future call site can't accidentally grant write to a
+// read-ineligible uid. Fail-closed via mcpEligible: a Firestore blip meters the
+// uid as free (loadEntitlement never caches a degraded result), which DENIES write
+// rather than granting it. Free users never receive write. Dark by default: with
+// MCP_IMPORT_ALL off and MCP_IMPORT_UIDS empty this is always false.
+async function mcpImportEligible(uid: string): Promise<boolean> {
+  if (!uid) return false;
+  if (MCP_IMPORT_UIDS.has(uid)) return true; // explicit opt-in (even if broad off)
+  if (!MCP_IMPORT_ALL) return false; // broad grant disabled => allowlist-only
+  return await mcpEligible(uid); // owner / internal / Pro / Team
+}
+
 /**
  * Resolve a uid's metered identity from Firestore (no cache). Order of precedence:
  *  1. Own entitlement is a paid Team subscription → meter under the funded team
@@ -1610,14 +1962,35 @@ async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
     const snap = await db.collection("entitlements").doc(uid).get();
     const data = snap.exists ? (snap.data() as Record<string, unknown>) : null;
     const source = data?.source ? String(data.source) : null;
-    const plan = data ? derivePlan(data) : "free";
+    // Stored subscription period end (SECONDS — iap.ts msToSec / billing.ts).
+    const periodEndSec = Number(data?.currentPeriodEnd) || 0;
+    const expiresDate = periodEndSec > 0 ? periodEndSec * 1000 : null;
+    const derived = data ? derivePlan(data) : "free";
+    // Read-time IAP expiry backstop (money-leak guard) — pure logic in gating.ts
+    // (iapExpiryBackstop), the clock injected here. Response-only: we do NOT write
+    // from this hot read path — the next /iap/verify or a (re)delivered
+    // notification persists the terminal doc.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const plan = iapExpiryBackstop(derived, source, periodEndSec, nowSec);
+    if (plan !== derived) {
+      console.warn(
+        `[iap] expiry backstop: uid=${uid} source=${source} periodEnd=${periodEndSec} now=${nowSec} — treating as free (missed lifecycle notification?)`,
+      );
+    }
     if (plan === "team") {
       const teamId = String(data?.teamId || "").trim() || uid;
       const seats = Math.max(1, Math.floor(Number(data?.seats) || 1));
-      return { realPlan: "team", meterKey: teamId, seats, source };
+      return { realPlan: "team", meterKey: teamId, seats, source, expiresDate };
     }
     if (plan === "pro" || plan === "internal") {
-      return { realPlan: plan, meterKey: uid, seats: 1, source };
+      return {
+        realPlan: plan,
+        meterKey: uid,
+        seats: 1,
+        source,
+        // internal is unmetered/admin-seeded — no meaningful expiry to show.
+        expiresDate: plan === "internal" ? null : expiresDate,
+      };
     }
     // free own-entitlement → maybe an assigned member of a paid team. The team
     // MEMBER owns no subscription of their own (the team owner's doc holds the
@@ -1629,8 +2002,11 @@ async function computeEntitlement(uid: string): Promise<ResolvedEntitlement> {
         meterKey: seat.teamId,
         seats: seat.seats,
         source: null,
+        expiresDate: null,
       };
-    return { realPlan: "free", meterKey: uid, seats: 1, source };
+    // A backstop-expired IAP sub reads as free here but keeps its `source` so the
+    // client can still explain WHERE the lapsed subscription lived if needed.
+    return { realPlan: "free", meterKey: uid, seats: 1, source, expiresDate };
   } catch (err) {
     // Fail to per-uid "free" (NOT unlimited) so a Firestore blip can neither
     // break the product nor leak unlimited cost. Logged explicitly — never silent.
@@ -1655,6 +2031,17 @@ async function resolveTeamSeat(
   const teamSnap = await db.collection("teams").doc(teamId).get();
   if (!teamSnap.exists) return null;
   const t = teamSnap.data() as Record<string, unknown>;
+  // Current membership gate: a uid removed from the team must lose the shared
+  // pool IMMEDIATELY, even if a stale seatAssignments entry still names them.
+  // removeTeamMember is a client Firestore write that strips memberUids but does
+  // not (cannot securely) rewrite the server-authoritative seatAssignments, so
+  // deriveSeatAccess alone would keep granting a fired member access. Requiring
+  // BOTH current membership AND an in-capacity seat closes that at the server
+  // gate (authoritative — cannot be bypassed by the client).
+  const memberUids = Array.isArray(t?.memberUids)
+    ? (t.memberUids as unknown[]).map((u) => String(u ?? "").trim())
+    : [];
+  if (!memberUids.includes(uid)) return null;
   const billing = t?.billing as
     { status?: unknown; seats?: unknown } | undefined;
   const assignments = Array.isArray(t?.seatAssignments)
@@ -1730,10 +2117,24 @@ async function guard(
     }
     return { ok: true, charged: true, uid, meterKey, plan, feature, cost, ym };
   } catch (err) {
-    // Fail-open on metering-infra error: don't break AI for a DB blip. Logged.
-    // charged:false — the increment never persisted, so never refund it.
+    // Fail CLOSED on metering-infra error. A metered plan whose usage counter
+    // cannot be read/incremented must NOT be granted the feature for free — that
+    // is exactly the "user at their limit slips through during a Firestore blip"
+    // money leak (project rule: サイレントフォールバック禁止・障害は明示的に失敗させろ).
+    // Internal/unlimited plans never reach here (precheck.unlimited returned
+    // above), so this only fails a genuinely metered request. Surfaced as a
+    // retriable 503 with a stable code the client maps to a friendly message —
+    // never a silent success and never a raw error string.
     console.error(`guard tx failed for ${uid}/${feature}:`, err);
-    return { ok: true, charged: false, uid, meterKey, plan, feature, cost, ym };
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "metering_unavailable",
+        feature,
+        retryable: true,
+      }),
+    );
+    return { ok: false };
   }
 }
 
@@ -1782,13 +2183,1568 @@ async function refundIfUncommitted(
   await adjustUsage(g.meterKey, g.feature, -g.cost, g.plan, g.ym);
 }
 
+// =====================================================================
+// Remote MCP server + OAuth 2.1 Authorization Server
+// ---------------------------------------------------------------------
+// Exposes the signed-in user's PERSONAL documents (ownerId == uid, read-only) to
+// Claude as an MCP server over Streamable HTTP, protected by an OAuth 2.1 AS we
+// host here. Pure protocol/crypto logic lives in ./mcp + ./mcp-oauth (unit
+// tested); this section is the Firestore/HTTP wiring. All state lives in
+// server-write-only Firestore collections; codes/tokens are stored by SHA-256
+// hash (raw secret never persisted). See firestore.rules.
+// =====================================================================
+
+const MCP_CLIENTS = "mcp_oauth_clients";
+const MCP_CODES = "mcp_oauth_codes";
+const MCP_ACCESS = "mcp_access_tokens";
+const MCP_REFRESH = "mcp_refresh_tokens";
+// Authoritative revocation signal: one tiny doc per revoked token family. It is
+// the SOURCE OF TRUTH for family revocation because the best-effort delete sweep
+// can miss docs (rotation accumulates docs; a query page is bounded). Every token
+// grant/use checks it, so a token that survives the sweep — or is minted racing
+// the sweep — is still rejected the instant its family is tombstoned.
+const MCP_REVOKED_FAMILIES = "mcp_revoked_families";
+
+// Cap the personal-doc set a single MCP tool call scans. get_document fetches a
+// full body on demand, so list/search only need a bounded recent window.
+const MCP_MAX_DOCS = 500;
+
+function mcpNowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+// Escape a string for safe interpolation into HTML text/attribute content.
+function mcpEscHtml(s: string): string {
+  return String(s).replace(
+    /[<>&"']/g,
+    (c) =>
+      ({
+        "<": "&lt;",
+        ">": "&gt;",
+        "&": "&amp;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c] || c,
+  );
+}
+
+// Throttle the unauthenticated MCP surface (in-memory, per instance — sufficient
+// for the small --max-instances pool). Buckets are keyed strings; a GLOBAL key
+// backstops per-IP keys so X-Forwarded-For rotation can't buy unlimited budget.
+// mcpClientIp uses the spoof-resistant rightmost XFF entry.
+const mcpRateBuckets = new Map<string, number[]>();
+// Hard ceiling on distinct keys: an attacker rotating source addresses (e.g. an
+// IPv6 /64 on the dual-stack run.app ingress) would otherwise create a new key
+// per request. When exceeded we evict the OLDEST keys unconditionally (LRU via
+// Map insertion order) rather than only fully-stale ones, so the Map — and the
+// per-request bookkeeping cost — stays bounded regardless of key churn.
+const MCP_RATE_MAX_KEYS = 20000;
+function mcpRateHit(
+  key: string,
+  maxPerWindow: number,
+  windowSec: number,
+): boolean {
+  const now = mcpNowSec();
+  const hits = (mcpRateBuckets.get(key) || []).filter(
+    (t) => now - t < windowSec,
+  );
+  // This request is limited when the in-window count already meets the cap.
+  const limited = hits.length >= maxPerWindow;
+  // Record it, but never let a single hot key's array grow past the cap (+1):
+  // once we know the boolean answer, more timestamps add nothing.
+  if (hits.length <= maxPerWindow) hits.push(now);
+  // Re-insert last so this key becomes most-recently-used (LRU touch).
+  mcpRateBuckets.delete(key);
+  mcpRateBuckets.set(key, hits);
+  while (mcpRateBuckets.size > MCP_RATE_MAX_KEYS) {
+    const oldest = mcpRateBuckets.keys().next().value;
+    if (oldest === undefined) break;
+    mcpRateBuckets.delete(oldest);
+  }
+  return limited;
+}
+function mcpClientIp(req: http.IncomingMessage): string {
+  return pickClientIp(
+    req.headers["x-forwarded-for"],
+    req.socket.remoteAddress || undefined,
+  );
+}
+// Per-IP-FIRST composition: check the per-IP bucket and, if it already tripped,
+// return WITHOUT charging the global bucket — so one flooding source can only
+// spend its own per-IP budget and can never drain the shared global bucket to
+// 429 the legitimate owner. The global cap is still charged (and enforced) for
+// requests that stay under their per-IP cap, which is exactly the distributed /
+// address-rotating case it exists to bound.
+function mcpComposeRateLimit(
+  ipKey: string,
+  maxPerIp: number,
+  globalKey: string,
+  maxGlobal: number,
+  windowSec: number,
+): boolean {
+  if (mcpRateHit(ipKey, maxPerIp, windowSec)) return true;
+  return mcpRateHit(globalKey, maxGlobal, windowSec);
+}
+// DCR is unauthenticated and writes a permanent client doc → tight caps.
+const MCP_DCR_WINDOW_SEC = 3600;
+const MCP_DCR_MAX_PER_IP = 20;
+const MCP_DCR_MAX_GLOBAL = 200;
+function mcpDcrRateLimited(ip: string): boolean {
+  return mcpComposeRateLimit(
+    "dcr:" + ip,
+    MCP_DCR_MAX_PER_IP,
+    "dcr:__global__",
+    MCP_DCR_MAX_GLOBAL,
+    MCP_DCR_WINDOW_SEC,
+  );
+}
+// The unauthenticated MCP OAuth routes (token/authorize/revoke) each touch
+// Firestore before auth can fail; a looser per-minute cap bounds cost/quota DoS.
+// NOTE: /mcp itself is NOT limited here — it is throttled per-authenticated-uid
+// inside mcpHandleRpc AFTER the bearer check, so a flood of the shared pre-auth
+// buckets can never 429 the owner's own authenticated RPC traffic.
+const MCP_ROUTE_WINDOW_SEC = 60;
+const MCP_ROUTE_MAX_PER_IP = 120;
+const MCP_ROUTE_MAX_GLOBAL = 600;
+function mcpRouteRateLimited(ip: string): boolean {
+  return mcpComposeRateLimit(
+    "rt:" + ip,
+    MCP_ROUTE_MAX_PER_IP,
+    "rt:__global__",
+    MCP_ROUTE_MAX_GLOBAL,
+    MCP_ROUTE_WINDOW_SEC,
+  );
+}
+// Per-authenticated-uid throttle for /mcp JSON-RPC, applied only AFTER the bearer
+// token resolves to an MCP-eligible uid. Generous — a single client legitimately
+// batches calls — but bounds a compromised/looping client's Firestore fan-out.
+const MCP_RPC_WINDOW_SEC = 60;
+const MCP_RPC_MAX_PER_UID = 300;
+function mcpRpcRateLimited(uid: string): boolean {
+  return mcpRateHit("rpc:" + uid, MCP_RPC_MAX_PER_UID, MCP_RPC_WINDOW_SEC);
+}
+// Per-uid throttle specifically for create_document (write). Much tighter than the
+// generic RPC cap: a create is a permanent Firestore WRITE, so this bounds how
+// many documents a looping/compromised client can spawn into the user's library.
+// 60/hour is ample for a human-driven import flow and caps runaway writes.
+const MCP_CREATE_WINDOW_SEC = 3600;
+const MCP_CREATE_MAX_PER_UID = 60;
+function mcpCreateRateLimited(uid: string): boolean {
+  return mcpRateHit(
+    "mcpcreate:" + uid,
+    MCP_CREATE_MAX_PER_UID,
+    MCP_CREATE_WINDOW_SEC,
+  );
+}
+// Pre-auth per-IP throttle for /mcp: the bearer-token lookup is a real Firestore
+// read that runs BEFORE the per-uid throttle above, so an UNauthenticated flood of
+// bogus bearer tokens would otherwise drive uncapped Firestore reads (cost/quota)
+// and saturate the small shared instance pool. This is intentionally PER-IP-ONLY
+// (no global bucket): the cap is set well above the owner's own per-uid allowance
+// so the single legitimate owner is never throttled, and omitting the global
+// bucket guarantees other IPs' traffic can never 429 the owner. A trivial
+// single-source flood is stopped here; a botnet-scale distributed flood is not
+// bounded in aggregate by this limiter (accepted — --max-instances caps blast
+// radius and it targets a dark, single-owner endpoint).
+const MCP_MCP_PREAUTH_MAX_PER_IP = 600;
+function mcpMcpPreAuthRateLimited(ip: string): boolean {
+  return mcpRateHit(
+    "mcppre:" + ip,
+    MCP_MCP_PREAUTH_MAX_PER_IP,
+    MCP_ROUTE_WINDOW_SEC,
+  );
+}
+
+// Firestore Timestamp | number | null → epoch ms.
+function mcpToMs(v: unknown): number {
+  const t = v as { toMillis?: () => number } | null;
+  if (t && typeof t.toMillis === "function") return t.toMillis();
+  return typeof v === "number" ? v : 0;
+}
+
+function mcpJson(
+  res: http.ServerResponse,
+  status: number,
+  obj: unknown,
+  extraHeaders?: Record<string, string>,
+): void {
+  if (res.headersSent) {
+    if (!res.writableEnded) res.end();
+    return;
+  }
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    ...(extraHeaders || {}),
+  });
+  res.end(JSON.stringify(obj));
+}
+
+function mcpHtml(res: http.ServerResponse, status: number, html: string): void {
+  if (res.headersSent) return;
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(html);
+}
+
+// Bounded body reader for the MCP routes (they run before the shared readBody).
+function mcpReadBody(
+  req: http.IncomingMessage,
+  maxBytes: number,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let aborted = false;
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        aborted = true;
+        reject(new Error("Request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!aborted) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (e) => {
+      if (!aborted) reject(e);
+    });
+  });
+}
+
+function mcpFirestoreDocToMcp(
+  id: string,
+  data: Record<string, unknown>,
+): McpDoc {
+  return {
+    id,
+    title: String(data.title || ""),
+    content: String(data.content || ""),
+    updatedAt: mcpToMs(data.updatedAt),
+    createdAt: mcpToMs(data.createdAt),
+    folder: data.folder ? String(data.folder) : null,
+    tags: Array.isArray(data.tags) ? (data.tags as unknown[]).map(String) : [],
+    docType: data.docType ? String(data.docType) : undefined,
+  };
+}
+
+// I/O deps for handleMcpMessage, scoped to ONE user's personal docs. Both paths
+// enforce the authorization boundary via isPersonalDocData (pure, unit-tested in
+// mcp.test.ts): a doc that is not the caller's personal document — another user's,
+// a team doc (non-empty teamId), or one shared out (non-empty collaboratorUids) —
+// is never returned. Filtered in code because Firestore `where("teamId","==",null)`
+// does not match documents that omit the field entirely.
+async function mcpDepsForUid(uid: string): Promise<McpDeps> {
+  // Memoize the listing for the lifetime of this deps object (== one HTTP
+  // request): a JSON-RPC batch with several list/search calls then costs ONE
+  // Firestore query instead of one per element (read-amplification guard).
+  let listPromise: Promise<McpDoc[]> | null = null;
+  const deps: McpDeps = {
+    listDocs: () => {
+      if (!listPromise) {
+        listPromise = (async () => {
+          const q = await getFirestore()
+            .collection("documents")
+            .where("ownerId", "==", uid)
+            .limit(MCP_MAX_DOCS)
+            .get();
+          const docs = q.docs
+            .filter((d) => isPersonalDocData(uid, d.data()))
+            .map((d) => mcpFirestoreDocToMcp(d.id, d.data()));
+          docs.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+          return docs;
+        })();
+      }
+      return listPromise;
+    },
+    getDoc: async (id) => {
+      const snap = await getFirestore().collection("documents").doc(id).get();
+      if (!snap.exists) return null;
+      const data = snap.data() as Record<string, unknown>;
+      if (!isPersonalDocData(uid, data)) return null; // personal docs only
+      return mcpFirestoreDocToMcp(snap.id, data);
+    },
+  };
+
+  // Write surface (create_document) is wired ONLY for uids on the write allowlist
+  // (mcpImportEligible). Its mere presence is what advertises + enables the tool
+  // (see mcp.ts toolsFor / callTool); read-only connections never get it.
+  if (await mcpImportEligible(uid)) {
+    deps.createDoc = async (input) => {
+      // Per-uid write throttle: create is a permanent Firestore write, so bound
+      // how many docs a looping/compromised client can spawn (60/hour).
+      if (mcpCreateRateLimited(uid)) {
+        return {
+          ok: false,
+          message: "Too many documents created recently. Try again later.",
+        };
+      }
+      // Defense in depth: callTool already normalized + capped these, but the
+      // Firestore boundary must not trust a single upstream choke point. Re-cap
+      // content/title/tags here so no oversized/malformed write can ever land.
+      const content = typeof input.content === "string" ? input.content : "";
+      if (!content.trim()) {
+        return { ok: false, message: "Content must not be empty." };
+      }
+      if (content.length > MAX_CREATE_CONTENT_CHARS) {
+        return { ok: false, message: "Content is too large." };
+      }
+      const rawTitle =
+        typeof input.title === "string" ? input.title.trim() : "";
+      const title =
+        rawTitle.slice(0, MAX_CREATE_TITLE_CHARS) ||
+        deriveTitleFromMarkdown(content);
+      const tags = Array.isArray(input.tags)
+        ? input.tags
+            .filter((t): t is string => typeof t === "string")
+            .map((t) => t.trim().slice(0, MAX_CREATE_TAG_CHARS))
+            .filter((t) => t.length > 0)
+            .slice(0, MAX_CREATE_TAGS)
+        : [];
+
+      // Fresh UUID + `.create()` = HARD create-only: `.create()` fails with
+      // ALREADY_EXISTS rather than overwriting, so this path can never clobber an
+      // existing document even on an (astronomically unlikely) id collision. The
+      // shape mirrors saveDocumentToFirestore's create branch so the doc renders
+      // identically in-app, and every field that determines ownership/placement/
+      // classification is HARD-BOUND server-side (never client-controlled):
+      //   ownerId          = the authenticated uid          (not from the tool args)
+      //   folder           = MCP_IMPORT_FOLDER (fixed)       (tool cannot choose)
+      //   teamId/collab*   = personal-doc invariants         (never a team/shared doc)
+      const id = randomUUID();
+      const now = FieldValue.serverTimestamp();
+      const payload = {
+        title,
+        content,
+        ownerId: uid,
+        folder: MCP_IMPORT_FOLDER,
+        tags,
+        titlePinned: false,
+        docType: "markdown",
+        teamId: null,
+        collaborators: {},
+        collaboratorUids: [],
+        createdAt: now,
+        updatedAt: now,
+        source: "mcp_import", // provenance marker (ignored by the client mapper)
+      };
+      try {
+        await getFirestore().collection("documents").doc(id).create(payload);
+      } catch (err) {
+        console.error(
+          `[mcp] create_document failed for ${uid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { ok: false, message: "Failed to create the document." };
+      }
+      const nowMs = Date.now(); // display echo only; Firestore holds server time
+      return {
+        ok: true,
+        doc: {
+          id,
+          title,
+          content,
+          updatedAt: nowMs,
+          createdAt: nowMs,
+          folder: MCP_IMPORT_FOLDER,
+          tags,
+          docType: "markdown",
+        },
+      };
+    };
+  }
+
+  return deps;
+}
+
+async function mcpLoadClient(
+  clientId: string,
+): Promise<{ redirectUris: string[]; clientName: string } | null> {
+  if (!clientId) return null;
+  const snap = await getFirestore().collection(MCP_CLIENTS).doc(clientId).get();
+  if (!snap.exists) return null;
+  const data = snap.data() as Record<string, unknown>;
+  const redirectUris = Array.isArray(data.redirectUris)
+    ? (data.redirectUris as unknown[]).map(String)
+    : [];
+  const clientName = typeof data.clientName === "string" ? data.clientName : "";
+  return { redirectUris, clientName };
+}
+
+// Mint + persist an access/refresh token pair (hashes only) for a granted user.
+// `family` ties every token descended from a single authorization_code grant
+// together so refresh-token reuse can revoke the whole lineage (OAuth 2.1 §6.1).
+// Callers pass the raw token strings so the refresh path can pre-generate the
+// successor and record its hash on the predecessor ATOMICALLY (race-free reuse
+// detection, see mcpHandleRefreshGrant) before persisting the new pair here.
+async function mcpIssueTokens(
+  uid: string,
+  clientId: string,
+  scope: string,
+  resource: string,
+  family: string,
+  access: string,
+  refresh: string,
+): Promise<{ access: string; refresh: string }> {
+  const now = mcpNowSec();
+  await Promise.all([
+    getFirestore()
+      .collection(MCP_ACCESS)
+      .doc(hashToken(access))
+      .set({
+        uid,
+        clientId,
+        scope,
+        resource,
+        family,
+        expiresAt: now + ACCESS_TTL_SEC,
+        createdAt: FieldValue.serverTimestamp(),
+      }),
+    getFirestore()
+      .collection(MCP_REFRESH)
+      .doc(hashToken(refresh))
+      .set({
+        uid,
+        clientId,
+        scope,
+        resource,
+        family,
+        expiresAt: now + REFRESH_TTL_SEC,
+        createdAt: FieldValue.serverTimestamp(),
+      }),
+  ]);
+  return { access, refresh };
+}
+
+// True iff this token family has been revoked (tombstone present). This — not
+// the best-effort delete sweep — is the authoritative "is this lineage dead?"
+// check; it is consulted before honoring an access token and before rotating a
+// refresh token, so a doc the sweep missed (or one minted racing the sweep) is
+// still rejected.
+async function mcpFamilyRevoked(family: string): Promise<boolean> {
+  if (!family) return false;
+  try {
+    const snap = await getFirestore()
+      .collection(MCP_REVOKED_FAMILIES)
+      .doc(family)
+      .get();
+    return snap.exists;
+  } catch (err) {
+    // Fail CLOSED: if we cannot confirm the family is live, treat it as revoked
+    // rather than honor a possibly-compromised token.
+    console.error(
+      `[mcp] family-tombstone read failed for ${family.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)} — failing closed`,
+    );
+    return true;
+  }
+}
+
+// Revoke an entire token family. Writes the authoritative tombstone FIRST (so any
+// surviving/racing descendant is immediately rejected by mcpFamilyRevoked), then
+// best-effort sweeps every access+refresh doc, PAGINATING until the family is
+// empty (a single limit(500) page could otherwise leave live docs behind for a
+// long-lived family). Single-field equality is auto-indexed (no composite index).
+async function mcpRevokeFamily(family: string): Promise<void> {
+  if (!family) return;
+  const db = getFirestore();
+  // The tombstone is the AUTHORITATIVE revocation signal and the read side
+  // (mcpFamilyRevoked) fails CLOSED, so this write must actually land — a
+  // silently-swallowed failure would leave a detected-compromised lineage with
+  // no tombstone, and mcpFamilyRevoked would then read "absent" → honor the
+  // token. Mirror the read side's fail-closed posture on the write side: retry a
+  // bounded number of times, and if it still fails, THROW so the caller does not
+  // proceed as though revocation succeeded (the reuse/refresh paths then surface
+  // a server error instead of a false invalid_grant; /oauth/revoke wraps this in
+  // its own try/catch and still returns 200 per RFC 7009, but logs CRITICAL).
+  let tombstoneWritten = false;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await db
+        .collection(MCP_REVOKED_FAMILIES)
+        .doc(family)
+        .set({ revokedAt: FieldValue.serverTimestamp() });
+      tombstoneWritten = true;
+      break;
+    } catch (err) {
+      console.error(
+        `[mcp] family tombstone write attempt ${attempt}/4 failed for ${family.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  if (!tombstoneWritten) {
+    console.error(
+      `[mcp] CRITICAL: could not persist family tombstone for ${family.slice(0, 8)}… after retries — revocation NOT durable`,
+    );
+    throw new Error("mcp_family_tombstone_write_failed");
+  }
+  for (const coll of [MCP_ACCESS, MCP_REFRESH]) {
+    try {
+      for (;;) {
+        const q = await db
+          .collection(coll)
+          .where("family", "==", family)
+          .limit(500)
+          .get();
+        if (q.empty) break;
+        const batch = db.batch();
+        q.docs.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+        if (q.size < 500) break;
+      }
+    } catch (err) {
+      console.error(
+        `[mcp] family revocation sweep failed for ${coll}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+function mcpConsentPageHtml(
+  params: { redirectUri: string },
+  clientName: string,
+  googleAuthUrl: string,
+  denyUrl: string,
+  // Whether THIS user's connection can also create documents (write). When true,
+  // the consent copy discloses the added write scope + the fixed destination
+  // folder; when false, the copy stays read-only. Must reflect the same env-gated
+  // decision as mcpImportEligible so consent never overstates or understates scope.
+  canImport: boolean,
+  importFolder: string,
+): string {
+  // The redirect host is the un-spoofable trust anchor shown on the consent
+  // screen: it is where the authorization code will be delivered, and it has
+  // already passed the strict redirect-host allowlist. The client_name is
+  // self-asserted at DCR, so it is shown as secondary (labelled "アプリ") only.
+  let redirectHost = "";
+  try {
+    redirectHost = new URL(params.redirectUri).host;
+  } catch {
+    redirectHost = params.redirectUri;
+  }
+  const appLabel = clientName.trim() || "(名称未設定のアプリ)";
+  // Permission copy reflects the actual granted scope: read-only, or read + create
+  // (import) into the fixed folder. Never claim a scope the connection won't have.
+  const permText = canImport
+    ? `個人ドキュメントの検索・閲覧＋「${importFolder}」フォルダへの新規作成`
+    : "個人ドキュメントの検索・閲覧（読み取り専用）";
+  const fineText = canImport
+    ? `許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧でき、さらに「${importFolder}」フォルダに新しいドキュメントを作成できるようになります。既存のドキュメントの上書き・編集・削除はできず、共有・チームのドキュメントは対象外です。心当たりのない接続先の場合は「許可しない」を選んでください。`
+    : "許可すると、上記の「接続先」があなたの個人ドキュメントを検索・閲覧できるようになります。共有・チームのドキュメントは対象外で、書き込みはできません。心当たりのない接続先の場合は「許可しない」を選んでください。";
+  // Server-side Google OAuth (Option b): the consent is shown FIRST (destination +
+  // permission), then "許可" is a plain link to Google — no Firebase SDK, so no
+  // firebaseapp.com URL is ever surfaced. The buttons are anchors (no JS needed).
+  return `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MarkFlow へのアクセスを許可</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#faf9f7; color:#1c1b1a; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+  @media (prefers-color-scheme: dark){ body{ background:#191817; color:#ececec; } .card{ background:#232221 !important; border-color:#38363400 !important; } .grant{ background:#1c1b1a !important; border-color:#333 !important; } .k{ color:#9a958f !important; } }
+  .card { background:#fff; border:1px solid #eceae7; border-radius:16px; padding:36px 32px; max-width:420px; width:calc(100% - 32px);
+    box-shadow:0 1px 3px rgba(0,0,0,.06); text-align:center; }
+  .brand { width:56px; height:56px; border-radius:13px; margin:0 auto 12px; display:block; }
+  .wordmark { font-size:1.05rem; font-weight:700; letter-spacing:.01em; margin:0 0 3px; }
+  .official { font-size:.75rem; color:#8a857f; margin:0 0 20px; letter-spacing:.02em; }
+  h1 { font-size:1.15rem; margin:0 0 8px; font-weight:650; }
+  p { font-size:.9rem; line-height:1.6; color:#6b6763; margin:0 0 20px; }
+  a.btn { font:inherit; font-size:.95rem; font-weight:600; cursor:pointer; border:1px solid #dcdad7; text-decoration:none;
+    background:#fff; color:#1c1b1a; border-radius:10px; padding:11px 18px; display:inline-flex; align-items:center; gap:10px;
+    width:100%; justify-content:center; box-sizing:border-box; }
+  a.btn:hover { background:#f5f4f2; }
+  a.btn.primary { background:#1c1b1a; color:#fff; border-color:#1c1b1a; }
+  a.btn.primary:hover { background:#333; }
+  a.btn.secondary { margin-top:10px; background:transparent; border-color:transparent; color:#6b6763; }
+  a.btn.secondary:hover { background:#f5f4f2; }
+  .grant { text-align:left; background:#faf9f7; border:1px solid #eceae7; border-radius:12px; padding:14px 16px; margin:0 0 16px; }
+  .row { display:flex; gap:12px; font-size:.85rem; line-height:1.5; padding:4px 0; }
+  .k { flex:0 0 64px; color:#8a857f; }
+  .v { flex:1; font-weight:600; word-break:break-all; }
+  .fine { font-size:.78rem; color:#8a857f; margin:16px 0 0; line-height:1.55; }
+  .g { width:18px; height:18px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img class="brand" src="/mcp-icon.png" alt="MarkFlow" width="56" height="56" />
+    <div class="wordmark">MarkFlow</div>
+    <div class="official">markflow.jp の公式サインインページ</div>
+    <h1>アクセスを許可しますか？</h1>
+    <p>MarkFlow にログインしているのと同じ Google アカウントでサインインすると、下記の接続先が連携されます。</p>
+    <div class="grant">
+      <div class="row"><span class="k">接続先</span><span class="v">${mcpEscHtml(redirectHost)}</span></div>
+      <div class="row"><span class="k">アプリ</span><span class="v">${mcpEscHtml(appLabel)}</span></div>
+      <div class="row"><span class="k">権限</span><span class="v">${mcpEscHtml(permText)}</span></div>
+    </div>
+    <p class="fine">${mcpEscHtml(fineText)}</p>
+    <a class="btn primary" href="${mcpEscHtml(googleAuthUrl)}" rel="nofollow">
+      <svg class="g" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.7 30.2.5 24 .5 14.6.5 6.5 5.9 2.6 13.8l7.8 6.1C12.3 13.9 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.4 5.7c4.3-4 6.8-9.9 6.8-17.4z"/><path fill="#FBBC05" d="M10.4 28.3c-.5-1.5-.8-3.1-.8-4.8s.3-3.3.8-4.8l-7.8-6.1C.9 15.9 0 19.8 0 23.5s.9 7.6 2.6 10.9l7.8-6.1z"/><path fill="#34A853" d="M24 47.5c6.2 0 11.4-2 15.2-5.5l-7.4-5.7c-2 1.4-4.7 2.3-7.8 2.3-6.4 0-11.7-4.3-13.6-10.1l-7.8 6.1C6.5 42.1 14.6 47.5 24 47.5z"/></svg>
+      Googleでサインインして許可
+    </a>
+    <a class="btn secondary" href="${mcpEscHtml(denyUrl)}" rel="nofollow">許可しない</a>
+  </div>
+</body>
+</html>`;
+}
+
+function mcpErrorPageHtml(message: string): string {
+  const safe = String(message).replace(/[<>&]/g, (c) =>
+    c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;",
+  );
+  return `<!doctype html><meta charset="utf-8"><title>接続エラー</title>
+<body style="font-family:-apple-system,sans-serif;padding:3rem;text-align:center;color:#555">
+<h1 style="font-size:1.15rem">接続できませんでした</h1>
+<p>${safe}</p></body>`;
+}
+
+// authorization_code grant: verify PKCE + single-use code, issue tokens.
+async function mcpHandleAuthCodeGrant(
+  res: http.ServerResponse,
+  v: ReturnType<typeof parseTokenRequest>,
+): Promise<void> {
+  const ref = getFirestore()
+    .collection(MCP_CODES)
+    .doc(hashToken(v.code || ""));
+  // Atomic single-use consume: read + delete in ONE transaction so two
+  // concurrent /token calls presenting the same code cannot both read it as
+  // valid and mint two token pairs (replay via race). Even a subsequent PKCE
+  // failure must not leave a reusable code behind — the delete already landed.
+  const data = await getFirestore().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return null;
+    tx.delete(ref);
+    return snap.data() as Record<string, unknown>;
+  });
+  if (!data) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "code not found",
+    });
+    return;
+  }
+  if (Number(data.expiresAt || 0) < mcpNowSec()) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "code expired",
+    });
+    return;
+  }
+  if (v.clientId && String(data.clientId || "") !== v.clientId) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "client mismatch",
+    });
+    return;
+  }
+  if (v.redirectUri && String(data.redirectUri || "") !== v.redirectUri) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "redirect_uri mismatch",
+    });
+    return;
+  }
+  if (!verifyPkceS256(v.codeVerifier || "", String(data.codeChallenge || ""))) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "PKCE verification failed",
+    });
+    return;
+  }
+  const uid = String(data.uid || "");
+  if (!(await mcpEligible(uid))) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "user not authorized",
+    });
+    return;
+  }
+  const scope = String(data.scope || "");
+  const resource = String(data.resource || "");
+  // Fresh lineage per authorization: every access/refresh token descended from
+  // this grant shares one `family`, so refresh-token reuse can revoke them all.
+  const family = newOpaqueToken();
+  const { access, refresh } = await mcpIssueTokens(
+    uid,
+    String(data.clientId || ""),
+    scope,
+    resource,
+    family,
+    newOpaqueToken(),
+    newOpaqueToken(),
+  );
+  mcpJson(res, 200, buildTokenResponse(access, refresh, scope), {
+    "Cache-Control": "no-store",
+  });
+}
+
+// refresh_token grant: rotate the refresh token, issue a fresh pair.
+//
+// Reuse detection is lineage-aware, not wall-clock-based. On rotation we SOFT-
+// revoke the presented doc and, ATOMICALLY in the same transaction, record a
+// pointer to its successor (`supersededBy` = hash of the freshly-minted refresh
+// token). A later presentation of an already-revoked token is then classified by
+// its successor's state:
+//   - successor still live (or not yet persisted) → BENIGN: a concurrent double-
+//     submit or a lost-response retry where the chain advanced exactly one step.
+//     Reject this request but keep the lineage (never log the owner out).
+//   - successor itself already revoked → GENUINE REUSE: the chain forked ≥2
+//     generations, proving two concurrent holders (theft). Revoke the family.
+// This removes the fragile 10s wall-clock (a lost response is only detected after
+// the client's read timeout, which routinely exceeds any short grace) while still
+// catching real token theft.
+async function mcpHandleRefreshGrant(
+  res: http.ServerResponse,
+  v: ReturnType<typeof parseTokenRequest>,
+): Promise<void> {
+  const ref = getFirestore()
+    .collection(MCP_REFRESH)
+    .doc(hashToken(v.refreshToken || ""));
+  // Pre-generate the successor pair so the predecessor can record its successor's
+  // hash atomically with the soft-revoke (race-free reuse classification).
+  const newAccess = newOpaqueToken();
+  const newRefresh = newOpaqueToken();
+  const newRefreshHash = hashToken(newRefresh);
+  const outcome = await getFirestore().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return { kind: "missing" as const };
+    const data = snap.data() as Record<string, unknown>;
+    if (data.revoked === true) return { kind: "reuse" as const, data };
+    tx.update(ref, {
+      revoked: true,
+      revokedAt: FieldValue.serverTimestamp(),
+      supersededBy: newRefreshHash,
+    });
+    return { kind: "active" as const, data };
+  });
+
+  if (outcome.kind === "missing") {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token invalid",
+    });
+    return;
+  }
+
+  if (outcome.kind === "reuse") {
+    const fam = String(outcome.data.family || "");
+    const succHash = String(outcome.data.supersededBy || "");
+    let successorRevoked = false;
+    if (succHash) {
+      try {
+        const succ = await getFirestore()
+          .collection(MCP_REFRESH)
+          .doc(succHash)
+          .get();
+        // Successor missing => not yet persisted (mint in flight) or already
+        // swept: treat as benign. Successor present & revoked => chain forked.
+        successorRevoked = succ.exists && succ.data()?.revoked === true;
+      } catch (err) {
+        // Can't classify → assume the worst (compromise) and revoke.
+        console.error(
+          `[mcp] successor lookup failed during reuse check: ${err instanceof Error ? err.message : String(err)} — treating as reuse`,
+        );
+        successorRevoked = true;
+      }
+    }
+    if (successorRevoked) {
+      console.error(
+        `[mcp] refresh-token reuse detected (family=${fam.slice(0, 8)}…) — revoking lineage`,
+      );
+      await mcpRevokeFamily(fam);
+      mcpJson(res, 400, {
+        error: "invalid_grant",
+        error_description: "refresh_token reuse detected",
+      });
+      return;
+    }
+    // Benign concurrent/lost-response retry — reject this one, keep the lineage.
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token invalid",
+    });
+    return;
+  }
+
+  // Active token — already soft-revoked above (consumed). Validate then rotate.
+  const data = outcome.data;
+  if (Number(data.expiresAt || 0) < mcpNowSec()) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token expired",
+    });
+    return;
+  }
+  if (v.clientId && String(data.clientId || "") !== v.clientId) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "client mismatch",
+    });
+    return;
+  }
+  const uid = String(data.uid || "");
+  if (!(await mcpEligible(uid))) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "user not authorized",
+    });
+    return;
+  }
+  // Carry the same family forward so the rotated chain stays revocable as a unit.
+  const family = String(data.family || newOpaqueToken());
+  // Refuse to rotate a token whose family was revoked (e.g. reuse detected on a
+  // sibling): don't resurrect a dead lineage. The RPC-time tombstone check is the
+  // authoritative backstop for any pair minted racing the revoke.
+  if (await mcpFamilyRevoked(family)) {
+    mcpJson(res, 400, {
+      error: "invalid_grant",
+      error_description: "refresh_token invalid",
+    });
+    return;
+  }
+  const scope = String(data.scope || "");
+  const resource = String(data.resource || "");
+  const { access, refresh } = await mcpIssueTokens(
+    uid,
+    String(data.clientId || ""),
+    scope,
+    resource,
+    family,
+    newAccess,
+    newRefresh,
+  );
+  mcpJson(res, 200, buildTokenResponse(access, refresh, scope), {
+    "Cache-Control": "no-store",
+  });
+}
+
+// POST /mcp — bearer-authenticated JSON-RPC (stateless Streamable HTTP).
+async function mcpHandleRpc(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  baseUrl: string,
+): Promise<void> {
+  if (req.method !== "POST") {
+    // Stateless server: no server→client SSE stream, no session teardown.
+    mcpJson(
+      res,
+      405,
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Method not allowed; use POST" },
+      },
+      { Allow: "POST" },
+    );
+    return;
+  }
+  const prmUrl = `${baseUrl}${PRM_PATH}`;
+  const challenge = (desc: string) =>
+    `Bearer error="invalid_token", error_description="${desc}", resource_metadata="${prmUrl}"`;
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Missing bearer token") },
+    );
+    return;
+  }
+  const token = authHeader.slice(7).trim();
+  const snap = await getFirestore()
+    .collection(MCP_ACCESS)
+    .doc(hashToken(token))
+    .get();
+  if (!snap.exists) {
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Invalid token") },
+    );
+    return;
+  }
+  const tok = snap.data() as Record<string, unknown>;
+  if (Number(tok.expiresAt || 0) < mcpNowSec()) {
+    await snap.ref.delete().catch(() => {});
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Token expired") },
+    );
+    return;
+  }
+  const uid = String(tok.uid || "");
+  if (!(await mcpEligible(uid))) {
+    mcpJson(res, 403, { error: "forbidden" });
+    return;
+  }
+  // Authoritative revocation backstop: if this token's family was tombstoned
+  // (reuse detected on a sibling, or an explicit revoke), reject even if the
+  // access-token doc itself survived the sweep or was minted racing the revoke.
+  if (await mcpFamilyRevoked(String(tok.family || ""))) {
+    mcpJson(
+      res,
+      401,
+      { error: "invalid_token" },
+      { "WWW-Authenticate": challenge("Token revoked") },
+    );
+    return;
+  }
+  // Per-uid RPC throttle — the tools are Firestore-backed; cap how many calls a
+  // single authorized identity can drive per window.
+  if (mcpRpcRateLimited(uid)) {
+    mcpJson(
+      res,
+      429,
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Rate limit exceeded" },
+      },
+      { "Retry-After": String(MCP_RPC_WINDOW_SEC) },
+    );
+    return;
+  }
+
+  const body = await mcpReadBody(req, 4 * 1024 * 1024);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "");
+  } catch {
+    mcpJson(res, 400, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Parse error" },
+    });
+    return;
+  }
+
+  const isBatch = Array.isArray(parsed);
+  // Reject an empty batch (JSON-RPC 2.0: invalid) and cap batch size so a client
+  // can't fan one POST out into many Firestore-backed tool calls.
+  if (isBatch && (parsed as unknown[]).length === 0) {
+    mcpJson(res, 400, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid Request: empty batch" },
+    });
+    return;
+  }
+  if (isBatch && (parsed as unknown[]).length > MAX_RPC_BATCH) {
+    mcpJson(res, 400, {
+      jsonrpc: "2.0",
+      id: null,
+      error: {
+        code: -32600,
+        message: `Invalid Request: batch too large (max ${MAX_RPC_BATCH})`,
+      },
+    });
+    return;
+  }
+
+  const deps = await mcpDepsForUid(uid);
+  const messages = (isBatch ? parsed : [parsed]) as unknown[];
+  const responses: JsonRpcResponse[] = [];
+  for (const m of messages) {
+    if (!isRequest(m)) continue;
+    const r = await handleMcpMessage(m as JsonRpcRequest, deps);
+    if (r) responses.push(r);
+  }
+
+  if (responses.length === 0) {
+    // Only notifications/responses were sent → 202 Accepted, no body.
+    res.writeHead(202);
+    res.end();
+    return;
+  }
+  mcpJson(res, 200, isBatch ? responses : responses[0]);
+}
+
+/**
+ * Dispatch the MCP + OAuth routes. Returns true if the request was handled (the
+ * caller then returns), false if it is not an MCP route. DARK when MCP_UIDS is
+ * empty: every MCP route 404s as if absent.
+ */
+async function handleMcpRoutes(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<boolean> {
+  const rawUrl = req.url || "";
+  const path = rawUrl.split("?")[0];
+
+  const isPrm =
+    path === PRM_PATH || path === "/.well-known/oauth-protected-resource";
+  const isAsm = path === ASM_PATH || path.startsWith(ASM_PATH + "/");
+  const isMcp = path === MCP_PATH;
+  const isRegister = path === REGISTER_PATH;
+  const isAuthorize = path === AUTHORIZE_PATH;
+  const isGoogleCallback = path === GOOGLE_CALLBACK_PATH;
+  const isToken = path === TOKEN_PATH;
+  const isRevoke = path === REVOKE_PATH;
+
+  if (!(
+    isPrm ||
+    isAsm ||
+    isMcp ||
+    isRegister ||
+    isAuthorize ||
+    isGoogleCallback ||
+    isToken ||
+    isRevoke
+  )) {
+    return false;
+  }
+
+  // Dark-launch: feature off unless an allowlist is configured. Return a body
+  // byte-identical to the generic catch-all 404 so the dark feature cannot be
+  // fingerprinted by probing these paths.
+  if (MCP_UIDS.size === 0) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+    return true;
+  }
+
+  // Fail closed: when MCP is enabled the public origin MUST be pinned. Deriving
+  // it from client-supplied Host / X-Forwarded-Host would let a caller steer the
+  // OAuth issuer + endpoint metadata (and the /mcp WWW-Authenticate PRM pointer)
+  // to an attacker origin. Never trust request headers for security metadata.
+  if (!MCP_PUBLIC_ORIGIN) {
+    console.error(
+      "[mcp] MCP_UIDS is set but MCP_PUBLIC_ORIGIN is unset — refusing to serve MCP with a header-derived origin",
+    );
+    mcpJson(res, 503, { error: "server_misconfigured" });
+    return true;
+  }
+  const baseUrl = MCP_PUBLIC_ORIGIN;
+
+  // Throttle the Firestore-touching routes before any lookup (cost/quota DoS).
+  // Register has its own tighter limiter below; discovery (PRM/ASM) is cheap and
+  // header-only, so it is not throttled (Claude fetches it on every connect).
+  if (
+    (isToken || isAuthorize || isGoogleCallback || isRevoke) &&
+    mcpRouteRateLimited(mcpClientIp(req))
+  ) {
+    mcpJson(
+      res,
+      429,
+      { error: "rate_limited", error_description: "Too many requests" },
+      { "Retry-After": String(MCP_ROUTE_WINDOW_SEC) },
+    );
+    return true;
+  }
+  // /mcp has its own generous PER-IP pre-auth limiter (above): the bearer lookup
+  // is a Firestore read that precedes the per-uid throttle, so cap anonymous
+  // floods here without ever charging a shared/global bucket that could 429 the
+  // owner. Kept separate from mcpRouteRateLimited so the owner's authenticated
+  // RPC (≤300/min per-uid) is never clipped by the tighter OAuth-route cap.
+  if (isMcp && mcpMcpPreAuthRateLimited(mcpClientIp(req))) {
+    mcpJson(
+      res,
+      429,
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32000, message: "Rate limit exceeded" },
+      },
+      { "Retry-After": String(MCP_ROUTE_WINDOW_SEC) },
+    );
+    return true;
+  }
+
+  try {
+    // ---- Discovery (public, GET) ----
+    if (isPrm) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      mcpJson(res, 200, buildProtectedResourceMetadata(baseUrl));
+      return true;
+    }
+    if (isAsm) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      mcpJson(res, 200, buildAuthServerMetadata(baseUrl));
+      return true;
+    }
+
+    // ---- Dynamic Client Registration (POST JSON) ----
+    if (isRegister) {
+      if (req.method !== "POST") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      if (mcpDcrRateLimited(mcpClientIp(req))) {
+        mcpJson(
+          res,
+          429,
+          {
+            error: "rate_limited",
+            error_description: "Too many registration requests",
+          },
+          { "Retry-After": String(MCP_DCR_WINDOW_SEC) },
+        );
+        return true;
+      }
+      const body = await mcpReadBody(req, 64 * 1024);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        mcpJson(res, 400, {
+          error: "invalid_client_metadata",
+          error_description: "invalid JSON",
+        });
+        return true;
+      }
+      const v = validateDcrRequest(parsed, MCP_ALLOWED_REDIRECT_HOSTS);
+      if (!v.ok) {
+        mcpJson(res, 400, {
+          error: v.error,
+          error_description: v.error_description,
+        });
+        return true;
+      }
+      const clientId = "mcp_" + newOpaqueToken();
+      const createdAtSec = mcpNowSec();
+      await getFirestore()
+        .collection(MCP_CLIENTS)
+        .doc(clientId)
+        .set({
+          clientId,
+          redirectUris: v.redirectUris,
+          clientName: v.clientName || null,
+          tokenEndpointAuthMethod: "none",
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      mcpJson(
+        res,
+        201,
+        buildDcrResponse(
+          clientId,
+          v.redirectUris || [],
+          v.clientName,
+          createdAtSec,
+        ),
+      );
+      return true;
+    }
+
+    // ---- Authorize (GET consent page → server-side Google OAuth, Option b) ----
+    // No Firebase SDK: the consent page shows the destination + permission, then
+    // "許可" is a plain link to Google. Google returns to /oauth/google/callback,
+    // which redeems the code server-side. firebaseapp.com is never surfaced.
+    if (isAuthorize) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      if (!GOOGLE_OAUTH_CLIENT_ID || !MCP_STATE_KEY) {
+        // GOOGLE_OAUTH_CLIENT_SECRET (→ MCP_STATE_KEY) or CLIENT_ID unset.
+        mcpJson(res, 503, { error: "mcp_login_not_configured" });
+        return true;
+      }
+      const query = Object.fromEntries(new URL(rawUrl, baseUrl).searchParams);
+      const client = await mcpLoadClient(query.client_id || "");
+      const v = validateAuthorizeRequest(query, client);
+      if (!v.ok) {
+        if (
+          v.kind === "redirect" &&
+          query.redirect_uri &&
+          client &&
+          matchRedirectUri(query.redirect_uri, client.redirectUris)
+        ) {
+          res.writeHead(302, {
+            Location: buildErrorRedirect(
+              query.redirect_uri,
+              v.error || "invalid_request",
+              v.error_description || "",
+              query.state || "",
+            ),
+          });
+          res.end();
+          return true;
+        }
+        mcpHtml(
+          res,
+          400,
+          mcpErrorPageHtml(v.error_description || v.error || "invalid request"),
+        );
+        return true;
+      }
+      // Carry the (validated) authorize params through the Google round-trip in a
+      // signed, short-lived state so we can trust them on return (and re-validate).
+      // Fresh per-flow nonce, carried in the signed state AND sent to Google, so the
+      // returned id_token can be bound back to THIS authorize request. Blocks OIDC
+      // authorization-code injection: a captured victim code redeems to an id_token
+      // whose nonce won't match an attacker-crafted state's nonce.
+      const nonce = newOpaqueToken();
+      const signedState = signState(
+        { ...v.params, nonce },
+        MCP_STATE_KEY,
+        mcpNowSec(),
+      );
+      const googleAuthUrl =
+        "https://accounts.google.com/o/oauth2/v2/auth?" +
+        new URLSearchParams({
+          client_id: GOOGLE_OAUTH_CLIENT_ID,
+          redirect_uri: `${baseUrl}${GOOGLE_CALLBACK_PATH}`,
+          response_type: "code",
+          scope: "openid email",
+          state: signedState,
+          nonce,
+          access_type: "online",
+          prompt: "select_account",
+        }).toString();
+      const denyUrl = buildErrorRedirect(
+        v.params!.redirectUri,
+        "access_denied",
+        "User declined the connection",
+        v.params!.state,
+      );
+      mcpHtml(
+        res,
+        200,
+        mcpConsentPageHtml(
+          v.params!,
+          client?.clientName || "",
+          googleAuthUrl,
+          denyUrl,
+          // Consent is shown BEFORE Google sign-in, so the authenticating uid is
+          // not yet known. Disclose write whenever the import feature is enabled
+          // for anyone — either the broad switch (MCP_IMPORT_ALL) or a non-empty
+          // explicit allowlist (MCP_IMPORT_UIDS). A uid that turns out NOT to be
+          // write-eligible simply gets a read-only token (LESS than disclosed) —
+          // this never UNDERSTATES the scope the resulting token could carry.
+          MCP_IMPORT_ALL || MCP_IMPORT_UIDS.size > 0,
+          MCP_IMPORT_FOLDER,
+        ),
+      );
+      return true;
+    }
+
+    // ---- Google OAuth callback (Option b) — server-side code redemption ----
+    if (isGoogleCallback) {
+      if (req.method !== "GET") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "GET" });
+        return true;
+      }
+      if (
+        !GOOGLE_OAUTH_CLIENT_ID ||
+        !GOOGLE_OAUTH_CLIENT_SECRET ||
+        !MCP_STATE_KEY
+      ) {
+        mcpJson(res, 503, { error: "mcp_login_not_configured" });
+        return true;
+      }
+      const cbUrl = new URL(rawUrl, baseUrl);
+      const gState = cbUrl.searchParams.get("state") || "";
+      const gCode = cbUrl.searchParams.get("code") || "";
+      const gError = cbUrl.searchParams.get("error") || "";
+      // Recover + re-validate the original authorize params from the signed state.
+      // Max age 10 min (the user just clicked through Google). A tampered/expired
+      // state cannot be tied to a trusted redirect_uri, so it renders an error page
+      // rather than redirecting anywhere.
+      const payload = verifyState(gState, MCP_STATE_KEY, 600, mcpNowSec());
+      if (!payload) {
+        mcpHtml(
+          res,
+          400,
+          mcpErrorPageHtml(
+            "セッションの有効期限が切れました。お手数ですが、Claude 側からもう一度お試しください。",
+          ),
+        );
+        return true;
+      }
+      const query = {
+        response_type: String(payload.responseType || ""),
+        client_id: String(payload.clientId || ""),
+        redirect_uri: String(payload.redirectUri || ""),
+        code_challenge: String(payload.codeChallenge || ""),
+        code_challenge_method: String(payload.codeChallengeMethod || ""),
+        state: String(payload.state || ""),
+        scope: String(payload.scope || ""),
+        resource: String(payload.resource || ""),
+      };
+      const client = await mcpLoadClient(query.client_id);
+      const v = validateAuthorizeRequest(query, client);
+      if (!v.ok) {
+        // The signed params no longer validate (e.g. client deleted) — cannot
+        // safely deliver a code; end on an error page.
+        mcpHtml(
+          res,
+          400,
+          mcpErrorPageHtml(v.error_description || v.error || "invalid request"),
+        );
+        return true;
+      }
+      // From here we have a trusted redirect_uri, so protocol errors go back to it.
+      const failRedirect = (error: string, description: string): true => {
+        res.writeHead(302, {
+          Location: buildErrorRedirect(
+            v.params!.redirectUri,
+            error,
+            description,
+            v.params!.state,
+          ),
+        });
+        res.end();
+        return true;
+      };
+      if (gError) {
+        // User denied / errored at Google's screen.
+        return failRedirect("access_denied", "Google sign-in was cancelled");
+      }
+      if (!gCode) {
+        return failRedirect("invalid_request", "Missing authorization code");
+      }
+      // Redeem the Google code server-side with the confidential client_secret.
+      let idToken = "";
+      try {
+        const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code: gCode,
+            client_id: GOOGLE_OAUTH_CLIENT_ID,
+            client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+            redirect_uri: `${baseUrl}${GOOGLE_CALLBACK_PATH}`,
+            grant_type: "authorization_code",
+          }),
+        });
+        const text = await tokenRes.text();
+        if (!tokenRes.ok) {
+          console.error(
+            `[mcp] google exchange failed: ${tokenRes.status} ${text}`,
+          );
+          return failRedirect("server_error", "Google token exchange failed");
+        }
+        idToken = String(JSON.parse(text).id_token || "");
+      } catch (err) {
+        console.error(
+          `[mcp] google exchange error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return failRedirect("server_error", "Google token exchange failed");
+      }
+      // The id_token arrived on a trusted channel (direct TLS from Google's token
+      // endpoint, authenticated by our client_secret). Validate aud/iss/exp and
+      // require a verified email before trusting the identity.
+      const claims = validateGoogleIdToken(decodeJwtPayload(idToken), {
+        expectedAud: GOOGLE_OAUTH_CLIENT_ID,
+        expectedNonce: String(payload.nonce || ""),
+        nowSec: mcpNowSec(),
+      });
+      if (!claims.ok || !claims.email) {
+        return failRedirect(
+          "access_denied",
+          "Could not verify a Google account",
+        );
+      }
+      // Map the verified email → Firebase uid (Firebase Auth is the authoritative
+      // registry). Never signed into MarkFlow → not authorized.
+      let userRecord: UserRecord;
+      try {
+        userRecord = await getAuth().getUserByEmail(claims.email);
+      } catch (err) {
+        const code = (err as { code?: string })?.code || "";
+        if (code === "auth/user-not-found") {
+          return failRedirect(
+            "access_denied",
+            "This Google account has no MarkFlow account.",
+          );
+        }
+        throw err;
+      }
+      // Fail closed on a disabled account: the removed verifyIdToken(checkRevoked=true)
+      // path rejected disabled/revoked credentials, but getUserByEmail returns the
+      // record regardless — so an admin-disabled account could otherwise still mint a
+      // 30-day MCP grant.
+      if (userRecord.disabled) {
+        return failRedirect(
+          "access_denied",
+          "This MarkFlow account is disabled.",
+        );
+      }
+      // Bind identity to the Google provider, not to the email string alone. MarkFlow
+      // also ships GitHub sign-in, so an account whose email was established via GitHub
+      // must NOT be claimable by whoever later controls that Google mailbox. (The old
+      // Firebase consent page was Google-only, so this is no functional regression.)
+      const hasGoogleProvider = userRecord.providerData.some(
+        (p) => p.providerId === "google.com",
+      );
+      if (!hasGoogleProvider || !userRecord.emailVerified) {
+        return failRedirect(
+          "access_denied",
+          "This Google account is not linked to a MarkFlow account.",
+        );
+      }
+      const uid = userRecord.uid;
+      if (!(await mcpEligible(uid))) {
+        return failRedirect(
+          "access_denied",
+          "This Google account is not authorized for MarkFlow MCP.",
+        );
+      }
+      // Mint the single-use MCP authorization code bound to the PKCE challenge.
+      const code = newOpaqueToken();
+      await getFirestore()
+        .collection(MCP_CODES)
+        .doc(hashToken(code))
+        .set({
+          uid,
+          clientId: v.params!.clientId,
+          redirectUri: v.params!.redirectUri,
+          codeChallenge: v.params!.codeChallenge,
+          codeChallengeMethod: "S256",
+          scope: v.params!.scope,
+          resource: v.params!.resource,
+          expiresAt: mcpNowSec() + CODE_TTL_SEC,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      res.writeHead(302, {
+        Location: buildSuccessRedirect(
+          v.params!.redirectUri,
+          code,
+          v.params!.state,
+        ),
+      });
+      res.end();
+      return true;
+    }
+
+    // ---- Token (POST form) ----
+    if (isToken) {
+      if (req.method !== "POST") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      const body = await mcpReadBody(req, 64 * 1024);
+      const form = Object.fromEntries(new URLSearchParams(body)) as Record<
+        string,
+        string
+      >;
+      const v = parseTokenRequest(form);
+      if (!v.ok) {
+        mcpJson(res, 400, {
+          error: v.error,
+          error_description: v.error_description,
+        });
+        return true;
+      }
+      if (v.grantType === "authorization_code") {
+        await mcpHandleAuthCodeGrant(res, v);
+      } else {
+        await mcpHandleRefreshGrant(res, v);
+      }
+      return true;
+    }
+
+    // ---- Revoke (POST form; RFC 7009 always 200) ----
+    if (isRevoke) {
+      if (req.method !== "POST") {
+        mcpJson(res, 405, { error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      const body = await mcpReadBody(req, 16 * 1024);
+      const form = Object.fromEntries(new URLSearchParams(body)) as Record<
+        string,
+        string
+      >;
+      const token = String(form.token || "");
+      if (token) {
+        const h = hashToken(token);
+        try {
+          // Resolve the presented token's family and revoke the WHOLE lineage
+          // (RFC 7009 §2.1: revoking a token SHOULD revoke related tokens from
+          // the same authorization grant). Writes the durable tombstone, so any
+          // sibling access/refresh token is rejected at next use even if the
+          // sweep misses its doc.
+          const [acc, ref] = await Promise.all([
+            getFirestore().collection(MCP_ACCESS).doc(h).get(),
+            getFirestore().collection(MCP_REFRESH).doc(h).get(),
+          ]);
+          const family = String(
+            (acc.exists && acc.data()?.family) ||
+              (ref.exists && ref.data()?.family) ||
+              "",
+          );
+          if (family) {
+            await mcpRevokeFamily(family);
+          } else {
+            // No family recorded (shouldn't happen for current tokens) — fall
+            // back to deleting just the presented doc.
+            await Promise.allSettled([
+              getFirestore().collection(MCP_ACCESS).doc(h).delete(),
+              getFirestore().collection(MCP_REFRESH).doc(h).delete(),
+            ]);
+          }
+        } catch (err) {
+          // RFC 7009: respond 200 regardless; never leak token validity/state.
+          console.error(
+            `[mcp] revoke cascade failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      mcpJson(res, 200, {});
+      return true;
+    }
+
+    // ---- MCP JSON-RPC ----
+    if (isMcp) {
+      await mcpHandleRpc(req, res, baseUrl);
+      return true;
+    }
+
+    return false;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[mcp] route error (${path}): ${msg}`);
+    if (!res.headersSent) mcpJson(res, 500, { error: "internal_error" });
+    return true;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
-  // CORS headers
+  // CORS headers. GET/DELETE + the MCP client headers (Mcp-Session-Id,
+  // MCP-Protocol-Version, Last-Event-Id) are allowed so a browser-based MCP
+  // client (e.g. the MCP Inspector) can preflight /mcp; WWW-Authenticate is
+  // exposed so such a client can read the 401 challenge and start OAuth.
+  //
+  // Origin "*" is intentional and safe here: we NEVER set
+  // Access-Control-Allow-Credentials, so browsers do not send cookies and cannot
+  // read credentialed responses cross-origin. All auth is via bearer token /
+  // Firebase idToken carried in the request (never a cookie). Reading anything
+  // sensitive from /oauth/token or /oauth/authorize already requires possessing
+  // the code_verifier / idToken (which a cross-origin page cannot obtain), so the
+  // wildcard is not an exfiltration vector. The token-theft path the review
+  // flagged is closed by the redirect-host allowlist + consent screen above.
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  // Idempotency-Key is sent by the frontend on EVERY /v1/chat (and quick-action)
+  // request so error-retries / 再生成 collapse onto one charge (see aiProxyHeaders
+  // + gating.decideIdempotencyReuse). It MUST be listed here or the browser's CORS
+  // preflight fails and the actual POST is never sent — i.e. AI silently dies for
+  // every client that stamps the key (regression: header was added client-side in
+  // beta.16 but never allowlisted server-side).
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-View-As",
+    "Content-Type, Authorization, X-View-As, Idempotency-Key, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-Id",
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "WWW-Authenticate, Mcp-Session-Id",
   );
 
   if (req.method === "OPTIONS") {
@@ -1797,9 +3753,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- Remote MCP server + OAuth 2.1 AS (owner-allowlisted; dark unless
+  // MCP_UIDS is set). Dispatched BEFORE the POST-only 404 guard because several
+  // MCP routes are GET (discovery, the /authorize login page). Self-contained:
+  // reads its own request body, so it must run before the shared readBody. ---
+  if (await handleMcpRoutes(req, res)) return;
+
   if (req.method === "GET" && req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("MarkFlow AI Proxy");
+    return;
+  }
+
+  // --- Brand icon (favicon + MCP connector logo). api.markflow.jp maps directly
+  // to this service, so /favicon.ico is served at the domain root. Referenced by
+  // the RFC 8414 logo_uri, the OAuth consent page <img>, and other MCP clients.
+  // NOTE (verified 2026-09): Claude's connector UI does NOT fetch this — it only
+  // brands via a Connectors Directory listing. Served anyway for other clients,
+  // our own consent page, and the Google favicon crawler. ---
+  if (
+    req.method === "GET" &&
+    (req.url === "/favicon.ico" ||
+      req.url === "/favicon.png" ||
+      req.url === "/mcp-icon.png")
+  ) {
+    const png = mcpIconBuffer();
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": String(png.length),
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(png);
     return;
   }
 
@@ -1999,12 +3983,33 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Read request body (shared by all POST routes)
+  // 10 MB cap: every endpoint using this reader posts JSON (chat/transcript
+  // metadata/feedback) — never raw audio (that goes to Storage; requests carry
+  // only a gcsUri). The Stripe webhook uses its own raw-body reader. A cap here
+  // stops an unbounded body from pinning memory (OOM / cost DoS vector).
+  const MAX_BODY_BYTES = 10 * 1024 * 1024;
   const readBody = (): Promise<string> =>
     new Promise<string>((resolve, reject) => {
-      let data = "";
-      req.on("data", (chunk: Buffer) => (data += chunk.toString()));
-      req.on("end", () => resolve(data));
-      req.on("error", reject);
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let aborted = false;
+      req.on("data", (chunk: Buffer) => {
+        if (aborted) return;
+        size += chunk.length;
+        if (size > MAX_BODY_BYTES) {
+          aborted = true;
+          reject(new Error("Request body too large"));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on("end", () => {
+        if (!aborted) resolve(Buffer.concat(chunks).toString("utf8"));
+      });
+      req.on("error", (e) => {
+        if (!aborted) reject(e);
+      });
     });
 
   // --- /v1/auth/oauth/exchange (BFF: swap authorization code → tokens) ---
@@ -2769,7 +4774,7 @@ const server = http.createServer(async (req, res) => {
             stripeSubscriptionId?: unknown;
           } | null;
           const subId = String(billing?.stripeSubscriptionId ?? "").trim();
-          if (subId && isBillingConfigured()) {
+          if (subId && billingConfigured()) {
             try {
               await getStripe().subscriptions.cancel(subId);
             } catch (e) {
@@ -2798,7 +4803,11 @@ const server = http.createServer(async (req, res) => {
           try {
             await doc.ref.update({
               memberUids: FieldValue.arrayRemove(uid),
-              [`seatAssignments.${uid}`]: FieldValue.delete(),
+              // seatAssignments is an ORDERED ARRAY (the capacity fence), not a
+              // map — remove the uid with arrayRemove. The old map-path delete
+              // (`seatAssignments.<uid>`) was a no-op on an array, so a deleted
+              // account's seat lingered and could push a live member off the end.
+              seatAssignments: FieldValue.arrayRemove(uid),
             });
             scrubbedTeams++;
             progressed = true;
@@ -2883,10 +4892,8 @@ const server = http.createServer(async (req, res) => {
   if (req.url === "/v1/me/entitlement") {
     try {
       const uid = await verifyFirebaseToken(req.headers.authorization);
-      const { realPlan, plan, viewAs, meterKey, seats } = await resolvePlan(
-        req,
-        uid,
-      );
+      const { realPlan, plan, viewAs, meterKey, seats, source, expiresDate } =
+        await resolvePlan(req, uid);
       const isOwner = OWNER_UIDS.has(uid);
       const ym = periodKey(new Date());
       let usage: Record<string, number> = {};
@@ -2938,6 +4945,21 @@ const server = http.createServer(async (req, res) => {
           seats,
           limits,
           usage,
+          // Billing rail owning THIS user's own subscription (stripe / app_store /
+          // play / founder / null). The client routes "契約を管理" on it: an IAP
+          // sub has no Stripe customer, so it must be sent to the store's own
+          // management UI instead. Dropping it here (the pre-fix behavior) left the
+          // client's source-aware routing dead → IAP users hit the Stripe portal
+          // and saw a false "no subscription found".
+          source: source ?? null,
+          // Subscription period end (epoch ms) for the plan panel's renewal/expiry
+          // line; null for free / no dated subscription.
+          expiresDate: expiresDate ?? null,
+          // Whether this user may connect Claude to their docs via the remote
+          // MCP server (owner / named-testers allowlist, internal staff, or a paid
+          // Pro/Team plan; dark unless MCP_UIDS set). Drives the in-app "Connect to
+          // Claude (MCP)" entry point visibility — mirrors the server-side gate.
+          mcpEnabled: await mcpEligible(uid),
         }),
       );
       return;
@@ -3532,10 +5554,44 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ error: result.reason }));
           return;
         }
-        await bindIapCustomer(result.intent.subId!, uid, {
+        // Strongest cross-account guard: the store-recorded buyer id (Apple
+        // appAccountToken) is the firebase uid stamped at purchase time. When
+        // present it is STABLE regardless of any subId churn, so an account that
+        // did not buy this sub can never claim it. (Today the iOS client omits
+        // appAccountToken — StoreKit requires a UUID — so result.uid is usually
+        // empty and this is a no-op; the originalTransactionId guard below is the
+        // active iOS check. Kept for defense-in-depth + future-proofing.)
+        if (result.uid && result.uid !== uid) {
+          console.warn(
+            `[iap] verify/ios buyer-id mismatch uid=${uid} buyer=${result.uid} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
+        const iosOwner = await bindIapCustomer(result.intent.subId!, uid, {
           source: "app_store",
           productId: result.intent.productId,
         });
+        if (iosOwner === IAP_OWNER_UNVERIFIABLE) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "verify_retry" }));
+          return;
+        }
+        // The Apple subscription is owned by the DEVICE's Apple ID, not the app
+        // account. If a different Firebase account than the original buyer signs
+        // in on the same device and restores/re-purchases, StoreKit returns the
+        // EXISTING transaction — granting on it would hand one paid subscription
+        // to multiple accounts (越境課金). originalTransactionId is stable across
+        // resubscribe, so this binding scopes ownership. Only the owner may apply.
+        if (iosOwner && iosOwner !== uid) {
+          console.warn(
+            `[iap] verify/ios owned_by_other uid=${uid} owner=${iosOwner} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
         await applyIapIntent(uid, result, "verify/ios");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -3600,10 +5656,41 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ error: result.reason }));
           return;
         }
-        await bindIapCustomer(result.intent.subId!, uid, {
+        // PRIMARY Play cross-account guard: the store-recorded buyer id
+        // (obfuscatedExternalAccountId) is the firebase uid the client stamped at
+        // purchase time (mobile-billing.ts sets obfuscatedAccountId: user.uid).
+        // Unlike the purchaseToken subId — which Google ROTATES on
+        // upgrade/downgrade/resubscribe/resume, leaving the new token unbound —
+        // this id is STABLE across the whole lineage. So a second Firebase
+        // account restoring a rotated token (subId guard would miss it, brand-new
+        // token → fresh binding → leak) is caught here (越境課金防止).
+        if (result.uid && result.uid !== uid) {
+          console.warn(
+            `[iap] verify/android buyer-id mismatch uid=${uid} buyer=${result.uid} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
+        const playOwner = await bindIapCustomer(result.intent.subId!, uid, {
           source: "play",
           productId: result.intent.productId,
         });
+        if (playOwner === IAP_OWNER_UNVERIFIABLE) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "verify_retry" }));
+          return;
+        }
+        // Secondary guard (defense-in-depth): the purchaseToken binding. Scopes
+        // ownership when obfuscatedExternalAccountId is absent (older purchases).
+        if (playOwner && playOwner !== uid) {
+          console.warn(
+            `[iap] verify/android owned_by_other uid=${uid} owner=${playOwner} sub=${result.intent.subId}`,
+          );
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "owned_by_other_account" }));
+          return;
+        }
         await applyIapIntent(uid, result, "verify/android");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -3672,24 +5759,35 @@ const server = http.createServer(async (req, res) => {
       const data = (notification.data || {}) as Record<string, unknown>;
       const signedTx = String(data.signedTransactionInfo || "").trim();
       const notifProduction = isProdEnvironment(data.environment);
-      if (signedTx && !notifProduction && !IAP_ALLOW_SANDBOX) {
-        // Sandbox notification in a production deployment — never apply it (would
-        // grant/alter a real entitlement from a test purchase). Still ack +
-        // dedupe-record below so Apple stops retrying.
-        console.log(`[iap] apple notif ${uuid} sandbox — ack, not applied`);
-      } else if (signedTx) {
-        const production = notifProduction;
-        const txn = (await appleVerifier(production).verifyAndDecodeTransaction(
-          signedTx,
-        )) as unknown as Record<string, unknown>;
+      if (signedTx) {
+        // Decode + resolve the bound uid FIRST so the sandbox decision is PER-UID
+        // (sandboxAllowedFor), mirroring /iap/verify. The SAME allowlisted testers
+        // who may sandbox-PURCHASE must also have their sandbox lifecycle
+        // (renew / expire / refund) APPLIED — otherwise a sandbox EXPIRED is
+        // dropped and the tester is stuck on Pro forever (grant/revoke asymmetry).
+        // A real production notification (notifProduction=true) is unaffected: the
+        // sandbox gate below is skipped and it applies as before.
+        const txn = (await appleVerifier(
+          notifProduction,
+        ).verifyAndDecodeTransaction(signedTx)) as unknown as Record<
+          string,
+          unknown
+        >;
         const facts = appleFactsFromDecoded(txn, {
           status: data.status,
           eventId: uuid,
         });
         const result = buildAppleIntent(facts);
         const subId = String(txn.originalTransactionId || "").trim();
-        const uid = await lookupIapCustomer(subId);
-        if (result.ok && uid) {
+        const uid = subId ? await lookupIapCustomer(subId) : null;
+        if (!notifProduction && !(uid && sandboxAllowedFor(uid))) {
+          // Sandbox notification whose bound uid is NOT sandbox-allowed (or a stray
+          // sandbox event in a production deployment) — never apply it to a real
+          // entitlement. Still ack + dedupe-record below so Apple stops retrying.
+          console.log(
+            `[iap] apple notif ${uuid} sandbox — ack, not applied (uid=${uid ?? "?"})`,
+          );
+        } else if (result.ok && uid) {
           await applyIapIntent(uid, result, "notif/apple");
         } else {
           console.warn(
@@ -3784,27 +5882,31 @@ const server = http.createServer(async (req, res) => {
           eventId: rtdn.messageId,
           eventTimeMs: rtdn.eventTimeMs,
         });
-        if (facts.test && !IAP_ALLOW_SANDBOX) {
-          // Test-purchase RTDN in production — ack + dedupe-record, never apply.
+        const result = buildPlayIntent(facts);
+        // Resolve the bound uid FIRST so the test-purchase decision is PER-UID
+        // (sandboxAllowedFor), mirroring /iap/verify/android. The SAME allowlisted
+        // testers who may test-PURCHASE must also have their test lifecycle
+        // (renew / expire / refund) APPLIED — otherwise a test EXPIRED is dropped
+        // and the tester is stuck on Pro forever (grant/revoke asymmetry). Prefer
+        // the server-established binding; fall back to the obfuscated account id we
+        // set at purchase (from the authoritative Play API).
+        let uid = await lookupIapCustomer(token);
+        if (!uid && result.ok) uid = String(result.uid || "") || null;
+        if (facts.test && !(uid && sandboxAllowedFor(uid))) {
+          // Test-purchase RTDN whose bound uid is NOT sandbox-allowed (or a stray
+          // test event) — ack + dedupe-record, never apply to a real entitlement.
           console.log(
-            `[iap] play sub ${rtdn.messageId} test — ack, not applied`,
+            `[iap] play sub ${rtdn.messageId} test — ack, not applied (uid=${uid ?? "?"})`,
           );
+        } else if (result.ok && uid) {
+          await bindIapCustomer(result.intent.subId!, uid, {
+            source: "play",
+          });
+          await applyIapIntent(uid, result, "rtdn/sub");
         } else {
-          const result = buildPlayIntent(facts);
-          // Prefer the server-established binding; fall back to the obfuscated
-          // account id we set at purchase (from the authoritative Play API).
-          let uid = await lookupIapCustomer(token);
-          if (!uid && result.ok) uid = String(result.uid || "") || null;
-          if (result.ok && uid) {
-            await bindIapCustomer(result.intent.subId!, uid, {
-              source: "play",
-            });
-            await applyIapIntent(uid, result, "rtdn/sub");
-          } else {
-            console.warn(
-              `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
-            );
-          }
+          console.warn(
+            `[iap] play sub ${rtdn.messageId} unmapped token ok=${result.ok}`,
+          );
         }
       } else {
         console.log(`[iap] play RTDN ${rtdn.messageId} no actionable body`);
@@ -4038,6 +6140,22 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Cap the chunk fan-out. Each chunk launches its own paid BatchRecognize
+      // job in parallel (Promise.all below), so an oversized `chunks` array is a
+      // cost bomb independent of the quota reserve. The client never produces
+      // more than ~a few dozen chunks (≤55min each); anything larger is abuse.
+      if (chunks.length > MAX_BATCH_CHUNKS) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "too_many_chunks",
+            message:
+              "録音が長すぎます。もう少し短い録音に分けてお試しください。",
+          }),
+        );
+        return;
+      }
+
       // Pre-flight reserve from the client-supplied (untrusted) durations —
       // negatives clamped, floored at 1. The authoritative charge is reconciled
       // below from the server-measured transcript length, so the client cannot
@@ -4084,11 +6202,18 @@ const server = http.createServer(async (req, res) => {
 
       const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
 
+      // Per-chunk "op launched" flags. A chunk's paid BatchRecognize op is billed
+      // by Google the moment it is created (startRes.ok), so on a partial failure
+      // we charge for the ops that STARTED and refund only the rest (see the
+      // failure branch below and failedBatchChargeDelta).
+      const startedChunks: boolean[] = new Array(chunks.length).fill(false);
+
       // Transcribe one file: start the op, poll to completion, surface per-file
       // errors, and return its SpeechRecognitionResult[] (word-level speaker
       // labels + timestamps). Throws on any failure.
       const transcribeFile = async (
         uri: string,
+        idx: number,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ): Promise<any[]> => {
         const startToken = await getGcpAccessToken();
@@ -4104,6 +6229,15 @@ const server = http.createServer(async (req, res) => {
               languageCodes: [language],
               features: {
                 enableAutomaticPunctuation: true,
+                // REQUIRED for multi-chunk (>58min) recordings: the overlap dedup
+                // below filters words by parseOffset(w.startOffset). Per the STT v2
+                // spec, word startOffset/endOffset are ONLY populated when this flag
+                // is set — without it every word offset is absent (→ 0), so for
+                // chunk i>0 the leadCut filter (t >= 10) drops EVERY word and the
+                // entire chunk is silently lost (observed: a 102-min 2-chunk run
+                // transcribed only its first ~55min). measuredBatchMinutes also
+                // reads endOffset, so this fixes the batch billing under-count too.
+                enableWordTimeOffsets: true,
                 diarizationConfig: { minSpeakerCount: 1, maxSpeakerCount: 6 },
               },
               denoiserConfig: { denoiseAudio: true },
@@ -4122,6 +6256,10 @@ const server = http.createServer(async (req, res) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const op = (await startRes.json()) as any;
         const opName: string = op.name;
+        // The op now exists on Google's side and is billed regardless of whether
+        // it later succeeds, errors, or times out — flag it so a partial failure
+        // charges for it instead of refunding it.
+        startedChunks[idx] = true;
         const shortName = uri.split("/").pop();
         console.log(`[batch] Operation started: ${opName} (${shortName})`);
 
@@ -4183,91 +6321,93 @@ const server = http.createServer(async (req, res) => {
         return fileResults[fileKey]?.inlineResult?.transcript?.results || [];
       };
 
-      // Run all chunks in parallel (total ≈ slowest chunk).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let chunkResults: any[][];
-      try {
-        chunkResults = await Promise.all(
-          chunks.map((c) => transcribeFile(c.gcsUri)),
-        );
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+      // Run all chunks in parallel (total ≈ slowest chunk). allSettled (not all)
+      // so one chunk's failure doesn't erase the fact that the OTHER chunks' paid
+      // ops already launched — the failure branch below charges for every started
+      // op instead of refunding the whole batch.
+      const settled = await Promise.allSettled(
+        chunks.map((c, i) => transcribeFile(c.gcsUri, i)),
+      );
+      const firstReject = settled.find((s) => s.status === "rejected") as
+        PromiseRejectedResult | undefined;
+      if (firstReject) {
+        const msg =
+          firstReject.reason instanceof Error
+            ? firstReject.reason.message
+            : String(firstReject.reason);
         console.error(`[batch] Transcription failed: ${msg}`);
+        // A batch that launched real BatchRecognize ops then failed must NOT
+        // refund the whole reserve — that would let a client loop "N valid + 1
+        // poisoned" chunks to run paid STT for free. Charge the ops that STARTED
+        // (Google billed them) and refund only the never-launched remainder. The
+        // delta is always ≤ 0 (see failedBatchChargeDelta), so this never
+        // over-charges; startedCount = 0 (a pre-flight start failure) is still a
+        // full refund. Setting committed=true stops `finally` refunding on top.
+        const startedCount = startedChunks.filter(Boolean).length;
+        if (g.ok && g.charged) {
+          await adjustUsage(
+            g.meterKey,
+            "batchMin",
+            failedBatchChargeDelta(startedCount, reserveMin),
+            g.plan,
+            g.ym,
+          );
+        }
+        committed = true;
+        console.log(
+          `[batch] Partial failure: ${startedCount}/${chunks.length} op(s) started; charged ${Math.min(
+            startedCount,
+            reserveMin,
+          )}min of reserved ${reserveMin}min`,
+        );
         res.writeHead(502, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: msg }));
         return;
       }
+      // All chunks fulfilled — collect their results in order.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const chunkResults: any[][] = settled.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (s) => (s as PromiseFulfilledResult<any[]>).value,
+      );
 
       // Dedup the 20s overlap by word timestamp — split the overlap at its
       // midpoint so each boundary word is emitted exactly once — then build a
       // speaker-tagged transcript per chunk joined by "---" boundaries (labels
       // are only consistent within a segment; Claude unifies across "---").
-      const allSpeakerLabels = new Set<string>();
-      const taggedSegments: string[] = [];
-      const plainSegments: string[] = [];
+      // The merge (incl. the enableWordTimeOffsets-absent fallback that prevents
+      // whole-chunk loss) lives in mergeBatchChunks() so it is unit-tested in
+      // gating.test.ts independently of this handler.
+      const { taggedSegments, plainSegments, speakerLabels } = mergeBatchChunks(
+        chunkResults,
+        chunks,
+        multi,
+        OVERLAP_SECS,
+      );
+      const allSpeakerLabels = new Set(speakerLabels);
 
-      for (let i = 0; i < chunkResults.length; i++) {
-        const results = chunkResults[i];
-        const c = chunks[i];
-        const leadCut = i === 0 ? 0 : OVERLAP_SECS / 2;
-        const trailCut =
-          i === chunkResults.length - 1 || c.durationSec <= 0
-            ? Infinity
-            : c.durationSec - OVERLAP_SECS / 2;
-
-        const words: Array<{ word: string; speakerLabel: string }> = [];
-        let plain = "";
-        for (const r of results) {
+      // Partial-loss alarm: every chunk that returned any words should yield a
+      // non-empty segment. If a chunk produced text but was dropped by the
+      // overlap filter (e.g. absent offsets slipping past the guard above), it
+      // silently vanishes from the "---"-joined transcript with no gap marker,
+      // and the client only rejects a FULLY empty transcript — so Refine would
+      // replace the document with a plausible-looking but truncated result.
+      // Surface it loudly (no silent fallback). With enableWordTimeOffsets set
+      // this should never fire; it exists to catch regressions in the field.
+      const chunksWithText = chunkResults.filter((results) =>
+        results.some((r) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const alt = (r as any).alternatives?.[0];
-          if (!alt) continue;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const ws: any[] = alt.words || [];
-          if (multi && ws.length > 0) {
-            for (const w of ws) {
-              const t = parseOffset(w.startOffset);
-              if (t >= leadCut && t < trailCut) {
-                words.push({
-                  word: w.word || "",
-                  speakerLabel: w.speakerLabel || "",
-                });
-                plain += w.word || "";
-              }
-            }
-          } else {
-            for (const w of ws)
-              words.push({
-                word: w.word || "",
-                speakerLabel: w.speakerLabel || "",
-              });
-            plain += alt.transcript || "";
-          }
-        }
-
-        const labels = new Set(
-          words.map((w) => w.speakerLabel).filter(Boolean),
+          return (
+            (alt?.transcript && alt.transcript.trim()) ||
+            (Array.isArray(alt?.words) && alt.words.length > 0)
+          );
+        }),
+      ).length;
+      if (plainSegments.length < chunksWithText) {
+        console.error(
+          `[batch] PARTIAL LOSS: ${chunksWithText - plainSegments.length}/${chunkResults.length} chunk(s) had audio/words but produced an empty merged segment — transcript is truncated. Check enableWordTimeOffsets / overlap dedup.`,
         );
-        labels.forEach((l) => allSpeakerLabels.add(l));
-
-        let tagged = plain;
-        if (labels.size > 1 && words.length > 0) {
-          let cur = "";
-          const parts: string[] = [];
-          for (const w of words) {
-            const label = w.speakerLabel || "";
-            if (label && label !== cur) {
-              cur = label;
-              parts.push(`\n[Speaker ${label}] `);
-            }
-            parts.push(w.word);
-          }
-          tagged = parts.join("").trim();
-        }
-
-        if (plain.trim()) {
-          taggedSegments.push(tagged.trim());
-          plainSegments.push(plain.trim());
-        }
       }
 
       const transcript = plainSegments.join("\n");
@@ -4278,7 +6418,11 @@ const server = http.createServer(async (req, res) => {
       // from the actual STT word/result offsets, not the client's claim). This
       // is the authoritative charge — a client that under-reported duration now
       // has its counter corrected upward so the next request is blocked.
-      const measuredMin = measuredBatchMinutes(chunkResults, OVERLAP_SECS);
+      const measuredMin = measuredBatchMinutes(
+        chunkResults,
+        OVERLAP_SECS,
+        chunks.map((c) => c.durationSec),
+      );
       if (g.ok && g.charged) {
         await adjustUsage(
           g.meterKey,
@@ -4317,10 +6461,13 @@ const server = http.createServer(async (req, res) => {
             console.error(`[batch] lease release failed for ${leaseUid}:`, e),
         );
       }
-      // On any non-success path (transcription 502, timeout, throw) refund the
-      // full reserve so a failed batch never costs the user minutes. Combined
-      // with the lease above this bounds abuse: a timeout-driven refund loop can
-      // now only run ONE job at a time per uid (residual serial retry accepted).
+      // Refund the reserve only on paths that left committed=false: an early
+      // 429/return (no op launched) or an exception caught above (rare, e.g. a
+      // post-transcription processing bug). The partial-failure branch is NOT one
+      // of these — it already reconciled the charge to the ops that STARTED and
+      // set committed=true, so it is not refunded on top. Charging started ops
+      // there closes the old free-STT loop (which full-refunded every partial
+      // failure), while the per-uid lease keeps a retry loop serial.
       await refundIfUncommitted(g, committed);
     }
     return;
@@ -4571,34 +6718,41 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
       }
       userPrompt += `\n\n## 検索済みトピック（重複禁止）\n${searchedTopics.length > 0 ? searchedTopics.join(", ") : "(なし)"}`;
 
-      const vertexRes = await fetch(getVertexAiUrl(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          anthropic_version: "vertex-2023-10-16",
-          // Generous headroom for opus-5's default `thinking` tokens PLUS the
-          // JSON brief: with thinking on, a low ceiling can be spent before the
-          // JSON is emitted, truncating it ("no JSON found"). The ceiling is a
-          // cap, not a charge. Kept below the 128K streaming max because this
-          // call is non-streaming (stream:false) and a huge cap would widen the
-          // HTTP-timeout window; the JSON brief is small and finishes early.
-          max_tokens: 32000,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }],
-          stream: false,
+      const vertexRes = await fetchUpstreamWithRetry(() =>
+        fetch(getVertexAiUrl(), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            anthropic_version: "vertex-2023-10-16",
+            // Generous headroom for opus-5's default `thinking` tokens PLUS the
+            // JSON brief: with thinking on, a low ceiling can be spent before the
+            // JSON is emitted, truncating it ("no JSON found"). The ceiling is a
+            // cap, not a charge. Kept below the 128K streaming max because this
+            // call is non-streaming (stream:false) and a huge cap would widen the
+            // HTTP-timeout window; the JSON brief is small and finishes early.
+            max_tokens: 32000,
+            system: systemPrompt,
+            messages: [{ role: "user", content: userPrompt }],
+            stream: false,
+          }),
         }),
-      });
+      );
 
       if (!vertexRes.ok) {
-        const errText = await vertexRes.text();
+        // Never leak the raw upstream status/body to the client (that produced
+        // the "素の500エラー" users saw). Research is a best-effort background
+        // enhancement: on upstream failure we degrade to an empty result with a
+        // clean 200 so the panel simply shows no new cards this tick. committed
+        // stays false → the reserved aiCall is refunded in `finally`.
+        const errText = await vertexRes.text().catch(() => "");
         console.error(
-          `[research] analyze error: ${vertexRes.status} | ${errText}`,
+          `[research] analyze upstream failed: ${vertexRes.status} | ${errText.slice(0, 500)}`,
         );
-        res.writeHead(vertexRes.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: errText }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ searches: [], questions: null }));
         return;
       }
 
@@ -4620,8 +6774,11 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
         : vertexData.content?.text || "";
 
       if (!text) {
+        // Model produced NO text — a failed generation from the user's view (no
+        // cards). Owner rule 「生成されない＝課金しない」: leave committed=false so
+        // the reserved aiCall refunds in `finally`. (Q2: research empty/error
+        // results are refunded; only a genuine parsed decision is charged.)
         console.log("[research] analyze: empty response from Claude");
-        committed = true; // Vertex was invoked (cost incurred) — keep the charge.
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ searches: [], questions: null }));
         return;
@@ -4629,14 +6786,34 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
+        // Text came back but not the expected JSON brief — degraded output, no
+        // user-facing result. Refund (committed stays false).
         console.error("[research] analyze: no JSON found in response");
-        committed = true; // Vertex was invoked (cost incurred) — keep the charge.
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ searches: [], questions: null }));
         return;
       }
 
-      const result = JSON.parse(jsonMatch[0]);
+      // The greedy /\{[\s\S]*\}/ span can capture non-JSON text, and a
+      // thinking-truncated response can leave the JSON malformed — an unguarded
+      // JSON.parse here throws, and the outer catch turned that into a raw 500
+      // (the "素の500エラー" users saw). Degrade to an empty result on any parse
+      // failure; this is a failed generation (no cards) so committed stays false
+      // → the reserved aiCall refunds (owner rule 「生成されない＝課金しない」).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let result: any;
+      try {
+        result = JSON.parse(jsonMatch[0]);
+      } catch (parseErr) {
+        console.error(
+          `[research] analyze: JSON parse failed: ${
+            parseErr instanceof Error ? parseErr.message : String(parseErr)
+          }`,
+        );
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ searches: [], questions: null }));
+        return;
+      }
       const searches = Array.isArray(result.searches) ? result.searches : [];
       // Questions are follow-up prompts the user can ASK — no web search needed.
       // Only surface them when the director produced a non-empty item list.
@@ -4716,33 +6893,46 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
       const userPrompt = query;
 
-      const geminiRes = await fetch(getGeminiUrl(GEMINI_MODEL), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemPrompt }],
+      const geminiRes = await fetchUpstreamWithRetry(() =>
+        fetch(getGeminiUrl(GEMINI_MODEL), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
           },
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: userPrompt }],
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: systemPrompt }],
             },
-          ],
-          tools: [{ googleSearch: {} }],
+            contents: [
+              {
+                role: "user",
+                parts: [{ text: userPrompt }],
+              },
+            ],
+            tools: [{ googleSearch: {} }],
+          }),
         }),
-      });
+      );
 
       if (!geminiRes.ok) {
-        const errText = await geminiRes.text();
+        // Same degrade-not-leak policy as analyze: return a clean, empty result
+        // (with `degraded:true` so the client can show a soft "検索できませんでした"
+        // state instead of a raw error) rather than passing the upstream status/
+        // body through. committed stays false → the aiCall is refunded.
+        const errText = await geminiRes.text().catch(() => "");
         console.error(
-          `[research] grounded-search error: ${geminiRes.status} | ${errText}`,
+          `[research] grounded-search upstream failed: ${geminiRes.status} | ${errText.slice(0, 500)}`,
         );
-        res.writeHead(geminiRes.status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: errText }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            summary: "",
+            sources: [],
+            webSearchQueries: [],
+            degraded: true,
+          }),
+        );
         return;
       }
 
@@ -4791,7 +6981,11 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
       console.log(
         `[research] grounded-search: queryLen=${query.length} sources=${sources.length} searches=${webSearchQueries.length}`,
       );
-      committed = true;
+      // Charge only when the model actually produced answer text. An empty
+      // summary (all thought-parts, or a post-200 error event with no content)
+      // = no card for the user = failed generation → committed stays false → the
+      // reserved aiCall refunds (Q2 / owner rule 「生成されない＝課金しない」).
+      if (summary.trim()) committed = true;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ summary, sources, webSearchQueries }));
     } catch (err) {
@@ -4825,8 +7019,23 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
     const parsed = JSON.parse(body);
     const isStream = parsed.stream === true;
 
-    g = await guard(req, res, uid, "aiCalls", 1);
-    if (!g.ok) return;
+    // Idempotency: a retry / 再生成 of the SAME logical request (same key + same
+    // content) within the TTL REUSES the original charge instead of billing a new
+    // aiCall (owner rule: 「エラー起因の再生成・リトライは利用カウントに含めない」).
+    // A fresh / expired / different-prompt / at-cap key charges normally; no key
+    // at all → always charges (old clients behave exactly as before).
+    const idemKey = readIdempotencyKey(req);
+    const contentHash = idemKey ? chatContentHash(parsed) : "";
+    const reused = idemKey
+      ? await checkAiIdempotency(uid, idemKey, contentHash)
+      : false;
+
+    // Reserve a fresh aiCall only when NOT reusing a prior charge. On reuse `g`
+    // stays null → the finally never refunds (nothing was reserved this run).
+    if (!reused) {
+      g = await guard(req, res, uid, "aiCalls", 1);
+      if (!g.ok) return;
+    }
 
     // Build Vertex AI request (model is in URL, not body)
     const vertexBody: Record<string, unknown> = {
@@ -4847,26 +7056,46 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 
     const accessToken = await getGcpAccessToken();
 
-    const vertexRes = await fetch(getVertexAiUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(vertexBody),
-    });
+    const vertexRes = await fetchUpstreamWithRetry(() =>
+      fetch(getVertexAiUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(vertexBody),
+      }),
+    );
 
     if (!vertexRes.ok) {
-      const errText = await vertexRes.text();
-      res.writeHead(vertexRes.status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: errText }));
+      // Do NOT pass the raw Vertex body through — it is an opaque upstream error
+      // that surfaced as a raw blob in the UI. Emit a machine-readable code +
+      // retryable flag; the client (AiPanel.pushFriendlyError) maps it to a
+      // friendly Japanese message. Full body is logged server-side for ops.
+      const errText = await vertexRes.text().catch(() => "");
+      console.error(
+        `[chat] vertex upstream failed: ${vertexRes.status} | ${errText.slice(0, 800)}`,
+      );
+      const retryable = TRANSIENT_UPSTREAM_STATUS.has(vertexRes.status);
+      const status = retryable ? 503 : 502;
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "ai_upstream_error",
+          retryable,
+        }),
+      );
       return;
     }
 
-    // Vertex accepted the request (200) — the cost is incurred, so keep the
-    // charge even if the client disconnects mid-stream.
-    committed = true;
-
+    // Vertex accepted the request (200), but a 200 alone is NOT proof of output:
+    // Anthropic can stream a 200 then emit an `error` event with no content, and
+    // an empty completion produces no deltas. So the charge is committed ONLY
+    // after we observe the model actually produced usable output (streamed text /
+    // a tool call, or — non-streaming — a non-empty text/tool_use block). This
+    // honors 「生成されない＝課金しない」 while still charging a client that
+    // disconnects AFTER receiving content (we scan the UPSTREAM bytes, not client
+    // delivery — closing the disconnect-after-output free-generation vector).
     if (isStream) {
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -4877,20 +7106,55 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
       const reader = vertexRes.body?.getReader();
       if (!reader) {
         res.end();
-        return;
+        return; // no stream body = no output → committed stays false → refund
       }
 
       const decoder = new TextDecoder();
+      let scanBuf = "";
+      let producedOutput = false;
+      let clientGone = false;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(decoder.decode(value, { stream: true }));
+        const chunk = decoder.decode(value, { stream: true });
+        // Detect usable output from the UPSTREAM stream (independent of client
+        // delivery). Bounded tail buffer catches a marker split across chunks
+        // without unbounded growth; stop scanning once output is confirmed.
+        if (!producedOutput) {
+          scanBuf += chunk;
+          if (sseProducedOutput(scanBuf)) producedOutput = true;
+          else if (scanBuf.length > 4096) scanBuf = scanBuf.slice(-1024);
+        }
+        if (!clientGone && !res.writableEnded) {
+          try {
+            res.write(chunk);
+          } catch {
+            // Client vanished mid-stream; keep draining upstream so the billing
+            // decision reflects what the model produced, not delivery success.
+            clientGone = true;
+          }
+        }
       }
-      res.end();
+      if (!res.writableEnded) res.end();
+      if (producedOutput) committed = true;
     } else {
       const data = await vertexRes.text();
+      let hasOutput = false;
+      try {
+        hasOutput = chatResponseHasOutput(JSON.parse(data));
+      } catch {
+        hasOutput = false; // unparseable/empty upstream body → refund
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(data);
+      if (hasOutput) committed = true;
+    }
+
+    // Record the successful charge so a same-key, same-content retry/regenerate
+    // reuses it (free) within the TTL. Only when a real charge happened (skip
+    // reuse runs and internal/unlimited callers whose g.charged is false).
+    if (idemKey && !reused && committed && g && g.ok && g.charged) {
+      await markAiIdempotencyCharged(uid, idemKey, contentHash);
     }
   } catch (err) {
     const message =

@@ -28,6 +28,7 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTauri } from "@/platform";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import {
   enableShareLink,
   disableShareLink,
@@ -170,7 +171,7 @@ export function ShareDialog({
         detail: `Shared with ${linkPermission} access via link`,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create link");
+      setError(friendlyErrorMessage(err, "share"));
     } finally {
       setLinkLoading(false);
     }
@@ -183,7 +184,7 @@ export function ShareDialog({
       await disableShareLink(activeDocId);
       setShareLink((prev) => (prev ? { ...prev, enabled: false } : null));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to disable link");
+      setError(friendlyErrorMessage(err, "share"));
     } finally {
       setLinkLoading(false);
     }
@@ -281,7 +282,7 @@ export function ShareDialog({
         detail: `Invited ${inviteEmail.trim()} as ${inviteRole}`,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to invite");
+      setError(friendlyErrorMessage(err, "share"));
     } finally {
       setInviting(false);
     }
@@ -300,7 +301,7 @@ export function ShareDialog({
         useAppStore.getState().updateDocument(activeDocId, { isShared: false });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to remove");
+      setError(friendlyErrorMessage(err, "share"));
     }
   };
 

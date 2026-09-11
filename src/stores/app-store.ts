@@ -63,7 +63,10 @@ interface AppState {
   documents: Document[];
   loadDocuments: () => Promise<void>;
   addDocument: (doc: Document) => Promise<void>;
-  updateDocument: (id: string, updates: Partial<Document>) => void;
+  updateDocument: (
+    id: string,
+    updates: Partial<Document> & { __voiceClear?: boolean },
+  ) => void;
   deleteDocument: (id: string) => Promise<void>;
   /**
    * Clear the IN-MEMORY document cache (sidebar) without touching SQLite. Used
@@ -497,7 +500,30 @@ export const useAppStore = create<AppState>((set, get) => ({
       const existing = s.documents.find((d) => d.id === id);
       if (!existing) return {};
 
-      const safeUpdates = updates;
+      // Voice-metadata loss guard (architecture.md: never overwrite non-empty
+      // with empty across layers). A successful Refine or a passive re-render
+      // must not silently wipe a saved transcript / GCS archive reference. Only
+      // a deliberate reset — the "Clear transcript" button or starting a fresh
+      // recording — may null these, signalled by the internal __voiceClear flag.
+      // The flag itself is never persisted.
+      const { __voiceClear, ...rest } = updates;
+      const safeUpdates: Partial<Document> = { ...rest };
+      if (!__voiceClear) {
+        if (
+          "voiceTranscript" in safeUpdates &&
+          !safeUpdates.voiceTranscript &&
+          existing.voiceTranscript
+        ) {
+          delete safeUpdates.voiceTranscript;
+        }
+        if (
+          "voiceGcsUri" in safeUpdates &&
+          !safeUpdates.voiceGcsUri &&
+          existing.voiceGcsUri
+        ) {
+          delete safeUpdates.voiceGcsUri;
+        }
+      }
 
       const documents = s.documents.map((d) =>
         d.id === id ? { ...d, ...safeUpdates } : d,

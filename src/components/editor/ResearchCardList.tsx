@@ -7,6 +7,7 @@ import {
   BILLING_ENABLED,
 } from "@/stores/entitlement-store";
 import { groundedSearch } from "@/services/research";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import { getPlatform } from "@/platform";
 import { insertResearchCard } from "@/hooks/use-research-window";
 import { ResearchCardItem } from "./ResearchCardItem";
@@ -117,11 +118,10 @@ export function ResearchCardList({ cards }: { cards: ResearchCard[] }) {
                   error: undefined,
                 });
               } catch (e) {
-                // Surface the real reason instead of a flat "Retry failed", and
+                // Friendly, localized reason (never the raw status/body), and
                 // always clear the loading flag so the card isn't stuck spinning.
                 updateCard(card.id, {
-                  error:
-                    e instanceof Error ? e.message : "再試行に失敗しました",
+                  error: friendlyErrorMessage(e, "research"),
                   loading: false,
                 });
               }

@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
 import { cn } from "@/lib/utils";
+import { friendlyErrorMessage } from "@/lib/friendly-error";
 import { isMobile } from "@/platform";
 import {
   createTeam,
@@ -177,9 +178,7 @@ function TeamCard({
       // entry to spend the pool — that requires the manager to assign them a seat.
       onRefresh();
     } catch (err) {
-      onError(
-        err instanceof Error ? err.message : "メンバーの追加に失敗しました",
-      );
+      onError(friendlyErrorMessage(err, "team"));
     }
   };
 
@@ -194,9 +193,7 @@ function TeamCard({
         ),
       }));
     } catch (err) {
-      onError(
-        err instanceof Error ? err.message : "メンバーの削除に失敗しました",
-      );
+      onError(friendlyErrorMessage(err, "team"));
     }
   };
 
@@ -206,9 +203,7 @@ function TeamCard({
       await deleteTeam(team.id);
       onRemove(team.id);
     } catch (err) {
-      onError(
-        err instanceof Error ? err.message : "チームの削除に失敗しました",
-      );
+      onError(friendlyErrorMessage(err, "team"));
     }
   };
 
@@ -354,7 +349,9 @@ function TeamCard({
             }
           >
             <option value="member">メンバー</option>
-            <option value="admin">管理者</option>
+            {/* Only the owner may create admins — promoting a member to admin grows
+                managerUids, which the Firestore rules freeze to the owner. */}
+            {isOwner && <option value="admin">管理者</option>}
           </select>
           <Button
             size="sm"
@@ -720,9 +717,7 @@ export function TeamManageDialog({
       ]);
       setNewTeamName("");
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "チームの作成に失敗しました",
-      );
+      setError(friendlyErrorMessage(err, "team"));
     } finally {
       setCreating(false);
     }

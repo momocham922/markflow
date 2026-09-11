@@ -78,9 +78,29 @@ async function openBillingUrl(url: string): Promise<boolean> {
 async function openStoreSubscriptions(
   source: "app_store" | "play",
 ): Promise<boolean> {
+  const { isIOS } = await import("@/platform");
+
+  // iOS: prefer StoreKit 2's native manage-subscriptions sheet
+  // (AppStore.showManageSubscriptions). This is the ONLY surface that lists an
+  // IAP subscription for a real-Apple-ID TestFlight/sandbox tester — such subs
+  // never appear under Settings › Subscriptions, so the itms-apps:// deep link
+  // is a dead end for testers. Production subscribers see it in both places.
+  if (source === "app_store" && isIOS) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("plugin:iap|show_manage_subscriptions");
+      return true;
+    } catch (err) {
+      // Fall through to the itms-apps:// deep link (pre-iOS-15 / no scene / etc.).
+      console.warn(
+        "[billing] native manage subscriptions failed, falling back to deep link:",
+        err,
+      );
+    }
+  }
+
   let url: string;
   if (source === "app_store") {
-    const { isIOS } = await import("@/platform");
     url = isIOS
       ? "itms-apps://apps.apple.com/account/subscriptions"
       : "https://apps.apple.com/account/subscriptions";
@@ -144,6 +164,8 @@ function billingErrorMessage(code: string): string {
       return "アプリ内課金は現在準備中です。しばらくお待ちください。";
     case "sandbox_not_allowed":
       return "サンドボックス（テスト）購入は現在このアカウントでは有効化されていません。";
+    case "owned_by_other_account":
+      return "この端末のサブスクリプションは別のアカウントで登録済みです。購入時のアカウントでログインしてご利用ください。";
     case "no_receipt":
     case "no_purchase_token":
     case "missing_jws":
@@ -153,6 +175,8 @@ function billingErrorMessage(code: string): string {
     case "unknown_status":
     case "unmapped_product":
       return "この購入を確認できませんでした。時間をおいて再度お試しください。";
+    case "verify_retry":
+      return "購入の確認に一時的に失敗しました。通信状況を確認して、もう一度お試しください。";
     case "unsupported_platform":
       return "このプラットフォームではアプリ内課金を利用できません。";
     case "team_mobile_unavailable":
@@ -244,8 +268,24 @@ interface EntitlementState {
    * management surface instead (openBillingPortal branches on this).
    */
   source: string | null;
+  /**
+   * When the current paid subscription's period ends / next renews, in epoch
+   * MILLISECONDS (server sends seconds→ms). null for free / internal / an
+   * assigned team member (no own subscription). Shown in the usage view so a
+   * subscriber can see their renewal (or, after cancel, expiry) date.
+   */
+  expiresDate: number | null;
   loading: boolean;
   loaded: boolean;
+  /**
+   * Whether the remote MCP server (Claude connector) is enabled for THIS user.
+   * Server-gated by the MCP_UIDS allowlist (owner-only during testing); the
+   * endpoint returns it so the UI can show the "Claude連携" entry + connector
+   * dialog only to allowlisted users. Dark for everyone else.
+   */
+  mcpEnabled: boolean;
+  /** Whether the MCP connector-instructions dialog is open. */
+  mcpConnectorOpen: boolean;
   /** Last 429 quota_exceeded surfaced by an AI call, for upsell UI. */
   lastQuotaError: QuotaError | null;
   /** True while a Checkout/Portal session is being created (spinner + guard). */
@@ -337,6 +377,10 @@ interface EntitlementState {
   openTeamManage: () => void;
   /** Close the global team-management dialog. */
   closeTeamManage: () => void;
+  /** Open the MCP connector-instructions dialog (no-op unless mcpEnabled). */
+  openMcpConnector: () => void;
+  /** Close the MCP connector-instructions dialog. */
+  closeMcpConnector: () => void;
   reset: () => void;
 }
 
@@ -350,8 +394,11 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   seats: 1,
   period: null,
   source: null,
+  expiresDate: null,
   loading: false,
   loaded: false,
+  mcpEnabled: false,
+  mcpConnectorOpen: false,
   lastQuotaError: null,
   billingBusy: false,
   billingError: null,
@@ -397,6 +444,11 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
         seats: Math.max(1, Math.floor(Number(d.seats) || 1)),
         period: d.period ?? null,
         source: typeof d.source === "string" ? d.source : null,
+        expiresDate:
+          typeof d.expiresDate === "number" && d.expiresDate > 0
+            ? d.expiresDate
+            : null,
+        mcpEnabled: !!d.mcpEnabled,
         loaded: true,
         loading: false,
       });
@@ -468,7 +520,14 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   startCheckout: async (plan, interval = "month", opts) => {
-    if (!BILLING_ENABLED) return;
+    // Billing dark (pre-GO): never a silent no-op. The purchase CTA is already
+    // gated off in the paywall (proPurchasable = BILLING_ENABLED), but if any
+    // other path reaches here, surface a clear message instead of a dead button
+    // (サイレントフォールバック禁止) — matching openBillingPortal / changeTeamSeats.
+    if (!BILLING_ENABLED) {
+      set({ billingError: "決済は現在準備中です。しばらくお待ちください。" });
+      return;
+    }
     const user = auth.currentUser;
     if (!user) {
       set({ billingError: "サインインが必要です。" });
@@ -585,7 +644,15 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   openBillingPortal: async () => {
-    if (!BILLING_ENABLED) return { ok: false, error: "決済は現在準備中です。" };
+    // Managing/cancelling an EXISTING subscription must work even while the
+    // purchase UI is dark (BILLING_ENABLED=false): a paid user (esp. an IAP
+    // subscriber routed to the store's own management surface below) must never be
+    // trapped unable to cancel. Only block when billing is dark AND the user is
+    // not currently on a paid plan.
+    const plan = get().effectivePlan;
+    const isPaid = plan === "pro" || plan === "team";
+    if (!BILLING_ENABLED && !isPaid)
+      return { ok: false, error: "決済は現在準備中です。" };
     const user = auth.currentUser;
     if (!user) {
       const msg = "サインインが必要です。";
@@ -604,6 +671,16 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
         // A failed open is a failure, never a silent success — a user trying to
         // cancel must get feedback (サイレントフォールバック禁止).
         if (!opened) throw new Error("store_manage_failed");
+        // iOS's native manage sheet (AppStore.showManageSubscriptions) resolves
+        // only AFTER the customer dismisses it, so re-pull the entitlement now: a
+        // cancellation that already took effect (e.g. an accelerated sandbox sub
+        // that has expired) flips the CTA from "現在のプラン" to the upgrade CTA
+        // immediately instead of showing a stale plan. A mid-period cancel
+        // legitimately stays paid until expiry — the foreground re-fetch (App.tsx
+        // visibilitychange) then catches the later downgrade when the user
+        // returns to the app. Fire-and-forget so the manage flow returns promptly
+        // and billingBusy clears; fetchEntitlement drives its own loading flag.
+        void get().fetchEntitlement();
         return { ok: true };
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);
@@ -781,13 +858,29 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   },
 
   openPaywall: (reason = null) => {
-    if (!BILLING_ENABLED) return;
+    // This dialog is the single surface for 利用状況 (the usage meter) + plan info +
+    // the platform-appropriate upgrade / 契約を管理 action, so it must ALWAYS open
+    // for a signed-in user — on every platform and even while the purchase UI
+    // ships dark (BILLING_ENABLED=false). Purchase-CTA visibility is gated INSIDE
+    // the dialog (PaywallDialog: desktop shows the Stripe upgrade, mobile shows
+    // "近日対応予定" until launch), NOT by refusing to open. Refusing for a Free
+    // user while dark left the StatusBar/UserMenu entry a no-op — the reported PC
+    // dead-end the moment the owner downgraded (mirror of the earlier paid-user
+    // dead-end). All callers are user-triggered (badge/menu click or a gated
+    // action), so this never auto-pops.
     set({ paywallOpen: true, paywallReason: reason, billingError: null });
   },
   closePaywall: () => set({ paywallOpen: false, paywallReason: null }),
   openTeamManage: () =>
     set({ teamManageOpen: true, paywallOpen: false, paywallReason: null }),
   closeTeamManage: () => set({ teamManageOpen: false }),
+  openMcpConnector: () => {
+    // Gated: only allowlisted (mcpEnabled) users can open it. Everyone else has
+    // no entry point, but guard here too so a stale caller can't force it open.
+    if (!get().mcpEnabled) return;
+    set({ mcpConnectorOpen: true });
+  },
+  closeMcpConnector: () => set({ mcpConnectorOpen: false }),
 
   reset: () =>
     set({
@@ -799,6 +892,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       seats: 1,
       period: null,
       source: null,
+      expiresDate: null,
       loaded: false,
       loading: false,
       lastQuotaError: null,
@@ -807,6 +901,8 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       paywallOpen: false,
       paywallReason: null,
       teamManageOpen: false,
+      mcpEnabled: false,
+      mcpConnectorOpen: false,
       // viewAs is intentionally kept (persisted); it is owner-only and gets
       // reconciled to null on the next fetch if the next user is not the owner.
     }),
@@ -845,6 +941,78 @@ export function collaboratorLimit(plan: Plan | null): number {
       return 3;
     default: // free / null
       return 0;
+  }
+}
+
+/**
+ * Where a subscription is billed, for UI copy. `source` is the ai-proxy
+ * entitlement rail: "app_store" (Apple IAP), "play" (Google IAP), "stripe"
+ * (desktop/web card), "founder" (grandfathered), or null (free / team member).
+ */
+export function billingSourceLabel(source: string | null): string {
+  switch (source) {
+    case "app_store":
+      return "App Store（iOSアプリ）";
+    case "play":
+      return "Google Play（Androidアプリ）";
+    case "stripe":
+      return "クレジットカード（Web）";
+    case "founder":
+      return "永年優待";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Label for the "manage subscription" action, matched to the billing rail so the
+ * button says where it will actually send the user (Apple/Google mandate their
+ * own management surface for IAP subscriptions; Stripe uses the customer portal).
+ */
+export function manageLabelForSource(source: string | null): string {
+  switch (source) {
+    case "app_store":
+      return "App Storeで管理";
+    case "play":
+      return "Google Playで管理";
+    default:
+      return "契約を管理";
+  }
+}
+
+/**
+ * One-line guidance explaining WHERE an IAP subscription must be managed, shown
+ * in the usage view for app_store/play subscribers (who often try to manage from
+ * the desktop and hit a dead end). Empty for Stripe/founder/free — no special
+ * routing needed. The exact Settings path is spelled out so a user can find it
+ * even offline.
+ */
+export function billingSourceGuidance(source: string | null): string {
+  switch (source) {
+    case "app_store":
+      return "このプランはiOSアプリ（App Store）経由でご購入いただいています。解約・プラン変更・お支払い方法の更新は、iPhone/iPadの「設定 › （自分の名前）› サブスクリプション」から行えます。";
+    case "play":
+      return "このプランはAndroidアプリ（Google Play）経由でご購入いただいています。解約・プラン変更・お支払い方法の更新は、Playストアアプリの「メニュー › 定期購入」から行えます。";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Format an epoch-ms subscription period end as a JST calendar date (the
+ * product's fixed timezone). Returns "" for null so callers can omit the line.
+ */
+export function formatExpiryDate(ms: number | null): string {
+  if (!ms || ms <= 0) return "";
+  try {
+    return new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }).format(new Date(ms));
+  } catch {
+    return "";
   }
 }
 

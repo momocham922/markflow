@@ -28,7 +28,6 @@ import {
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -71,21 +70,104 @@ async function exchangeOAuthCode(
   code: string,
   redirectUri: string,
 ): Promise<{ id_token?: string; access_token?: string }> {
-  const res = await fetch(`${AI_PROXY_URL}/v1/auth/oauth/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, code, redirectUri }),
-  });
-  if (!res.ok) {
-    let detail = "";
+  const url = `${AI_PROXY_URL}/v1/auth/oauth/exchange`;
+  const body = JSON.stringify({ provider, code, redirectUri });
+
+  // On native (Tauri: desktop + mobile) run the HTTPS exchange in Rust
+  // (reqwest/rustls) instead of the WebView's fetch. The mobile WebView's TLS
+  // handshake to Cloud Run intermittently dies *before any response arrives*
+  // (surfaces as "Failed to fetch") yet a later attempt succeeds — the same
+  // WebView network fragility that forced `upload_image_cloud`. reqwest is far
+  // more robust and reports real error text. Retry lives in Rust and only fires
+  // when no HTTP response came back (the auth `code` is single-use / spent
+  // server-side, so retrying after a response would double-spend it).
+  const nativeHost =
+    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (nativeHost) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    let resp: { status: number; body: string };
     try {
-      detail = ((await res.json()) as { error?: string })?.error || "";
-    } catch {
-      /* body not JSON */
+      resp = await invoke<{ status: number; body: string }>(
+        "exchange_oauth_code",
+        { url, body },
+      );
+    } catch (e) {
+      // Rust exhausted its transport retries with no HTTP response.
+      throw new Error(
+        `Failed to fetch: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
-    throw new Error(`Token exchange failed: ${res.status} ${detail}`.trim());
+    if (resp.status < 200 || resp.status >= 300) {
+      let detail = "";
+      try {
+        detail = (JSON.parse(resp.body) as { error?: string })?.error || "";
+      } catch {
+        /* body not JSON */
+      }
+      throw new Error(`Token exchange failed: ${resp.status} ${detail}`.trim());
+    }
+    return JSON.parse(resp.body) as {
+      id_token?: string;
+      access_token?: string;
+    };
   }
-  return res.json();
+
+  // Web fallback: fetch with the same retry discipline. The mobile WebView's
+  // fetch/TLS stack intermittently fails the HTTPS handshake before any
+  // response arrives, so we retry the transport for the user.
+  //
+  // CRITICAL: retry ONLY when NO HTTP response was received. The authorization
+  // `code` is single-use and is spent server-side (the proxy holds the
+  // client_secret and calls the provider). A thrown fetch means the request
+  // never reached the proxy, so the code is untouched and retrying is safe.
+  // But once we get any HTTP response, the code may already be consumed —
+  // retrying then would fail with invalid_grant, so we surface that error.
+  const backoffMs = [0, 400, 1000, 2000];
+  const perAttemptTimeoutMs = 20000;
+  let lastNetworkErr: unknown;
+
+  for (let attempt = 0; attempt < backoffMs.length; attempt++) {
+    if (backoffMs[attempt] > 0) {
+      await new Promise((r) => setTimeout(r, backoffMs[attempt]));
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), perAttemptTimeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      // No response arrived (TLS/DNS/connection failure or a hung request that
+      // hit perAttemptTimeoutMs) → the code was never spent → retry.
+      lastNetworkErr = e;
+      clearTimeout(timer);
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // An HTTP response came back: never retry (the code may be consumed now).
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = ((await res.json()) as { error?: string })?.error || "";
+      } catch {
+        /* body not JSON */
+      }
+      throw new Error(`Token exchange failed: ${res.status} ${detail}`.trim());
+    }
+    return res.json();
+  }
+
+  // Every attempt failed at the network layer before any response.
+  throw lastNetworkErr instanceof Error
+    ? lastNetworkErr
+    : new Error("Failed to fetch");
 }
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
@@ -885,28 +967,6 @@ export async function fetchAiThreadsFromCloud(
     title: string;
     createdAt: number;
   }[];
-}
-
-// ─── Image upload (Firebase Storage) ────────────────────────
-
-const storage = getStorage(app);
-
-/**
- * Upload an image to Firebase Storage and return the download URL.
- * Path: images/{uid}/{uuid}.{ext}
- */
-export async function uploadImage(
-  uid: string,
-  data: Uint8Array,
-  ext: string,
-): Promise<string> {
-  const id = crypto.randomUUID();
-  const path = `images/${uid}/${id}.${ext}`;
-  const storageRef = ref(storage, path);
-  await uploadBytes(storageRef, data, {
-    contentType: `image/${ext === "jpg" ? "jpeg" : ext}`,
-  });
-  return getDownloadURL(storageRef);
 }
 
 // ─── Remote error logging ────────────────────────────────────

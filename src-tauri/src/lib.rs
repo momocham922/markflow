@@ -377,6 +377,60 @@ async fn send_slack_webhook(webhook_url: String, body: String) -> Result<String,
     }
 }
 
+#[derive(serde::Serialize)]
+struct OAuthExchangeResponse {
+    status: u16,
+    body: String,
+}
+
+/// Exchange an OAuth authorization `code` for tokens via the ai-proxy BFF, using
+/// the native reqwest/rustls stack instead of the WebView's `fetch`. On mobile
+/// the WebView's TLS handshake to Cloud Run intermittently dies *before any
+/// response arrives* (surfaces in JS as "Failed to fetch") yet a later attempt
+/// succeeds — same class of WebView network fragility that forced
+/// `upload_image_cloud`. reqwest is far more robust and reports real error text.
+///
+/// Retry policy (critical): the auth `code` is single-use and is spent
+/// server-side (the proxy holds the client_secret). We retry ONLY when `send()`
+/// fails — no HTTP response means the request never reached the proxy, so the
+/// code is untouched and retrying is safe. Once any HTTP response is received we
+/// return it verbatim and never retry (a retry would double-spend the code →
+/// invalid_grant). The caller inspects `status` to decide success vs. error.
+#[tauri::command]
+async fn exchange_oauth_code(url: String, body: String) -> Result<OAuthExchangeResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let backoff_ms: [u64; 4] = [0, 400, 1000, 2000];
+    let mut last_err = String::new();
+    for delay in backoff_ms {
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Ok(OAuthExchangeResponse { status, body: text });
+            }
+            Err(e) => {
+                // Transport failure before any response → code untouched → retry.
+                last_err = e.to_string();
+                continue;
+            }
+        }
+    }
+    Err(format!("network error after retries: {last_err}"))
+}
+
 #[tauri::command]
 async fn fetch_ogp(url: String) -> Result<OgpData, String> {
     let client = reqwest::Client::builder()
@@ -747,9 +801,16 @@ async fn upload_image_cloud(
         _ => "application/octet-stream",
     };
 
+    // Storage base URL. When MARKFLOW_STORAGE_BASE is set at build time (e.g.
+    // https://storage.markflow.jp — an authenticating reverse proxy that injects
+    // the bucket and hides the googleapis host), the image download URLs embedded
+    // into document content / published pages no longer expose the GCP default
+    // domain or bucket name. Falls back to the direct googleapis host + bucket.
+    let storage_base = image_storage_base(&bucket);
+
     let upload_url = format!(
-        "https://firebasestorage.googleapis.com/v0/b/{}/o?name={}",
-        bucket,
+        "{}/o?name={}",
+        storage_base,
         urlencoding::encode(&object_path),
     );
 
@@ -782,23 +843,32 @@ async fn upload_image_cloud(
     let download_url = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(token) = json.get("downloadTokens").and_then(|t| t.as_str()) {
             format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media&token={}",
-                bucket, encoded_path, token
+                "{}/o/{}?alt=media&token={}",
+                storage_base, encoded_path, token
             )
         } else {
-            format!(
-                "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-                bucket, encoded_path
-            )
+            format!("{}/o/{}?alt=media", storage_base, encoded_path)
         }
     } else {
-        format!(
-            "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
-            bucket, encoded_path
-        )
+        format!("{}/o/{}?alt=media", storage_base, encoded_path)
     };
 
     Ok(download_url)
+}
+
+/// Base URL for Firebase Storage image REST calls. When MARKFLOW_STORAGE_BASE is
+/// set at build time (an authenticating reverse proxy such as
+/// https://storage.markflow.jp that injects the bucket and forwards the Firebase
+/// auth token), image URLs no longer leak the GCP default host or bucket name.
+/// Otherwise falls back to the direct googleapis host including the bucket path.
+/// Voice uploads intentionally stay on the direct host (large WAV chunks would
+/// exceed the Cloud Run 32MB request limit, and voice URLs are never embedded in
+/// public content).
+fn image_storage_base(bucket: &str) -> String {
+    match option_env!("MARKFLOW_STORAGE_BASE") {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => format!("https://firebasestorage.googleapis.com/v0/b/{}", bucket),
+    }
 }
 
 /// Upload image from a file path — reads file and uploads in Rust (no IPC byte transfer).
@@ -983,6 +1053,12 @@ async fn force_install_stable(app: tauri::AppHandle) -> Result<String, String> {
 static VOICE_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static SYSTEM_AUDIO_BUFFER: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static SYSTEM_AUDIO_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Mic samples discarded by the MIC_BUFFER_MAX_SAMPLES cap because the JS drain
+/// loop (get_voice_chunk) stalled. Reported by get_voice_chunk so the loss is
+/// never silent. On Windows the cpal callback is a real-time thread, so it must
+/// NOT do file I/O — it only bumps this counter (RT-safe). This audio is lost
+/// from both the live transcript AND the Refine archive.
+static MIC_OVERFLOW_DROP_COUNT: AtomicU32 = AtomicU32::new(0);
 static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Safety backstop for system-audio buffers: drop oldest beyond this many samples
 /// if the frontend stops draining (normal drain is every CHUNK_MS = 25s).
@@ -1516,13 +1592,57 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                     buf.extend_from_slice(&temp[..count as usize]);
                     if buf.len() > MIC_BUFFER_MAX_SAMPLES {
                         let drop = buf.len() - MIC_BUFFER_MAX_SAMPLES;
+                        // macOS: the Refine archive is written only by the
+                        // JS-timer-driven get_voice_chunk. When that stalls
+                        // (app backgrounded / screen asleep) the ~120s cap here
+                        // would permanently discard the oldest audio — lost from
+                        // BOTH the live transcript AND the archive, even though
+                        // the UI promises Refine recovers full audio. Spill the
+                        // about-to-be-dropped samples to the archive (resampled
+                        // to 16k mono) so Refine keeps them. iOS already writes
+                        // the archive continuously above (immune), so skip there.
+                        #[cfg(target_os = "macos")]
+                        {
+                            use std::io::Write;
+                            const ARCHIVE_RATE: u32 = 16000;
+                            let src_rate =
+                                VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(ARCHIVE_RATE);
+                            let dropped = &buf[..drop];
+                            let resampled: Vec<f32> = if src_rate > ARCHIVE_RATE {
+                                let ratio = src_rate as f64 / ARCHIVE_RATE as f64;
+                                let new_len = (dropped.len() as f64 / ratio) as usize;
+                                (0..new_len)
+                                    .map(|i| {
+                                        let pos = i as f64 * ratio;
+                                        let idx = pos as usize;
+                                        let frac = pos - idx as f64;
+                                        let s0 = dropped[idx.min(dropped.len() - 1)];
+                                        let s1 = dropped[(idx + 1).min(dropped.len() - 1)];
+                                        s0 + (s1 - s0) * frac as f32
+                                    })
+                                    .collect()
+                            } else {
+                                dropped.to_vec()
+                            };
+                            if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
+                                if let Some(ref mut file) = *archive {
+                                    let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                                    for &s in &resampled {
+                                        let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        bytes.extend_from_slice(&sample.to_le_bytes());
+                                    }
+                                    let _ = file.write_all(&bytes);
+                                }
+                            }
+                        }
                         buf.drain(..drop);
                         // Smoking gun for background loss: the JS drain loop
                         // (get_voice_chunk) stalled long enough that the ~120s
-                        // cap discarded the oldest audio. Previously silent.
+                        // cap discarded the oldest audio from the LIVE transcript
+                        // (macOS spills it to the Refine archive above).
                         let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
                         println!(
-                            "[voice][buffer-overflow] dropped {} samples (~{:.1}s) — drain loop stalled (likely backgrounded)",
+                            "[voice][buffer-overflow] dropped {} samples (~{:.1}s) from live buffer — drain loop stalled (likely backgrounded)",
                             drop,
                             drop as f64 / rate,
                         );
@@ -1604,7 +1724,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                 if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     buf.extend_from_slice(data);
-                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); }
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); MIC_OVERFLOW_DROP_COUNT.fetch_add(d as u32, Ordering::Relaxed); }
                 }
             }, |e| eprintln!("[voice] {}", e), None,
         ).map_err(|e| format!("録音開始失敗: {}", e))?,
@@ -1613,7 +1733,7 @@ fn start_voice_recording_inner(device_name: &Option<String>) -> Result<(), Strin
                 if !VOICE_ACTIVE.load(Ordering::Relaxed) { return; }
                 if let Ok(mut buf) = VOICE_BUFFER.try_lock() {
                     for &s in data { buf.push(s as f32 / 32768.0); }
-                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); }
+                    if buf.len() > MIC_BUFFER_MAX_SAMPLES { let d = buf.len() - MIC_BUFFER_MAX_SAMPLES; buf.drain(..d); MIC_OVERFLOW_DROP_COUNT.fetch_add(d as u32, Ordering::Relaxed); }
                 }
             }, |e| eprintln!("[voice] {}", e), None,
         ).map_err(|e| format!("録音開始失敗: {}", e))?,
@@ -1956,6 +2076,15 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
     if drops > 0 {
         println!("[voice] System audio: {} callback(s) dropped due to lock contention", drops);
     }
+    let mic_drops = MIC_OVERFLOW_DROP_COUNT.swap(0, Ordering::Relaxed);
+    if mic_drops > 0 {
+        let rate = VOICE_SAMPLE_RATE.load(Ordering::Relaxed).max(1) as f64;
+        eprintln!(
+            "[voice][buffer-overflow] mic buffer cap discarded {} samples (~{:.1}s) — drain loop stalled (likely backgrounded); this audio is lost from live + Refine",
+            mic_drops,
+            mic_drops as f64 / rate,
+        );
+    }
 
     if mic_samples.is_empty() && sys_samples.is_empty() {
         return Ok(None);
@@ -2033,11 +2162,28 @@ fn get_voice_chunk() -> Result<Option<VoiceChunkData>, String> {
         };
         if let Ok(mut archive) = VOICE_ARCHIVE_FILE.try_lock() {
             if let Some(ref mut file) = *archive {
+                // Serialize once and write in a single syscall. The samples were
+                // already drained from VOICE_BUFFER, so a swallowed write error
+                // means that window is permanently absent from the Refine archive
+                // with no other recovery source — log loudly (no silent fallback).
+                let mut bytes = Vec::with_capacity(archive_samples.len() * 2);
                 for &s in &archive_samples {
                     let sample = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                    let _ = file.write_all(&sample.to_le_bytes());
+                    bytes.extend_from_slice(&sample.to_le_bytes());
+                }
+                if let Err(e) = file.write_all(&bytes) {
+                    eprintln!(
+                        "[voice][archive-write-error] dropped {} samples from Refine archive: {}",
+                        archive_samples.len(),
+                        e,
+                    );
                 }
             }
+        } else {
+            eprintln!(
+                "[voice][archive-lock-miss] archive file busy; dropped {} samples from Refine archive",
+                archive_samples.len(),
+            );
         }
     }
 
@@ -2231,9 +2377,9 @@ async fn upload_wav_range(
 
 /// Upload the full-session voice archive to Firebase Storage as WAV file(s).
 /// Accepts optional `archive_path` for Android (Kotlin archive) — falls back to Rust archive.
-/// Recordings >58min are split into ≤55min chunks (20s overlap) to stay under
-/// chirp_3 BatchRecognize's 60-minute limit. Uses streaming (seek + limited read)
-/// to avoid loading the whole file into memory (iOS/Android OOM protection).
+/// Recordings >18min are split into ≤18min chunks (20s overlap) to stay under
+/// chirp_3 BatchRecognize's ~20-minute inline-results limit. Uses streaming (seek +
+/// limited read) to avoid loading the whole file into memory (iOS/Android OOM protection).
 #[tauri::command]
 async fn upload_voice_archive(
     uid: String,
@@ -2244,6 +2390,28 @@ async fn upload_voice_archive(
     let path = if let Some(p) = archive_path {
         p
     } else {
+        // Flush the recording tail into the archive BEFORE closing the handle.
+        // On macOS/Windows the Refine archive is written only inside
+        // get_voice_chunk, which is driven by a JS setInterval (~25s cadence).
+        // stopRecording clears that timer without a final drain, so the audio
+        // captured since the last tick (up to ~25s) would otherwise stay in
+        // VOICE_BUFFER and be abandoned — the structured doc silently loses the
+        // recording's ending. Recording is already stopped here (voice_active
+        // == false → mic_min == 0), so each get_voice_chunk drains + writes
+        // everything remaining; loop until it returns None. iOS writes the
+        // archive from its native poll thread and get_voice_chunk skips the
+        // archive write there, so this is a harmless no-op on iOS.
+        #[cfg(not(target_os = "ios"))]
+        if !VOICE_ACTIVE.load(Ordering::Relaxed) {
+            // Bounded: each call drains ≤25s and the live buffer caps at ~120s,
+            // so ≤~6 iterations ever have data. Cap defensively at 16.
+            for _ in 0..16 {
+                match get_voice_chunk() {
+                    Ok(Some(_)) => continue,
+                    _ => break,
+                }
+            }
+        }
         // Close the Rust archive file handle before reading
         *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
         VOICE_ARCHIVE_PATH.lock().unwrap().clone()
@@ -2268,12 +2436,14 @@ async fn upload_voice_archive(
 
     let id = uuid::Uuid::new_v4().to_string();
 
-    // chirp_3 BatchRecognize hard-caps a single file at 60 minutes. Split long
-    // recordings into ≤55min parts with 20s overlap so the server can dedup the
-    // overlap by word timestamp (lossless boundaries). ≤58min → single file.
-    const STEP_SECS: u64 = 55 * 60;
+    // chirp_3 BatchRecognize with inline results caps a single file at ~20 minutes
+    // ("File too long. Only audio files up to 20 minutes"). Split long recordings
+    // into ≤18min parts with 20s overlap so the server dedups the overlap by word
+    // timestamp (lossless boundaries). Max emitted chunk = STEP + 2*OVERLAP =
+    // 18min40s < 20min. ≤18min → single file.
+    const STEP_SECS: u64 = 18 * 60;
     const OVERLAP_SECS: u64 = 20;
-    const SINGLE_MAX_SECS: f64 = 58.0 * 60.0;
+    const SINGLE_MAX_SECS: f64 = 18.0 * 60.0;
 
     let mut chunks: Vec<VoiceArchiveChunk> = Vec::new();
     let mut first_download_url = String::new();
@@ -2291,13 +2461,26 @@ async fn upload_voice_archive(
     } else {
         let step_bytes = STEP_SECS * bytes_per_sec;
         let span_bytes = (STEP_SECS + OVERLAP_SECS) * bytes_per_sec;
+        let overlap_bytes = OVERLAP_SECS * bytes_per_sec;
         let mut i: u64 = 0;
         loop {
             let start_byte = i * step_bytes;
             if start_byte >= pcm_size {
                 break;
             }
-            let len = std::cmp::min(span_bytes, pcm_size - start_byte);
+            let remaining = pcm_size - start_byte;
+            // If the tail beyond this step is ≤ the overlap, a separate trailing
+            // chunk would be shorter than the server's dedup lead-cut
+            // (OVERLAP_SECS/2) and get discarded entirely — AND the previous
+            // chunk's trail-cut would trim content that doomed chunk was meant to
+            // carry, silently losing the last ~10-20s. Absorb that tail into this
+            // chunk instead. Max chunk = step + 2*overlap ≈ 55min40s < the 60min
+            // BatchRecognize cap, so this stays safe.
+            let len = if remaining <= span_bytes + overlap_bytes {
+                remaining
+            } else {
+                span_bytes
+            };
             let object_path = format!("audio/{}/{}-c{}.wav", uid, id, i);
             let (gcs_uri, dl) =
                 upload_wav_range(&client, &bucket, &token, &object_path, &path, start_byte, len)
@@ -2310,6 +2493,11 @@ async fn upload_voice_archive(
                 start_sec: start_byte as f64 / bytes_per_sec as f64,
                 duration_sec: len as f64 / bytes_per_sec as f64,
             });
+            // This chunk reached EOF (either a full final span or an absorbed
+            // tail) — stop so we never emit an undersized trailing chunk.
+            if start_byte + len >= pcm_size {
+                break;
+            }
             i += 1;
         }
         println!(
@@ -2329,6 +2517,203 @@ async fn upload_voice_archive(
 
     Ok(VoiceArchiveResult {
         gcs_uri,
+        download_url: first_download_url,
+        chunks,
+    })
+}
+
+/// Locate the PCM `data` chunk in a WAV file from its leading header bytes and
+/// return the byte offset where samples begin. Files we upload use a canonical
+/// 44-byte header (see build_wav_header), but scan the RIFF chunk list
+/// defensively in case an encoder inserted LIST/fact chunks before `data`.
+fn wav_data_offset(head: &[u8]) -> Result<usize, String> {
+    if head.len() < 12 || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return Err("Not a RIFF/WAVE file".into());
+    }
+    let mut pos = 12usize;
+    while pos + 8 <= head.len() {
+        let id = &head[pos..pos + 4];
+        let sz = u32::from_le_bytes([head[pos + 4], head[pos + 5], head[pos + 6], head[pos + 7]])
+            as usize;
+        let body = pos + 8;
+        if id == b"data" {
+            return Ok(body);
+        }
+        // RIFF chunks are word-aligned: an odd size is padded by one byte.
+        pos = body + sz + (sz & 1);
+    }
+    Err("No data chunk found in WAV header".into())
+}
+
+/// Re-derive transcribe chunks from a previously-uploaded voice WAV in Firebase
+/// Storage when the on-device PCM archive is gone (app restart / temp cleanup, or
+/// a doc whose voice metadata was recovered from the cloud). Downloads the stored
+/// WAV; if it exceeds the inline BatchRecognize limit (~20min) it is split into
+/// ≤18min overlapping parts re-uploaded as new objects so re-Refine works. Short
+/// files return the original URI unchanged (no re-upload). Streams the download to
+/// a temp file so a long recording never sits fully in memory.
+#[tauri::command]
+async fn prepare_gcs_voice_chunks(
+    uid: String,
+    token: String,
+    bucket: String,
+    gcs_uri: String,
+) -> Result<VoiceArchiveResult, String> {
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // gs://<bucket>/<object/path> → the object path (strip the gs://bucket/ prefix).
+    let object_path = gcs_uri
+        .strip_prefix("gs://")
+        .and_then(|s| s.split_once('/'))
+        .map(|(_, p)| p.to_string())
+        .ok_or_else(|| format!("Invalid gcs_uri: {}", gcs_uri))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let dl_url = format!(
+        "https://firebasestorage.googleapis.com/v0/b/{}/o/{}?alt=media",
+        bucket,
+        urlencoding::encode(&object_path),
+    );
+    let resp = client
+        .get(&dl_url)
+        .header("Authorization", format!("Firebase {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Download failed (HTTP {}): {}", status, body));
+    }
+
+    // Stream to a temp file (cleaned up on every exit path via TmpGuard).
+    let tmp_path = std::env::temp_dir().join(format!("mf-gcs-split-{}.wav", uuid::Uuid::new_v4()));
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+    struct TmpGuard(String);
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _guard = TmpGuard(tmp_str.clone());
+    {
+        let mut out = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(|e| format!("Temp create failed: {}", e))?;
+        let mut stream = resp.bytes_stream();
+        while let Some(item) = stream.next().await {
+            let chunk = item.map_err(|e| format!("Download read failed: {}", e))?;
+            out.write_all(&chunk)
+                .await
+                .map_err(|e| format!("Temp write failed: {}", e))?;
+        }
+        out.flush()
+            .await
+            .map_err(|e| format!("Temp flush failed: {}", e))?;
+    }
+
+    let file_len = tokio::fs::metadata(&tmp_path)
+        .await
+        .map_err(|e| format!("Temp stat failed: {}", e))?
+        .len();
+    // Read enough leading bytes to locate the data chunk (canonical header is 44B).
+    let head_len = std::cmp::min(4096u64, file_len) as usize;
+    let mut head = vec![0u8; head_len];
+    {
+        let mut f = tokio::fs::File::open(&tmp_path)
+            .await
+            .map_err(|e| format!("Temp open failed: {}", e))?;
+        f.read_exact(&mut head)
+            .await
+            .map_err(|e| format!("Temp header read failed: {}", e))?;
+    }
+    let data_offset = wav_data_offset(&head)?;
+    if (data_offset as u64) >= file_len {
+        return Err("WAV data chunk is empty".into());
+    }
+    let data_size = file_len - data_offset as u64;
+
+    let bytes_per_sec: u64 = 16000 * 2; // 16kHz mono 16-bit
+    let duration_secs = data_size as f64 / bytes_per_sec as f64;
+
+    // Keep in lockstep with upload_voice_archive's split constants.
+    const STEP_SECS: u64 = 18 * 60;
+    const OVERLAP_SECS: u64 = 20;
+    const SINGLE_MAX_SECS: f64 = 18.0 * 60.0;
+
+    // Short enough for inline BatchRecognize — reuse the existing object as-is.
+    if duration_secs <= SINGLE_MAX_SECS {
+        return Ok(VoiceArchiveResult {
+            gcs_uri: gcs_uri.clone(),
+            download_url: dl_url,
+            chunks: vec![VoiceArchiveChunk {
+                gcs_uri,
+                start_sec: 0.0,
+                duration_sec: duration_secs,
+            }],
+        });
+    }
+
+    // Too long: slice the PCM data region into overlapping ≤18min WAV objects.
+    // Identical math to upload_voice_archive's split branch, but reading from the
+    // downloaded WAV where samples start at `data_offset` (not byte 0).
+    let id = uuid::Uuid::new_v4().to_string();
+    let step_bytes = STEP_SECS * bytes_per_sec;
+    let span_bytes = (STEP_SECS + OVERLAP_SECS) * bytes_per_sec;
+    let overlap_bytes = OVERLAP_SECS * bytes_per_sec;
+    let mut chunks: Vec<VoiceArchiveChunk> = Vec::new();
+    let mut first_download_url = String::new();
+    let mut i: u64 = 0;
+    loop {
+        let start_byte = i * step_bytes;
+        if start_byte >= data_size {
+            break;
+        }
+        let remaining = data_size - start_byte;
+        // Absorb a tiny tail into this chunk rather than emit an undersized final
+        // chunk the server would trim away (see upload_voice_archive for the why).
+        let len = if remaining <= span_bytes + overlap_bytes {
+            remaining
+        } else {
+            span_bytes
+        };
+        let obj = format!("audio/{}/{}-c{}.wav", uid, id, i);
+        let (c_uri, dl) = upload_wav_range(
+            &client,
+            &bucket,
+            &token,
+            &obj,
+            &tmp_str,
+            data_offset as u64 + start_byte,
+            len,
+        )
+        .await?;
+        if i == 0 {
+            first_download_url = dl;
+        }
+        chunks.push(VoiceArchiveChunk {
+            gcs_uri: c_uri,
+            start_sec: start_byte as f64 / bytes_per_sec as f64,
+            duration_sec: len as f64 / bytes_per_sec as f64,
+        });
+        if start_byte + len >= data_size {
+            break;
+        }
+        i += 1;
+    }
+    let first = chunks.first().ok_or("No chunks produced")?;
+    println!(
+        "[voice] Re-split GCS WAV into {} chunk(s) ({:.1}min)",
+        chunks.len(),
+        duration_secs / 60.0
+    );
+    Ok(VoiceArchiveResult {
+        gcs_uri: first.gcs_uri.clone(),
         download_url: first_download_url,
         chunks,
     })
@@ -2356,6 +2741,13 @@ fn clear_voice_archive() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // rustls 0.23 requires a process-wide default CryptoProvider. tauri core and
+    // tauri-plugin-updater build reqwest 0.13 (rustls) clients that panic with
+    // "No provider set" if none is installed, crashing the app on startup
+    // (reproduced on the iOS simulator). Install the ring provider once here;
+    // .ok() ignores the error when a provider is already set (idempotent).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -2565,7 +2957,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, prepare_gcs_voice_chunks, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

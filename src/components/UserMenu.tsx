@@ -13,6 +13,7 @@ import {
   MessageSquareWarning,
   BarChart3,
   Github,
+  Plug,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -80,23 +81,36 @@ export function UserMenu() {
   } = useAuthStore();
   const effectivePlan = useEntitlementStore((s) => s.effectivePlan);
   const openPaywall = useEntitlementStore((s) => s.openPaywall);
-  const openBillingPortal = useEntitlementStore((s) => s.openBillingPortal);
   const openTeamManage = useEntitlementStore((s) => s.openTeamManage);
+  // MCP (Claude connector) entry — allowlist-gated server-side; mcpEnabled is
+  // false for everyone but the owner during testing, so this stays hidden.
+  const mcpEnabled = useEntitlementStore((s) => s.mcpEnabled);
+  const openMcpConnector = useEntitlementStore((s) => s.openMcpConnector);
   const openFeedback = useFeedbackStore((s) => s.openFeedback);
   const telemetryConsent = useTelemetryStore((s) => s.consent);
   const telemetryReady = useTelemetryStore((s) => s.ready);
   const setTelemetryConsentChoice = useTelemetryStore((s) => s.setConsent);
-  // Show the upgrade entry to Free users; the manage entry to paying users.
-  // internal (staff/owner real plan) sees neither — they don't buy.
+  // Show the upgrade entry to Free users only (purchase UI stays dark until
+  // launch via BILLING_ENABLED). internal (staff/owner real plan) sees neither
+  // upgrade nor plan — they don't buy.
   const showUpgrade = BILLING_ENABLED && effectivePlan === "free";
-  // Anti-steering (Apple/Google): mobile app users must NOT be routed to the
-  // external Stripe billing portal to manage/cancel their subscription. They
-  // manage it on the web/desktop instead. PaywallDialog is already
-  // anti-steering-safe (purchasable=!isMobile), so showUpgrade stays as-is.
-  const showManage =
-    BILLING_ENABLED &&
-    !isMobile &&
-    (effectivePlan === "pro" || effectivePlan === "team");
+  const isPaidPlan = effectivePlan === "pro" || effectivePlan === "team";
+  // A paid user (pro/team — commonly bought via mobile IAP) must ALWAYS be able
+  // to open the plan dialog to see usage (利用状況の確認) and manage/cancel the
+  // subscription (サブスク管理), on EVERY platform and even while the purchase UI
+  // is dark. Before, this required BILLING_ENABLED and excluded desktop, so a Pro
+  // user on the shipped desktop build had no path at all (the reported dead-end).
+  // The dialog's manage button is source-aware: it routes an IAP sub to the OS
+  // store's own manager and a Stripe sub to the customer portal — anti-steering
+  // safe on mobile.
+  //
+  // Free users must ALSO always reach the dialog — it shows the usage meter for
+  // everyone, plus the upgrade path. When the purchase UI is live the dedicated
+  // "アップグレード" entry (showUpgrade) already covers Free, so only add the
+  // "利用状況・プラン" entry for Free when that upgrade entry is NOT shown — avoids
+  // a duplicate item opening the same dialog, and fixes the dead-end where a
+  // downgraded Free user had no path to 利用状況 while billing was dark.
+  const showPlan = isPaidPlan || (effectivePlan === "free" && !showUpgrade);
   const [syncMenuOpen, setSyncMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -130,15 +144,14 @@ export function UserMenu() {
     );
   }, [resetCloudAndReSync, isOnline]);
 
-  // Manage/cancel an existing subscription. openBillingPortal sets billingError
-  // in the store, but that is only rendered inside PaywallDialog (closed here),
-  // so we surface the failure ourselves — otherwise the button looks dead and a
-  // user trying to CANCEL gets no feedback (silent failure).
-  const handleManageSubscription = useCallback(async () => {
+  // Open the plan dialog (usage meter + source-aware 契約を管理). Routing an
+  // existing subscription to its correct management surface lives inside the
+  // dialog, so this menu entry just opens it — one discoverable place for both
+  // 利用状況 and サブスク管理.
+  const handleOpenPlan = useCallback(() => {
     setMobileMenuOpen(false);
-    const res = await openBillingPortal();
-    if (!res.ok && res.error) window.alert(res.error);
-  }, [openBillingPortal]);
+    openPaywall();
+  }, [openPaywall]);
 
   useEffect(() => {
     if (!syncMenuOpen) return;
@@ -259,6 +272,18 @@ export function UserMenu() {
               <Users className="h-4 w-4" />
               チーム管理
             </button>
+            {mcpEnabled && (
+              <button
+                className={menuItem}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openMcpConnector();
+                }}
+              >
+                <Plug className="h-4 w-4" />
+                Claude連携
+              </button>
+            )}
             {showUpgrade && (
               <button
                 className={menuItem}
@@ -271,10 +296,10 @@ export function UserMenu() {
                 プランをアップグレード
               </button>
             )}
-            {showManage && (
-              <button className={menuItem} onClick={handleManageSubscription}>
+            {showPlan && (
+              <button className={menuItem} onClick={handleOpenPlan}>
                 <CreditCard className="h-4 w-4" />
-                契約を管理
+                利用状況・プラン
               </button>
             )}
             <button
@@ -368,15 +393,26 @@ export function UserMenu() {
           <Sparkles className={iconSize} />
         </Button>
       )}
-      {showManage && (
+      {showPlan && (
         <Button
           variant="ghost"
           size="icon"
           className={btnSize}
-          onClick={handleManageSubscription}
-          title="契約を管理"
+          onClick={handleOpenPlan}
+          title="利用状況・プラン"
         >
           <CreditCard className={iconSize} />
+        </Button>
+      )}
+      {mcpEnabled && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={() => openMcpConnector()}
+          title="Claude連携（MCP）"
+        >
+          <Plug className={iconSize} />
         </Button>
       )}
       <Button

@@ -14,8 +14,9 @@
 // rail-agnostic subId (Apple originalTransactionId / Play purchaseToken). That is
 // what lets decideEntitlementWrite refuse to let an IAP purchase overwrite (or be
 // overwritten by) an active Stripe subscription — the multi-rail double-charge
-// guard. IAP Team is a FLAT single-user grant (seats:1, no teamId): per-seat Team
-// is desktop/web only, so an IAP "team" product meters as a 1-seat pool.
+// guard. MOBILE = PRO ONLY: per-seat Team is desktop/web only, so NO team SKU is
+// registered (see APPLE_PRODUCTS/PLAY_PRODUCTS) and an IAP "team" product maps to
+// null → buildAppleIntent/buildPlayIntent fail closed (unmapped_product) on grant.
 // =====================================================================
 import type { EntitlementIntent, OurStatus } from "./billing";
 
@@ -24,25 +25,29 @@ import type { EntitlementIntent, OurStatus } from "./billing";
  * SKUs that must be created in App Store Connect. The bundle id is com.markflow.app
  * (iOS); product ids are namespaced under it. Interval is audit-only (the plan is
  * what gates); both months and years grant the same plan.
+ *
+ * MOBILE = PRO ONLY (invariant): Team is a per-seat product sold on desktop/web
+ * only, so NO team SKU is registered here. This is a defense-in-depth fence: even
+ * if a `com.markflow.app.team.*` product were somehow purchased, mapAppleProductToPlan
+ * returns null → buildAppleIntent fails closed (unmapped_product) on a grant and
+ * never mints an IAP plan="team". Re-add a team entry ONLY alongside a real
+ * per-seat mobile Team design.
  */
 export const APPLE_PRODUCTS: Readonly<
-  Record<string, { plan: "pro" | "team"; interval: "month" | "year" }>
+  Record<string, { plan: "pro"; interval: "month" | "year" }>
 > = {
   "com.markflow.app.pro.monthly": { plan: "pro", interval: "month" },
   "com.markflow.app.pro.yearly": { plan: "pro", interval: "year" },
-  "com.markflow.app.team.monthly": { plan: "team", interval: "month" },
-  "com.markflow.app.team.yearly": { plan: "team", interval: "year" },
 };
 
 /**
  * Google Play subscription product ids → plan. Play separates the product
- * (com.markflow.app.pro / .team) from the base plan (monthly / yearly), so the
- * PLAN is derived from the product id alone; the base plan (interval) is
- * audit-only and not needed for the gate.
+ * (com.markflow.app.pro) from the base plan (monthly / yearly), so the PLAN is
+ * derived from the product id alone; the base plan (interval) is audit-only and
+ * not needed for the gate. MOBILE = PRO ONLY — no team SKU (see APPLE_PRODUCTS).
  */
-export const PLAY_PRODUCTS: Readonly<Record<string, "pro" | "team">> = {
+export const PLAY_PRODUCTS: Readonly<Record<string, "pro">> = {
   "com.markflow.app.pro": "pro",
-  "com.markflow.app.team": "team",
 };
 
 /** Resolve which plan an Apple product id grants (null = unrecognized). */
@@ -152,6 +157,13 @@ export interface AppleFacts {
   appAccountToken?: unknown;
   /** Subscription expiry (epoch ms). */
   expiresDateMs?: unknown;
+  /**
+   * Transaction revocation time (epoch ms) — set by Apple when THIS transaction
+   * was refunded or revoked (family-sharing removal). Present in the decoded
+   * JWSTransaction even when data.status still reads active on a single-
+   * transaction refund, so it is the authoritative signal to pull access.
+   */
+  revocationDateMs?: unknown;
   /** Event/signed time (epoch ms) — the monotonic-ordering key. */
   signedDateMs?: unknown;
   /** Idempotency id: notificationUUID (server notif) or transactionId. */
@@ -199,7 +211,15 @@ export type IapIntentResult =
  * cross-rail + terminal scoping in decideEntitlementWrite applies unchanged.
  */
 export function buildAppleIntent(facts: AppleFacts): IapIntentResult {
-  const status = mapAppleSubStatus(facts.status);
+  // A set revocationDate means THIS transaction was refunded/revoked. Apple may
+  // leave data.status=active on a single-transaction refund, so the numeric
+  // status alone would keep the buyer on Pro until period end (+ backstop) — a
+  // bounded money leak. Treat a revoked transaction exactly like REVOKE(5):
+  // terminal "canceled", regardless of the reported status. Mirrors Play's
+  // voidedPurchaseNotification → immediate revoke. A genuine later resubscribe
+  // arrives strictly-newer and clears terminal (see decideEntitlementWrite).
+  const revokedByRefund = msToSec(facts.revocationDateMs) > 0;
+  const status = revokedByRefund ? "canceled" : mapAppleSubStatus(facts.status);
   if (!status) return { ok: false, reason: "unknown_status" };
   const plan = mapAppleProductToPlan(facts.productId);
   const revoking = status === "on_hold" || status === "canceled";
@@ -209,10 +229,11 @@ export function buildAppleIntent(facts: AppleFacts): IapIntentResult {
   if (!originalTxId) return { ok: false, reason: "missing_original_tx" };
   const uid = String(facts.appAccountToken ?? "").trim();
   // Apple REVOKE (5) is final (refund / family-sharing removal): no follow-up
-  // event, so it must win a same-second tie and never be resurrected. Expired (2)
-  // is NOT terminal — a resubscribe reuses originalTransactionId and arrives
-  // strictly newer, clearing the state. terminal is keyed off the RAW status.
-  const terminal = Number(facts.status) === 5;
+  // event, so it must win a same-second tie and never be resurrected. A refund
+  // detected via revocationDate is the same event class → also terminal. Expired
+  // (2) is NOT terminal — a resubscribe reuses originalTransactionId and arrives
+  // strictly newer, clearing the state.
+  const terminal = Number(facts.status) === 5 || revokedByRefund;
 
   const intent: EntitlementIntent = {
     plan: plan ?? "free",
@@ -322,6 +343,7 @@ export function appleFactsFromDecoded(
     transactionId: txn.transactionId,
     appAccountToken: txn.appAccountToken,
     expiresDateMs: txn.expiresDate,
+    revocationDateMs: txn.revocationDate,
     signedDateMs: txn.signedDate,
     eventId:
       String(opts.eventId ?? "").trim() ||
