@@ -165,6 +165,9 @@ export const MIN_TRANSCRIPT_CHARS = 1_000;
 // get_research renders every card; bound the text so a long session can't blow
 // the same budget. Cards past the cap are counted, not silently dropped.
 export const MAX_RESEARCH_OUTPUT_CHARS = 30_000;
+// A real card averages ~2k chars (summary + sources), so 12 stays inside the
+// same output budget as MAX_RESEARCH_OUTPUT_CHARS.
+export const MAX_RESEARCH_CARDS_PER_CALL = 12;
 
 // Cap the number of JSON-RPC messages accepted in a single batch POST. A batch of
 // N list/search calls would otherwise fan out to N Firestore queries; combined
@@ -263,11 +266,18 @@ export const TOOLS = [
       "Read the web research cards gathered while a document was being " +
       "recorded: each card's query, summary, sources and whether it was " +
       "already woven into the document. Cards of type question are follow-up " +
-      "questions raised during the meeting, not facts.",
+      "questions raised during the meeting, not facts. When a document has " +
+      "many cards, the first call returns a numbered index; pass `cards` with " +
+      "the numbers you need to read their summaries and sources.",
     inputSchema: {
       type: "object",
       properties: {
         id: { type: "string", description: "The document id." },
+        cards: {
+          type: "array",
+          items: { type: "number" },
+          description: `Card numbers from the index to read in full (max ${MAX_RESEARCH_CARDS_PER_CALL}).`,
+        },
       },
       required: ["id"],
       additionalProperties: false,
@@ -557,48 +567,101 @@ const RESEARCH_TYPE_LABEL: Record<string, string> = {
   question: "follow-up question (not a fact)",
 };
 
+function researchCardBlock(n: number, c: McpResearchCard): string {
+  const label = RESEARCH_TYPE_LABEL[c.type] || c.type || "research";
+  const status = c.integrated ? "woven into the document" : "not in the document";
+  const lines = [`### #${n} [${label}] ${c.query || "(no query)"}`, `(${status})`];
+  if (c.summary) lines.push(c.summary.trim());
+  if (c.sources.length) {
+    lines.push("Sources:");
+    for (const src of c.sources)
+      lines.push(`- ${src.title || src.url} — ${src.url}`);
+  }
+  return lines.join("\n");
+}
+
+function sessionHeading(s: McpResearchSession): string {
+  const ended = s.endedAt ? ` – ${formatTokyo(s.endedAt)}` : "";
+  return `## Session ${formatTokyo(s.startedAt)}${ended}`;
+}
+
+/**
+ * Research cards for get_research, numbered 1..N across sessions (in session
+ * order). With no `pick`, returns every card in full when that fits the output
+ * cap, otherwise a one-line-per-card index so the caller can choose; with
+ * `pick`, returns just those cards in full. Nothing is dropped silently.
+ */
 export function formatResearch(
   doc: { id: string; title: string },
   sessions: McpResearchSession[],
+  pick?: number[],
 ): string {
-  const cardTotal = sessions.reduce((n, s) => n + s.cards.length, 0);
+  const numbered: Array<{ n: number; session: McpResearchSession; card: McpResearchCard }> = [];
+  for (const s of sessions)
+    for (const card of s.cards) numbered.push({ n: numbered.length + 1, session: s, card });
+  const total = numbered.length;
   const head = `Title: ${doc.title?.trim() || "(untitled)"}\nId: ${doc.id}`;
-  if (!cardTotal) return `${head}\n\nNo research cards for this document.`;
-  const blocks: string[] = [];
-  let used = 0;
-  let shown = 0;
-  let truncated = false;
-  for (const s of sessions) {
-    if (truncated) break;
-    const ended = s.endedAt ? ` – ${formatTokyo(s.endedAt)}` : "";
-    const sessionHead = `## Session ${formatTokyo(s.startedAt)}${ended}`;
-    const cardBlocks: string[] = [];
-    for (const c of s.cards) {
-      const label = RESEARCH_TYPE_LABEL[c.type] || c.type || "research";
-      const status = c.integrated ? "woven into the document" : "not in the document";
-      const lines = [`### [${label}] ${c.query || "(no query)"}`, `(${status})`];
-      if (c.summary) lines.push(c.summary.trim());
-      if (c.sources.length) {
-        lines.push("Sources:");
-        for (const src of c.sources)
-          lines.push(`- ${src.title || src.url} — ${src.url}`);
+  if (!total) return `${head}\n\nNo research cards for this document.`;
+  const summary = `${sessions.length} research session${sessions.length === 1 ? "" : "s"}, ${formatCount(total)} card${total === 1 ? "" : "s"}`;
+
+  // Render the chosen cards grouped under their session headings.
+  const renderFull = (rows: typeof numbered): string => {
+    const out: string[] = [];
+    let current: McpResearchSession | null = null;
+    for (const r of rows) {
+      if (r.session !== current) {
+        out.push(sessionHeading(r.session));
+        current = r.session;
       }
-      const block = lines.join("\n");
-      if (used + block.length > MAX_RESEARCH_OUTPUT_CHARS && shown > 0) {
-        truncated = true;
-        break;
-      }
-      cardBlocks.push(block);
-      used += block.length;
-      shown++;
+      out.push(researchCardBlock(r.n, r.card));
     }
-    if (cardBlocks.length) blocks.push([sessionHead, ...cardBlocks].join("\n\n"));
+    return out.join("\n\n");
+  };
+
+  if (pick && pick.length) {
+    const wanted = new Set(pick);
+    const rows = numbered.filter((r) => wanted.has(r.n));
+    // Still honour the output cap: keep whole cards, name the ones left over.
+    const shown: typeof rows = [];
+    let used = 0;
+    for (const r of rows) {
+      const len = researchCardBlock(r.n, r.card).length;
+      if (shown.length && used + len > MAX_RESEARCH_OUTPUT_CHARS) break;
+      shown.push(r);
+      used += len;
+    }
+    const notes: string[] = [];
+    const left = rows.slice(shown.length).map((r) => r.n);
+    if (left.length)
+      notes.push(`Not shown (output size limit) — request again: ${left.join(", ")}.`);
+    const missing = pick.filter((n) => n < 1 || n > total);
+    if (missing.length)
+      notes.push(`No such card number(s): ${missing.join(", ")} (valid: 1–${total}).`);
+    const noteText = notes.length ? `\n\n---\n\n${notes.join("\n")}` : "";
+    return `${head}\n${summary} — showing ${shown.length}\n\n${renderFull(shown)}${noteText}`;
   }
-  const summary = `${sessions.length} research session${sessions.length === 1 ? "" : "s"}, ${formatCount(cardTotal)} card${cardTotal === 1 ? "" : "s"}`;
-  const note = truncated
-    ? `\n\n---\n\n${formatCount(cardTotal - shown)} more card(s) not shown (output size limit).`
-    : "";
-  return `${head}\n${summary}\n\n${blocks.join("\n\n")}${note}`;
+
+  const full = renderFull(numbered);
+  if (full.length <= MAX_RESEARCH_OUTPUT_CHARS) return `${head}\n${summary}\n\n${full}`;
+
+  // Too much to show in one go: a compact index of every card.
+  const index: string[] = [];
+  let current: McpResearchSession | null = null;
+  for (const r of numbered) {
+    if (r.session !== current) {
+      index.push(`\n${sessionHeading(r.session)}`);
+      current = r.session;
+    }
+    const label = RESEARCH_TYPE_LABEL[r.card.type] || r.card.type || "research";
+    const woven = r.card.integrated ? " · woven" : "";
+    const q = (r.card.query || "(no query)").replace(/\s+/g, " ").slice(0, 120);
+    index.push(`#${r.n} [${label}] ${q}${woven}`);
+  }
+  return (
+    `${head}\n${summary} — too many to show in full, so this is an index.\n` +
+    `Read cards with get_research {"id": "${doc.id}", "cards": [numbers]} (up to ${MAX_RESEARCH_CARDS_PER_CALL} per call).\n` +
+    index.join("\n")
+  );
 }
 
 /**
@@ -811,9 +874,27 @@ export async function callTool(
         return errorResult("The get_research tool is not enabled.");
       const doc = await deps.getDoc(id);
       if (!doc) return errorResult(`No document found with id "${id}".`);
+      let pick: number[] | undefined;
+      if (args.cards !== undefined) {
+        if (!Array.isArray(args.cards))
+          return errorResult("'cards' must be an array of card numbers.");
+        pick = [
+          ...new Set(
+            args.cards
+              .filter((n): n is number => typeof n === "number" && Number.isFinite(n))
+              .map((n) => Math.floor(n)),
+          ),
+        ];
+        if (!pick.length)
+          return errorResult("'cards' must contain at least one card number.");
+        if (pick.length > MAX_RESEARCH_CARDS_PER_CALL)
+          return errorResult(
+            `Too many cards requested (${pick.length}; max ${MAX_RESEARCH_CARDS_PER_CALL} per call).`,
+          );
+      }
       const sessions = await deps.getResearch(id);
       if (!sessions) return errorResult(`No document found with id "${id}".`);
-      return textResult(formatResearch(doc, sessions));
+      return textResult(formatResearch(doc, sessions, pick));
     }
     case "create_document": {
       // Gate: only write-enabled connections carry deps.createDoc. A read-only

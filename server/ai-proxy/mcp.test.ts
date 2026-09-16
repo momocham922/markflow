@@ -30,6 +30,7 @@ import {
   DEFAULT_TRANSCRIPT_CHARS,
   MAX_TRANSCRIPT_CHARS,
   MAX_RESEARCH_OUTPUT_CHARS,
+  MAX_RESEARCH_CARDS_PER_CALL,
   type McpTranscript,
   type McpResearchSession,
   type McpDoc,
@@ -692,6 +693,44 @@ const SESSIONS: McpResearchSession[] = [
   },
 ];
 
+const BIG: McpResearchSession[] = [
+  {
+    id: "s-a",
+    startedAt: 1,
+    endedAt: null,
+    cards: Array.from({ length: 30 }, (_, i) => ({
+      type: "topic",
+      query: `q${i}`,
+      summary: "z".repeat(2000),
+      sources: [],
+    })),
+  },
+  {
+    id: "s-b",
+    startedAt: 2,
+    endedAt: null,
+    cards: Array.from({ length: 10 }, (_, i) => ({
+      type: "topic",
+      query: `q${30 + i}`,
+      summary: "z".repeat(2000),
+      sources: [],
+    })),
+  },
+];
+const HUGE_CARDS: McpResearchSession[] = [
+  {
+    id: "s-h",
+    startedAt: 1,
+    endedAt: null,
+    cards: Array.from({ length: 3 }, (_, i) => ({
+      type: "topic",
+      query: `h${i}`,
+      summary: "y".repeat(MAX_RESEARCH_OUTPUT_CHARS * 0.6),
+      sources: [],
+    })),
+  },
+];
+
 function depsWithVoice(
   overrides: Partial<McpDeps> = {},
   opts: { tx?: string; sessions?: McpResearchSession[] | null } = {},
@@ -777,10 +816,10 @@ describe("formatResearch", () => {
     const out = formatResearch({ id: "v", title: "Kickoff" }, SESSIONS);
     expect(out).toContain("1 research session, 2 cards");
     expect(out).toContain("## Session 2026-09-16 17:05 – 2026-09-16 18:28");
-    expect(out).toContain("### [topic] hacomono とは");
+    expect(out).toContain("### #1 [topic] hacomono とは");
     expect(out).toContain("(woven into the document)");
     expect(out).toContain("- hacomono — https://www.hacomono.jp/");
-    expect(out).toContain("[follow-up question (not a fact)] API連携の許可は誰が出す？");
+    expect(out).toContain("### #2 [follow-up question (not a fact)] API連携の許可は誰が出す？");
     expect(out).toContain("(not in the document)");
   });
   it("says so when there are no cards", () => {
@@ -788,23 +827,30 @@ describe("formatResearch", () => {
       "No research cards for this document.",
     );
   });
-  it("caps output size and counts the cards it left out", () => {
-    const big: McpResearchSession[] = [
-      {
-        id: "s",
-        startedAt: 1,
-        endedAt: null,
-        cards: Array.from({ length: 40 }, (_, i) => ({
-          type: "topic",
-          query: `q${i}`,
-          summary: "z".repeat(2000),
-          sources: [],
-        })),
-      },
-    ];
-    const out = formatResearch({ id: "v", title: "K" }, big);
-    expect(out.length).toBeLessThan(MAX_RESEARCH_OUTPUT_CHARS + 2000);
-    expect(out).toMatch(/\d+ more card\(s\) not shown/);
+  it("switches to a numbered index when the full rendering is too large", () => {
+    const out = formatResearch({ id: "v", title: "K" }, BIG);
+    expect(out.length).toBeLessThan(MAX_RESEARCH_OUTPUT_CHARS);
+    expect(out).toContain("40 cards — too many to show in full, so this is an index.");
+    expect(out).toContain('get_research {"id": "v", "cards": [numbers]}');
+    // every card is listed, numbered, without its summary
+    expect(out).toContain("#1 [topic] q0");
+    expect(out).toContain("#40 [topic] q39");
+    expect(out).not.toContain("zzzz");
+    // numbering continues across sessions
+    expect(out).toContain("## Session");
+  });
+  it("renders only the picked cards, keeping their global numbers", () => {
+    const out = formatResearch({ id: "v", title: "K" }, BIG, [2, 31]);
+    expect(out).toContain("40 cards — showing 2");
+    expect(out).toContain("### #2 [topic] q1");
+    expect(out).toContain("### #31 [topic] q30");
+    expect(out).not.toContain("### #3 ");
+  });
+  it("reports unknown card numbers and cards cut by the size cap", () => {
+    const out = formatResearch({ id: "v", title: "K" }, HUGE_CARDS, [1, 2, 3, 99]);
+    expect(out).toContain("No such card number(s): 99 (valid: 1–3).");
+    expect(out).toMatch(/Not shown \(output size limit\) — request again: \d/);
+    expect(out.length).toBeLessThan(MAX_RESEARCH_OUTPUT_CHARS * 2 + 1000);
   });
 });
 
@@ -866,7 +912,24 @@ describe("callTool get_research", () => {
   it("renders the document's research cards", async () => {
     const r = await callTool("get_research", { id: "v" }, depsWithVoice());
     expect(r.isError).toBeUndefined();
-    expect(r.content[0].text).toContain("### [topic] hacomono とは");
+    expect(r.content[0].text).toContain("### #1 [topic] hacomono とは");
+  });
+  it("passes picked card numbers through and validates them", async () => {
+    const r = await callTool("get_research", { id: "v", cards: [2] }, depsWithVoice());
+    expect(r.content[0].text).toContain("showing 1");
+    expect(r.content[0].text).toContain("### #2 ");
+    expect(r.content[0].text).not.toContain("### #1 ");
+    const bad = await callTool("get_research", { id: "v", cards: "2" }, depsWithVoice());
+    expect(bad.isError).toBe(true);
+    const empty = await callTool("get_research", { id: "v", cards: [] }, depsWithVoice());
+    expect(empty.isError).toBe(true);
+    const tooMany = await callTool(
+      "get_research",
+      { id: "v", cards: Array.from({ length: MAX_RESEARCH_CARDS_PER_CALL + 1 }, (_, i) => i + 1) },
+      depsWithVoice(),
+    );
+    expect(tooMany.isError).toBe(true);
+    expect(tooMany.content[0].text).toContain("Too many cards");
   });
   it("errors for an unknown / non-personal id", async () => {
     const r = await callTool("get_research", { id: "nope" }, depsWithVoice());
