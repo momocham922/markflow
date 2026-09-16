@@ -59,6 +59,18 @@ if [ ! -d "$ARCHIVE" ]; then
   exit 1
 fi
 
+# Fail closed if the markflow:// custom URL scheme is missing from the built app.
+# tauri-plugin-deep-link <=2.4.8 generated CFBundleURLTypes from the https
+# app-link entry only (an empty "https" type), so every iOS build shipped without
+# markflow:// (share links, and the Stripe portal return that dismisses
+# SFSafariViewController). Fixed upstream in 2.4.9; this guard keeps a regression
+# from being uploaded.
+if ! /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$APP_PLIST" 2>/dev/null | grep -qw "markflow"; then
+  echo "ERROR: markflow:// URL scheme is missing from $APP_PLIST"
+  /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$APP_PLIST" 2>&1 || true
+  exit 1
+fi
+
 # 3. Fix CFBundleVersion (Tauri overwrites with version string, TestFlight needs integer)
 echo "=== Fixing CFBundleVersion to $BUILD_NUM ==="
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP_PLIST"
