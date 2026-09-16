@@ -35,6 +35,13 @@ env:
   VITE_AI_PROXY_URL: ${{ secrets.VITE_AI_PROXY_URL }}
   VITE_YJS_WEBSOCKET_URL: ${{ secrets.VITE_YJS_WEBSOCKET_URL }}
   VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+  # Self-hosted auto-updater base (Rust compile-time option_env, src-tauri/src/lib.rs).
+  # Same as release-beta.yml: the stable build must check markflow.jp/updates, not
+  # the GitHub releases CDN, so the repo can go private without stranding Windows
+  # stable users. v0.6.2 shipped WITHOUT this (Windows stable still polls GitHub);
+  # the stable build is still ALSO published to GitHub below so those clients can
+  # pick up the next release. VITE_BILLING_ENABLED stays beta-only (not set here).
+  MARKFLOW_UPDATE_BASE: "https://markflow.jp/updates"
 
 jobs:
   build-and-release:
@@ -74,6 +81,23 @@ jobs:
             exit 1
           fi
           echo "OK: Firebase config present in bundle."
+
+      # Fail-closed: prove the updater endpoint was baked to markflow.jp/updates.
+      # A binary still containing the GitHub manifest URLs would keep this release's
+      # users dependent on the public GitHub repo.
+      - name: Assert self-hosted updater endpoint baked into binary
+        shell: bash
+        run: |
+          BIN=src-tauri/target/release/markflow.exe
+          if ! grep -aq "markflow.jp/updates" "$BIN"; then
+            echo "::error::markflow.jp/updates is MISSING from $BIN — MARKFLOW_UPDATE_BASE not applied."
+            exit 1
+          fi
+          if grep -aq "github.com/momocham922/markflow/releases" "$BIN"; then
+            echo "::error::$BIN still contains GitHub release manifest URLs — refusing to publish a GitHub-polling stable build."
+            exit 1
+          fi
+          echo "OK: updater endpoint is markflow.jp/updates."
 
       - name: Get version and artifacts
         id: info
