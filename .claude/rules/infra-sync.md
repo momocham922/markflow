@@ -51,7 +51,7 @@ globs:
 
 **必須アクション**:
 
-1. Cloud Run に再デプロイ:
+1. Cloud Run に再デプロイ（**デプロイ元は最新のサーバコードを含むブランチ**。2026-09-17 時点では Refine ジョブ API ＝ `/v1/voice/refine-jobs` と MCP の get_transcript / get_research が release/beta にしかない。beta を stable に昇格するまで main からデプロイしないこと。main からデプロイすると、配信済みベータの Refine が 404 で壊れる）:
    ```bash
    # 注意: --timeout は必ず 3600（2026-09-17 rev 00076 から）。Refine ジョブ
    # (/v1/voice/refine-jobs) は文字起こし（最大14分の同期ポーリング）と整形（数分）を
