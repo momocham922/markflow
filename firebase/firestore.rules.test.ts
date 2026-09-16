@@ -527,7 +527,7 @@ describe("server-only collections", () => {
     );
   });
 
-  it("stripe/iap/teamSeats/batchLocks/aiRequests fully denied to clients", async () => {
+  it("stripe/iap/teamSeats/batchLocks/aiRequests/refine_jobs fully denied to clients", async () => {
     for (const path of [
       ["stripeEvents", "e1"],
       ["stripeCustomers", "c1"],
@@ -538,6 +538,10 @@ describe("server-only collections", () => {
       // AI idempotency ledger: a client that could forge a "charged" record here
       // would run AI for free — must be server-only truth (read AND write denied).
       ["aiRequests", "req1"],
+      // Server-side Refine jobs + their text parts (transcript / output): only
+      // reachable through the ownership-checked /v1/voice/refine-jobs API.
+      ["refine_jobs", "job_12345678"],
+      ["refine_job_parts", "job_12345678_transcript_0"],
     ] as const) {
       await seed((db) => setDoc(doc(db, path[0], path[1]), { x: 1 }));
       await assertFails(getDoc(doc(as(OWNER), path[0], path[1])));
