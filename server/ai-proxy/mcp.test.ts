@@ -24,6 +24,14 @@ import {
   isRequest,
   hasId,
   isPersonalDocData,
+  sliceTranscript,
+  formatTranscriptPage,
+  formatResearch,
+  DEFAULT_TRANSCRIPT_CHARS,
+  MAX_TRANSCRIPT_CHARS,
+  MAX_RESEARCH_OUTPUT_CHARS,
+  type McpTranscript,
+  type McpResearchSession,
   type McpDoc,
   type McpDeps,
   type CreateDocInput,
@@ -137,10 +145,12 @@ describe("buildInitializeResult", () => {
 });
 
 describe("TOOLS catalogue", () => {
-  it("exposes exactly the three read tools with valid schemas", () => {
+  it("exposes exactly the five read tools with valid schemas", () => {
     const names = TOOLS.map((t) => t.name).sort();
     expect(names).toEqual([
       "get_document",
+      "get_research",
+      "get_transcript",
       "list_documents",
       "search_documents",
     ]);
@@ -286,7 +296,7 @@ describe("handleMcpMessage", () => {
       { jsonrpc: "2.0", id: 2, method: "tools/list" },
       deps,
     );
-    expect((res?.result as { tools: unknown[] }).tools.length).toBe(3);
+    expect((res?.result as { tools: unknown[] }).tools.length).toBe(5);
   });
   it("dispatches tools/call", async () => {
     const res = await handleMcpMessage(
@@ -403,19 +413,21 @@ function depsForWrite(
 }
 
 describe("toolsFor (write tool advertised only when write-enabled)", () => {
-  it("read-only → exactly the three read tools, no create_document", () => {
+  it("read-only → exactly the five read tools, no create_document", () => {
     const names = toolsFor(false).map((t) => t.name);
     expect(names).toEqual([
       "list_documents",
       "search_documents",
       "get_document",
+      "get_transcript",
+      "get_research",
     ]);
     expect(names).not.toContain("create_document");
   });
-  it("write-enabled → read tools plus create_document (4 total)", () => {
+  it("write-enabled → read tools plus create_document (6 total)", () => {
     const names = toolsFor(true).map((t) => t.name);
     expect(names).toContain("create_document");
-    expect(names.length).toBe(4);
+    expect(names.length).toBe(6);
     // Read tools are still present + unchanged.
     expect(names).toEqual(
       expect.arrayContaining([
@@ -557,22 +569,22 @@ describe("callTool create_document", () => {
 });
 
 describe("handleMcpMessage tools/list reflects write-eligibility", () => {
-  it("lists 4 tools including create_document for a write-enabled connection", async () => {
+  it("lists 6 tools including create_document for a write-enabled connection", async () => {
     const res = await handleMcpMessage(
       { jsonrpc: "2.0", id: 20, method: "tools/list" },
       depsForWrite(DOCS),
     );
     const tools = (res?.result as { tools: Array<{ name: string }> }).tools;
-    expect(tools.length).toBe(4);
+    expect(tools.length).toBe(6);
     expect(tools.map((t) => t.name)).toContain("create_document");
   });
-  it("still lists only 3 tools for a read-only connection", async () => {
+  it("still lists only the 5 read tools for a read-only connection", async () => {
     const res = await handleMcpMessage(
       { jsonrpc: "2.0", id: 21, method: "tools/list" },
       depsFor(DOCS),
     );
     const tools = (res?.result as { tools: Array<{ name: string }> }).tools;
-    expect(tools.length).toBe(3);
+    expect(tools.length).toBe(5);
     expect(tools.map((t) => t.name)).not.toContain("create_document");
   });
   it("dispatches a create_document tools/call end-to-end", async () => {
@@ -639,5 +651,256 @@ describe("formatCreatedDoc", () => {
     expect(out).toContain("Id: xyz");
     expect(out).toContain("Folder: /Claude");
     expect(out).toContain("Tags: a, b");
+  });
+});
+
+// ---------------------------------------------------------------------
+// get_transcript / get_research
+// ---------------------------------------------------------------------
+
+const TX_DOC: McpDoc = {
+  id: "v",
+  title: "Kickoff",
+  content: "## Summary\n- structured body",
+  updatedAt: 5000,
+  transcriptChars: 0, // filled below
+};
+const TX_TEXT = "ネクストゲートの件です。".repeat(3000); // 36,000 chars
+TX_DOC.transcriptChars = TX_TEXT.length;
+
+const SESSIONS: McpResearchSession[] = [
+  {
+    id: "s1",
+    startedAt: Date.UTC(2026, 8, 16, 8, 5),
+    endedAt: Date.UTC(2026, 8, 16, 9, 28),
+    cards: [
+      {
+        type: "topic",
+        query: "hacomono とは",
+        summary: "フィットネス向け会員管理システム。",
+        sources: [{ title: "hacomono", url: "https://www.hacomono.jp/" }],
+        integrated: true,
+      },
+      {
+        type: "question",
+        query: "API連携の許可は誰が出す？",
+        summary: "先方に確認する。",
+        sources: [],
+        integrated: false,
+      },
+    ],
+  },
+];
+
+function depsWithVoice(
+  overrides: Partial<McpDeps> = {},
+  opts: { tx?: string; sessions?: McpResearchSession[] | null } = {},
+): McpDeps {
+  const tx = opts.tx ?? TX_TEXT;
+  const docs = [TX_DOC, ...DOCS];
+  return {
+    listDocs: async () => docs,
+    getDoc: async (id) => docs.find((d) => d.id === id) || null,
+    getTranscript: async (id): Promise<McpTranscript | null> =>
+      id === "v"
+        ? { id, title: "Kickoff", text: tx, recordedAt: 6000, audioStored: true }
+        : docs.some((d) => d.id === id)
+          ? { id, title: "x", text: "", audioStored: false }
+          : null,
+    getResearch: async (id) =>
+      id === "v"
+        ? opts.sessions === undefined
+          ? SESSIONS
+          : opts.sessions
+        : docs.some((d) => d.id === id)
+          ? []
+          : null,
+    ...overrides,
+  };
+}
+
+describe("sliceTranscript", () => {
+  it("pages from offset and reports the continuation offset", () => {
+    const r = sliceTranscript("abcdefghij", 2, 5);
+    expect(r).toEqual({ chunk: "cdefg", start: 2, end: 7, total: 10 });
+  });
+  it("backs the cut off to a sentence end inside the last 10% of the page", () => {
+    const text = "a".repeat(95) + "。" + "b".repeat(50);
+    const r = sliceTranscript(text, 0, 100);
+    expect(r.end).toBe(96); // right after 。
+    expect(r.chunk.endsWith("。")).toBe(true);
+  });
+  it("does not back off when no boundary is near the cut", () => {
+    const text = "。" + "a".repeat(200);
+    expect(sliceTranscript(text, 0, 100).end).toBe(100);
+  });
+  it("never splits a surrogate pair at either edge", () => {
+    const text = "ab😀cd😀ef"; // 😀 is 2 UTF-16 units
+    const cutInside = sliceTranscript(text, 0, 3); // would end between the pair
+    expect(cutInside.chunk).toBe("ab");
+    const startInside = sliceTranscript(text, 3, 10); // starts on a low surrogate
+    expect(startInside.chunk.startsWith("😀")).toBe(true);
+  });
+  it("clamps an offset past the end to an empty page", () => {
+    const r = sliceTranscript("abc", 99, 10);
+    expect(r).toEqual({ chunk: "", start: 3, end: 3, total: 3 });
+  });
+});
+
+describe("formatTranscriptPage", () => {
+  const t: McpTranscript = {
+    id: "v",
+    title: "Kickoff",
+    text: "x".repeat(2500),
+    recordedAt: Date.UTC(2026, 8, 16, 9, 28),
+    audioStored: false,
+  };
+  it("shows metadata, the range and a continuation hint", () => {
+    const out = formatTranscriptPage(t, 0, 1000);
+    expect(out).toContain("Title: Kickoff");
+    expect(out).toContain("Recorded: 2026-09-16 18:28"); // Asia/Tokyo
+    expect(out).toContain("Audio stored: no");
+    expect(out).toContain("Transcript: 2,500 chars — showing 0–1,000");
+    expect(out).toContain('get_transcript {"id": "v", "offset": 1000}');
+    expect(out).toContain("misheard");
+  });
+  it("marks the last page as the end", () => {
+    const out = formatTranscriptPage(t, 2000, 1000);
+    expect(out).toContain("showing 2,000–2,500");
+    expect(out).toContain("End of transcript.");
+    expect(out).not.toContain("Continue with");
+  });
+});
+
+describe("formatResearch", () => {
+  it("renders sessions, labels question cards and integration status", () => {
+    const out = formatResearch({ id: "v", title: "Kickoff" }, SESSIONS);
+    expect(out).toContain("1 research session, 2 cards");
+    expect(out).toContain("## Session 2026-09-16 17:05 – 2026-09-16 18:28");
+    expect(out).toContain("### [topic] hacomono とは");
+    expect(out).toContain("(woven into the document)");
+    expect(out).toContain("- hacomono — https://www.hacomono.jp/");
+    expect(out).toContain("[follow-up question (not a fact)] API連携の許可は誰が出す？");
+    expect(out).toContain("(not in the document)");
+  });
+  it("says so when there are no cards", () => {
+    expect(formatResearch({ id: "v", title: "K" }, [])).toContain(
+      "No research cards for this document.",
+    );
+  });
+  it("caps output size and counts the cards it left out", () => {
+    const big: McpResearchSession[] = [
+      {
+        id: "s",
+        startedAt: 1,
+        endedAt: null,
+        cards: Array.from({ length: 40 }, (_, i) => ({
+          type: "topic",
+          query: `q${i}`,
+          summary: "z".repeat(2000),
+          sources: [],
+        })),
+      },
+    ];
+    const out = formatResearch({ id: "v", title: "K" }, big);
+    expect(out.length).toBeLessThan(MAX_RESEARCH_OUTPUT_CHARS + 2000);
+    expect(out).toMatch(/\d+ more card\(s\) not shown/);
+  });
+});
+
+describe("callTool get_transcript", () => {
+  it("returns the first page by default", async () => {
+    const r = await callTool("get_transcript", { id: "v" }, depsWithVoice());
+    expect(r.isError).toBeUndefined();
+    const text = r.content[0].text;
+    expect(text).toContain("Transcript: 36,000 chars");
+    expect(text).toContain("Audio stored: yes");
+    expect(text).toContain("Continue with get_transcript");
+    // default page size (± boundary back-off)
+    const body = text.split("\n\n---\n\n")[1];
+    expect(body.length).toBeLessThanOrEqual(DEFAULT_TRANSCRIPT_CHARS);
+    expect(body.length).toBeGreaterThan(DEFAULT_TRANSCRIPT_CHARS * 0.9);
+  });
+  it("honours offset and clamps max_chars into range", async () => {
+    const huge = await callTool(
+      "get_transcript",
+      { id: "v", offset: 0, max_chars: 10_000_000 },
+      depsWithVoice(),
+    );
+    const body = huge.content[0].text.split("\n\n---\n\n")[1];
+    expect(body.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_CHARS);
+    const tail = await callTool(
+      "get_transcript",
+      { id: "v", offset: 35_000, max_chars: 5000 },
+      depsWithVoice(),
+    );
+    expect(tail.content[0].text).toContain("End of transcript.");
+  });
+  it("rejects an offset past the end", async () => {
+    const r = await callTool(
+      "get_transcript",
+      { id: "v", offset: 99_999 },
+      depsWithVoice(),
+    );
+    expect(r.isError).toBe(true);
+  });
+  it("reports a document without a transcript (not an error)", async () => {
+    const r = await callTool("get_transcript", { id: "a" }, depsWithVoice());
+    expect(r.isError).toBeUndefined();
+    expect(r.content[0].text).toContain("This document has no transcript.");
+  });
+  it("errors for an unknown / non-personal id (authorization boundary)", async () => {
+    const r = await callTool("get_transcript", { id: "nope" }, depsWithVoice());
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain('No document found with id "nope"');
+  });
+  it("requires an id and is refused when the deps don't provide it", async () => {
+    expect((await callTool("get_transcript", {}, depsWithVoice())).isError).toBe(true);
+    const r = await callTool("get_transcript", { id: "v" }, depsFor(DOCS));
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("not enabled");
+  });
+});
+
+describe("callTool get_research", () => {
+  it("renders the document's research cards", async () => {
+    const r = await callTool("get_research", { id: "v" }, depsWithVoice());
+    expect(r.isError).toBeUndefined();
+    expect(r.content[0].text).toContain("### [topic] hacomono とは");
+  });
+  it("errors for an unknown / non-personal id", async () => {
+    const r = await callTool("get_research", { id: "nope" }, depsWithVoice());
+    expect(r.isError).toBe(true);
+  });
+  it("does not read research when the parent doc is not visible", async () => {
+    const getResearch = vi.fn(async () => SESSIONS);
+    const r = await callTool(
+      "get_research",
+      { id: "hidden" },
+      depsWithVoice({ getResearch }),
+    );
+    expect(r.isError).toBe(true);
+    expect(getResearch).not.toHaveBeenCalled();
+  });
+});
+
+describe("get_document surfaces transcript / research availability", () => {
+  it("adds transcript size and research count to the header only", async () => {
+    const r = await callTool("get_document", { id: "v" }, depsWithVoice());
+    const text = r.content[0].text;
+    expect(text).toContain("Transcript: 36,000 chars (read with get_transcript)");
+    expect(text).toContain("Research: 2 cards (read with get_research)");
+    // the transcript itself is NOT inlined
+    expect(text).not.toContain("ネクストゲートの件です。");
+  });
+  it("omits both lines for a plain document", async () => {
+    const r = await callTool("get_document", { id: "a" }, depsWithVoice());
+    expect(r.content[0].text).not.toContain("Transcript:");
+    expect(r.content[0].text).not.toContain("Research:");
+  });
+  it("list_documents flags documents that have a transcript", () => {
+    const out = formatDocList([TX_DOC, ...DOCS], 10);
+    expect(out).toContain("transcript: 36,000 chars");
+    expect(out.match(/transcript:/g)?.length).toBe(1);
   });
 });

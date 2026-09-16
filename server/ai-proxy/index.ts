@@ -2208,6 +2208,9 @@ const MCP_REVOKED_FAMILIES = "mcp_revoked_families";
 // Cap the personal-doc set a single MCP tool call scans. get_document fetches a
 // full body on demand, so list/search only need a bounded recent window.
 const MCP_MAX_DOCS = 500;
+// Bound the research_sessions read behind get_research / get_document (a doc has
+// one session per recording; 50 is far above any real document).
+const MCP_MAX_RESEARCH_SESSIONS = 50;
 
 function mcpNowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -2430,6 +2433,8 @@ function mcpFirestoreDocToMcp(
     folder: data.folder ? String(data.folder) : null,
     tags: Array.isArray(data.tags) ? (data.tags as unknown[]).map(String) : [],
     docType: data.docType ? String(data.docType) : undefined,
+    transcriptChars:
+      typeof data.voiceTranscript === "string" ? data.voiceTranscript.length : 0,
   };
 }
 
@@ -2440,6 +2445,15 @@ function mcpFirestoreDocToMcp(
 // is never returned. Filtered in code because Firestore `where("teamId","==",null)`
 // does not match documents that omit the field entirely.
 async function mcpDepsForUid(uid: string): Promise<McpDeps> {
+  // The personal-doc authorization gate shared by every per-document read.
+  const personalDocData = async (
+    id: string,
+  ): Promise<Record<string, unknown> | null> => {
+    const snap = await getFirestore().collection("documents").doc(id).get();
+    if (!snap.exists) return null;
+    const data = snap.data() as Record<string, unknown>;
+    return isPersonalDocData(uid, data) ? data : null; // personal docs only
+  };
   // Memoize the listing for the lifetime of this deps object (== one HTTP
   // request): a JSON-RPC batch with several list/search calls then costs ONE
   // Firestore query instead of one per element (read-amplification guard).
@@ -2463,11 +2477,60 @@ async function mcpDepsForUid(uid: string): Promise<McpDeps> {
       return listPromise;
     },
     getDoc: async (id) => {
-      const snap = await getFirestore().collection("documents").doc(id).get();
-      if (!snap.exists) return null;
-      const data = snap.data() as Record<string, unknown>;
-      if (!isPersonalDocData(uid, data)) return null; // personal docs only
-      return mcpFirestoreDocToMcp(snap.id, data);
+      const data = await personalDocData(id);
+      return data ? mcpFirestoreDocToMcp(id, data) : null;
+    },
+    // Raw voice transcript kept on the document (live STT, or the full-recording
+    // speaker-labeled transcript once Refine has run). Same personal-doc gate.
+    getTranscript: async (id) => {
+      const data = await personalDocData(id);
+      if (!data) return null;
+      return {
+        id,
+        title: String(data.title || ""),
+        text: typeof data.voiceTranscript === "string" ? data.voiceTranscript : "",
+        recordedAt: mcpToMs(data.voiceRecordedAt),
+        audioStored:
+          typeof data.voiceGcsUri === "string" && data.voiceGcsUri !== "",
+      };
+    },
+    // Research cards live in documents/{id}/research_sessions (written by the
+    // client's research assistant). Read only after the parent passes the
+    // personal-doc gate, so a shared/team doc's research is never exposed.
+    getResearch: async (id) => {
+      const data = await personalDocData(id);
+      if (!data) return null;
+      const snap = await getFirestore()
+        .collection("documents")
+        .doc(id)
+        .collection("research_sessions")
+        .limit(MCP_MAX_RESEARCH_SESSIONS)
+        .get();
+      const sessions = snap.docs.map((d) => {
+        const s = d.data() as Record<string, unknown>;
+        const cards = Array.isArray(s.cards) ? (s.cards as unknown[]) : [];
+        return {
+          id: d.id,
+          startedAt: mcpToMs(s.startedAt) || 0,
+          endedAt: mcpToMs(s.endedAt) || null,
+          cards: cards
+            .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+            .map((c) => ({
+              type: String(c.type || ""),
+              query: String(c.query || ""),
+              summary: String(c.summary || ""),
+              sources: (Array.isArray(c.sources) ? (c.sources as unknown[]) : [])
+                .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+                .map((x) => ({ title: String(x.title || ""), url: String(x.url || "") }))
+                .filter((x) => x.url),
+              credibility: c.credibility ? String(c.credibility) : undefined,
+              integrated: c.integrated === true,
+              timestamp: typeof c.timestamp === "number" ? c.timestamp : undefined,
+            })),
+        };
+      });
+      sessions.sort((a, b) => a.startedAt - b.startedAt);
+      return sessions;
     },
   };
 

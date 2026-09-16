@@ -120,7 +120,12 @@ export const SERVER_INFO = {
 export const SERVER_INSTRUCTIONS =
   "These tools expose the signed-in MarkFlow user's own personal documents " +
   "(read-only Markdown). Use list_documents to browse, search_documents to " +
-  "find by keyword, and get_document to read a document's full content by id.";
+  "find by keyword, and get_document to read a document's full content by id. " +
+  "Documents created from a voice recording also keep the raw speech-to-text " +
+  "transcript (get_transcript, paged) and any web research gathered during the " +
+  "recording (get_research); get_document's header says when either exists. " +
+  "The transcript is the primary source for what was actually said — the " +
+  "document body is an AI-structured summary of it.";
 
 export function buildInitializeResult(requestedVersion: unknown) {
   return {
@@ -149,6 +154,17 @@ export function buildInitializeResult(requestedVersion: unknown) {
 // full body of one doc on demand.
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 200;
+
+// get_transcript pages the raw transcript so one call stays well inside MCP
+// client output budgets (Claude Code warns at 10k and caps at 25k tokens by
+// default; Japanese runs roughly one token per character). A 4-hour recording is
+// ~100k+ characters, so callers page with `offset`.
+export const DEFAULT_TRANSCRIPT_CHARS = 15_000;
+export const MAX_TRANSCRIPT_CHARS = 50_000;
+export const MIN_TRANSCRIPT_CHARS = 1_000;
+// get_research renders every card; bound the text so a long session can't blow
+// the same budget. Cards past the cap are counted, not silently dropped.
+export const MAX_RESEARCH_OUTPUT_CHARS = 30_000;
 
 // Cap the number of JSON-RPC messages accepted in a single batch POST. A batch of
 // N list/search calls would otherwise fan out to N Firestore queries; combined
@@ -207,6 +223,51 @@ export const TOOLS = [
       type: "object",
       properties: {
         id: { type: "string", description: "The document id to read." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "get_transcript",
+    title: "Get transcript",
+    description:
+      "Read the raw speech-to-text transcript kept with a voice-recorded " +
+      "document (the document body is an AI summary of it). Paged: returns up " +
+      `to max_chars characters (default ${DEFAULT_TRANSCRIPT_CHARS}) starting at ` +
+      "offset, and tells you the offset to continue from. Speech recognition " +
+      "can mishear names and numbers — treat it as evidence, not ground truth.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The document id." },
+        offset: {
+          type: "number",
+          description: "Character offset to start from (default 0).",
+        },
+        max_chars: {
+          type: "number",
+          description: `Characters to return (${MIN_TRANSCRIPT_CHARS}-${MAX_TRANSCRIPT_CHARS}, default ${DEFAULT_TRANSCRIPT_CHARS}).`,
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "get_research",
+    title: "Get research",
+    description:
+      "Read the web research cards gathered while a document was being " +
+      "recorded: each card's query, summary, sources and whether it was " +
+      "already woven into the document. Cards of type question are follow-up " +
+      "questions raised during the meeting, not facts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The document id." },
       },
       required: ["id"],
       additionalProperties: false,
@@ -284,7 +345,7 @@ export const CREATE_DOCUMENT_TOOL = {
 /**
  * The tool catalogue advertised to a client. The create_document (write) tool is
  * offered ONLY when the connection is write-enabled; a read-only connection sees
- * exactly the three read tools. index.ts decides write-eligibility per-uid (env
+ * exactly the read tools. index.ts decides write-eligibility per-uid (env
  * MCP_IMPORT_UIDS) and reflects it by setting deps.createDoc, so `canWrite` here
  * is simply `!!deps.createDoc`.
  */
@@ -305,6 +366,35 @@ export interface McpDoc {
   folder?: string | null;
   tags?: string[];
   docType?: string;
+  /** Length (chars) of the stored voice transcript; 0/absent = none. */
+  transcriptChars?: number;
+}
+
+/** A document's stored voice transcript (get_transcript). */
+export interface McpTranscript {
+  id: string;
+  title: string;
+  text: string;
+  recordedAt?: number; // epoch ms
+  /** The full recording is kept in cloud storage (Refine can re-transcribe it). */
+  audioStored: boolean;
+}
+
+export interface McpResearchCard {
+  type: string;
+  query: string;
+  summary: string;
+  sources: Array<{ title: string; url: string }>;
+  credibility?: string;
+  integrated?: boolean;
+  timestamp?: number; // epoch ms
+}
+
+export interface McpResearchSession {
+  id: string;
+  startedAt: number; // epoch ms
+  endedAt: number | null;
+  cards: McpResearchCard[];
 }
 
 // True iff a raw Firestore `documents/{id}` record is `uid`'s PERSONAL doc — the
@@ -350,6 +440,8 @@ export function formatDocLine(doc: McpDoc): string {
   if (doc.tags && doc.tags.length) parts.push(`tags: ${doc.tags.join(", ")}`);
   if (doc.docType && doc.docType !== "markdown")
     parts.push(`type: ${doc.docType}`);
+  if (doc.transcriptChars)
+    parts.push(`transcript: ${formatCount(doc.transcriptChars)} chars`);
   return `• ${title}\n  id: ${doc.id}\n  ${parts.join(" · ")}`;
 }
 
@@ -363,8 +455,15 @@ export function formatDocList(docs: McpDoc[], limit: number): string {
   return `${header}\n\n${shown.map(formatDocLine).join("\n\n")}`;
 }
 
+function formatCount(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
 /** Full-content rendering of a single document for get_document. */
-export function formatDocFull(doc: McpDoc): string {
+export function formatDocFull(
+  doc: McpDoc,
+  extras: { researchCards?: number } = {},
+): string {
   const meta: string[] = [
     `Title: ${doc.title?.trim() || "(untitled)"}`,
     `Id: ${doc.id}`,
@@ -373,8 +472,133 @@ export function formatDocFull(doc: McpDoc): string {
   if (doc.createdAt) meta.push(`Created: ${formatTokyo(doc.createdAt)}`);
   if (doc.folder) meta.push(`Folder: ${doc.folder}`);
   if (doc.tags && doc.tags.length) meta.push(`Tags: ${doc.tags.join(", ")}`);
+  if (doc.transcriptChars)
+    meta.push(
+      `Transcript: ${formatCount(doc.transcriptChars)} chars (read with get_transcript)`,
+    );
+  if (extras.researchCards)
+    meta.push(
+      `Research: ${formatCount(extras.researchCards)} cards (read with get_research)`,
+    );
   const body = doc.content ?? "";
   return `${meta.join("\n")}\n\n---\n\n${body}`;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * One page of a transcript. Never splits a surrogate pair, and when more text
+ * follows, backs the cut off to the last line break or sentence end within the
+ * final 10% of the page so a page doesn't end mid-sentence. `end` is the offset
+ * to continue from.
+ */
+export function sliceTranscript(
+  text: string,
+  offset: number,
+  maxChars: number,
+): { chunk: string; start: number; end: number; total: number } {
+  const total = text.length;
+  let start = Math.max(0, Math.min(Math.floor(offset), total));
+  if (start > 0 && start < total && isLowSurrogate(text.charCodeAt(start)))
+    start -= 1;
+  let end = Math.min(total, start + maxChars);
+  if (end < total) {
+    const floor = end - Math.floor(maxChars / 10);
+    for (let i = end - 1; i > floor && i > start; i--) {
+      const ch = text[i];
+      if (ch === "\n" || ch === "。" || ch === "？" || ch === "！") {
+        end = i + 1;
+        break;
+      }
+    }
+    if (isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
+  }
+  return { chunk: text.slice(start, end), start, end, total };
+}
+
+export function formatTranscriptPage(
+  t: McpTranscript,
+  offset: number,
+  maxChars: number,
+): string {
+  const { chunk, start, end, total } = sliceTranscript(t.text, offset, maxChars);
+  const meta: string[] = [
+    `Title: ${t.title?.trim() || "(untitled)"}`,
+    `Id: ${t.id}`,
+  ];
+  if (t.recordedAt) meta.push(`Recorded: ${formatTokyo(t.recordedAt)}`);
+  meta.push(
+    `Audio stored: ${t.audioStored ? "yes (the recording can be re-transcribed with Refine)" : "no"}`,
+  );
+  meta.push(
+    `Transcript: ${formatCount(total)} chars — showing ${formatCount(start)}–${formatCount(end)}`,
+  );
+  meta.push(
+    "Note: raw speech-to-text; names, numbers and technical terms may be misheard.",
+  );
+  const tail =
+    end < total
+      ? `\n\n---\n\n${formatCount(total - end)} more chars. Continue with get_transcript {"id": "${t.id}", "offset": ${end}}.`
+      : "\n\n---\n\nEnd of transcript.";
+  return `${meta.join("\n")}\n\n---\n\n${chunk}${tail}`;
+}
+
+const RESEARCH_TYPE_LABEL: Record<string, string> = {
+  topic: "topic",
+  "fact-check": "fact-check",
+  financial: "financial",
+  "explicit-request": "requested",
+  internal: "internal",
+  question: "follow-up question (not a fact)",
+};
+
+export function formatResearch(
+  doc: { id: string; title: string },
+  sessions: McpResearchSession[],
+): string {
+  const cardTotal = sessions.reduce((n, s) => n + s.cards.length, 0);
+  const head = `Title: ${doc.title?.trim() || "(untitled)"}\nId: ${doc.id}`;
+  if (!cardTotal) return `${head}\n\nNo research cards for this document.`;
+  const blocks: string[] = [];
+  let used = 0;
+  let shown = 0;
+  let truncated = false;
+  for (const s of sessions) {
+    if (truncated) break;
+    const ended = s.endedAt ? ` – ${formatTokyo(s.endedAt)}` : "";
+    const sessionHead = `## Session ${formatTokyo(s.startedAt)}${ended}`;
+    const cardBlocks: string[] = [];
+    for (const c of s.cards) {
+      const label = RESEARCH_TYPE_LABEL[c.type] || c.type || "research";
+      const status = c.integrated ? "woven into the document" : "not in the document";
+      const lines = [`### [${label}] ${c.query || "(no query)"}`, `(${status})`];
+      if (c.summary) lines.push(c.summary.trim());
+      if (c.sources.length) {
+        lines.push("Sources:");
+        for (const src of c.sources)
+          lines.push(`- ${src.title || src.url} — ${src.url}`);
+      }
+      const block = lines.join("\n");
+      if (used + block.length > MAX_RESEARCH_OUTPUT_CHARS && shown > 0) {
+        truncated = true;
+        break;
+      }
+      cardBlocks.push(block);
+      used += block.length;
+      shown++;
+    }
+    if (cardBlocks.length) blocks.push([sessionHead, ...cardBlocks].join("\n\n"));
+  }
+  const summary = `${sessions.length} research session${sessions.length === 1 ? "" : "s"}, ${formatCount(cardTotal)} card${cardTotal === 1 ? "" : "s"}`;
+  const note = truncated
+    ? `\n\n---\n\n${formatCount(cardTotal - shown)} more card(s) not shown (output size limit).`
+    : "";
+  return `${head}\n${summary}\n\n${blocks.join("\n\n")}${note}`;
 }
 
 /**
@@ -509,10 +733,20 @@ export type CreateDocResult =
 // uid + env); its presence is exactly what flips the advertised tool catalogue
 // to include create_document (see toolsFor / tools/list). When absent, the
 // create_document tool is neither listed nor callable.
+// getTranscript / getResearch apply the SAME personal-doc authorization as
+// getDoc (null = not found or not the caller's personal document).
 export interface McpDeps {
   listDocs: () => Promise<McpDoc[]>;
   getDoc: (id: string) => Promise<McpDoc | null>;
+  getTranscript?: (id: string) => Promise<McpTranscript | null>;
+  getResearch?: (id: string) => Promise<McpResearchSession[] | null>;
   createDoc?: (input: CreateDocInput) => Promise<CreateDocResult>;
+}
+
+function intArg(raw: unknown, fallback: number): number {
+  return typeof raw === "number" && Number.isFinite(raw)
+    ? Math.floor(raw)
+    : fallback;
 }
 
 export async function callTool(
@@ -539,7 +773,47 @@ export async function callTool(
       if (!id) return errorResult("The 'id' argument is required.");
       const doc = await deps.getDoc(id);
       if (!doc) return errorResult(`No document found with id "${id}".`);
-      return textResult(formatDocFull(doc));
+      // Only surface the research COUNT here (the cards themselves stay behind
+      // get_research) so a plain document read doesn't grow noisier.
+      let researchCards = 0;
+      if (deps.getResearch) {
+        const sessions = await deps.getResearch(id);
+        researchCards = (sessions || []).reduce((n, s) => n + s.cards.length, 0);
+      }
+      return textResult(formatDocFull(doc, { researchCards }));
+    }
+    case "get_transcript": {
+      const id = typeof args.id === "string" ? args.id.trim() : "";
+      if (!id) return errorResult("The 'id' argument is required.");
+      if (!deps.getTranscript)
+        return errorResult("The get_transcript tool is not enabled.");
+      const t = await deps.getTranscript(id);
+      if (!t) return errorResult(`No document found with id "${id}".`);
+      if (!t.text.trim())
+        return textResult(
+          `Title: ${t.title?.trim() || "(untitled)"}\nId: ${t.id}\n\nThis document has no transcript.`,
+        );
+      const offset = Math.max(0, intArg(args.offset, 0));
+      if (offset >= t.text.length)
+        return errorResult(
+          `offset ${offset} is past the end of the transcript (${t.text.length} chars).`,
+        );
+      const maxChars = Math.max(
+        MIN_TRANSCRIPT_CHARS,
+        Math.min(MAX_TRANSCRIPT_CHARS, intArg(args.max_chars, DEFAULT_TRANSCRIPT_CHARS)),
+      );
+      return textResult(formatTranscriptPage(t, offset, maxChars));
+    }
+    case "get_research": {
+      const id = typeof args.id === "string" ? args.id.trim() : "";
+      if (!id) return errorResult("The 'id' argument is required.");
+      if (!deps.getResearch)
+        return errorResult("The get_research tool is not enabled.");
+      const doc = await deps.getDoc(id);
+      if (!doc) return errorResult(`No document found with id "${id}".`);
+      const sessions = await deps.getResearch(id);
+      if (!sessions) return errorResult(`No document found with id "${id}".`);
+      return textResult(formatResearch(doc, sessions));
     }
     case "create_document": {
       // Gate: only write-enabled connections carry deps.createDoc. A read-only
@@ -613,7 +887,7 @@ export async function handleMcpMessage(
 
     case "tools/list":
       // Advertise the write tool only to write-enabled connections (deps.createDoc
-      // present). Read-only connections see exactly the three read tools.
+      // present). Read-only connections see exactly the read tools.
       return rpcResult(id, { tools: toolsFor(!!deps.createDoc) });
 
     case "tools/call": {
