@@ -4,6 +4,7 @@ const trackMock = vi.fn();
 const reportIfQuotaMock = vi.fn();
 const streamMock = vi.fn();
 const fetchJobMock = vi.fn();
+const ackMock = vi.fn();
 
 vi.mock("@/services/firebase", () => ({
   auth: { currentUser: { getIdToken: () => Promise.resolve("tok") } },
@@ -21,6 +22,7 @@ vi.mock("@/services/refine-jobs", async (orig) => {
     ...actual,
     streamRefineJob: (...a: unknown[]) => streamMock(...a),
     fetchRefineJob: (...a: unknown[]) => fetchJobMock(...a),
+    ackRefineJob: (...a: unknown[]) => ackMock(...a),
   };
 });
 
@@ -29,6 +31,7 @@ import {
   pollRefineJob,
   retryRefineJob,
   recordLocalRefineFailure,
+  supersedeRefineJob,
 } from "./refine-runner";
 import { RefineHttpError, type RefineJobView } from "./refine-jobs";
 import { useRefineStore } from "@/stores/refine-store";
@@ -64,6 +67,7 @@ beforeEach(() => {
   reportIfQuotaMock.mockReset();
   streamMock.mockReset();
   fetchJobMock.mockReset();
+  ackMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("runRefineStream", () => {
@@ -290,5 +294,22 @@ describe("retry / local failure", () => {
       "refine_failed",
       expect.objectContaining({ stage: "upload", code: "local" }),
     );
+  });
+});
+
+describe("supersedeRefineJob", () => {
+  it("discards a result awaiting review and dismisses an unacknowledged failure", async () => {
+    supersedeRefineJob({ jobId: "a", phase: "review" });
+    supersedeRefineJob({ jobId: "b", phase: "error" });
+    await vi.waitFor(() => expect(ackMock).toHaveBeenCalledTimes(2));
+    expect(ackMock).toHaveBeenCalledWith("a", "discarded", "tok");
+    expect(ackMock).toHaveBeenCalledWith("b", "dismissed", "tok");
+  });
+  it("leaves running or missing jobs alone", async () => {
+    supersedeRefineJob(undefined);
+    supersedeRefineJob({ jobId: null, phase: "error" });
+    supersedeRefineJob({ jobId: "c", phase: "transcribe" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ackMock).not.toHaveBeenCalled();
   });
 });

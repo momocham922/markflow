@@ -30,6 +30,7 @@ import {
 import {
   recordLocalRefineFailure,
   runRefineStream,
+  supersedeRefineJob,
 } from "@/services/refine-runner";
 import { isRefineBusy, useRefineStore } from "@/stores/refine-store";
 
@@ -821,6 +822,7 @@ export function VoicePanel({
         includedCardIds: refineIncludedCards.map((c) => c.id),
       };
       refineStore.patch(docId, { audioKey });
+      supersedeRefineJob(prevState);
       track("refine_started", {
         chunks: chunks.length,
         audio_sec: Math.round(

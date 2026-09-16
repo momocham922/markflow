@@ -3,6 +3,7 @@ import { reportIfQuota } from "@/services/ai-proxy";
 import { track } from "@/services/telemetry";
 import {
   RefineHttpError,
+  ackRefineJob,
   fetchRefineJob,
   refineErrorMessage,
   refineThrownMessage,
@@ -259,4 +260,30 @@ export function recordLocalRefineFailure(
       err instanceof RefineHttpError ? String(err.body.error ?? "") : "local",
     status: err instanceof RefineHttpError ? err.status : 0,
   });
+}
+
+/**
+ * A new Refine replaces a result still awaiting review, or a failure the user
+ * never dismissed: record that on the server so the old job is not offered
+ * again for this document.
+ */
+export function supersedeRefineJob(
+  prev: { jobId: string | null; phase: string } | undefined,
+): void {
+  if (!prev?.jobId) return;
+  const action =
+    prev.phase === "review"
+      ? "discarded"
+      : prev.phase === "error"
+        ? "dismissed"
+        : null;
+  if (!action) return;
+  const jobId = prev.jobId;
+  void (async () => {
+    try {
+      await ackRefineJob(jobId, action, await idToken());
+    } catch (err) {
+      console.warn(`[refine] superseding ${jobId} failed:`, err);
+    }
+  })();
 }

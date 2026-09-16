@@ -166,6 +166,21 @@ describe("useRefineJobSync — applying results", () => {
     );
   });
 
+  it("silently records a result that is already in the document", async () => {
+    const { setContent } = setup({ docId: "d1", content: "# 清書" });
+    const job = await doneJob();
+    act(() =>
+      useRefineStore
+        .getState()
+        .patch("d1", { jobId: "j1", job, phase: "ready" }),
+    );
+    await waitFor(() =>
+      expect(ackMock).toHaveBeenCalledWith("j1", "applied", "tok"),
+    );
+    expect(setContent).not.toHaveBeenCalled();
+    expect(useRefineStore.getState().byDoc.d1).toBeUndefined();
+  });
+
   it("discard acknowledges the job without touching the document", async () => {
     const { result, setContent } = setup({ docId: "d1", content: "changed" });
     const job = await doneJob();

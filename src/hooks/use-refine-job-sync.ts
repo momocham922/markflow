@@ -174,6 +174,14 @@ export function useRefineJobSync({
       if (latest?.phase !== "ready" || latest.job?.jobId !== job.jobId) return;
       if (current === job.baseContentHash) {
         apply(job, true);
+      } else if (
+        typeof job.output === "string" &&
+        current === (await sha256Hex(job.output))
+      ) {
+        // Already applied earlier (e.g. the "applied" ack never reached the
+        // server) — record it instead of asking again.
+        void ack(job.jobId, "applied");
+        useRefineStore.getState().clear(docId);
       } else {
         useRefineStore.getState().patch(docId, { phase: "review" });
         track("refine_review_shown", {
