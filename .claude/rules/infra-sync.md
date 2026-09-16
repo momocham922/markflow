@@ -53,13 +53,15 @@ globs:
 
 1. Cloud Run に再デプロイ:
    ```bash
-   # 注意: --timeout は必ず 900。batch-transcribe が最大14分同期ポーリングするため
-   # 600 だと長尺文字起こしで "load failed" 回帰する（rev 00034 で実際に回帰）。
+   # 注意: --timeout は必ず 3600（2026-09-17 rev 00076 から）。Refine ジョブ
+   # (/v1/voice/refine-jobs) は文字起こし（最大14分の同期ポーリング）と整形（数分）を
+   # 1リクエスト内で実行するため、900 に戻すと長尺会議の整形が途中で打ち切られる。
+   # 過去に 600 で "load failed" が回帰した（rev 00034）のと同じ種類の事故になる。
    # env は --update-env-vars でマージ上書き（INTERNAL_UIDS/OWNER_UIDS を消さない）。
    gcloud run deploy markflow-ai-proxy \
      --source server/ai-proxy --project markflow-app-2026 --region asia-northeast1 \
      --account ga.crossmedia@gmail.com \
-     --allow-unauthenticated --memory 512Mi --timeout 900 \
+     --allow-unauthenticated --memory 512Mi --timeout 3600 \
      --min-instances 0 --max-instances 3
    ```
 2. 新リビジョンがトラフィック 100% であることを確認:

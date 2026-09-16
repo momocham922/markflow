@@ -276,12 +276,12 @@ for S in stripe-secret-key stripe-webhook-secret; do
     --role=roles/secretmanager.secretAccessor; done
 ```
 
-**手順 6 — Cloud Run に env / secret を注入して点灯**（`--update-*` でマージ。既存 `INTERNAL_UIDS`/`OWNER_UIDS`/`CLAUDE_MODEL`/`GCP_*` を絶対に消さない。`--timeout 900` 厳守）
+**手順 6 — Cloud Run に env / secret を注入して点灯**（`--update-*` でマージ。既存 `INTERNAL_UIDS`/`OWNER_UIDS`/`CLAUDE_MODEL`/`GCP_*` を絶対に消さない。`--timeout 3600` 厳守。2026-09-17 以降は Refine ジョブのため 3600）
 
 ```bash
 gcloud run deploy markflow-ai-proxy --source server/ai-proxy \
   --project markflow-app-2026 --region asia-northeast1 --account ga.crossmedia@gmail.com \
-  --allow-unauthenticated --memory 512Mi --timeout 900 --min-instances 0 --max-instances 3 \
+  --allow-unauthenticated --memory 512Mi --timeout 3600 --min-instances 0 --max-instances 3 \
   --update-secrets=STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest \
   --update-env-vars=STRIPE_PRICE_PRO_MONTHLY=price_XXX,STRIPE_PRICE_PRO_YEARLY=price_XXX,STRIPE_PRICE_TEAM_MONTHLY=price_XXX,STRIPE_PRICE_TEAM_YEARLY=price_XXX,NONAI_GATES_ENABLED=1
 # URL は既定で markflow.jp/checkout/success|cancel・/account を使用。変える場合のみ
