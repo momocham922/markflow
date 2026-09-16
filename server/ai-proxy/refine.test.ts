@@ -9,6 +9,7 @@ import {
   isStale,
   isValidJobId,
   isAckAction,
+  isAudioTooLongMessage,
   audioKeyFor,
   splitUtf8,
   buildRefinePrompt,
@@ -290,6 +291,17 @@ describe("small validators", () => {
     expect(isAckAction("applied")).toBe(true);
     expect(isAckAction("dismissed")).toBe(true);
     expect(isAckAction("delete")).toBe(false);
+  });
+});
+
+describe("isAudioTooLongMessage", () => {
+  it("recognizes BatchRecognize's length rejection", () => {
+    expect(
+      isAudioTooLongMessage(
+        "STT failed: File `gs://b/a.wav` is too long. Only audio files up to 20 minutes are supported",
+      ),
+    ).toBe(true);
+    expect(isAudioTooLongMessage('STT op error: {"code":13}')).toBe(false);
   });
 });
 

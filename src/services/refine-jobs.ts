@@ -282,6 +282,8 @@ export function refineErrorMessage(
       return `${label}: 文字起こし結果が空でした。録音に音声が入っていない可能性があります。`;
     case "stt_failed":
       return `${label}: 文字起こしに失敗しました。もう一度お試しください。`;
+    case "audio_too_long":
+      return `${label}: 音声が長すぎると判定されました。もう一度 Refine をお試しください。解消しない場合は録音を短く区切ってください。`;
     case "job_exhausted":
       return "何度か再試行しましたが完了できませんでした。お手数ですが、もう一度 Refine を実行してください。";
     case "job_not_found":

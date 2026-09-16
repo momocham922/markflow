@@ -256,6 +256,11 @@ export function parseRefineRequest(
 }
 
 /** Identity of the audio a job transcribes (a resume must not switch audio). */
+/** True for BatchRecognize's "file is too long" rejection (≈20-min limit). */
+export function isAudioTooLongMessage(message: string): boolean {
+  return /too long|20 ?minutes|20\s*分|60 ?minutes|60\s*分/i.test(message);
+}
+
 export function audioKeyFor(chunks: RefineChunk[]): string {
   return createHash("sha256")
     .update(

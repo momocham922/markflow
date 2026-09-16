@@ -210,6 +210,9 @@ describe("refineErrorMessage", () => {
     expect(refineErrorMessage("transcribe", "stt_failed", 502)).toContain(
       "文字起こしに失敗",
     );
+    expect(refineErrorMessage("transcribe", "audio_too_long", 422)).toContain(
+      "録音を短く区切ってください",
+    );
   });
   it("tells the user a structuring retry reuses the saved transcript", () => {
     expect(refineErrorMessage("structure", "ai_upstream_error", 503)).toContain(

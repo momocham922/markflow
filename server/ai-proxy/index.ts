@@ -138,6 +138,7 @@ import { stripThinkingBlocks } from "./thinking";
 import {
   REFINE_JOBS,
   REFINE_JOB_PARTS,
+  isAudioTooLongMessage,
   REFINE_HEARTBEAT_MS,
   REFINE_RETENTION_MS,
   REFINE_MAX_TOKENS,
@@ -4451,7 +4452,14 @@ async function executeRefineJob(
       }
       if (out.kind === "failed") {
         console.error(`[refine-job] ${jobId} STT failed: ${out.message}`);
-        await fail("stt_failed", 502, { error: "stt_failed" });
+        // BatchRecognize rejects a single file longer than ~20 minutes. The
+        // client splits recordings into ≤18-min parts, so this should not
+        // happen — but if it does, tell the user what to do about it.
+        if (isAudioTooLongMessage(out.message)) {
+          await fail("audio_too_long", 422, { error: "audio_too_long" });
+        } else {
+          await fail("stt_failed", 502, { error: "stt_failed" });
+        }
         return;
       }
       transcript = out.taggedTranscript;
