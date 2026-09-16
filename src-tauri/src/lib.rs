@@ -919,36 +919,27 @@ struct UpdateCheckResult {
 }
 
 // --- Update manifest endpoints ---
-// Default = public GitHub Releases (works while the repo is public, unchanged
-// behavior for every existing build). The distribution migration (decision #1)
-// self-hosts the manifests + artifacts behind markflow.jp/updates (GCS-backed,
+// Manifests + artifacts are self-hosted behind markflow.jp/updates (GCS-backed,
 // see hosting/nginx.conf + scripts/release-updates-gcs.sh) so the GitHub repo
-// can be made PRIVATE without breaking auto-update. The transition build is
-// produced by setting MARKFLOW_UPDATE_BASE=https://markflow.jp/updates at
-// COMPILE time — kept as a compile-time env (not a runtime flag) because Tauri
-// resolves the updater endpoint at build; keeping the default on GitHub means
-// the plain working tree is always shippable even before the new host exists.
-const STABLE_ENDPOINT_GITHUB: &str =
-    "https://github.com/momocham922/markflow/releases/latest/download/latest.json";
-const BETA_ENDPOINT_GITHUB: &str =
-    "https://github.com/momocham922/markflow/releases/download/beta/beta.json";
+// can be made PRIVATE without breaking auto-update (decision #1). This is also
+// the DEFAULT: the former GitHub Releases default let builds that forgot the env
+// ship polling GitHub (macOS beta.16 before its rebuild, Windows stable v0.6.2).
+// MARKFLOW_UPDATE_BASE still overrides the base at COMPILE time (option_env!).
+const DEFAULT_UPDATE_BASE: &str = "https://markflow.jp/updates";
 
-fn stable_endpoint() -> String {
+fn update_base() -> &'static str {
     match option_env!("MARKFLOW_UPDATE_BASE") {
-        Some(base) if !base.is_empty() => {
-            format!("{}/latest.json", base.trim_end_matches('/'))
-        }
-        _ => STABLE_ENDPOINT_GITHUB.to_string(),
+        Some(base) if !base.is_empty() => base.trim_end_matches('/'),
+        _ => DEFAULT_UPDATE_BASE,
     }
 }
 
+fn stable_endpoint() -> String {
+    format!("{}/latest.json", update_base())
+}
+
 fn beta_endpoint() -> String {
-    match option_env!("MARKFLOW_UPDATE_BASE") {
-        Some(base) if !base.is_empty() => {
-            format!("{}/beta.json", base.trim_end_matches('/'))
-        }
-        _ => BETA_ENDPOINT_GITHUB.to_string(),
-    }
+    format!("{}/beta.json", update_base())
 }
 
 #[tauri::command]
