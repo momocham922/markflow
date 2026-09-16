@@ -21,6 +21,17 @@ import { auth } from "@/services/firebase";
 import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
 import { extractHints } from "@/lib/text-utils";
 import { friendlyErrorMessage } from "@/lib/friendly-error";
+import { track } from "@/services/telemetry";
+import {
+  newRefineJobId,
+  sha256Hex,
+  type CreateRefineJobBody,
+} from "@/services/refine-jobs";
+import {
+  recordLocalRefineFailure,
+  runRefineStream,
+} from "@/services/refine-runner";
+import { isRefineBusy, useRefineStore } from "@/stores/refine-store";
 
 const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
@@ -58,6 +69,8 @@ export interface VoiceDataUpdate {
 }
 
 interface VoicePanelProps {
+  /** The open document — Refine jobs are tracked per document. */
+  documentId: string;
   onInsertMarkdown: (markdown: string) => void;
   onSetContent: (content: string) => void;
   documentContent: string;
@@ -144,6 +157,7 @@ function toTranscriptSegments(raw: string): string[] {
 }
 
 export function VoicePanel({
+  documentId,
   onInsertMarkdown,
   onSetContent,
   documentContent,
@@ -154,11 +168,17 @@ export function VoicePanel({
   onVoiceDataChange,
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
-  const [refining, setRefining] = useState(false);
   const [hasArchive, setHasArchive] = useState(false);
-  const [refineStage, setRefineStage] = useState<
-    "upload" | "transcribe" | "structure" | null
-  >(null);
+  // Refine runs as a server-side job tracked per document (refine-store), so its
+  // progress survives this panel closing or the document being switched.
+  const refineState = useRefineStore((s) => s.byDoc[documentId]);
+  const refining = isRefineBusy(refineState);
+  const refineStage =
+    refineState?.phase === "upload" ||
+    refineState?.phase === "transcribe" ||
+    refineState?.phase === "structure"
+      ? refineState.phase
+      : null;
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voiceInfo, setVoiceInfo] = useState<string | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -172,7 +192,6 @@ export function VoicePanel({
   // (A ref alone doesn't trigger re-render.)
   const [lastStructuredText, setLastStructuredText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const refineAbortRef = useRef<AbortController | null>(null);
   // Chunks from the last archive upload this session. Lets a Refine retry skip
   // re-uploading (and re-splitting) the audio. Long recordings (>58min) are
   // split into ≤55min parts with 20s overlap to clear chirp_3's 60-min limit.
@@ -210,6 +229,7 @@ export function VoicePanel({
   const onVoiceDataChangeRef = useRef(onVoiceDataChange);
   const savedVoiceGcsUriRef = useRef(savedVoiceGcsUri);
   const hasArchiveRef = useRef(false);
+  const documentIdRef = useRef(documentId);
 
   const {
     isRecording,
@@ -349,6 +369,12 @@ export function VoicePanel({
   useEffect(() => {
     savedVoiceGcsUriRef.current = savedVoiceGcsUri;
   }, [savedVoiceGcsUri]);
+  useEffect(() => {
+    documentIdRef.current = documentId;
+  }, [documentId]);
+  useEffect(() => {
+    refiningRef.current = refining;
+  }, [refining]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -368,6 +394,7 @@ export function VoicePanel({
 
     setStructuring(true);
     structuringRef.current = true;
+    const structureStartedAt = Date.now();
     try {
       const user = useAuthStore.getState().user;
       if (!user) throw new Error("Not authenticated");
@@ -550,6 +577,15 @@ export function VoicePanel({
         }
         lastStructuredRef.current = transcript;
         setLastStructuredText(transcript);
+        track("structure_completed", {
+          manual,
+          ms: Date.now() - structureStartedAt,
+          output_chars: cleanOutput.length,
+          new_chars: newPart.length,
+          has_existing: hasExisting,
+          research_cards: includedCards.length,
+          stop_reason: structStopReason,
+        });
         // Mark only the cards we actually wove in (clears their queued flag);
         // don't touch cards that weren't included this run. Covers both
         // research and question cards.
@@ -560,6 +596,14 @@ export function VoicePanel({
       }
     } catch (err) {
       console.error("[voice] Structuring failed:", err);
+      const statusMatch = /Structure failed: (\d{3})/.exec(
+        err instanceof Error ? err.message : "",
+      );
+      track("structure_failed", {
+        manual,
+        ms: Date.now() - structureStartedAt,
+        status: statusMatch ? Number(statusMatch[1]) : 0,
+      });
       // Surface the failure so a manual "Structure" click never fails silently
       // (the user would otherwise stare at an unchanged document). Auto-runs
       // stay quiet — they retry on the next interval, and quota 429s already
@@ -578,8 +622,11 @@ export function VoicePanel({
   }, []);
 
   const doRefine = useCallback(async () => {
+    const docId = documentIdRef.current;
+    const refineStore = useRefineStore.getState();
+    const prevState = refineStore.byDoc[docId];
+    if (!docId || isRefineBusy(prevState)) return;
     const transcript = fullTranscriptRef.current;
-    if (refiningRef.current) return;
     // Refine re-transcribes the recording from its native archive, so it does
     // NOT require a live transcript: a fully-backgrounded session has an empty
     // live transcript (JS timers were frozen) but the complete audio was still
@@ -592,13 +639,11 @@ export function VoicePanel({
     )
       return;
 
-    const abortController = new AbortController();
-    refineAbortRef.current = abortController;
-
-    setRefining(true);
-    refiningRef.current = true;
-    // Tracks the current stage so a failure can report where it happened.
-    let stageLabel = "準備";
+    const startedAt = Date.now();
+    refineStore.begin(docId, "");
+    // Only the upload happens on this device; everything after it is a
+    // server-side job that keeps running if the app goes away.
+    let stage: "upload" | "transcribe" = "upload";
     try {
       const user = useAuthStore.getState().user;
       if (!user) throw new Error("Not authenticated");
@@ -618,8 +663,6 @@ export function VoicePanel({
           chunks.length,
         );
       } else {
-        setRefineStage("upload");
-        stageLabel = "音声アップロード";
         const { invoke } = await import("@tauri-apps/api/core");
 
         let androidArchivePath: string | undefined;
@@ -708,97 +751,39 @@ export function VoicePanel({
         }
       }
 
-      // Stage 2: Batch transcribe with full-session diarization (per-chunk,
-      // parallel server-side; overlap deduped by word timestamp).
-      setRefineStage("transcribe");
-      stageLabel = "文字起こし";
-      const timeout = setTimeout(() => abortController.abort(), 15 * 60 * 1000);
-      const batchRes = await fetch(
-        `${AI_PROXY_URL}/v1/voice/batch-transcribe`,
-        {
-          method: "POST",
-          headers: aiProxyHeaders(token),
-          body: JSON.stringify({
-            chunks,
-            language: "ja-JP",
-          }),
-          signal: abortController.signal,
-        },
+      stage = "transcribe";
+      const audioKey = JSON.stringify(
+        chunks.map((c) => [c.gcsUri, c.startSec, c.durationSec]),
       );
-      clearTimeout(timeout);
 
-      if (!batchRes.ok) {
-        const errText = await batchRes.text();
-        reportIfQuota(batchRes.status, errText);
-        // The server may return a clean, user-facing Japanese `message` (e.g.
-        // 429 batch_in_progress: one in-flight batch per user). Prefer it verbatim.
-        let serverMsg = "";
-        try {
-          const j = JSON.parse(errText) as { message?: string };
-          if (typeof j.message === "string") serverMsg = j.message;
-        } catch {
-          /* not JSON; fall through to the raw-text handling below */
-        }
-        if (serverMsg) throw new Error(serverMsg);
-        // BatchRecognize rejects an individual file longer than ~20 minutes.
-        // Recordings are auto-split into ≤18min parts (incl. re-split of a stored
-        // GCS file on re-Refine), so this should be unreachable in practice; keep
-        // a clear message as a safety net.
-        if (/too long|20 ?minutes|20\s*分|60 ?minutes|60\s*分/i.test(errText)) {
-          throw new Error(
-            "文字起こしの一括処理で音声が長すぎると判定されました。お手数ですが再度Refineをお試しください。解消しない場合は録音を短く区切ってください。",
-          );
-        }
-        throw new Error(
-          `Batch transcribe failed: ${batchRes.status} ${errText}`,
-        );
+      // Re-running Refine on the same audio after a failure whose transcript was
+      // already saved: resume that job so speech-to-text isn't paid for twice.
+      if (
+        prevState?.phase === "error" &&
+        prevState.jobId &&
+        prevState.audioKey === audioKey &&
+        (prevState.job?.transcriptChars ?? 0) > 0
+      ) {
+        refineStore.patch(docId, {
+          jobId: prevState.jobId,
+          job: prevState.job,
+          audioKey,
+          phase: "structure",
+        });
+        track("refine_resumed", {
+          reason: "rerun",
+          stage: "structure",
+          has_transcript: true,
+        });
+        await runRefineStream(docId, { jobId: prevState.jobId, resume: true });
+        return;
       }
 
-      const batchData = await batchRes.json();
-      const diarizedTranscript =
-        batchData.taggedTranscript || batchData.transcript || "";
-      const speakerCount = batchData.speakerCount || 0;
-
-      if (!diarizedTranscript.trim()) {
-        throw new Error(
-          "文字起こし結果が空でした。録音に音声が入っていない可能性があります。",
-        );
-      }
-
-      // Stage 3: Claude refinement with diarized transcript + existing structure
-      setRefineStage("structure");
-      stageLabel = "整形";
-      const existingDoc = docContentRef.current.trim();
-      const docVocabulary = existingDoc ? extractHints(existingDoc) : [];
-      const vocabularyHint =
-        docVocabulary.length > 0
-          ? `The following terms appear in the existing document and may have been misrecognized — use them as the correct spelling: [${docVocabulary.slice(0, 100).join(", ")}]. `
-          : "";
-
-      const refineSystemPrompt =
-        "You are a document assistant performing a FINAL REFINEMENT. " +
-        "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session. It may contain '---' markers separating processing segments of a long recording; speaker labels are ONLY consistent WITHIN a segment (the same speaker may have a different number across '---') — use speech content to identify and unify the same speaker across segments, " +
-        (existingDoc
-          ? "and an EXISTING DOCUMENT (a preliminary structure created during recording). "
-          : "") +
-        "The transcript is from speech-to-text and may contain misrecognitions. Correct obvious errors based on context. " +
-        vocabularyHint +
-        `There are ${speakerCount} speaker(s) in this recording. ` +
-        "CRITICAL RULES: " +
-        "1) You are NOT creating a cleaned-up transcript or conversation log. Produce a POLISHED INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
-        "2) Use the speaker labels INTERNALLY to understand who holds which opinion, who proposed what, and the dynamics between participants — but NEVER output raw speaker labels like 'Speaker 1', 'Speaker 0', 'speaker0', etc. " +
-        "3) When attribution matters: if a speaker's name can be identified from the transcript (e.g., they introduced themselves or were addressed by name), use their real name (e.g., '田中さんからの質問', '鈴木の提案'). Otherwise, describe by inferred role or position (e.g., '提案側の意見として', 'プロジェクトリーダーが指摘した点'). If neither name nor role can be inferred, paraphrase without attribution rather than using speaker numbers. " +
-        "4) Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
-        "5) CONSOLIDATION (CRITICAL — non-redundant): Each distinct topic, decision, fact, definition, number, or conclusion must appear EXACTLY ONCE, in the single most relevant section. The conversation circles back to topics — do NOT create a new section or restate a point each time it recurs; gather everything about a topic into its one section. Never repeat the same conclusion/figure/definition/action item across sections; refer to it in one short phrase if needed elsewhere. Before finalizing, scan your output and merge sections/bullets covering the same subject. Prefer a tight, consolidated document over a long, repetitive one. " +
-        "6) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
-        "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
-        "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
-        "Output ONLY the structured Markdown, no explanations. Do not truncate.";
-
-      let refineUserContent = existingDoc
-        ? `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
-        : `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${diarizedTranscript}\n\nProduce a polished structured document from this transcript.`;
-
+      // The prompt is built server-side from these inputs (see
+      // server/ai-proxy/refine.ts). The hash of the document as it is now lets
+      // the result be applied automatically only if nothing changed meanwhile.
+      const existingRaw = docContentRef.current;
+      const existingDoc = existingRaw.trim();
       const { useResearchStore: getResearchStore } =
         await import("@/stores/research-store");
       // Weave research when the global toggle is on OR specific cards were
@@ -818,131 +803,38 @@ export function VoicePanel({
       const refineQuestionCards = refineIncludedCards.filter(
         (c) => c.type === "question",
       );
-      if (refineResearchCards.length > 0) {
-        refineUserContent +=
-          "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
-          "Gathered via web search during the recording — background reference, NOT meeting speech. " +
-          "Follow the SEPARATION RULE: put these in the trailing '## 補足情報（Web調査）' section, NOT in the minutes body. " +
-          "For EACH item: use a natural H3 heading like '### 〇〇の件について' (never the raw query); write 1–2 concise sentences (do not dump the summary verbatim); include ONLY what adds to the minutes; and, if it clearly supplements a specific meeting section, add a link on its own line — [本文「<見出し>」への補足](#<見出し>) — copying that body heading VERBATIM. Cite sources as markdown links.\n\n" +
-          refineResearchCards
-            .map((c) => {
-              const srcList = c.sources
-                .map((s) => `  - [${s.title}](${s.url})`)
-                .join("\n");
-              return `### ${c.type}: ${c.query}\n${c.summary}\n${srcList}`;
-            })
-            .join("\n\n");
-      }
-      if (refineQuestionCards.length > 0) {
-        refineUserContent += buildQuestionsContext(refineQuestionCards);
-      }
-
-      const refineRes = await fetch(`${AI_PROXY_URL}/v1/chat`, {
-        method: "POST",
-        headers: aiProxyHeaders(token),
-        body: JSON.stringify({
-          system: refineSystemPrompt,
-          messages: [{ role: "user", content: refineUserContent }],
-          // Max out at opus-5's full 128K streaming ceiling so even very long
-          // meetings never truncate. It's a cap, not a charge.
-          max_tokens: 128000,
-          stream: true,
-        }),
-        signal: abortController.signal,
+      const body: CreateRefineJobBody = {
+        jobId: newRefineJobId(),
+        docId,
+        language: "ja-JP",
+        chunks,
+        baseContentHash: await sha256Hex(existingRaw),
+        existingDoc,
+        vocabulary: existingDoc ? extractHints(existingDoc).slice(0, 100) : [],
+        researchCards: refineResearchCards.map((c) => ({
+          type: c.type,
+          query: c.query,
+          summary: c.summary,
+          sources: c.sources.map((src) => ({ title: src.title, url: src.url })),
+        })),
+        questionCards: refineQuestionCards.map((c) => ({ summary: c.summary })),
+        includedCardIds: refineIncludedCards.map((c) => c.id),
+      };
+      refineStore.patch(docId, { audioKey });
+      track("refine_started", {
+        chunks: chunks.length,
+        audio_sec: Math.round(
+          chunks.reduce((sum, c) => sum + (c.durationSec || 0), 0),
+        ),
+        doc_chars: existingDoc.length,
+        research_cards: refineResearchCards.length,
+        question_cards: refineQuestionCards.length,
+        upload_ms: Date.now() - startedAt,
       });
-
-      if (!refineRes.ok) {
-        const errBody = await refineRes.text().catch(() => "");
-        reportIfQuota(refineRes.status, errBody);
-        throw new Error(
-          `Refine structuring failed: ${refineRes.status} ${errBody}`.trim(),
-        );
-      }
-
-      // Read SSE stream to collect full response
-      const reader = refineRes.body?.getReader();
-      if (!reader) throw new Error("No response body");
-      const decoder = new TextDecoder();
-      let sseBuffer = "";
-      let refinedOutput = "";
-      let refineStopReason = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split("\n");
-        sseBuffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const payload = line.slice(6).trim();
-          if (payload === "[DONE]") continue;
-          try {
-            const evt = JSON.parse(payload);
-            if (evt.type === "content_block_delta" && evt.delta?.text) {
-              refinedOutput += evt.delta.text;
-            } else if (evt.type === "message_delta" && evt.delta?.stop_reason) {
-              refineStopReason = evt.delta.stop_reason;
-            }
-          } catch {
-            // skip malformed SSE lines
-          }
-        }
-      }
-
-      // No-silent-failure: warn when the model hit the output cap and truncated.
-      // Persistent (no auto-dismiss): Refine REPLACES the whole document, so a
-      // truncated result clobbers the fuller live-structured version. The user
-      // MUST see this to recover from version history. Cleared by X or next run.
-      if (refineStopReason === "max_tokens") {
-        if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-        setVoiceError(
-          "整形がモデルの最大出力長に達し、末尾が切り捨てられた可能性があります。ドキュメントが短くなっていたらバージョン履歴から復元してください。会議が長い場合は分割をおすすめします。",
-        );
-      }
-
-      if (refinedOutput.trim()) {
-        onSetContentRef.current(refinedOutput.trim());
-        // Mark only the cards actually woven in (clears their queued flag).
-        // Covers both research and question cards.
-        if (refineIncludedCards.length > 0) {
-          const store = getResearchStore.getState();
-          for (const c of refineIncludedCards) store.markIntegrated(c.id);
-        }
-      }
-      // A successful Refine consumes the recording INTO the structured document,
-      // but we deliberately KEEP the voice metadata (and the on-device archive)
-      // so the transcript stays viewable and the recording can be re-Refined
-      // later — e.g. after a server-side transcription improvement, or if the
-      // refined output was truncated at max_tokens (warned above). Persist the
-      // full batch-diarized transcript (higher fidelity than the live one, which
-      // can be empty for a backgrounded session). voiceGcsUri / voiceRecordedAt
-      // were already stamped at upload (see the upload block) and are left intact
-      // so the Refine render gate survives a reload/restart. Only the explicit
-      // "Clear transcript" button discards voice data.
-      //
-      // (Before 2026-09-07 this nulled all three voice fields AND deleted the
-      // local archive on every Refine, so the transcript + Refine button
-      // "mysteriously vanished" after refining — reported as data loss. Do not
-      // reintroduce a null-emit or clear_voice_archive here.)
-      if (diarizedTranscript.trim()) {
-        onVoiceDataChangeRef.current?.({
-          voiceTranscript: diarizedTranscript.trim(),
-        });
-      }
+      await runRefineStream(docId, body);
     } catch (err) {
       console.error("[voice] Refine failed:", err);
-      // Audio is already uploaded on failure, so retrying skips re-upload.
-      // Route the reason through the shared classifier (never leak the raw
-      // message/status or an English "Refine failed:" prefix); keep only the
-      // localized stage label so the user knows which step failed.
-      setVoiceError(`${stageLabel}: ${friendlyErrorMessage(err, "voice")}`);
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => setVoiceError(null), 30000);
-    } finally {
-      setRefining(false);
-      refiningRef.current = false;
-      setRefineStage(null);
-      refineAbortRef.current = null;
+      recordLocalRefineFailure(docId, err, stage);
     }
   }, []);
 
@@ -971,10 +863,10 @@ export function VoicePanel({
     };
   }, [autoStructureInterval, isRecording, doStructure]);
 
-  // Cleanup on unmount: abort in-flight refine fetches + clear error timer
+  // Cleanup on unmount: clear the error timer. A running Refine is NOT
+  // cancelled — it is a server-side job the Editor keeps following.
   useEffect(() => {
     return () => {
-      refineAbortRef.current?.abort();
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     };
   }, []);
@@ -1283,11 +1175,13 @@ export function VoicePanel({
               Structure
             </span>
           </div>
-          {isMobile && (
-            <span className="text-[10px] text-amber-500 ml-1">
-              — アプリを閉じないでください
-            </span>
-          )}
+          <span
+            className={`text-[10px] ml-1 ${refineStage === "upload" ? "text-amber-500" : ""}`}
+          >
+            {refineStage === "upload"
+              ? "— アップロードが終わるまでアプリを閉じないでください"
+              : "— サーバーで処理中です。アプリを閉じても続きます"}
+          </span>
         </div>
       )}
     </div>

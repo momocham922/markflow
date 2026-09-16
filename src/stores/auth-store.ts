@@ -22,6 +22,7 @@ import {
 import { useAppStore, type Document, type DocType } from "./app-store";
 import { useEntitlementStore } from "./entitlement-store";
 import { useResearchStore } from "./research-store";
+import { useRefineStore } from "./refine-store";
 import {
   getDeletedDocIds,
   clearDeletedDoc,
@@ -261,6 +262,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             // Drop the previous account's in-memory research cards (content) and
             // re-read prefs now that local-reset cleared their localStorage keys.
             useResearchStore.getState().reset();
+            useRefineStore.getState().reset();
             // Drop cross-account tracking so the new user's sync is clean.
             collabActiveDocIds.clear();
             cloudPulledDocIds.clear();
@@ -467,6 +469,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Research cards are user content — clear them so the login screen (and any
       // next account) never shows the previous user's research.
       useResearchStore.getState().reset();
+      useRefineStore.getState().reset();
     }
   },
 
@@ -550,6 +553,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       useAppStore.getState().resetLocalDocuments();
       useEntitlementStore.getState().reset();
       useResearchStore.getState().reset();
+      useRefineStore.getState().reset();
       return { ok: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

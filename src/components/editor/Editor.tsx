@@ -38,6 +38,8 @@ import {
 } from "@/extensions/image-paste";
 import { EditorToolbar } from "./EditorToolbar";
 import { VoicePanel, type VoiceDataUpdate } from "./VoicePanel";
+import { RefineStatusBanner } from "./RefineStatusBanner";
+import { useRefineJobSync } from "@/hooks/use-refine-job-sync";
 import { ResearchPanel } from "./ResearchPanel";
 import { useResearchPipeline } from "@/hooks/use-research-pipeline";
 import {
@@ -1157,6 +1159,25 @@ export function Editor() {
     [activeDocId, updateDocument],
   );
 
+  // Server-side Refine: follow / apply this document's job even when the voice
+  // panel is closed, the job was started on another device, or the app restarted.
+  const setRefinedTranscript = useCallback(
+    (transcript: string) =>
+      handleVoiceDataChange({ voiceTranscript: transcript }),
+    [handleVoiceDataChange],
+  );
+  const refineSync = useRefineJobSync({
+    docId: activeDocId,
+    hasVoiceData: !!(
+      activeDoc?.voiceTranscript ||
+      activeDoc?.voiceGcsUri ||
+      activeDoc?.voiceRecordedAt
+    ),
+    content: activeDoc?.content || "",
+    setContent: handleSetContent,
+    setVoiceTranscript: setRefinedTranscript,
+  });
+
   if (!activeDoc) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -1436,9 +1457,20 @@ export function Editor() {
           </div>
         )}
       </div>
-      {voiceOpen && (
+      {activeDocId && (
+        <RefineStatusBanner
+          docId={activeDocId}
+          state={refineSync.state}
+          voiceOpen={voiceOpen}
+          onApply={refineSync.confirmApply}
+          onDiscard={refineSync.discard}
+          onDismissError={refineSync.dismissError}
+        />
+      )}
+      {voiceOpen && activeDocId && (
         <VoicePanel
           key={activeDocId}
+          documentId={activeDocId}
           onInsertMarkdown={handleInsertMarkdown}
           onSetContent={handleSetContent}
           documentContent={activeDoc?.content || ""}
