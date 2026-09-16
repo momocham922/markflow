@@ -536,7 +536,11 @@ export function formatTranscriptPage(
   offset: number,
   maxChars: number,
 ): string {
-  const { chunk, start, end, total } = sliceTranscript(t.text, offset, maxChars);
+  const { chunk, start, end, total } = sliceTranscript(
+    t.text,
+    offset,
+    maxChars,
+  );
   const meta: string[] = [
     `Title: ${t.title?.trim() || "(untitled)"}`,
     `Id: ${t.id}`,
@@ -569,8 +573,13 @@ const RESEARCH_TYPE_LABEL: Record<string, string> = {
 
 function researchCardBlock(n: number, c: McpResearchCard): string {
   const label = RESEARCH_TYPE_LABEL[c.type] || c.type || "research";
-  const status = c.integrated ? "woven into the document" : "not in the document";
-  const lines = [`### #${n} [${label}] ${c.query || "(no query)"}`, `(${status})`];
+  const status = c.integrated
+    ? "woven into the document"
+    : "not in the document";
+  const lines = [
+    `### #${n} [${label}] ${c.query || "(no query)"}`,
+    `(${status})`,
+  ];
   if (c.summary) lines.push(c.summary.trim());
   if (c.sources.length) {
     lines.push("Sources:");
@@ -596,9 +605,14 @@ export function formatResearch(
   sessions: McpResearchSession[],
   pick?: number[],
 ): string {
-  const numbered: Array<{ n: number; session: McpResearchSession; card: McpResearchCard }> = [];
+  const numbered: Array<{
+    n: number;
+    session: McpResearchSession;
+    card: McpResearchCard;
+  }> = [];
   for (const s of sessions)
-    for (const card of s.cards) numbered.push({ n: numbered.length + 1, session: s, card });
+    for (const card of s.cards)
+      numbered.push({ n: numbered.length + 1, session: s, card });
   const total = numbered.length;
   const head = `Title: ${doc.title?.trim() || "(untitled)"}\nId: ${doc.id}`;
   if (!total) return `${head}\n\nNo research cards for this document.`;
@@ -633,16 +647,21 @@ export function formatResearch(
     const notes: string[] = [];
     const left = rows.slice(shown.length).map((r) => r.n);
     if (left.length)
-      notes.push(`Not shown (output size limit) — request again: ${left.join(", ")}.`);
+      notes.push(
+        `Not shown (output size limit) — request again: ${left.join(", ")}.`,
+      );
     const missing = pick.filter((n) => n < 1 || n > total);
     if (missing.length)
-      notes.push(`No such card number(s): ${missing.join(", ")} (valid: 1–${total}).`);
+      notes.push(
+        `No such card number(s): ${missing.join(", ")} (valid: 1–${total}).`,
+      );
     const noteText = notes.length ? `\n\n---\n\n${notes.join("\n")}` : "";
     return `${head}\n${summary} — showing ${shown.length}\n\n${renderFull(shown)}${noteText}`;
   }
 
   const full = renderFull(numbered);
-  if (full.length <= MAX_RESEARCH_OUTPUT_CHARS) return `${head}\n${summary}\n\n${full}`;
+  if (full.length <= MAX_RESEARCH_OUTPUT_CHARS)
+    return `${head}\n${summary}\n\n${full}`;
 
   // Too much to show in one go: a compact index of every card.
   const index: string[] = [];
@@ -841,7 +860,10 @@ export async function callTool(
       let researchCards = 0;
       if (deps.getResearch) {
         const sessions = await deps.getResearch(id);
-        researchCards = (sessions || []).reduce((n, s) => n + s.cards.length, 0);
+        researchCards = (sessions || []).reduce(
+          (n, s) => n + s.cards.length,
+          0,
+        );
       }
       return textResult(formatDocFull(doc, { researchCards }));
     }
@@ -863,7 +885,10 @@ export async function callTool(
         );
       const maxChars = Math.max(
         MIN_TRANSCRIPT_CHARS,
-        Math.min(MAX_TRANSCRIPT_CHARS, intArg(args.max_chars, DEFAULT_TRANSCRIPT_CHARS)),
+        Math.min(
+          MAX_TRANSCRIPT_CHARS,
+          intArg(args.max_chars, DEFAULT_TRANSCRIPT_CHARS),
+        ),
       );
       return textResult(formatTranscriptPage(t, offset, maxChars));
     }
@@ -881,7 +906,9 @@ export async function callTool(
         pick = [
           ...new Set(
             args.cards
-              .filter((n): n is number => typeof n === "number" && Number.isFinite(n))
+              .filter(
+                (n): n is number => typeof n === "number" && Number.isFinite(n),
+              )
               .map((n) => Math.floor(n)),
           ),
         ];

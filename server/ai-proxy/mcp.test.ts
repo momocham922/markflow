@@ -742,7 +742,13 @@ function depsWithVoice(
     getDoc: async (id) => docs.find((d) => d.id === id) || null,
     getTranscript: async (id): Promise<McpTranscript | null> =>
       id === "v"
-        ? { id, title: "Kickoff", text: tx, recordedAt: 6000, audioStored: true }
+        ? {
+            id,
+            title: "Kickoff",
+            text: tx,
+            recordedAt: 6000,
+            audioStored: true,
+          }
         : docs.some((d) => d.id === id)
           ? { id, title: "x", text: "", audioStored: false }
           : null,
@@ -819,7 +825,9 @@ describe("formatResearch", () => {
     expect(out).toContain("### #1 [topic] hacomono とは");
     expect(out).toContain("(woven into the document)");
     expect(out).toContain("- hacomono — https://www.hacomono.jp/");
-    expect(out).toContain("### #2 [follow-up question (not a fact)] API連携の許可は誰が出す？");
+    expect(out).toContain(
+      "### #2 [follow-up question (not a fact)] API連携の許可は誰が出す？",
+    );
     expect(out).toContain("(not in the document)");
   });
   it("says so when there are no cards", () => {
@@ -830,7 +838,9 @@ describe("formatResearch", () => {
   it("switches to a numbered index when the full rendering is too large", () => {
     const out = formatResearch({ id: "v", title: "K" }, BIG);
     expect(out.length).toBeLessThan(MAX_RESEARCH_OUTPUT_CHARS);
-    expect(out).toContain("40 cards — too many to show in full, so this is an index.");
+    expect(out).toContain(
+      "40 cards — too many to show in full, so this is an index.",
+    );
     expect(out).toContain('get_research {"id": "v", "cards": [numbers]}');
     // every card is listed, numbered, without its summary
     expect(out).toContain("#1 [topic] q0");
@@ -847,7 +857,11 @@ describe("formatResearch", () => {
     expect(out).not.toContain("### #3 ");
   });
   it("reports unknown card numbers and cards cut by the size cap", () => {
-    const out = formatResearch({ id: "v", title: "K" }, HUGE_CARDS, [1, 2, 3, 99]);
+    const out = formatResearch(
+      { id: "v", title: "K" },
+      HUGE_CARDS,
+      [1, 2, 3, 99],
+    );
     expect(out).toContain("No such card number(s): 99 (valid: 1–3).");
     expect(out).toMatch(/Not shown \(output size limit\) — request again: \d/);
     expect(out.length).toBeLessThan(MAX_RESEARCH_OUTPUT_CHARS * 2 + 1000);
@@ -901,7 +915,9 @@ describe("callTool get_transcript", () => {
     expect(r.content[0].text).toContain('No document found with id "nope"');
   });
   it("requires an id and is refused when the deps don't provide it", async () => {
-    expect((await callTool("get_transcript", {}, depsWithVoice())).isError).toBe(true);
+    expect(
+      (await callTool("get_transcript", {}, depsWithVoice())).isError,
+    ).toBe(true);
     const r = await callTool("get_transcript", { id: "v" }, depsFor(DOCS));
     expect(r.isError).toBe(true);
     expect(r.content[0].text).toContain("not enabled");
@@ -915,17 +931,35 @@ describe("callTool get_research", () => {
     expect(r.content[0].text).toContain("### #1 [topic] hacomono とは");
   });
   it("passes picked card numbers through and validates them", async () => {
-    const r = await callTool("get_research", { id: "v", cards: [2] }, depsWithVoice());
+    const r = await callTool(
+      "get_research",
+      { id: "v", cards: [2] },
+      depsWithVoice(),
+    );
     expect(r.content[0].text).toContain("showing 1");
     expect(r.content[0].text).toContain("### #2 ");
     expect(r.content[0].text).not.toContain("### #1 ");
-    const bad = await callTool("get_research", { id: "v", cards: "2" }, depsWithVoice());
+    const bad = await callTool(
+      "get_research",
+      { id: "v", cards: "2" },
+      depsWithVoice(),
+    );
     expect(bad.isError).toBe(true);
-    const empty = await callTool("get_research", { id: "v", cards: [] }, depsWithVoice());
+    const empty = await callTool(
+      "get_research",
+      { id: "v", cards: [] },
+      depsWithVoice(),
+    );
     expect(empty.isError).toBe(true);
     const tooMany = await callTool(
       "get_research",
-      { id: "v", cards: Array.from({ length: MAX_RESEARCH_CARDS_PER_CALL + 1 }, (_, i) => i + 1) },
+      {
+        id: "v",
+        cards: Array.from(
+          { length: MAX_RESEARCH_CARDS_PER_CALL + 1 },
+          (_, i) => i + 1,
+        ),
+      },
       depsWithVoice(),
     );
     expect(tooMany.isError).toBe(true);
@@ -951,7 +985,9 @@ describe("get_document surfaces transcript / research availability", () => {
   it("adds transcript size and research count to the header only", async () => {
     const r = await callTool("get_document", { id: "v" }, depsWithVoice());
     const text = r.content[0].text;
-    expect(text).toContain("Transcript: 36,000 chars (read with get_transcript)");
+    expect(text).toContain(
+      "Transcript: 36,000 chars (read with get_transcript)",
+    );
     expect(text).toContain("Research: 2 cards (read with get_research)");
     // the transcript itself is NOT inlined
     expect(text).not.toContain("ネクストゲートの件です。");

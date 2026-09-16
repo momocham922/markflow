@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import Stripe from "stripe";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
 import { getAuth, type UserRecord } from "firebase-admin/auth";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import {
   PLAN_LIMITS,
   parseUidSet,
@@ -135,6 +135,31 @@ import {
   type BigQueryInsertRow,
 } from "./telemetry";
 import { stripThinkingBlocks } from "./thinking";
+import {
+  REFINE_JOBS,
+  REFINE_JOB_PARTS,
+  REFINE_HEARTBEAT_MS,
+  REFINE_RETENTION_MS,
+  REFINE_MAX_TOKENS,
+  parseRefineRequest,
+  decideJobAction,
+  newJobRecord,
+  toJobRecord,
+  toJobView,
+  pickPendingJob,
+  isValidJobId,
+  isAckAction,
+  splitUtf8,
+  partId,
+  buildRefinePrompt,
+  SseTextAccumulator,
+  encodeEvent,
+  type RefineChunk,
+  type RefineEvent,
+  type RefineJobRecord,
+  type RefinePromptInput,
+  type RefineStage,
+} from "./refine";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "markflow-app-2026";
@@ -1105,8 +1130,10 @@ const meteringStore: MeteringStore = {
 // Per-uid batch-transcribe in-flight lease: cap concurrent BatchRecognize jobs
 // at 1 so a fan-out of concurrent requests cannot launch dozens of paid
 // multi-minute STT jobs in parallel (see metering.ts decideBatchLease). MUST
-// exceed the Cloud Run request timeout (900s) so a legitimately long batch is
-// never reclaimed as "stale" while it is still running.
+// exceed the longest a transcription can hold it — runMeteredBatch polls each
+// chunk for ≤12 min (chunks in parallel) and releases the lease as soon as the
+// transcription ends, even when a Refine job keeps the request open afterwards
+// for structuring — so a legitimately long batch is never reclaimed as "stale".
 const BATCH_LEASE_STALE_MS = 20 * 60 * 1000;
 // Hard cap on chunks per batch-transcribe request. Each chunk launches its own
 // paid BatchRecognize job, so an unbounded chunk array is a parallel cost bomb;
@@ -2070,19 +2097,22 @@ type GuardResult =
     }
   | { ok: false };
 
+// A refused reservation: the HTTP status + JSON body the caller should surface.
+type QuotaBlock = { ok: false; status: number; body: Record<string, unknown> };
+
 /**
- * Atomically check + reserve `cost` units of `feature` for `uid`. On over-limit
- * writes a 429 and returns { ok:false } — the caller MUST return immediately.
- * Internal/unlimited plans and fail-open DB errors return { ok:true, charged:
- * false } (no Firestore write, so no refund is ever attempted for them).
+ * Atomically check + reserve `cost` units of `feature` for `uid` WITHOUT writing
+ * a response — for callers that report refusals in-band (the Refine job stream
+ * has already sent its 200 by the time it reserves the structuring call).
+ * Internal/unlimited plans return { ok:true, charged:false } (no Firestore write,
+ * so no refund is ever attempted for them).
  */
-async function guard(
+async function reserveQuota(
   req: http.IncomingMessage,
-  res: http.ServerResponse,
   uid: string,
   feature: Feature,
   cost = 1,
-): Promise<GuardResult> {
+): Promise<Extract<GuardResult, { ok: true }> | QuotaBlock> {
   const { plan, meterKey, seats } = await resolvePlan(req, uid);
   const ym = periodKey(new Date());
   const precheck = checkQuota(plan, feature, 0, cost, seats);
@@ -2103,17 +2133,17 @@ async function guard(
       seats,
     );
     if (result.blocked) {
-      res.writeHead(429, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
+      return {
+        ok: false,
+        status: 429,
+        body: {
           error: "quota_exceeded",
           feature,
           plan,
           limit: precheck.limit,
           used: result.used,
-        }),
-      );
-      return { ok: false };
+        },
+      };
     }
     return { ok: true, charged: true, uid, meterKey, plan, feature, cost, ym };
   } catch (err) {
@@ -2126,16 +2156,31 @@ async function guard(
     // retriable 503 with a stable code the client maps to a friendly message —
     // never a silent success and never a raw error string.
     console.error(`guard tx failed for ${uid}/${feature}:`, err);
-    res.writeHead(503, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        error: "metering_unavailable",
-        feature,
-        retryable: true,
-      }),
-    );
-    return { ok: false };
+    return {
+      ok: false,
+      status: 503,
+      body: { error: "metering_unavailable", feature, retryable: true },
+    };
   }
+}
+
+/**
+ * Atomically check + reserve `cost` units of `feature` for `uid`. On over-limit
+ * (or a metering outage) writes the refusal and returns { ok:false } — the
+ * caller MUST return immediately.
+ */
+async function guard(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  uid: string,
+  feature: Feature,
+  cost = 1,
+): Promise<GuardResult> {
+  const r = await reserveQuota(req, uid, feature, cost);
+  if (r.ok) return r;
+  res.writeHead(r.status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(r.body));
+  return { ok: false };
 }
 
 /**
@@ -2434,7 +2479,9 @@ function mcpFirestoreDocToMcp(
     tags: Array.isArray(data.tags) ? (data.tags as unknown[]).map(String) : [],
     docType: data.docType ? String(data.docType) : undefined,
     transcriptChars:
-      typeof data.voiceTranscript === "string" ? data.voiceTranscript.length : 0,
+      typeof data.voiceTranscript === "string"
+        ? data.voiceTranscript.length
+        : 0,
   };
 }
 
@@ -2488,7 +2535,8 @@ async function mcpDepsForUid(uid: string): Promise<McpDeps> {
       return {
         id,
         title: String(data.title || ""),
-        text: typeof data.voiceTranscript === "string" ? data.voiceTranscript : "",
+        text:
+          typeof data.voiceTranscript === "string" ? data.voiceTranscript : "",
         recordedAt: mcpToMs(data.voiceRecordedAt),
         audioStored:
           typeof data.voiceGcsUri === "string" && data.voiceGcsUri !== "",
@@ -2514,18 +2562,30 @@ async function mcpDepsForUid(uid: string): Promise<McpDeps> {
           startedAt: mcpToMs(s.startedAt) || 0,
           endedAt: mcpToMs(s.endedAt) || null,
           cards: cards
-            .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+            .filter(
+              (c): c is Record<string, unknown> => !!c && typeof c === "object",
+            )
             .map((c) => ({
               type: String(c.type || ""),
               query: String(c.query || ""),
               summary: String(c.summary || ""),
-              sources: (Array.isArray(c.sources) ? (c.sources as unknown[]) : [])
-                .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
-                .map((x) => ({ title: String(x.title || ""), url: String(x.url || "") }))
+              sources: (Array.isArray(c.sources)
+                ? (c.sources as unknown[])
+                : []
+              )
+                .filter(
+                  (x): x is Record<string, unknown> =>
+                    !!x && typeof x === "object",
+                )
+                .map((x) => ({
+                  title: String(x.title || ""),
+                  url: String(x.url || ""),
+                }))
                 .filter((x) => x.url),
               credibility: c.credibility ? String(c.credibility) : undefined,
               integrated: c.integrated === true,
-              timestamp: typeof c.timestamp === "number" ? c.timestamp : undefined,
+              timestamp:
+                typeof c.timestamp === "number" ? c.timestamp : undefined,
             })),
         };
       });
@@ -3779,6 +3839,958 @@ async function handleMcpRoutes(
   }
 }
 
+/** The caller's own Storage folder; audio outside it is never transcribed. */
+function audioPrefixFor(uid: string): string {
+  return `gs://markflow-app-2026.firebasestorage.app/audio/${uid}/`;
+}
+
+// Outcome of one metered BatchRecognize run (shared by /v1/voice/batch-transcribe
+// and Refine jobs). "blocked" = refused before any paid op (quota, metering
+// outage, or another batch already running for this uid) — nothing was charged.
+// "failed" = the STT itself failed; ops that already started stay charged (see
+// failedBatchChargeDelta). Unexpected exceptions propagate after the lease is
+// released and an uncommitted reserve is refunded.
+type BatchOutcome =
+  | { kind: "blocked"; status: number; body: Record<string, unknown> }
+  | { kind: "failed"; message: string }
+  | {
+      kind: "ok";
+      transcript: string;
+      taggedTranscript: string;
+      speakerCount: number;
+    };
+
+async function runMeteredBatch(
+  req: http.IncomingMessage,
+  uid: string,
+  chunks: RefineChunk[],
+  language: string,
+): Promise<BatchOutcome> {
+  const OVERLAP_SECS = 20; // must match the client-side split overlap
+  let g: Extract<GuardResult, { ok: true }> | null = null;
+  let committed = false;
+  let reserveMin = 0;
+  let leaseUid = "";
+  let leaseHeld = false;
+  let leaseToken = 0; // the heldAt generation we acquired (for a fenced release)
+  try {
+    // Pre-flight reserve from the client-supplied (untrusted) durations —
+    // negatives clamped, floored at 1. The authoritative charge is reconciled
+    // below from the server-measured transcript length, so the client cannot
+    // obtain free minutes by under-reporting duration.
+    reserveMin = clampBatchReserveMinutes(chunks);
+    const reserved = await reserveQuota(req, uid, "batchMin", reserveMin);
+    if (!reserved.ok)
+      return { kind: "blocked", status: reserved.status, body: reserved.body };
+    g = reserved;
+
+    // Per-uid in-flight lease: cap concurrent batch jobs at 1 so a fan-out of
+    // concurrent requests (each passing the floored-at-1 reserve) cannot launch
+    // dozens of paid multi-minute BatchRecognize jobs in parallel. Acquired
+    // AFTER the (cheap) reserve and BEFORE the (expensive) job launch. On a
+    // lock-infra error we fail OPEN (proceed without a lease) so a Firestore
+    // blip never breaks a single legitimate transcription; on genuine
+    // contention we return 429 and refund the reserve via `finally`.
+    leaseUid = uid;
+    leaseToken = Date.now();
+    let leaseContended = false;
+    try {
+      leaseHeld = await acquireBatchLease(
+        meteringStore,
+        serverValues,
+        uid,
+        leaseToken,
+        BATCH_LEASE_STALE_MS,
+      );
+      leaseContended = !leaseHeld;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[batch] lease acquire failed for ${uid}: ${msg}`);
+    }
+    if (leaseContended) {
+      return {
+        kind: "blocked",
+        status: 429,
+        body: {
+          error: "batch_in_progress",
+          message: "別の文字起こしが処理中です。完了後に再度お試しください。",
+        },
+      };
+    }
+
+    const multi = chunks.length > 1;
+
+    const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
+
+    // Per-chunk "op launched" flags. A chunk's paid BatchRecognize op is billed
+    // by Google the moment it is created (startRes.ok), so on a partial failure
+    // we charge for the ops that STARTED and refund only the rest (see the
+    // failure branch below and failedBatchChargeDelta).
+    const startedChunks: boolean[] = new Array(chunks.length).fill(false);
+
+    // Transcribe one file: start the op, poll to completion, surface per-file
+    // errors, and return its SpeechRecognitionResult[] (word-level speaker
+    // labels + timestamps). Throws on any failure.
+    const transcribeFile = async (
+      uri: string,
+      idx: number,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ): Promise<any[]> => {
+      const startToken = await getGcpAccessToken();
+      const startRes = await fetch(batchUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${startToken}`,
+        },
+        body: JSON.stringify({
+          config: {
+            model: STT_MODEL,
+            languageCodes: [language],
+            features: {
+              enableAutomaticPunctuation: true,
+              // REQUIRED for multi-chunk (>58min) recordings: the overlap dedup
+              // below filters words by parseOffset(w.startOffset). Per the STT v2
+              // spec, word startOffset/endOffset are ONLY populated when this flag
+              // is set — without it every word offset is absent (→ 0), so for
+              // chunk i>0 the leadCut filter (t >= 10) drops EVERY word and the
+              // entire chunk is silently lost (observed: a 102-min 2-chunk run
+              // transcribed only its first ~55min). measuredBatchMinutes also
+              // reads endOffset, so this fixes the batch billing under-count too.
+              enableWordTimeOffsets: true,
+              diarizationConfig: { minSpeakerCount: 1, maxSpeakerCount: 6 },
+            },
+            denoiserConfig: { denoiseAudio: true },
+            autoDecodingConfig: {},
+          },
+          files: [{ uri }],
+          recognitionOutputConfig: { inlineResponseConfig: {} },
+        }),
+      });
+      if (!startRes.ok) {
+        const t = await startRes.text();
+        throw new Error(
+          `BatchRecognize start failed (${startRes.status}): ${t}`,
+        );
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const op = (await startRes.json()) as any;
+      const opName: string = op.name;
+      // The op now exists on Google's side and is billed regardless of whether
+      // it later succeeds, errors, or times out — flag it so a partial failure
+      // charges for it instead of refunding it.
+      startedChunks[idx] = true;
+      const shortName = uri.split("/").pop();
+      console.log(`[batch] Operation started: ${opName} (${shortName})`);
+
+      // Parallel across chunks → total ≈ slowest chunk; keep each poll under
+      // the Cloud Run 900s request timeout.
+      const maxPollMs = 12 * 60 * 1000;
+      const pollInterval = 5000;
+      const t0 = Date.now();
+      let fails = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let result: any = null;
+      while (Date.now() - t0 < maxPollMs) {
+        await new Promise((r) => setTimeout(r, pollInterval));
+        const tok = await getGcpAccessToken();
+        const pollRes = await fetch(
+          `https://${STT_LOCATION}-speech.googleapis.com/v2/${opName}`,
+          { headers: { Authorization: `Bearer ${tok}` } },
+        );
+        if (!pollRes.ok) {
+          fails++;
+          const t = await pollRes.text();
+          console.error(
+            `[batch] Poll error (${fails}/5) ${shortName}: ${pollRes.status} | ${t}`,
+          );
+          if (fails >= 5)
+            throw new Error(`Poll circuit breaker for ${shortName}`);
+          continue;
+        }
+        fails = 0;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const status = (await pollRes.json()) as any;
+        if (status.done) {
+          result = status;
+          break;
+        }
+      }
+      if (!result) throw new Error(`BatchRecognize timed out (${shortName})`);
+      if (result.error)
+        throw new Error(`STT op error: ${JSON.stringify(result.error)}`);
+      const fileResults = result.response?.results || {};
+      const fileKey = Object.keys(fileResults)[0];
+      if (!fileKey) {
+        console.error(
+          `[batch] No file results for ${shortName}: ${JSON.stringify(
+            result.response || {},
+          ).slice(0, 1500)}`,
+        );
+        throw new Error("BatchRecognize returned no file results");
+      }
+      const fileError = fileResults[fileKey]?.error;
+      if (fileError) {
+        console.error(
+          `[batch] Per-file STT error ${shortName}: ${JSON.stringify(fileError)}`,
+        );
+        throw new Error(
+          `STT failed: ${fileError.message || JSON.stringify(fileError)}`,
+        );
+      }
+      return fileResults[fileKey]?.inlineResult?.transcript?.results || [];
+    };
+
+    // Run all chunks in parallel (total ≈ slowest chunk). allSettled (not all)
+    // so one chunk's failure doesn't erase the fact that the OTHER chunks' paid
+    // ops already launched — the failure branch below charges for every started
+    // op instead of refunding the whole batch.
+    const settled = await Promise.allSettled(
+      chunks.map((c, i) => transcribeFile(c.gcsUri, i)),
+    );
+    const firstReject = settled.find((s) => s.status === "rejected") as
+      PromiseRejectedResult | undefined;
+    if (firstReject) {
+      const msg =
+        firstReject.reason instanceof Error
+          ? firstReject.reason.message
+          : String(firstReject.reason);
+      console.error(`[batch] Transcription failed: ${msg}`);
+      // A batch that launched real BatchRecognize ops then failed must NOT
+      // refund the whole reserve — that would let a client loop "N valid + 1
+      // poisoned" chunks to run paid STT for free. Charge the ops that STARTED
+      // (Google billed them) and refund only the never-launched remainder. The
+      // delta is always ≤ 0 (see failedBatchChargeDelta), so this never
+      // over-charges; startedCount = 0 (a pre-flight start failure) is still a
+      // full refund. Setting committed=true stops `finally` refunding on top.
+      const startedCount = startedChunks.filter(Boolean).length;
+      if (g.charged) {
+        await adjustUsage(
+          g.meterKey,
+          "batchMin",
+          failedBatchChargeDelta(startedCount, reserveMin),
+          g.plan,
+          g.ym,
+        );
+      }
+      committed = true;
+      console.log(
+        `[batch] Partial failure: ${startedCount}/${chunks.length} op(s) started; charged ${Math.min(
+          startedCount,
+          reserveMin,
+        )}min of reserved ${reserveMin}min`,
+      );
+      return { kind: "failed", message: msg };
+    }
+    // All chunks fulfilled — collect their results in order.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const chunkResults: any[][] = settled.map(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (s) => (s as PromiseFulfilledResult<any[]>).value,
+    );
+
+    // Dedup the 20s overlap by word timestamp — split the overlap at its
+    // midpoint so each boundary word is emitted exactly once — then build a
+    // speaker-tagged transcript per chunk joined by "---" boundaries (labels
+    // are only consistent within a segment; Claude unifies across "---").
+    // The merge (incl. the enableWordTimeOffsets-absent fallback that prevents
+    // whole-chunk loss) lives in mergeBatchChunks() so it is unit-tested in
+    // gating.test.ts independently of this handler.
+    const { taggedSegments, plainSegments, speakerLabels } = mergeBatchChunks(
+      chunkResults,
+      chunks,
+      multi,
+      OVERLAP_SECS,
+    );
+    const allSpeakerLabels = new Set(speakerLabels);
+
+    // Partial-loss alarm: every chunk that returned any words should yield a
+    // non-empty segment. If a chunk produced text but was dropped by the
+    // overlap filter (e.g. absent offsets slipping past the guard above), it
+    // silently vanishes from the "---"-joined transcript with no gap marker,
+    // and the client only rejects a FULLY empty transcript — so Refine would
+    // replace the document with a plausible-looking but truncated result.
+    // Surface it loudly (no silent fallback). With enableWordTimeOffsets set
+    // this should never fire; it exists to catch regressions in the field.
+    const chunksWithText = chunkResults.filter((results) =>
+      results.some((r) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const alt = (r as any).alternatives?.[0];
+        return (
+          (alt?.transcript && alt.transcript.trim()) ||
+          (Array.isArray(alt?.words) && alt.words.length > 0)
+        );
+      }),
+    ).length;
+    if (plainSegments.length < chunksWithText) {
+      console.error(
+        `[batch] PARTIAL LOSS: ${chunksWithText - plainSegments.length}/${chunkResults.length} chunk(s) had audio/words but produced an empty merged segment — transcript is truncated. Check enableWordTimeOffsets / overlap dedup.`,
+      );
+    }
+
+    const transcript = plainSegments.join("\n");
+    const taggedTranscript = taggedSegments.join("\n---\n");
+    const speakerCount = allSpeakerLabels.size;
+
+    // Reconcile the reserve to the server-measured billable minutes (derived
+    // from the actual STT word/result offsets, not the client's claim). This
+    // is the authoritative charge — a client that under-reported duration now
+    // has its counter corrected upward so the next request is blocked.
+    const measuredMin = measuredBatchMinutes(
+      chunkResults,
+      OVERLAP_SECS,
+      chunks.map((c) => c.durationSec),
+    );
+    if (g.charged) {
+      await adjustUsage(
+        g.meterKey,
+        "batchMin",
+        reconcileBatchDelta(measuredMin, reserveMin),
+        g.plan,
+        g.ym,
+      );
+    }
+
+    console.log(
+      `[batch] Done: ${chunks.length} chunk(s), ${transcript.length} chars, ${speakerCount} speakers, reserved=${reserveMin}min measured=${measuredMin}min`,
+    );
+
+    committed = true;
+    return {
+      kind: "ok",
+      transcript,
+      taggedTranscript: taggedTranscript || transcript,
+      speakerCount,
+    };
+  } finally {
+    // Release the in-flight lease so the user's next batch can proceed. The
+    // transcription above is bounded (≤12 min polling per chunk, chunks in
+    // parallel), so a lease older than BATCH_LEASE_STALE_MS (20 min) can only
+    // belong to a process that died before reaching this line.
+    if (leaseHeld) {
+      await releaseBatchLease(meteringStore, leaseUid, leaseToken).catch((e) =>
+        console.error(`[batch] lease release failed for ${leaseUid}:`, e),
+      );
+    }
+    // Refund the reserve only on paths that left committed=false: an early
+    // return (lease contention — no op launched) or an exception (rare, e.g. a
+    // post-transcription processing bug). The partial-failure branch is NOT one
+    // of these — it already reconciled the charge to the ops that STARTED and
+    // set committed=true, so it is not refunded on top. Charging started ops
+    // there closes the old free-STT loop (which full-refunded every partial
+    // failure), while the per-uid lease keeps a retry loop serial.
+    await refundIfUncommitted(g, committed);
+  }
+}
+
+// =====================================================================
+// Refine jobs (server-side Refine: transcription + structuring in one request)
+// ---------------------------------------------------------------------
+// See refine.ts for the rationale and the pure logic. The POST streams NDJSON
+// progress events while it works; every intermediate result is written to
+// Firestore first, so a client that disconnects (backgrounded app, closed panel,
+// dropped network — none of which Cloud Run propagates over HTTP/1.1) can fetch
+// the finished job later, from any device. Both collections are server-only
+// (firestore.rules) and expire via a TTL policy on `expireAt`.
+// =====================================================================
+
+function refineJobRef(jobId: string) {
+  return getFirestore().collection(REFINE_JOBS).doc(jobId);
+}
+
+function refineExpireAt(now: number): Timestamp {
+  return Timestamp.fromMillis(now + REFINE_RETENTION_MS);
+}
+
+/** Store `text` as ordered parts (each well under Firestore's 1 MiB doc cap). */
+async function writeRefineParts(
+  jobId: string,
+  uid: string,
+  name: "input" | "transcript" | "output",
+  text: string,
+  now: number,
+): Promise<number> {
+  const parts = splitUtf8(text);
+  const col = getFirestore().collection(REFINE_JOB_PARTS);
+  for (let i = 0; i < parts.length; i++) {
+    await col.doc(partId(jobId, name, i)).set({
+      jobId,
+      uid,
+      name,
+      index: i,
+      text: parts[i],
+      expireAt: refineExpireAt(now),
+    });
+  }
+  return parts.length;
+}
+
+async function readRefineParts(
+  jobId: string,
+  name: "input" | "transcript" | "output",
+  count: number,
+): Promise<string> {
+  if (count <= 0) return "";
+  const col = getFirestore().collection(REFINE_JOB_PARTS);
+  const snaps = await getFirestore().getAll(
+    ...Array.from({ length: count }, (_, i) => col.doc(partId(jobId, name, i))),
+  );
+  if (snaps.some((sn) => !sn.exists))
+    throw new Error(`refine job ${jobId}: missing ${name} part`);
+  return snaps.map((sn) => String(sn.data()?.text ?? "")).join("");
+}
+
+// Outcome of the metered structuring call. Mirrors /v1/chat's billing: the
+// aiCall is kept only when the model actually produced output, refunded
+// otherwise. Unlike /v1/chat, a stream that dies before its stop reason is a
+// failure here (a Refine REPLACES the document, so a truncated-by-error answer
+// must never be delivered) — and since nothing is delivered, it is refunded.
+type StructureOutcome =
+  | { kind: "blocked"; status: number; body: Record<string, unknown> }
+  | { kind: "failed"; status: number; body: Record<string, unknown> }
+  | { kind: "ok"; text: string; stopReason: string };
+
+async function runMeteredStructure(
+  req: http.IncomingMessage,
+  uid: string,
+  system: string,
+  user: string,
+  onProgress: () => void,
+): Promise<StructureOutcome> {
+  let g: Extract<GuardResult, { ok: true }> | null = null;
+  let committed = false;
+  try {
+    const reserved = await reserveQuota(req, uid, "aiCalls", 1);
+    if (!reserved.ok)
+      return { kind: "blocked", status: reserved.status, body: reserved.body };
+    g = reserved;
+
+    const accessToken = await getGcpAccessToken();
+    const vertexRes = await fetchUpstreamWithRetry(() =>
+      fetch(getVertexAiUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          anthropic_version: "vertex-2023-10-16",
+          // opus-5's full streaming ceiling so long meetings never truncate
+          // (a cap, not a charge).
+          max_tokens: REFINE_MAX_TOKENS,
+          system,
+          messages: [{ role: "user", content: user }],
+          stream: true,
+        }),
+      }),
+    );
+    if (!vertexRes.ok) {
+      const errText = await vertexRes.text().catch(() => "");
+      console.error(
+        `[refine-job] vertex upstream failed: ${vertexRes.status} | ${errText.slice(0, 800)}`,
+      );
+      const retryable = TRANSIENT_UPSTREAM_STATUS.has(vertexRes.status);
+      return {
+        kind: "failed",
+        status: retryable ? 503 : 502,
+        body: { error: "ai_upstream_error", retryable },
+      };
+    }
+    const reader = vertexRes.body?.getReader();
+    if (!reader) {
+      return {
+        kind: "failed",
+        status: 502,
+        body: { error: "ai_upstream_error", retryable: true },
+      };
+    }
+    const decoder = new TextDecoder();
+    const acc = new SseTextAccumulator();
+    let scanBuf = "";
+    let producedOutput = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      acc.push(chunk);
+      if (!producedOutput) {
+        scanBuf += chunk;
+        if (sseProducedOutput(scanBuf)) producedOutput = true;
+        else if (scanBuf.length > 4096) scanBuf = scanBuf.slice(-1024);
+      }
+      onProgress();
+    }
+    acc.push(decoder.decode());
+    acc.end();
+
+    if (!acc.stopReason || acc.streamError) {
+      console.error(
+        `[refine-job] structuring stream ended early for ${uid}: stop=${acc.stopReason || "-"} error=${acc.streamError || "-"} chars=${acc.text.length}`,
+      );
+      return {
+        kind: "failed",
+        status: 503,
+        body: { error: "ai_incomplete_output", retryable: true },
+      };
+    }
+    if (!acc.text.trim() || !producedOutput) {
+      return {
+        kind: "failed",
+        status: 502,
+        body: { error: "ai_empty_output", retryable: true },
+      };
+    }
+    committed = true;
+    return { kind: "ok", text: acc.text.trim(), stopReason: acc.stopReason };
+  } finally {
+    await refundIfUncommitted(g, committed);
+  }
+}
+
+/**
+ * Run (or resume) a claimed job to completion, streaming progress to `res` while
+ * the client is still listening and persisting every result as it lands. Never
+ * throws: every failure is recorded on the job and reported as an error event.
+ */
+async function executeRefineJob(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  uid: string,
+  jobId: string,
+  job: RefineJobRecord,
+  runnerId: string,
+  from: "transcribe" | "structure",
+  freshInput: RefinePromptInput | null,
+): Promise<void> {
+  const ref = refineJobRef(jobId);
+  const t0 = Date.now();
+  let stage: RefineStage = from;
+  let clientGone = false;
+  const emit = (e: RefineEvent) => {
+    if (clientGone || res.writableEnded) return;
+    try {
+      res.write(encodeEvent(e));
+    } catch {
+      clientGone = true; // keep working — the result is persisted regardless
+    }
+  };
+  res.on("close", () => {
+    clientGone = true;
+  });
+
+  // Heartbeat: proves liveness to pollers (a job whose heartbeat stops is
+  // reported stale and can be resumed) and keeps idle proxies from cutting the
+  // stream during the long STT poll.
+  let lastBeat = 0;
+  const beat = async () => {
+    const now = Date.now();
+    if (now - lastBeat < REFINE_HEARTBEAT_MS / 2) return;
+    lastBeat = now;
+    await ref
+      .update({ heartbeatAt: now, updatedAt: now })
+      .catch((e) =>
+        console.error(
+          `[refine-job] ${jobId} heartbeat failed: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
+  };
+  const timer = setInterval(() => {
+    emit({ type: "ping" });
+    void beat();
+  }, REFINE_HEARTBEAT_MS);
+
+  // Final writes only land if this runner still owns the job (a resumed copy
+  // that took over a stale job must not be clobbered by the old one, or v.v.).
+  const writeIfOwner = async (
+    patch: Record<string, unknown>,
+  ): Promise<RefineJobRecord | null> =>
+    getFirestore().runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return null;
+      const cur = toJobRecord(snap.data() as Record<string, unknown>);
+      if (cur.runnerId !== runnerId) return null;
+      const now = Date.now();
+      tx.update(ref, { ...patch, updatedAt: now, heartbeatAt: now });
+      return toJobRecord({
+        ...cur,
+        ...patch,
+        updatedAt: now,
+        heartbeatAt: now,
+      });
+    });
+
+  const fail = async (
+    code: string,
+    status: number,
+    body: Record<string, unknown>,
+  ) => {
+    const error = { stage, code, status, body };
+    const rec = await writeIfOwner({ status: "error", error }).catch(
+      () => null,
+    );
+    console.error(
+      `[refine-job] ${jobId} failed at ${stage}: ${code} (${status}) after ${Math.round((Date.now() - t0) / 1000)}s`,
+    );
+    emit({
+      type: "error",
+      status,
+      body,
+      job: rec ? toJobView(jobId, rec, Date.now()) : null,
+    });
+  };
+
+  try {
+    let transcript = "";
+    let speakerCount = job.speakerCount;
+    if (from === "transcribe") {
+      emit({ type: "stage", stage: "transcribe" });
+      const out = await runMeteredBatch(req, uid, job.chunks, job.language);
+      if (out.kind === "blocked") {
+        await fail(String(out.body.error || "blocked"), out.status, out.body);
+        return;
+      }
+      if (out.kind === "failed") {
+        console.error(`[refine-job] ${jobId} STT failed: ${out.message}`);
+        await fail("stt_failed", 502, { error: "stt_failed" });
+        return;
+      }
+      transcript = out.taggedTranscript;
+      speakerCount = out.speakerCount;
+      if (!transcript.trim()) {
+        await fail("empty_transcript", 422, { error: "empty_transcript" });
+        return;
+      }
+      const now = Date.now();
+      const n = await writeRefineParts(
+        jobId,
+        uid,
+        "transcript",
+        transcript,
+        now,
+      );
+      const rec = await writeIfOwner({
+        stage: "structure",
+        transcriptParts: n,
+        transcriptChars: transcript.length,
+        speakerCount,
+        transcribedAt: now,
+      });
+      if (!rec) {
+        console.error(`[refine-job] ${jobId} lost ownership after STT`);
+        return;
+      }
+      console.log(
+        `[refine-job] ${jobId} transcribed: ${transcript.length} chars, ${speakerCount} speakers, ${Math.round((now - t0) / 1000)}s`,
+      );
+    } else {
+      transcript = await readRefineParts(
+        jobId,
+        "transcript",
+        job.transcriptParts,
+      );
+    }
+
+    stage = "structure";
+    emit({ type: "stage", stage: "structure" });
+    const input: RefinePromptInput =
+      freshInput ??
+      (JSON.parse(
+        await readRefineParts(jobId, "input", job.inputParts),
+      ) as RefinePromptInput);
+    const { system, user } = buildRefinePrompt(transcript, speakerCount, input);
+    const s = await runMeteredStructure(req, uid, system, user, () => {
+      void beat();
+    });
+    if (s.kind !== "ok") {
+      await fail(String(s.body.error || "ai_failed"), s.status, s.body);
+      return;
+    }
+    const now = Date.now();
+    const n = await writeRefineParts(jobId, uid, "output", s.text, now);
+    const rec = await writeIfOwner({
+      status: "done",
+      stage: "done",
+      outputParts: n,
+      outputChars: s.text.length,
+      stopReason: s.stopReason,
+      structuredAt: now,
+      error: null,
+    });
+    if (!rec) {
+      console.error(`[refine-job] ${jobId} lost ownership after structuring`);
+      return;
+    }
+    console.log(
+      `[refine-job] ${jobId} done: ${s.text.length} chars, stop=${s.stopReason}, total ${Math.round((now - t0) / 1000)}s, clientGone=${clientGone}`,
+    );
+    emit({
+      type: "done",
+      job: toJobView(jobId, rec, now, { output: s.text, transcript }),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[refine-job] ${jobId} crashed at ${stage}: ${message}`);
+    await fail("internal", 500, { error: "internal" });
+  } finally {
+    clearInterval(timer);
+    if (!res.writableEnded) res.end();
+  }
+}
+
+/** A finished job's view with its text attached (for GET / a repeated POST). */
+async function refineJobViewWithText(
+  jobId: string,
+  job: RefineJobRecord,
+): Promise<ReturnType<typeof toJobView>> {
+  const now = Date.now();
+  if (job.status !== "done") return toJobView(jobId, job, now);
+  const [output, transcript] = await Promise.all([
+    readRefineParts(jobId, "output", job.outputParts),
+    readRefineParts(jobId, "transcript", job.transcriptParts),
+  ]);
+  return toJobView(jobId, job, now, { output, transcript });
+}
+
+async function handleRefineJobGet(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+): Promise<void> {
+  try {
+    const uid = await verifyFirebaseToken(req.headers.authorization);
+    const m = url.pathname.match(/^\/v1\/voice\/refine-jobs\/([^/]+)$/);
+    if (m) {
+      const jobId = decodeURIComponent(m[1]);
+      if (!isValidJobId(jobId)) {
+        sendJsonError(res, 400, "invalid_job_id");
+        return;
+      }
+      const snap = await refineJobRef(jobId).get();
+      const job = snap.exists
+        ? toJobRecord(snap.data() as Record<string, unknown>)
+        : null;
+      if (!job || job.uid !== uid) {
+        sendJsonError(res, 404, "job_not_found");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ job: await refineJobViewWithText(jobId, job) }));
+      return;
+    }
+    // GET /v1/voice/refine-jobs?docId=… → the job to offer for this document.
+    const docId = url.searchParams.get("docId") || "";
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(docId)) {
+      sendJsonError(res, 400, "invalid_doc_id");
+      return;
+    }
+    // Two equality filters are served by Firestore's single-field indexes
+    // (no composite index); a user has a handful of jobs per document.
+    const q = await getFirestore()
+      .collection(REFINE_JOBS)
+      .where("uid", "==", uid)
+      .where("docId", "==", docId)
+      .limit(50)
+      .get();
+    const picked = pickPendingJob(
+      q.docs.map((d) => ({
+        id: d.id,
+        job: toJobRecord(d.data() as Record<string, unknown>),
+      })),
+      uid,
+      docId,
+      Date.now(),
+    );
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        job: picked ? await refineJobViewWithText(picked.id, picked.job) : null,
+      }),
+    );
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Internal server error";
+    console.error(`[refine-job] GET failed: ${message}`);
+    sendJsonError(
+      res,
+      isAuthErrorMessage(message) ? 401 : 500,
+      isAuthErrorMessage(message) ? message : "internal",
+    );
+  }
+}
+
+async function handleRefineJobPost(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  rawBody: string,
+): Promise<void> {
+  const uid = await verifyFirebaseToken(req.headers.authorization, {
+    checkRevoked: true,
+  });
+  let body: unknown;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    sendJsonError(res, 400, "invalid_json");
+    return;
+  }
+  const parsed = parseRefineRequest(
+    body,
+    audioPrefixFor(uid),
+    MAX_BATCH_CHUNKS,
+  );
+  if (parsed.kind === "invalid") {
+    res.writeHead(parsed.status, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: parsed.error,
+        ...(parsed.message ? { message: parsed.message } : {}),
+      }),
+    );
+    return;
+  }
+  const jobId = parsed.kind === "create" ? parsed.req.jobId : parsed.jobId;
+  const ref = refineJobRef(jobId);
+  const runnerId = randomUUID();
+  const isCreate = parsed.kind === "create";
+
+  // Persist the prompt input BEFORE the job exists, so a job record never
+  // points at missing input (a resume on another instance re-reads it).
+  let inputParts = 0;
+  if (isCreate) {
+    const pre = await ref.get();
+    if (!pre.exists) {
+      inputParts = await writeRefineParts(
+        jobId,
+        uid,
+        "input",
+        JSON.stringify(parsed.req.input),
+        Date.now(),
+      );
+    }
+  }
+
+  const now = Date.now();
+  const claim = await getFirestore().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const existing = snap.exists
+      ? toJobRecord(snap.data() as Record<string, unknown>)
+      : null;
+    const action = decideJobAction(existing, uid, isCreate, now);
+    if (action.kind === "create" && parsed.kind === "create") {
+      if (inputParts === 0) {
+        // Raced with another create of the same id — let the loser poll.
+        return { action: { kind: "busy" as const }, job: existing };
+      }
+      const rec = newJobRecord(uid, parsed.req, runnerId, inputParts, now);
+      tx.create(ref, { ...rec, expireAt: refineExpireAt(now) });
+      return { action, job: rec };
+    }
+    if (action.kind === "run" && existing) {
+      const patch = {
+        status: "running",
+        stage: action.from,
+        runnerId,
+        heartbeatAt: now,
+        updatedAt: now,
+        attempts: existing.attempts + 1,
+        error: null,
+      };
+      tx.update(ref, patch);
+      return { action, job: { ...existing, ...patch } as RefineJobRecord };
+    }
+    return { action, job: existing };
+  });
+
+  const { action, job } = claim;
+  if (action.kind === "not_found" || !job) {
+    sendJsonError(res, 404, "job_not_found");
+    return;
+  }
+  if (action.kind === "busy" || action.kind === "exhausted") {
+    res.writeHead(409, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: action.kind === "busy" ? "job_running" : "job_exhausted",
+        job: toJobView(jobId, job, Date.now()),
+      }),
+    );
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+  });
+  if (action.kind === "return_done") {
+    const view = await refineJobViewWithText(jobId, job);
+    res.write(
+      encodeEvent({ type: "accepted", job: toJobView(jobId, job, Date.now()) }),
+    );
+    res.end(encodeEvent({ type: "done", job: view }));
+    return;
+  }
+  res.write(encodeEvent({ type: "accepted", job: toJobView(jobId, job, now) }));
+  console.log(
+    `[refine-job] ${jobId} ${action.kind === "create" ? "created" : "resumed"} for ${uid}: from=${action.kind === "create" ? "transcribe" : action.from} chunks=${job.chunks.length} attempt=${job.attempts}`,
+  );
+  await executeRefineJob(
+    req,
+    res,
+    uid,
+    jobId,
+    job,
+    runnerId,
+    action.kind === "create" ? "transcribe" : action.from,
+    // A resumed job always rebuilds its prompt from the input saved at creation,
+    // so the result matches the job's baseContentHash even if a retry sent newer
+    // document text.
+    action.kind === "create" && parsed.kind === "create"
+      ? parsed.req.input
+      : null,
+  );
+}
+
+async function handleRefineJobAck(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  jobId: string,
+  rawBody: string,
+): Promise<void> {
+  const uid = await verifyFirebaseToken(req.headers.authorization);
+  if (!isValidJobId(jobId)) {
+    sendJsonError(res, 400, "invalid_job_id");
+    return;
+  }
+  let action: unknown;
+  try {
+    action = (JSON.parse(rawBody) as { action?: unknown }).action;
+  } catch {
+    action = undefined;
+  }
+  if (!isAckAction(action)) {
+    sendJsonError(res, 400, "invalid_action");
+    return;
+  }
+  const ref = refineJobRef(jobId);
+  const ok = await getFirestore().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return false;
+    const job = toJobRecord(snap.data() as Record<string, unknown>);
+    if (job.uid !== uid) return false;
+    if (job.ackAt === null) {
+      tx.update(ref, { ackAt: Date.now(), ackAction: action });
+    }
+    return true;
+  });
+  if (!ok) {
+    sendJsonError(res, 404, "job_not_found");
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ ok: true }));
+}
+
 const server = http.createServer(async (req, res) => {
   // CORS headers. GET/DELETE + the MCP client headers (Mcp-Session-Id,
   // MCP-Protocol-Version, Last-Event-Id) are allowed so a browser-based MCP
@@ -4037,6 +5049,18 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ received: true }));
     });
     return;
+  }
+
+  // --- Refine jobs: status + pending lookup (GET) ---
+  if (req.method === "GET" && req.url?.startsWith("/v1/voice/refine-jobs")) {
+    const url = new URL(req.url, "http://localhost");
+    if (
+      url.pathname === "/v1/voice/refine-jobs" ||
+      /^\/v1\/voice\/refine-jobs\/[^/]+$/.test(url.pathname)
+    ) {
+      await handleRefineJobGet(req, res, url);
+      return;
+    }
   }
 
   if (req.method !== "POST") {
@@ -6150,14 +7174,54 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- /v1/voice/refine-jobs (server-side Refine) ---
+  if (req.url === "/v1/voice/refine-jobs") {
+    try {
+      await handleRefineJobPost(req, res, await readBody());
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Internal server error";
+      console.error(`[refine-job] POST failed: ${message}`);
+      if (res.headersSent) {
+        if (!res.writableEnded) res.end();
+      } else {
+        sendJsonError(
+          res,
+          isAuthErrorMessage(message) ? 401 : 500,
+          isAuthErrorMessage(message) ? message : "internal",
+        );
+      }
+    }
+    return;
+  }
+  {
+    const ackMatch = req.url?.match(
+      /^\/v1\/voice\/refine-jobs\/([^/?]+)\/ack$/,
+    );
+    if (ackMatch) {
+      try {
+        await handleRefineJobAck(
+          req,
+          res,
+          decodeURIComponent(ackMatch[1]),
+          await readBody(),
+        );
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Internal server error";
+        console.error(`[refine-job] ack failed: ${message}`);
+        sendJsonError(
+          res,
+          isAuthErrorMessage(message) ? 401 : 500,
+          isAuthErrorMessage(message) ? message : "internal",
+        );
+      }
+      return;
+    }
+  }
+
   // --- /v1/voice/batch-transcribe ---
   if (req.url === "/v1/voice/batch-transcribe") {
-    let g: GuardResult | null = null;
-    let committed = false;
-    let reserveMin = 0;
-    let leaseUid = "";
-    let leaseHeld = false;
-    let leaseToken = 0; // the heldAt generation we acquired (for a fenced release)
     try {
       const uid = await verifyFirebaseToken(req.headers.authorization, {
         checkRevoked: true,
@@ -6165,16 +7229,10 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody();
       const parsed = JSON.parse(body);
       const language: string = parsed.language || "ja-JP";
-      const OVERLAP_SECS = 20; // must match the client-side split overlap
 
-      // Accept either `chunks` (ordered ≤55min parts of a long recording, each
+      // Accept either `chunks` (ordered ≤18min parts of a long recording, each
       // with 20s overlap) or a single `gcsUri` (short recording / back-compat).
-      type BatchChunk = {
-        gcsUri: string;
-        startSec: number;
-        durationSec: number;
-      };
-      let chunks: BatchChunk[] = [];
+      let chunks: RefineChunk[] = [];
       if (Array.isArray(parsed.chunks) && parsed.chunks.length > 0) {
         chunks = parsed.chunks.map(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -6196,17 +7254,16 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const expectedPrefix = `gs://markflow-app-2026.firebasestorage.app/audio/${uid}/`;
-      if (chunks.some((c) => !c.gcsUri.startsWith(expectedPrefix))) {
+      if (chunks.some((c) => !c.gcsUri.startsWith(audioPrefixFor(uid)))) {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Access denied: invalid audio path" }));
         return;
       }
 
       // Cap the chunk fan-out. Each chunk launches its own paid BatchRecognize
-      // job in parallel (Promise.all below), so an oversized `chunks` array is a
-      // cost bomb independent of the quota reserve. The client never produces
-      // more than ~a few dozen chunks (≤55min each); anything larger is abuse.
+      // job in parallel, so an oversized `chunks` array is a cost bomb
+      // independent of the quota reserve. The client never produces more than
+      // ~a few dozen chunks; anything larger is abuse.
       if (chunks.length > MAX_BATCH_CHUNKS) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(
@@ -6219,294 +7276,23 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Pre-flight reserve from the client-supplied (untrusted) durations —
-      // negatives clamped, floored at 1. The authoritative charge is reconciled
-      // below from the server-measured transcript length, so the client cannot
-      // obtain free minutes by under-reporting duration.
-      reserveMin = clampBatchReserveMinutes(chunks);
-      g = await guard(req, res, uid, "batchMin", reserveMin);
-      if (!g.ok) return;
-
-      // Per-uid in-flight lease: cap concurrent batch jobs at 1 so a fan-out of
-      // concurrent requests (each passing the floored-at-1 reserve) cannot launch
-      // dozens of paid multi-minute BatchRecognize jobs in parallel. Acquired
-      // AFTER the (cheap) reserve and BEFORE the (expensive) job launch. On a
-      // lock-infra error we fail OPEN (proceed without a lease) so a Firestore
-      // blip never breaks a single legitimate transcription; on genuine
-      // contention we return 429 and refund the reserve via `finally`.
-      leaseUid = uid;
-      leaseToken = Date.now();
-      let leaseContended = false;
-      try {
-        leaseHeld = await acquireBatchLease(
-          meteringStore,
-          serverValues,
-          uid,
-          leaseToken,
-          BATCH_LEASE_STALE_MS,
-        );
-        leaseContended = !leaseHeld;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`[batch] lease acquire failed for ${uid}: ${msg}`);
-      }
-      if (leaseContended) {
-        res.writeHead(429, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            error: "batch_in_progress",
-            message: "別の文字起こしが処理中です。完了後に再度お試しください。",
-          }),
-        );
+      const out = await runMeteredBatch(req, uid, chunks, language);
+      if (out.kind === "blocked") {
+        res.writeHead(out.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(out.body));
         return;
       }
-
-      const multi = chunks.length > 1;
-
-      const batchUrl = `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:batchRecognize`;
-
-      // Per-chunk "op launched" flags. A chunk's paid BatchRecognize op is billed
-      // by Google the moment it is created (startRes.ok), so on a partial failure
-      // we charge for the ops that STARTED and refund only the rest (see the
-      // failure branch below and failedBatchChargeDelta).
-      const startedChunks: boolean[] = new Array(chunks.length).fill(false);
-
-      // Transcribe one file: start the op, poll to completion, surface per-file
-      // errors, and return its SpeechRecognitionResult[] (word-level speaker
-      // labels + timestamps). Throws on any failure.
-      const transcribeFile = async (
-        uri: string,
-        idx: number,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ): Promise<any[]> => {
-        const startToken = await getGcpAccessToken();
-        const startRes = await fetch(batchUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${startToken}`,
-          },
-          body: JSON.stringify({
-            config: {
-              model: STT_MODEL,
-              languageCodes: [language],
-              features: {
-                enableAutomaticPunctuation: true,
-                // REQUIRED for multi-chunk (>58min) recordings: the overlap dedup
-                // below filters words by parseOffset(w.startOffset). Per the STT v2
-                // spec, word startOffset/endOffset are ONLY populated when this flag
-                // is set — without it every word offset is absent (→ 0), so for
-                // chunk i>0 the leadCut filter (t >= 10) drops EVERY word and the
-                // entire chunk is silently lost (observed: a 102-min 2-chunk run
-                // transcribed only its first ~55min). measuredBatchMinutes also
-                // reads endOffset, so this fixes the batch billing under-count too.
-                enableWordTimeOffsets: true,
-                diarizationConfig: { minSpeakerCount: 1, maxSpeakerCount: 6 },
-              },
-              denoiserConfig: { denoiseAudio: true },
-              autoDecodingConfig: {},
-            },
-            files: [{ uri }],
-            recognitionOutputConfig: { inlineResponseConfig: {} },
-          }),
-        });
-        if (!startRes.ok) {
-          const t = await startRes.text();
-          throw new Error(
-            `BatchRecognize start failed (${startRes.status}): ${t}`,
-          );
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const op = (await startRes.json()) as any;
-        const opName: string = op.name;
-        // The op now exists on Google's side and is billed regardless of whether
-        // it later succeeds, errors, or times out — flag it so a partial failure
-        // charges for it instead of refunding it.
-        startedChunks[idx] = true;
-        const shortName = uri.split("/").pop();
-        console.log(`[batch] Operation started: ${opName} (${shortName})`);
-
-        // Parallel across chunks → total ≈ slowest chunk; keep each poll under
-        // the Cloud Run 900s request timeout.
-        const maxPollMs = 12 * 60 * 1000;
-        const pollInterval = 5000;
-        const t0 = Date.now();
-        let fails = 0;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let result: any = null;
-        while (Date.now() - t0 < maxPollMs) {
-          await new Promise((r) => setTimeout(r, pollInterval));
-          const tok = await getGcpAccessToken();
-          const pollRes = await fetch(
-            `https://${STT_LOCATION}-speech.googleapis.com/v2/${opName}`,
-            { headers: { Authorization: `Bearer ${tok}` } },
-          );
-          if (!pollRes.ok) {
-            fails++;
-            const t = await pollRes.text();
-            console.error(
-              `[batch] Poll error (${fails}/5) ${shortName}: ${pollRes.status} | ${t}`,
-            );
-            if (fails >= 5)
-              throw new Error(`Poll circuit breaker for ${shortName}`);
-            continue;
-          }
-          fails = 0;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const status = (await pollRes.json()) as any;
-          if (status.done) {
-            result = status;
-            break;
-          }
-        }
-        if (!result) throw new Error(`BatchRecognize timed out (${shortName})`);
-        if (result.error)
-          throw new Error(`STT op error: ${JSON.stringify(result.error)}`);
-        const fileResults = result.response?.results || {};
-        const fileKey = Object.keys(fileResults)[0];
-        if (!fileKey) {
-          console.error(
-            `[batch] No file results for ${shortName}: ${JSON.stringify(
-              result.response || {},
-            ).slice(0, 1500)}`,
-          );
-          throw new Error("BatchRecognize returned no file results");
-        }
-        const fileError = fileResults[fileKey]?.error;
-        if (fileError) {
-          console.error(
-            `[batch] Per-file STT error ${shortName}: ${JSON.stringify(fileError)}`,
-          );
-          throw new Error(
-            `STT failed: ${fileError.message || JSON.stringify(fileError)}`,
-          );
-        }
-        return fileResults[fileKey]?.inlineResult?.transcript?.results || [];
-      };
-
-      // Run all chunks in parallel (total ≈ slowest chunk). allSettled (not all)
-      // so one chunk's failure doesn't erase the fact that the OTHER chunks' paid
-      // ops already launched — the failure branch below charges for every started
-      // op instead of refunding the whole batch.
-      const settled = await Promise.allSettled(
-        chunks.map((c, i) => transcribeFile(c.gcsUri, i)),
-      );
-      const firstReject = settled.find((s) => s.status === "rejected") as
-        PromiseRejectedResult | undefined;
-      if (firstReject) {
-        const msg =
-          firstReject.reason instanceof Error
-            ? firstReject.reason.message
-            : String(firstReject.reason);
-        console.error(`[batch] Transcription failed: ${msg}`);
-        // A batch that launched real BatchRecognize ops then failed must NOT
-        // refund the whole reserve — that would let a client loop "N valid + 1
-        // poisoned" chunks to run paid STT for free. Charge the ops that STARTED
-        // (Google billed them) and refund only the never-launched remainder. The
-        // delta is always ≤ 0 (see failedBatchChargeDelta), so this never
-        // over-charges; startedCount = 0 (a pre-flight start failure) is still a
-        // full refund. Setting committed=true stops `finally` refunding on top.
-        const startedCount = startedChunks.filter(Boolean).length;
-        if (g.ok && g.charged) {
-          await adjustUsage(
-            g.meterKey,
-            "batchMin",
-            failedBatchChargeDelta(startedCount, reserveMin),
-            g.plan,
-            g.ym,
-          );
-        }
-        committed = true;
-        console.log(
-          `[batch] Partial failure: ${startedCount}/${chunks.length} op(s) started; charged ${Math.min(
-            startedCount,
-            reserveMin,
-          )}min of reserved ${reserveMin}min`,
-        );
+      if (out.kind === "failed") {
         res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: msg }));
+        res.end(JSON.stringify({ error: out.message }));
         return;
       }
-      // All chunks fulfilled — collect their results in order.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const chunkResults: any[][] = settled.map(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (s) => (s as PromiseFulfilledResult<any[]>).value,
-      );
-
-      // Dedup the 20s overlap by word timestamp — split the overlap at its
-      // midpoint so each boundary word is emitted exactly once — then build a
-      // speaker-tagged transcript per chunk joined by "---" boundaries (labels
-      // are only consistent within a segment; Claude unifies across "---").
-      // The merge (incl. the enableWordTimeOffsets-absent fallback that prevents
-      // whole-chunk loss) lives in mergeBatchChunks() so it is unit-tested in
-      // gating.test.ts independently of this handler.
-      const { taggedSegments, plainSegments, speakerLabels } = mergeBatchChunks(
-        chunkResults,
-        chunks,
-        multi,
-        OVERLAP_SECS,
-      );
-      const allSpeakerLabels = new Set(speakerLabels);
-
-      // Partial-loss alarm: every chunk that returned any words should yield a
-      // non-empty segment. If a chunk produced text but was dropped by the
-      // overlap filter (e.g. absent offsets slipping past the guard above), it
-      // silently vanishes from the "---"-joined transcript with no gap marker,
-      // and the client only rejects a FULLY empty transcript — so Refine would
-      // replace the document with a plausible-looking but truncated result.
-      // Surface it loudly (no silent fallback). With enableWordTimeOffsets set
-      // this should never fire; it exists to catch regressions in the field.
-      const chunksWithText = chunkResults.filter((results) =>
-        results.some((r) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const alt = (r as any).alternatives?.[0];
-          return (
-            (alt?.transcript && alt.transcript.trim()) ||
-            (Array.isArray(alt?.words) && alt.words.length > 0)
-          );
-        }),
-      ).length;
-      if (plainSegments.length < chunksWithText) {
-        console.error(
-          `[batch] PARTIAL LOSS: ${chunksWithText - plainSegments.length}/${chunkResults.length} chunk(s) had audio/words but produced an empty merged segment — transcript is truncated. Check enableWordTimeOffsets / overlap dedup.`,
-        );
-      }
-
-      const transcript = plainSegments.join("\n");
-      const taggedTranscript = taggedSegments.join("\n---\n");
-      const speakerCount = allSpeakerLabels.size;
-
-      // Reconcile the reserve to the server-measured billable minutes (derived
-      // from the actual STT word/result offsets, not the client's claim). This
-      // is the authoritative charge — a client that under-reported duration now
-      // has its counter corrected upward so the next request is blocked.
-      const measuredMin = measuredBatchMinutes(
-        chunkResults,
-        OVERLAP_SECS,
-        chunks.map((c) => c.durationSec),
-      );
-      if (g.ok && g.charged) {
-        await adjustUsage(
-          g.meterKey,
-          "batchMin",
-          reconcileBatchDelta(measuredMin, reserveMin),
-          g.plan,
-          g.ym,
-        );
-      }
-
-      console.log(
-        `[batch] Done: ${chunks.length} chunk(s), ${transcript.length} chars, ${speakerCount} speakers, reserved=${reserveMin}min measured=${measuredMin}min`,
-      );
-
-      committed = true;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
-          transcript,
-          taggedTranscript: taggedTranscript || transcript,
-          speakerCount,
+          transcript: out.transcript,
+          taggedTranscript: out.taggedTranscript,
+          speakerCount: out.speakerCount,
         }),
       );
     } catch (err) {
@@ -6514,24 +7300,6 @@ const server = http.createServer(async (req, res) => {
         err instanceof Error ? err.message : "Internal server error";
       console.error(`[batch] Error: ${message}`);
       sendJsonError(res, isAuthErrorMessage(message) ? 401 : 500, message);
-    } finally {
-      // Release the in-flight lease so the user's next batch can proceed. If the
-      // Cloud Run request timeout (900s) kills the process before this runs, the
-      // lease is reclaimed as stale after BATCH_LEASE_STALE_MS (20min > 900s).
-      if (leaseHeld) {
-        await releaseBatchLease(meteringStore, leaseUid, leaseToken).catch(
-          (e) =>
-            console.error(`[batch] lease release failed for ${leaseUid}:`, e),
-        );
-      }
-      // Refund the reserve only on paths that left committed=false: an early
-      // 429/return (no op launched) or an exception caught above (rare, e.g. a
-      // post-transcription processing bug). The partial-failure branch is NOT one
-      // of these — it already reconciled the charge to the ops that STARTED and
-      // set committed=true, so it is not refunded on top. Charging started ops
-      // there closes the old free-STT loop (which full-refunded every partial
-      // failure), while the per-uid lease keeps a retry loop serial.
-      await refundIfUncommitted(g, committed);
     }
     return;
   }

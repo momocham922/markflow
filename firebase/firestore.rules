@@ -364,5 +364,17 @@ service cloud.firestore {
     match /aiRequests/{requestHash} {
       allow read, write: if false;
     }
+
+    // Server-side Refine jobs (refine_jobs/{jobId}) and their text parts
+    // (refine_job_parts/{jobId}_{name}_{i}: prompt input, transcript, output):
+    // written and read ONLY by the ai-proxy via the Admin SDK. Clients reach
+    // them through the authenticated /v1/voice/refine-jobs API, which enforces
+    // job ownership. Both expire via a TTL policy on `expireAt`.
+    match /refine_jobs/{jobId} {
+      allow read, write: if false;
+    }
+    match /refine_job_parts/{partId} {
+      allow read, write: if false;
+    }
   }
 }
