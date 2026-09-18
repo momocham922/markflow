@@ -14,13 +14,14 @@ COPY feedback.ts feedback.ts
 COPY telemetry.ts telemetry.ts
 COPY thinking.ts thinking.ts
 COPY refine.ts refine.ts
+COPY datetime.ts datetime.ts
 COPY mcp.ts mcp.ts
 COPY mcp-oauth.ts mcp-oauth.ts
 COPY mcp-assets.ts mcp-assets.ts
 
 # Transpile TypeScript to JavaScript at build time (esbuild bundles the local
 # ./gating, ./metering, ./billing, ./iap, ./apple-root-certs, ./feedback,
-# ./telemetry, ./refine, ./mcp, ./mcp-oauth, ./mcp-assets imports into server.js; firebase-admin, the Google libs, the Stripe SDK, the Apple App Store
+# ./telemetry, ./refine, ./datetime, ./mcp, ./mcp-oauth, ./mcp-assets imports into server.js; firebase-admin, the Google libs, the Stripe SDK, the Apple App Store
 # Server library, and google-auth-library are resolved from node_modules at
 # runtime — their top-level requires run at boot even while IAP is DARK).
 RUN npx -y esbuild index.ts --bundle --platform=node --target=node20 --outfile=server.js \
