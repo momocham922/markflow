@@ -135,6 +135,7 @@ import {
   type BigQueryInsertRow,
 } from "./telemetry";
 import { stripThinkingBlocks } from "./thinking";
+import { currentDateBlock } from "./datetime";
 import {
   REFINE_JOBS,
   REFINE_JOB_PARTS,
@@ -7475,6 +7476,9 @@ const server = http.createServer(async (req, res) => {
       const accessToken = await getGcpAccessToken();
 
       const systemPrompt = `あなたは会議のシニアリサーチディレクターです。
+
+${currentDateBlock()}
+
 音声認識テキストを深く分析し、会議参加者に真に有益な調査を設計してください。
 
 ## あなたの役割
@@ -7716,6 +7720,8 @@ questions は掘り下げ価値がある時のみ。無ければ "questions": { 
       const systemPrompt = researchAngle
         ? `会議のリアルタイムリサーチアシスタント。ディレクターのブリーフに基づき、正確で具体的な情報を提供する。
 
+${currentDateBlock()}
+
 ## 調査の焦点
 ${researchAngle}
 
@@ -7728,7 +7734,9 @@ ${claim ? `\n## 検証対象の発言\n「${claim}」` : ""}
 - 「〜と言われている」「〜の見方がある」等の曖昧表現禁止。断定と出典で書く
 - 不明な情報は「確認不能」と明記。推測で補完しない
 - コンパクトに。会議中にチラ見して即座に使える分量（最大8行）`
-        : `会議中にチラ見するカンペを生成する。数値・固有名詞・日付を含め、曖昧表現は禁止。最大8行。`;
+        : `会議中にチラ見するカンペを生成する。数値・固有名詞・日付を含め、曖昧表現は禁止。最大8行。
+
+${currentDateBlock()}`;
 
       const userPrompt = query;
 

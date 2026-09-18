@@ -19,6 +19,7 @@
 // =====================================================================
 
 import { createHash } from "node:crypto";
+import { currentDateBlock } from "./datetime";
 
 export const REFINE_JOBS = "refine_jobs";
 export const REFINE_JOB_PARTS = "refine_job_parts";
@@ -576,6 +577,10 @@ export function buildRefinePrompt(
       : "";
 
   const system =
+    // The model has no clock: without today's date it reads "来年" / "翌月" /
+    // "次月" against its training year and can stamp the wrong year on a
+    // schedule. See datetime.ts.
+    `${currentDateBlock()}\n\n` +
     "You are a document assistant performing a FINAL REFINEMENT. " +
     "You will receive a BATCH-DIARIZED TRANSCRIPT processed from the complete recording session. It may contain '---' markers separating processing segments of a long recording; speaker labels are ONLY consistent WITHIN a segment (the same speaker may have a different number across '---') — use speech content to identify and unify the same speaker across segments, " +
     (existingDoc
