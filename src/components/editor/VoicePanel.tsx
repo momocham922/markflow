@@ -787,23 +787,27 @@ export function VoicePanel({
       const existingDoc = existingRaw.trim();
       const { useResearchStore: getResearchStore } =
         await import("@/stores/research-store");
-      // Weave research when the global toggle is on OR specific cards were
-      // queued for the next run ("組み込む").
-      const includeAllRefine = getResearchStore.getState().includeInStructure;
-      const refineIncludedCards = getResearchStore
+      // Refine gets EVERY card that has a summary — unlike auto-structuring it
+      // is not gated on the include toggle or on `integrated`.
+      //
+      // Refine rewrites the whole document from the diarized transcript, so
+      // whatever Structure wove in is thrown away: a card filtered out here
+      // because it was already `integrated` simply vanishes from the result.
+      // And the toggle exists to keep research out of the *live* structuring
+      // during a recording, which has nothing to do with the final accuracy
+      // pass. Measured 2026-09-18: all five real jobs ran with zero cards while
+      // their documents held up to 54, so the research never reached Refine at
+      // all. The server caps the list (MAX_RESEARCH_CARDS/MAX_QUESTION_CARDS).
+      const refineCards = getResearchStore
         .getState()
-        .cards.filter(
-          (c) =>
-            !c.integrated &&
-            c.summary &&
-            (includeAllRefine || c.queuedForStructure),
-        );
-      const refineResearchCards = refineIncludedCards.filter(
+        .cards.filter((c) => c.summary.trim());
+      const refineResearchCards = refineCards.filter(
         (c) => c.type !== "question",
       );
-      const refineQuestionCards = refineIncludedCards.filter(
+      const refineQuestionCards = refineCards.filter(
         (c) => c.type === "question",
       );
+      const refineIncludedCards = refineCards;
       const body: CreateRefineJobBody = {
         jobId: newRefineJobId(),
         docId,

@@ -48,6 +48,22 @@ export const MAX_CARD_SOURCES = 20;
 export const MAX_INCLUDED_CARD_IDS = 400;
 
 export const REFINE_MAX_TOKENS = 128_000;
+/**
+ * Reasoning effort for the refinement call. Rules 8 and 9 ask the model to unify
+ * speaker labels across segments and to re-read the whole transcript against its
+ * draft before emitting — neither is doable while already streaming the answer.
+ *
+ * opus-5 takes `thinking: { type: "adaptive" }` plus `output_config.effort`; the
+ * older `thinking: { type: "enabled", budget_tokens }` form is REJECTED with 400
+ * ("not supported for this model"), which would fail every refinement — verified
+ * live against the deployed model before shipping, so do not "restore" it.
+ *
+ * Billing is unaffected: metering counts one `aiCalls` unit per call regardless
+ * of tokens, and the commit gate (`sseProducedOutput`) only fires on
+ * `text_delta`/`input_json_delta`, never on `thinking_delta` — so a call that
+ * thinks and then fails is still refunded.
+ */
+export const REFINE_EFFORT = "high";
 
 export type RefineStage = "transcribe" | "structure" | "done";
 export type RefineStatus = "running" | "done" | "error";
@@ -570,6 +586,13 @@ export function buildRefinePrompt(
   input: RefinePromptInput,
 ): { system: string; user: string } {
   const existingDoc = input.existingDoc.trim();
+  // Speaker labels are assigned independently inside each "---" segment, so the
+  // number of distinct labels is an UPPER BOUND on how many people are present,
+  // never the count. Handing the model "There are 4 speakers" flatly contradicts
+  // the unify-across-segments instruction, and the model believes the number:
+  // measured 2026-09-18 (job 1433fdd5), a 3-person meeting was transcribed as 4
+  // labels across 2 segments and the refined document never named a participant.
+  const segments = transcript.split("\n---\n").length;
   const docVocabulary = existingDoc ? input.vocabulary : [];
   const vocabularyHint =
     docVocabulary.length > 0
@@ -588,7 +611,9 @@ export function buildRefinePrompt(
       : "") +
     "The transcript is from speech-to-text and may contain misrecognitions. Correct obvious errors based on context. " +
     vocabularyHint +
-    `There are ${speakerCount} speaker(s) in this recording. ` +
+    (segments > 1
+      ? `This transcript is made of ${segments} processing segments and ${speakerCount} distinct speaker labels appear across them. Because labels are assigned independently PER SEGMENT, ${speakerCount} is an UPPER BOUND on the number of people — it is NOT the participant count, and the same person almost always carries different numbers in different segments. Work out how many people are actually present by unifying labels: match on role and responsibility, who gives instructions and who accepts them, who is addressed by name, and which side each person speaks for (a person who consistently says 御社 to the others is on the opposite side from the person they say it to). NEVER state or imply a participant count taken from the label count. `
+      : `There are ${speakerCount} speaker(s) in this recording. `) +
     "CRITICAL RULES: " +
     "1) You are NOT creating a cleaned-up transcript or conversation log. Produce a POLISHED INFORMATIONAL DOCUMENT that a reader can use without having heard the conversation. " +
     "2) Use the speaker labels INTERNALLY to understand who holds which opinion, who proposed what, and the dynamics between participants — but NEVER output raw speaker labels like 'Speaker 1', 'Speaker 0', 'speaker0', etc. " +
@@ -597,12 +622,18 @@ export function buildRefinePrompt(
     "5) CONSOLIDATION (CRITICAL — non-redundant): Each distinct topic, decision, fact, definition, number, or conclusion must appear EXACTLY ONCE, in the single most relevant section. The conversation circles back to topics — do NOT create a new section or restate a point each time it recurs; gather everything about a topic into its one section. Never repeat the same conclusion/figure/definition/action item across sections; refer to it in one short phrase if needed elsewhere. Before finalizing, scan your output and merge sections/bullets covering the same subject. Prefer a tight, consolidated document over a long, repetitive one. " +
     "6) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
     "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
+    "8) PARTICIPANTS: When two or more people take part and their names or sides can be established from the transcript, open the document with a short '## 参加者' section (match the document's language) listing each person by the name used in the transcript, or — when no name is spoken — by organisation and role. Never invent a name or an organisation. If you could not decide whether two labels are the same person, list the participants you are sure of and say so in one short line instead of inflating the count. Omit this section for a solo recording, or when no side or role can be established. " +
+    "9) COVERAGE CHECK — do this before you output: re-read the transcript from the start against your draft and confirm that every decision, figure, date, name, deadline, condition, commitment and action item that was actually spoken survives somewhere in the document. Put back anything you dropped. This is not a licence to repeat: rule 5 still holds, so a recovered item goes in the one section it belongs to. Anything the speakers themselves retracted or corrected must NOT be restored — keep only the corrected version. " +
     "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
     "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
+  const header =
+    segments > 1
+      ? `## Batch-Diarized Transcript (${segments} segments, ${speakerCount} speaker labels — labels are per-segment, unify them into the real people)`
+      : `## Batch-Diarized Transcript (${speakerCount} speakers)`;
   let user = existingDoc
-    ? `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${transcript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
-    : `## Batch-Diarized Transcript (${speakerCount} speakers)\n\n${transcript}\n\nProduce a polished structured document from this transcript.`;
+    ? `${header}\n\n${transcript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
+    : `${header}\n\n${transcript}\n\nProduce a polished structured document from this transcript.`;
 
   if (input.researchCards.length > 0) {
     user +=

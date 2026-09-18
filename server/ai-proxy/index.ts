@@ -142,6 +142,7 @@ import {
   isAudioTooLongMessage,
   REFINE_HEARTBEAT_MS,
   REFINE_RETENTION_MS,
+  REFINE_EFFORT,
   REFINE_MAX_TOKENS,
   parseRefineRequest,
   decideJobAction,
@@ -4280,6 +4281,12 @@ async function runMeteredStructure(
           // opus-5's full streaming ceiling so long meetings never truncate
           // (a cap, not a charge).
           max_tokens: REFINE_MAX_TOKENS,
+          // Room to unify per-segment speaker labels and to re-read the
+          // transcript against the draft (prompt rules 8 and 9) before writing.
+          // Charging is per call, not per token, and the commit gate ignores
+          // thinking deltas — see REFINE_EFFORT.
+          thinking: { type: "adaptive" },
+          output_config: { effort: REFINE_EFFORT },
           system,
           messages: [{ role: "user", content: user }],
           stream: true,

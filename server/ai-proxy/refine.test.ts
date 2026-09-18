@@ -390,6 +390,49 @@ describe("buildRefinePrompt (verbatim port of the client prompt)", () => {
     expect(out.startsWith("\n\n## Questions Context")).toBe(true);
     expect(out.endsWith("\n\nq1\nq2")).toBe(true);
   });
+
+  // A long recording is transcribed in ≤18-min chunks joined by "\n---\n", and
+  // BatchRecognize numbers speakers independently inside each chunk. Asserting
+  // the label count as the participant count made a 3-person meeting come out
+  // as "4 speakers" with no participant list (measured job 1433fdd5).
+  it("treats the label count as an upper bound for a multi-segment transcript", () => {
+    const twoSegments = "[Speaker 0] a\n---\n[Speaker 1] b";
+    const { system, user } = buildRefinePrompt(twoSegments, 4, input);
+    expect(system).not.toContain("There are 4 speaker(s) in this recording.");
+    expect(system).toContain("2 processing segments");
+    expect(system).toContain("4 is an UPPER BOUND on the number of people");
+    expect(system).toContain(
+      "NEVER state or imply a participant count taken from the label count.",
+    );
+    expect(
+      user.startsWith(
+        "## Batch-Diarized Transcript (2 segments, 4 speaker labels — labels are per-segment, unify them into the real people)",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the plain speaker count for a single-segment transcript", () => {
+    const { system, user } = buildRefinePrompt("[Speaker 0] a", 2, input);
+    expect(system).toContain("There are 2 speaker(s) in this recording.");
+    expect(system).not.toContain("UPPER BOUND");
+    expect(user.startsWith("## Batch-Diarized Transcript (2 speakers)")).toBe(
+      true,
+    );
+  });
+
+  it("requires a participant section and a coverage re-read", () => {
+    const { system } = buildRefinePrompt("t", 1, input);
+    expect(system).toContain("8) PARTICIPANTS:");
+    expect(system).toContain("'## 参加者' section");
+    expect(system).toContain("Never invent a name or an organisation.");
+    expect(system).toContain("9) COVERAGE CHECK");
+    expect(system).toContain("Put back anything you dropped.");
+    // Recovering dropped content must not undo the consolidation rule.
+    expect(system).toContain("rule 5 still holds");
+    // A retracted statement stays out (the DROM recording opened with an
+    // influencer plan the speaker immediately withdrew).
+    expect(system).toContain("retracted or corrected must NOT be restored");
+  });
 });
 
 describe("SseTextAccumulator", () => {
