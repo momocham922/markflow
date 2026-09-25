@@ -1,11 +1,21 @@
 // =====================================================================
 // Context slots — what Refine is allowed to ask an external MCP server
 // ---------------------------------------------------------------------
-// Refine only has two questions for the outside world, both discovered by
-// verifying three real meetings by hand (2026-09-16..21):
+// Refine has exactly ONE question for the outside world, arrived at by verifying
+// three real meetings by hand (2026-09-16..21) and then measuring against a live
+// server (2026-09-25):
 //
-//   messages  — what was said around the recording, by whom, and when.
-//   attendees — who was actually in the meeting.
+//   messages — what was said around the recording, by whom, and when.
+//
+// "Who attended" was a second slot until the measurement killed it. Two
+// independent findings: a real aggregator's calendar carries no attendee list at
+// all (the producer keeps only summary/start/end), and an email-based check
+// cannot tell an attendee from a name that merely appears in the window — probing
+// the DROM meeting returned six addresses, every one of them a sender or CC on an
+// UNRELATED mail thread that happened to arrive at the same time. Announcing
+// "出席者が取れます" on that evidence would be a lie, and the participants are
+// obtainable from messages anyway: the invitation six minutes before the meeting
+// named all three people.
 //
 // A server that cannot answer either of these cannot improve a set of minutes,
 // so MarkFlow does not keep it. That refusal IS the guidance: users learn what
@@ -16,13 +26,12 @@
 // names, so a personal aggregator, a Google Calendar server and a hand-written
 // one all qualify on equal terms.
 //
-// `messages` is the required slot and `attendees` is a bonus: measured against
-// a real aggregator, the calendar carried no attendee list at all, while the
-// chat history contained the participants anyway — the invitation posted six
-// minutes before the meeting named all three people.
 // =====================================================================
 
-export type SlotId = "messages" | "attendees";
+// A union of one, kept as a union so a second slot can be added if something
+// ever proves verifiable — but a slot only earns its place by passing against a
+// real server, not by sounding useful.
+export type SlotId = "messages";
 
 export interface SlotSpec {
   id: SlotId;
@@ -40,15 +49,6 @@ export const SLOTS: Record<SlotId, SlotSpec> = {
     question: "録音の前後に、誰が・いつ・何をやりとりしたか",
     needs: ["発言者", "日時", "本文"],
     required: true,
-  },
-  attendees: {
-    id: "attendees",
-    question: "その時間帯の会議に誰が出ていたか",
-    // Verified by address, not by name: a name in prose cannot be told apart
-    // from a meeting title, so claiming to have found attendees would be a
-    // guess. See the attendees branch of evaluateProbe.
-    needs: ["出席者のメールアドレス"],
-    required: false,
   },
 };
 
@@ -123,6 +123,22 @@ const TIMESTAMP_PATTERNS: RegExp[] = [
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
+/**
+ * Evidence that a row is attributed to a PERSON.
+ *
+ * Needed because a timestamp alone does not make something a message: the same
+ * aggregator renders calendar entries as "• DROM様 / rakumo/meeting ·
+ * 2026-09-18 15:00 · 場所: カレンダー", which is dated, substantial, and has no
+ * speaker at all. Accepting it would promise Refine "who said what" and hand it
+ * a list of meeting titles.
+ *
+ * A server whose rows carry no recognisable attribution is refused, and told so
+ * — better than silently feeding unattributed text into a set of minutes.
+ */
+const AUTHOR_LABEL_RE =
+  /(?:^|[\s·|])(相手|差出人|発言者|投稿者|送信者|from|sender|author)\s*[:：]/gi;
+const HANDLE_RE = /(?:^|\s)@[A-Za-z0-9_.-]{2,}/g;
+
 export interface ProbeSignals {
   /** The tool reported a failure. */
   isError: boolean;
@@ -134,6 +150,8 @@ export interface ProbeSignals {
   emails: number;
   /** Non-trivial lines — a rough stand-in for "rows of an answer". */
   lines: number;
+  /** Rows that name who they came from (label, @handle or address). */
+  authors: number;
 }
 
 function textOf(result: unknown): { text: string; isError: boolean } {
@@ -173,12 +191,17 @@ export function extractSignals(result: unknown): ProbeSignals {
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length >= 2).length;
+  const authors =
+    [...text.matchAll(AUTHOR_LABEL_RE)].length +
+    [...text.matchAll(HANDLE_RE)].length +
+    emails.size;
   return {
     isError,
     chars: text.length,
     timestamps: stamps.size,
     emails: emails.size,
     lines,
+    authors,
   };
 }
 
@@ -220,36 +243,25 @@ export function evaluateProbe(slot: SlotId, result: unknown): ProbeVerdict {
   if (signals.chars === 0)
     return verdict("unusable", "ツールが空の応答を返しました。");
 
-  if (slot === "messages") {
-    if (signals.timestamps === 0)
-      return verdict(
-        "unusable",
-        "返ってきた内容に日時が含まれておらず、発言を時系列に置けません。",
-      );
-    if (signals.chars < MIN_MESSAGE_CHARS)
-      return verdict("empty", "この時間帯のやりとりは見つかりませんでした。");
+  // Order matters: an empty window has no timestamps and no authors either, so
+  // emptiness is decided FIRST — otherwise a server that simply had nothing to
+  // report for this hour gets reported as broken.
+  if (signals.chars < MIN_MESSAGE_CHARS)
+    return verdict("empty", "この時間帯のやりとりは見つかりませんでした。");
+  if (signals.timestamps === 0)
     return verdict(
-      "pass",
-      `この時間帯のやりとりを ${signals.timestamps} 件ぶんの日時付きで取得できました。`,
+      "unusable",
+      "返ってきた内容に日時が含まれておらず、発言を時系列に置けません。",
     );
-  }
-
-  // attendees — identified by EMAIL ADDRESSES only, and at least two, since a
-  // meeting has more than one person.
-  //
-  // Counting rows instead would be a false-positive machine: a real aggregator
-  // renders calendar entries as "• DROM様 / rakumo/meeting · 2026-09-18 15:00 ·
-  // 場所: カレンダー", which is several non-trivial lines and ZERO attendees.
-  // Reporting "出席者を7名ぶん取得できました" for that would be worse than
-  // reporting nothing, so the optional slot stays strict: no addresses, no pass.
-  if (signals.emails < 2)
+  if (signals.authors === 0)
     return verdict(
-      "empty",
-      signals.emails === 1
-        ? "出席者が1名ぶんしか取得できませんでした（会議として成立しません）。"
-        : "その時間帯の会議の出席者は取得できませんでした（メールアドレスが含まれていません）。",
+      "unusable",
+      "返ってきた内容に発言者が含まれておらず、誰の発言か分かりません。",
     );
-  return verdict("pass", `出席者を ${signals.emails} 名ぶん取得できました。`);
+  return verdict(
+    "pass",
+    `この時間帯のやりとりを ${signals.timestamps} 件ぶんの日時付きで取得できました。`,
+  );
 }
 
 // ---------------------------------------------------------------------

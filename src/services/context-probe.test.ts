@@ -89,11 +89,6 @@ describe("scoreToolForSlot", () => {
   it("scores a timeline tool for messages", () => {
     expect(scoreToolForSlot(QUERY_EVENTS, "messages")).toBeGreaterThan(0);
   });
-  it("scores a calendar tool for attendees", () => {
-    expect(scoreToolForSlot(LIST_CAL_EVENTS, "attendees")).toBeGreaterThan(
-      scoreToolForSlot(LIST_CAL_EVENTS, "messages"),
-    );
-  });
   it("pushes writing tools below zero however they are described", () => {
     expect(scoreToolForSlot(SEND_MESSAGE, "messages")).toBeLessThan(0);
   });
@@ -227,9 +222,8 @@ describe("probeServer", () => {
       return REAL_CHATWORK_RESULT;
     };
     await probeServer([QUERY_EVENTS, other], WINDOW, callTool);
-    // one call for messages (first passes), one for attendees — never both
-    // message tools.
-    expect(n).toBeLessThanOrEqual(2);
+    // the first candidate passes, so the second is never called
+    expect(n).toBe(1);
   });
 });
 

@@ -49,20 +49,6 @@ const SLOT_KEYWORDS: Record<SlotId, string[]> = {
     "イベント",
     "時系列",
   ],
-  attendees: [
-    "attendee",
-    "participant",
-    "invitee",
-    "calendar",
-    "meeting",
-    "event",
-    "guest",
-    "出席",
-    "参加",
-    "会議",
-    "予定",
-    "カレンダー",
-  ],
 };
 
 /**

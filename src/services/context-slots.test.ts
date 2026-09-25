@@ -124,7 +124,9 @@ describe("evaluateProbe — messages (required slot)", () => {
       content: [
         {
           type: "text",
-          text: "ここ最近は広告の審査について何度かやりとりがありました。",
+          text:
+            "相手: 齋藤 和也 ここ最近は広告の審査について何度かやりとりがありました。" +
+            "媒体ごとの通過状況や、今後の進め方についても話題に出ています。",
         },
       ],
     });
@@ -143,58 +145,19 @@ describe("evaluateProbe — messages (required slot)", () => {
   });
 });
 
-describe("evaluateProbe — attendees (optional slot)", () => {
-  it("passes when real addresses come back", () => {
-    const v = evaluateProbe("attendees", {
-      content: [
-        {
-          type: "text",
-          text: "ryohei.mita@gendai-a.co.jp, saito@drom.jp, horinoue@avalink.jp",
-        },
-      ],
-    });
-    expect(v.status).toBe("pass");
-    expect(v.reason).toContain("3 名");
-  });
-
-  // Regression: counting rows instead of addresses made this calendar listing
-  // "pass" with seven attendees when it contains none at all.
-  it("does NOT invent attendees from a calendar listing that has none", () => {
-    const v = evaluateProbe("attendees", REAL_CALENDAR);
-    expect(v.status).toBe("empty");
-    expect(v.signals.emails).toBe(0);
-    expect(v.reason).toContain("メールアドレスが含まれていません");
-  });
-
-  it("refuses a single address — a meeting has more than one person", () => {
-    const v = evaluateProbe("attendees", {
-      content: [{ type: "text", text: "organizer: only@me.com" }],
-    });
-    expect(v.status).toBe("empty");
-    expect(v.reason).toContain("1名");
-  });
-});
-
 describe("decideServer", () => {
   it("keeps a server that fills the required slot", () => {
-    const d = decideServer([
-      evaluateProbe("messages", REAL_CHATWORK),
-      evaluateProbe("attendees", REAL_CALENDAR),
-    ]);
+    const d = decideServer([evaluateProbe("messages", REAL_CHATWORK)]);
     expect(d.keep).toBe(true);
     expect(d.filled).toEqual(["messages"]);
     expect(d.message).toContain(SLOTS.messages.question);
   });
 
-  it("refuses a server that only fills the optional slot", () => {
-    const d = decideServer([
-      evaluateProbe("messages", { isError: true }),
-      evaluateProbe("attendees", {
-        content: [{ type: "text", text: "a@x.com b@y.com" }],
-      }),
-    ]);
+  // A calendar listing is not a set of minutes' worth of context: it has no
+  // speaker and no body, so it must not qualify a server on its own.
+  it("refuses a server that only returns calendar entries", () => {
+    const d = decideServer([evaluateProbe("messages", REAL_CALENDAR)]);
     expect(d.keep).toBe(false);
-    expect(d.filled).toEqual(["attendees"]);
   });
 
   it("explains what was needed instead of just saying no", () => {
@@ -213,5 +176,29 @@ describe("decideServer", () => {
     const d = decideServer([]);
     expect(d.keep).toBe(false);
     expect(d.message).toContain("読み取り専用");
+  });
+});
+
+// Third false positive of the same family, caught against a live server: a
+// timestamp alone does not make a row a message. The aggregator's calendar
+// source is dated and substantial and has no speaker anywhere in it.
+describe("attribution is required, not just a date", () => {
+  it("refuses a dated list of meeting titles", () => {
+    const v = evaluateProbe("messages", REAL_CALENDAR);
+    expect(v.status).toBe("unusable");
+    expect(v.reason).toContain("発言者");
+    expect(v.signals.authors).toBe(0);
+  });
+  it("counts a 相手: label as attribution", () => {
+    expect(extractSignals(REAL_CHATWORK).authors).toBeGreaterThan(0);
+  });
+  it.each([
+    'From: "林千咲" <chisaki.hayashi@example.co.jp>\n2026-09-18 14:09 本文がここに入ります。十分な長さの本文。',
+    "@saito 2026-09-18 15:02 こちらの資料を共有します。よろしくお願いいたします。",
+    "sender: alice\n2026-09-18 15:02 本文がここに入ります。十分な長さの本文です。",
+  ])("accepts other attribution conventions", (text) => {
+    expect(
+      evaluateProbe("messages", { content: [{ type: "text", text }] }).status,
+    ).toBe("pass");
   });
 });

@@ -431,6 +431,98 @@ async fn exchange_oauth_code(url: String, body: String) -> Result<OAuthExchangeR
     Err(format!("network error after retries: {last_err}"))
 }
 
+#[derive(serde::Serialize)]
+struct McpHttpResponse {
+    status: u16,
+    /// Lower-cased content type, so the caller can tell JSON from SSE.
+    content_type: String,
+    body: String,
+    /// `Mcp-Session-Id` from the response, when the server issues one.
+    session_id: Option<String>,
+}
+
+/// POST a JSON-RPC message to a user-configured MCP server over HTTP.
+///
+/// This runs in Rust rather than the WebView for two reasons: third-party MCP
+/// servers have no reason to send CORS headers (they are built for CLI clients),
+/// and the bearer token never has to enter the WebView's network stack.
+///
+/// Redirects are DISABLED rather than limited. reqwest replays headers on a
+/// redirect, so a server that answered a probe with `302 Location:
+/// https://attacker.example` would hand that host the user's bearer token. MCP
+/// endpoints have no reason to redirect, so a redirect is surfaced as its raw
+/// status and the caller reports the server as unusable.
+#[tauri::command]
+async fn mcp_http_rpc(
+    url: String,
+    bearer: Option<String>,
+    session_id: Option<String>,
+    protocol_version: Option<String>,
+    body: String,
+) -> Result<McpHttpResponse, String> {
+    // Plaintext is only tolerated for a server running on this machine; anything
+    // else would put the bearer on the wire in the clear.
+    let parsed = reqwest::Url::parse(&url).map_err(|_| "invalid URL".to_string())?;
+    let host = parsed.host_str().unwrap_or("").to_string();
+    let is_loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback => {}
+        _ => return Err("MCP サーバの URL は https である必要があります".into()),
+    }
+    // Cloud metadata services answer unauthenticated requests from inside the
+    // machine; never let a configured URL reach one.
+    if host == "169.254.169.254" || host == "metadata.google.internal" {
+        return Err("このホストには接続できません".into());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut req = client
+        .post(parsed)
+        .header("Content-Type", "application/json")
+        // Streamable HTTP servers may answer with either, so accept both.
+        .header("Accept", "application/json, text/event-stream")
+        .body(body);
+    if let Some(token) = bearer.filter(|t| !t.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        req = req.header("Mcp-Session-Id", sid);
+    }
+    if let Some(ver) = protocol_version.filter(|v| !v.is_empty()) {
+        req = req.header("MCP-Protocol-Version", ver);
+    }
+
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    let content_type = header("content-type").unwrap_or_default().to_lowercase();
+    let session_id = header("mcp-session-id");
+
+    // A hostile or broken server must not be able to exhaust memory here.
+    const MAX_BODY: usize = 4 * 1024 * 1024;
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let truncated = &bytes[..bytes.len().min(MAX_BODY)];
+    let body = String::from_utf8_lossy(truncated).to_string();
+
+    Ok(McpHttpResponse {
+        status,
+        content_type,
+        body,
+        session_id,
+    })
+}
+
 #[tauri::command]
 async fn fetch_ogp(url: String) -> Result<OgpData, String> {
     let client = reqwest::Client::builder()
@@ -2948,7 +3040,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, prepare_gcs_voice_chunks, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, mcp_http_rpc, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, prepare_gcs_voice_chunks, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
