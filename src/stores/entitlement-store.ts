@@ -286,6 +286,8 @@ interface EntitlementState {
   mcpEnabled: boolean;
   /** Whether the MCP connector-instructions dialog is open. */
   mcpConnectorOpen: boolean;
+  /** Whether the "context sources" dialog is open. */
+  contextSourcesOpen: boolean;
   /** Last 429 quota_exceeded surfaced by an AI call, for upsell UI. */
   lastQuotaError: QuotaError | null;
   /** True while a Checkout/Portal session is being created (spinner + guard). */
@@ -381,6 +383,14 @@ interface EntitlementState {
   openMcpConnector: () => void;
   /** Close the MCP connector-instructions dialog. */
   closeMcpConnector: () => void;
+  /**
+   * Open the context-sources dialog (no-op unless the user is internal staff).
+   * The feature calls third-party servers on the user's behalf, so it ships to
+   * internal testers first and widens once it has been used in anger.
+   */
+  openContextSources: () => void;
+  /** Close the context-sources dialog. */
+  closeContextSources: () => void;
   reset: () => void;
 }
 
@@ -399,6 +409,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
   loaded: false,
   mcpEnabled: false,
   mcpConnectorOpen: false,
+  contextSourcesOpen: false,
   lastQuotaError: null,
   billingBusy: false,
   billingError: null,
@@ -881,6 +892,13 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
     set({ mcpConnectorOpen: true });
   },
   closeMcpConnector: () => set({ mcpConnectorOpen: false }),
+  openContextSources: () => {
+    // Gated on realPlan, NOT effectivePlan: the owner previewing the product as
+    // a Free user must not lose access to an internal tool.
+    if (get().realPlan !== "internal") return;
+    set({ contextSourcesOpen: true });
+  },
+  closeContextSources: () => set({ contextSourcesOpen: false }),
 
   reset: () =>
     set({
@@ -903,6 +921,7 @@ export const useEntitlementStore = create<EntitlementState>((set, get) => ({
       teamManageOpen: false,
       mcpEnabled: false,
       mcpConnectorOpen: false,
+      contextSourcesOpen: false,
       // viewAs is intentionally kept (persisted); it is owner-only and gets
       // reconciled to null on the next fetch if the next user is not the owner.
     }),

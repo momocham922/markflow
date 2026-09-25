@@ -23,6 +23,7 @@ import { useAppStore, type Document, type DocType } from "./app-store";
 import { useEntitlementStore } from "./entitlement-store";
 import { useResearchStore } from "./research-store";
 import { useRefineStore } from "./refine-store";
+import { useContextSourceStore } from "./context-source-store";
 import {
   getDeletedDocIds,
   clearDeletedDoc,
@@ -263,6 +264,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             // re-read prefs now that local-reset cleared their localStorage keys.
             useResearchStore.getState().reset();
             useRefineStore.getState().reset();
+            useContextSourceStore.getState().reset();
             // Drop cross-account tracking so the new user's sync is clean.
             collabActiveDocIds.clear();
             cloudPulledDocIds.clear();
@@ -470,6 +472,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // next account) never shows the previous user's research.
       useResearchStore.getState().reset();
       useRefineStore.getState().reset();
+      useContextSourceStore.getState().reset();
     }
   },
 
@@ -554,6 +557,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       useEntitlementStore.getState().reset();
       useResearchStore.getState().reset();
       useRefineStore.getState().reset();
+      useContextSourceStore.getState().reset();
       return { ok: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

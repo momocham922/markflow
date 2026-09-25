@@ -14,6 +14,7 @@ import {
   BarChart3,
   Github,
   Plug,
+  Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -86,6 +87,11 @@ export function UserMenu() {
   // false for everyone but the owner during testing, so this stays hidden.
   const mcpEnabled = useEntitlementStore((s) => s.mcpEnabled);
   const openMcpConnector = useEntitlementStore((s) => s.openMcpConnector);
+  const openContextSources = useEntitlementStore((s) => s.openContextSources);
+  // Internal-only while the feature is proven in real use.
+  const contextSourcesEnabled = useEntitlementStore(
+    (s) => s.realPlan === "internal",
+  );
   const openFeedback = useFeedbackStore((s) => s.openFeedback);
   const telemetryConsent = useTelemetryStore((s) => s.consent);
   const telemetryReady = useTelemetryStore((s) => s.ready);
@@ -284,6 +290,18 @@ export function UserMenu() {
                 Claude連携
               </button>
             )}
+            {contextSourcesEnabled && (
+              <button
+                className={menuItem}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openContextSources();
+                }}
+              >
+                <Link2 className="h-4 w-4" />
+                議事録の情報源
+              </button>
+            )}
             {showUpgrade && (
               <button
                 className={menuItem}
@@ -413,6 +431,17 @@ export function UserMenu() {
           title="Claude連携（MCP）"
         >
           <Plug className={iconSize} />
+        </Button>
+      )}
+      {contextSourcesEnabled && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={() => openContextSources()}
+          title="議事録の情報源（MCP）"
+        >
+          <Link2 className={iconSize} />
         </Button>
       )}
       <Button

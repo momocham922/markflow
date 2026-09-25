@@ -36,6 +36,7 @@ import { PaywallDialog } from "@/components/PaywallDialog";
 import { TeamManageDialog } from "@/components/TeamManageDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { McpConnectorDialog } from "@/components/McpConnectorDialog";
+import { ContextSourceDialog } from "@/components/ContextSourceDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { useTelemetryStore } from "@/stores/telemetry-store";
@@ -1608,6 +1609,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         {/* Claude MCP connector instructions (global; opened from UserMenu,
             allowlist-gated via mcpEnabled) */}
         <GlobalMcpConnectorDialog />
+        <GlobalContextSourceDialog />
         {/* Regional analytics consent surface (once, until the user decides) */}
         <TelemetryConsentBanner />
       </div>
@@ -1667,6 +1669,23 @@ function GlobalMcpConnectorDialog() {
       open={open}
       onOpenChange={(o) => {
         if (!o) closeMcpConnector();
+      }}
+    />
+  );
+}
+
+/**
+ * The context-sources dialog, mounted once. Internal-only for now; the store
+ * action refuses to open for anyone else, so a stale caller cannot force it.
+ */
+function GlobalContextSourceDialog() {
+  const open = useEntitlementStore((s) => s.contextSourcesOpen);
+  const closeContextSources = useEntitlementStore((s) => s.closeContextSources);
+  return (
+    <ContextSourceDialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) closeContextSources();
       }}
     />
   );
