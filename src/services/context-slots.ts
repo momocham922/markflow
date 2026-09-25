@@ -94,6 +94,8 @@ export function probeWindow(recordedAtMs: number): ProbeWindow {
 export interface McpToolInfo {
   name: string;
   description?: string;
+  /** JSON Schema for the tool's arguments, as the server declares it. */
+  inputSchema?: unknown;
   annotations?: { readOnlyHint?: boolean };
 }
 
