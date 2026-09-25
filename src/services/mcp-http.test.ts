@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  fromWire,
   parseSseMessages,
   parseRpcResponse,
   parseToolsList,
@@ -150,5 +151,42 @@ describe("parseToolsList", () => {
 
   it("survives a result with no tools array", () => {
     expect(parseToolsList({})).toEqual([]);
+  });
+});
+
+// Regression: the Rust command returns serde's snake_case field names and Tauri
+// does not camel-case return values, so reading `contentType` straight off it is
+// undefined. Shipped once as `TypeError: undefined is not an object (evaluating
+// 't.contentType.includes')` — every connection attempt died before it could be
+// judged.
+describe("fromWire", () => {
+  it("maps the snake_case shape Rust actually sends", () => {
+    expect(
+      fromWire({
+        status: 200,
+        content_type: "application/json; charset=utf-8",
+        body: "{}",
+        session_id: "abc",
+      }),
+    ).toEqual({
+      status: 200,
+      contentType: "application/json; charset=utf-8",
+      body: "{}",
+      sessionId: "abc",
+    });
+  });
+
+  it("never yields undefined fields, whatever comes back", () => {
+    const r = fromWire(undefined);
+    expect(r.contentType).toBe("");
+    expect(r.body).toBe("");
+    expect(r.sessionId).toBeNull();
+    // and the parser must survive it rather than throw
+    expect(parseRpcResponse(r, 1).ok).toBe(false);
+  });
+
+  it("ignores a camelCase payload instead of half-reading it", () => {
+    const r = fromWire({ contentType: "application/json" } as never);
+    expect(r.contentType).toBe("");
   });
 });

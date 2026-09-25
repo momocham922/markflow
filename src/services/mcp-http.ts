@@ -16,11 +16,39 @@ import type { McpToolInfo } from "./context-slots";
 /** Matches the version our own MCP server offers (server/ai-proxy/mcp.ts). */
 export const CLIENT_PROTOCOL_VERSION = "2025-06-18";
 
+/** The parsed shape the pure functions below work with. */
 export interface McpHttpRaw {
   status: number;
   contentType: string;
   body: string;
   sessionId: string | null;
+}
+
+/**
+ * What the Rust command actually returns.
+ *
+ * serde serialises struct fields as-is and Tauri does NOT camel-case return
+ * values (it only converts command ARGUMENTS), so these arrive snake_cased —
+ * the same convention the rest of the app already reads from Rust (`site_name`,
+ * `gcs_uri`). Reading `contentType` off this object yields undefined, which is
+ * exactly how the first build failed: `t.contentType.includes` threw before any
+ * request could be judged.
+ */
+interface McpHttpWire {
+  status?: number;
+  content_type?: string;
+  body?: string;
+  session_id?: string | null;
+}
+
+export function fromWire(wire: McpHttpWire | null | undefined): McpHttpRaw {
+  return {
+    status: typeof wire?.status === "number" ? wire.status : 0,
+    contentType:
+      typeof wire?.content_type === "string" ? wire.content_type : "",
+    body: typeof wire?.body === "string" ? wire.body : "",
+    sessionId: typeof wire?.session_id === "string" ? wire.session_id : null,
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -58,7 +86,7 @@ export function parseSseMessages(body: string): unknown[] {
 }
 
 function messagesFrom(raw: McpHttpRaw): unknown[] {
-  if (raw.contentType.includes("text/event-stream"))
+  if ((raw.contentType ?? "").includes("text/event-stream"))
     return parseSseMessages(raw.body);
   try {
     const parsed = JSON.parse(raw.body);
@@ -206,13 +234,14 @@ export class McpHttpClient {
     const id = this.nextId++;
     let raw: McpHttpRaw;
     try {
-      raw = await invoke<McpHttpRaw>("mcp_http_rpc", {
+      const wire = await invoke<McpHttpWire>("mcp_http_rpc", {
         url: this.server.url,
         bearer: this.server.bearer ?? null,
         sessionId: this.sessionId,
         protocolVersion: CLIENT_PROTOCOL_VERSION,
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       });
+      raw = fromWire(wire);
     } catch (e) {
       throw new McpHttpError(
         "transport",
