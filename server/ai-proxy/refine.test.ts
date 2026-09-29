@@ -376,6 +376,38 @@ describe("buildRefinePrompt (verbatim port of the client prompt)", () => {
     );
     expect(user.endsWith("API連携の許可は？")).toBe(true);
   });
+  // The outside-records block is primary evidence, not background reading: it
+  // is what supplies the real spelling of a name the audio misheard and who
+  // actually did a thing. It must never become a section of its own.
+  it("passes context records through verbatim under rule 10", () => {
+    const { system, user } = buildRefinePrompt("t", 1, {
+      ...input,
+      contextRecords: [
+        {
+          source: "mita-activity-hub",
+          text: "• 三田 遼平さん 堀ノ上陽太_AVALINKさん https://us02web.zoom.us/j/8806\n  chatwork/message.mention · 2026-09-18 14:54 · 場所: ゲンダイ×DROM · 相手: 齋藤 和也",
+        },
+      ],
+    });
+    expect(system).toContain("10) OUTSIDE RECORDS:");
+    expect(system).toContain("SPELLINGS OF NAMES");
+    // Silently corrected — a minutes reader should not see bookkeeping.
+    expect(system).toContain("with no note about the correction");
+    // An unrelated mail that merely lands in the same window is not context.
+    expect(system).toContain("must be IGNORED");
+    expect(user).toContain("## Context Records");
+    expect(user).toContain("### mita-activity-hub");
+    expect(user).toContain("堀ノ上陽太_AVALINK");
+  });
+
+  it("omits the context block when nothing was collected", () => {
+    const { user } = buildRefinePrompt("t", 1, {
+      ...input,
+      contextRecords: [],
+    });
+    expect(user).not.toContain("Context Records");
+  });
+
   it("adds no context blocks when there are no cards", () => {
     const { user } = buildRefinePrompt("t", 1, {
       ...input,

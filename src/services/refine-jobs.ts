@@ -81,6 +81,8 @@ export interface CreateRefineJobBody {
   }>;
   questionCards: Array<{ summary: string }>;
   includedCardIds: string[];
+  /** Verbatim answers from the user's connected MCP servers (may be empty). */
+  contextRecords: Array<{ source: string; text: string }>;
 }
 
 export type AckAction = "applied" | "discarded" | "dismissed";

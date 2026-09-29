@@ -14,7 +14,7 @@ import {
   BarChart3,
   Github,
   Plug,
-  Link2,
+  Waypoints,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -298,7 +298,7 @@ export function UserMenu() {
                   openContextSources();
                 }}
               >
-                <Link2 className="h-4 w-4" />
+                <Waypoints className="h-4 w-4" />
                 議事録の情報源
               </button>
             )}
@@ -441,7 +441,7 @@ export function UserMenu() {
           onClick={() => openContextSources()}
           title="議事録の情報源（MCP）"
         >
-          <Link2 className={iconSize} />
+          <Waypoints className={iconSize} />
         </Button>
       )}
       <Button

@@ -179,6 +179,7 @@ describe("runRefineStream", () => {
       researchCards: [],
       questionCards: [],
       includedCardIds: [],
+      contextRecords: [],
     });
     expect(state()).toMatchObject({
       phase: "transcribe",

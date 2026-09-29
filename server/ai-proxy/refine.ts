@@ -46,6 +46,8 @@ export const MAX_QUESTION_CARDS = 200;
 export const MAX_CARD_TEXT_CHARS = 20_000;
 export const MAX_CARD_SOURCES = 20;
 export const MAX_INCLUDED_CARD_IDS = 400;
+/** One answer per connected server; each is a whole rendered listing. */
+export const MAX_CONTEXT_RECORDS = 8;
 
 export const REFINE_MAX_TOKENS = 128_000;
 /**
@@ -81,12 +83,33 @@ export interface RefineResearchCard {
   sources: Array<{ title: string; url: string }>;
 }
 
+/**
+ * Messages from the user's own systems around the time of the recording, pulled
+ * by the client from the MCP servers they connected. Unlike research (which is
+ * background reading), these are PRIMARY records of the same events: they carry
+ * the correct spelling of names the transcript misheard, and they show who
+ * actually did what.
+ */
+export interface RefineContextRecord {
+  /** Which connected server produced it. */
+  source: string;
+  /**
+   * The tool's answer, VERBATIM. MCP tool output is already written to be read
+   * by a model, so it is passed through rather than parsed into rows: every
+   * server renders authors and timestamps differently, and a parser that
+   * guessed at those formats would drop exactly the attribution this block
+   * exists to supply.
+   */
+  text: string;
+}
+
 /** Everything the structuring prompt needs besides the transcript. */
 export interface RefinePromptInput {
   existingDoc: string;
   vocabulary: string[];
   researchCards: RefineResearchCard[];
   questionSummaries: string[];
+  contextRecords: RefineContextRecord[];
 }
 
 export interface RefineCreateRequest {
@@ -251,6 +274,17 @@ export function parseRefineRequest(
     )
     .filter(Boolean);
 
+  const contextRecords: RefineContextRecord[] = (
+    Array.isArray(b.contextRecords) ? b.contextRecords : []
+  )
+    .slice(0, MAX_CONTEXT_RECORDS)
+    .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+    .map((m) => ({
+      source: str(m.source, 200),
+      text: str(m.text, MAX_CARD_TEXT_CHARS),
+    }))
+    .filter((m) => m.text.trim());
+
   const includedCardIds = (
     Array.isArray(b.includedCardIds) ? b.includedCardIds : []
   )
@@ -267,7 +301,13 @@ export function parseRefineRequest(
       chunks,
       baseContentHash,
       includedCardIds,
-      input: { existingDoc, vocabulary, researchCards, questionSummaries },
+      input: {
+        existingDoc,
+        vocabulary,
+        researchCards,
+        questionSummaries,
+        contextRecords,
+      },
     },
   };
 }
@@ -624,6 +664,7 @@ export function buildRefinePrompt(
     "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
     "8) PARTICIPANTS: When two or more people take part and their names or sides can be established from the transcript, open the document with a short '## 参加者' section (match the document's language) listing each person by the name used in the transcript, or — when no name is spoken — by organisation and role. Never invent a name or an organisation. If you could not decide whether two labels are the same person, list the participants you are sure of and say so in one short line instead of inflating the count. Omit this section for a solo recording, or when no side or role can be established. " +
     "9) COVERAGE CHECK — do this before you output: re-read the transcript from the start against your draft and confirm that every decision, figure, date, name, deadline, condition, commitment and action item that was actually spoken survives somewhere in the document. Put back anything you dropped. This is not a licence to repeat: rule 5 still holds, so a recovered item goes in the one section it belongs to. Anything the speakers themselves retracted or corrected must NOT be restored — keep only the corrected version. " +
+    "10) OUTSIDE RECORDS: If a 'Context Records' block is provided, it holds real messages from the user's own systems (chat, mail) written around the time of this recording. They are PRIMARY EVIDENCE about the same events, not background reading, and they outrank the transcript on anything the transcript could only have guessed at: SPELLINGS OF NAMES (people, companies, products), WHO did a thing, and WHAT HAPPENED AFTER the recording stopped. Use them to (a) correct misheard proper nouns throughout the document — silently, with no note about the correction, (b) fix an attribution the audio got backwards, and (c) mark an action item as already done when a record shows it was. Do NOT add their content to the minutes as if it had been discussed, do NOT create a section for them, and do NOT cite them inline. A record that merely happens to fall in the same time window and concerns an unrelated matter must be IGNORED — judge relevance by whether it involves this meeting's participants or subject. " +
     "Keep the same language as the transcript. Do NOT add generic titles like '会議メモ'. " +
     "Output ONLY the structured Markdown, no explanations. Do not truncate.";
 
@@ -635,6 +676,16 @@ export function buildRefinePrompt(
     ? `${header}\n\n${transcript}\n\n## Existing Document (preliminary)\n\n${existingDoc}\n\nProduce the final refined document using the diarized transcript as the authoritative source.`
     : `${header}\n\n${transcript}\n\nProduce a polished structured document from this transcript.`;
 
+  if (input.contextRecords.length > 0) {
+    user +=
+      "\n\n## Context Records (the user's own chat/mail around this recording — PRIMARY EVIDENCE)\n" +
+      "Real messages from the user's own systems, covering the time around this meeting. " +
+      "Follow rule 10: correct names, attributions and completed actions from these, silently. " +
+      "Do NOT add their content to the minutes as discussion, and ignore any record about an unrelated matter.\n\n" +
+      input.contextRecords
+        .map((m) => `### ${m.source}\n${m.text}`)
+        .join("\n\n");
+  }
   if (input.researchCards.length > 0) {
     user +=
       "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +

@@ -24,7 +24,14 @@ import {
   fetchUserSettings,
 } from "@/services/firebase";
 import { probeWindow, type SlotId } from "@/services/context-slots";
-import { probeServer, type ProbeReport } from "@/services/context-probe";
+import {
+  probeServer,
+  rankCandidates,
+  buildProbeArgs,
+  COLLECT_LIMIT,
+  type ProbeReport,
+  type JsonSchema,
+} from "@/services/context-probe";
 import { McpHttpClient, McpHttpError } from "@/services/mcp-http";
 
 /** Firestore key inside user_settings. */
@@ -66,7 +73,30 @@ interface ContextSourceState {
   remove: (uid: string, id: string) => Promise<void>;
   /** The token for a source, from this device. */
   tokenFor: (id: string) => Promise<string | null>;
+  /**
+   * Ask every configured source what was said around a recording. Used by
+   * Refine; never throws, because a source being unreachable must not stop a
+   * refinement that would otherwise succeed.
+   */
+  collect: (
+    recordedAtMs: number,
+  ) => Promise<Array<{ source: string; text: string }>>;
   reset: () => void;
+}
+
+/** The text blocks of an MCP tool result, joined. */
+function textOf(result: unknown): string {
+  const content = (result as { content?: unknown })?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) => {
+      const block = b as { type?: unknown; text?: unknown };
+      return block?.type === "text" && typeof block.text === "string"
+        ? block.text
+        : "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 function hostOf(url: string): string {
@@ -188,6 +218,43 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
   tokenFor: async (id) => {
     const v = await getSetting(tokenKey(id));
     return v && v.trim() ? v : null;
+  },
+
+  collect: async (recordedAtMs) => {
+    const window = probeWindow(recordedAtMs);
+    const out: Array<{ source: string; text: string }> = [];
+    for (const source of get().sources) {
+      try {
+        const token = await get().tokenFor(source.id);
+        const client = new McpHttpClient({
+          url: source.url,
+          bearer: token ?? undefined,
+        });
+        await client.initialize();
+        const tools = await client.listTools();
+        // Same ranking the probe used, so Refine calls the tool that was
+        // actually verified rather than re-deciding on different grounds.
+        for (const tool of rankCandidates(tools, "messages")) {
+          const { args, unfilledRequired } = buildProbeArgs(
+            tool.inputSchema as JsonSchema | undefined,
+            window,
+            COLLECT_LIMIT,
+          );
+          if (unfilledRequired.length > 0) continue;
+          const result = await client.callTool(tool.name, args);
+          const text = textOf(result);
+          if (text.trim()) {
+            out.push({ source: source.name, text });
+          }
+          break;
+        }
+      } catch (e) {
+        // A token that expired, a server that moved, no network — none of these
+        // are worth failing the whole refinement over.
+        console.error(`[context-source] ${source.name} unavailable:`, e);
+      }
+    }
+    return out;
   },
 
   reset: () => set({ sources: [], loaded: false, testing: false }),

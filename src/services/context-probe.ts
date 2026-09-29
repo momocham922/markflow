@@ -211,7 +211,7 @@ export interface ProbeArgs {
 export function buildProbeArgs(
   schema: JsonSchema | undefined,
   window: ProbeWindow,
-  probeLimit = 20,
+  probeLimit: number = PROBE_LIMIT,
 ): ProbeArgs {
   const args: Record<string, unknown> = {};
   const props = schema?.properties ?? {};
@@ -256,6 +256,22 @@ export type CallTool = (
 
 /** How many tools to try per slot before giving up. */
 export const MAX_ATTEMPTS_PER_SLOT = 3;
+
+/**
+ * Rows to ask for when PROBING: just enough to see the shape of an answer.
+ */
+export const PROBE_LIMIT = 20;
+
+/**
+ * Rows to ask for when COLLECTING for a refinement.
+ *
+ * Much larger than the probe limit because a probe only has to prove the shape,
+ * while a refinement needs the actual relevant rows — and an aggregator returns
+ * every source interleaved in time order. Measured: probing the DROM window at
+ * 20 rows filled up with unrelated traffic and dropped the invitation naming the
+ * participants, which is the single row the whole feature exists to deliver.
+ */
+export const COLLECT_LIMIT = 200;
 
 /**
  * Probe one server for every slot and decide whether to keep it.

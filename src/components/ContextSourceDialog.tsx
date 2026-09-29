@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { Loader2, Plug, Trash2, ShieldCheck } from "lucide-react";
+import { Loader2, Waypoints, Trash2, ShieldCheck } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -90,7 +90,7 @@ export function ContextSourceDialog({
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Plug className="h-4 w-4" />
+            <Waypoints className="h-4 w-4" />
             議事録の補完に使う情報源
           </DialogTitle>
           <DialogDescription>

@@ -808,6 +808,22 @@ export function VoicePanel({
         (c) => c.type === "question",
       );
       const refineIncludedCards = refineCards;
+      // Outside records from the user's own connected servers, for the window
+      // around this recording. Best-effort: `collect` swallows an unreachable
+      // source rather than failing a refinement that would otherwise work, and
+      // an empty list simply omits the block from the prompt.
+      const { useContextSourceStore } =
+        await import("@/stores/context-source-store");
+      const contextStore = useContextSourceStore.getState();
+      const { useAppStore } = await import("@/stores/app-store");
+      const recordedAtMs =
+        useAppStore.getState().documents.find((d) => d.id === docId)
+          ?.voiceRecordedAt || Date.now();
+      let contextRecords: Array<{ source: string; text: string }> = [];
+      if (contextStore.sources.length > 0) {
+        contextRecords = await contextStore.collect(recordedAtMs);
+      }
+
       const body: CreateRefineJobBody = {
         jobId: newRefineJobId(),
         docId,
@@ -824,6 +840,7 @@ export function VoicePanel({
         })),
         questionCards: refineQuestionCards.map((c) => ({ summary: c.summary })),
         includedCardIds: refineIncludedCards.map((c) => c.id),
+        contextRecords,
       };
       refineStore.patch(docId, { audioKey });
       supersedeRefineJob(prevState);
@@ -834,6 +851,7 @@ export function VoicePanel({
         ),
         doc_chars: existingDoc.length,
         research_cards: refineResearchCards.length,
+        context_records: contextRecords.length,
         question_cards: refineQuestionCards.length,
         upload_ms: Date.now() - startedAt,
       });
