@@ -186,6 +186,59 @@ const LIMIT_NAMES = new Set([
   "perpage",
 ]);
 
+const QUERY_NAMES = new Set([
+  "query",
+  "q",
+  "keyword",
+  "keywords",
+  "search",
+  "searchquery",
+  "text",
+  "term",
+]);
+
+/** Tools that take a free-text query — the ones that can look past the window. */
+export function rankSearchCandidates(
+  tools: McpToolInfo[],
+  slot: SlotId,
+): McpToolInfo[] {
+  return rankCandidates(tools, slot).filter((t) => {
+    const props = (t.inputSchema as JsonSchema | undefined)?.properties ?? {};
+    return Object.keys(props).some((n) => QUERY_NAMES.has(norm(n)));
+  });
+}
+
+/**
+ * Arguments for a topic search.
+ *
+ * Filling a free-text parameter is refused during a PROBE — an answer to an
+ * invented question proves nothing — but here the term comes from the meeting's
+ * own document, so it is a real question and filling it is honest.
+ */
+export function buildSearchArgs(
+  schema: JsonSchema | undefined,
+  term: string,
+  window: ProbeWindow,
+  limit: number = SEARCH_LIMIT,
+): ProbeArgs {
+  const args: Record<string, unknown> = {};
+  const props = schema?.properties ?? {};
+  for (const [name, prop] of Object.entries(props)) {
+    const key = norm(name);
+    if (QUERY_NAMES.has(key)) args[name] = term;
+    else if (SINCE_NAMES.has(key))
+      args[name] = timeValue(prop, window.sinceMs - SEARCH_BACK_MS);
+    else if (UNTIL_NAMES.has(key)) args[name] = timeValue(prop, window.untilMs);
+    else if (
+      LIMIT_NAMES.has(key) &&
+      (prop.type === "number" || prop.type === "integer")
+    )
+      args[name] = limit;
+  }
+  const unfilledRequired = (schema?.required ?? []).filter((r) => !(r in args));
+  return { args, unfilledRequired };
+}
+
 function timeValue(prop: JsonSchema, ms: number): number | string {
   const t = prop.type;
   if (t === "number" || t === "integer") return ms;
@@ -272,6 +325,19 @@ export const PROBE_LIMIT = 20;
  * participants, which is the single row the whole feature exists to deliver.
  */
 export const COLLECT_LIMIT = 200;
+
+/**
+ * Rows per topic search. Smaller than the window pass: a search is already
+ * narrowed by the term, and several terms are issued per source.
+ */
+export const SEARCH_LIMIT = 30;
+
+/**
+ * How far back a topic search reaches. The window pass answers "what happened
+ * around this meeting"; this answers "what came before it", which is where the
+ * decisions from the previous meeting live.
+ */
+export const SEARCH_BACK_MS = 180 * 24 * 60 * 60 * 1000;
 
 /**
  * Probe one server for every slot and decide whether to keep it.

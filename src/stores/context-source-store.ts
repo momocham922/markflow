@@ -28,6 +28,8 @@ import {
   probeServer,
   rankCandidates,
   buildProbeArgs,
+  buildSearchArgs,
+  rankSearchCandidates,
   COLLECT_LIMIT,
   type ProbeReport,
   type JsonSchema,
@@ -80,6 +82,7 @@ interface ContextSourceState {
    */
   collect: (
     recordedAtMs: number,
+    topicTerms?: string[],
   ) => Promise<Array<{ source: string; text: string }>>;
   reset: () => void;
 }
@@ -220,7 +223,7 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
     return v && v.trim() ? v : null;
   },
 
-  collect: async (recordedAtMs) => {
+  collect: async (recordedAtMs, topicTerms = []) => {
     const window = probeWindow(recordedAtMs);
     const out: Array<{ source: string; text: string }> = [];
     for (const source of get().sources) {
@@ -247,6 +250,27 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
             out.push({ source: source.name, text });
           }
           break;
+        }
+
+        // Second pass: look past the window by topic. The window says what
+        // happened around the meeting; this is where "what we agreed last time"
+        // lives, which no amount of widening the window would reach.
+        const searchTools = rankSearchCandidates(tools, "messages");
+        if (searchTools.length > 0 && topicTerms.length > 0) {
+          const tool = searchTools[0];
+          for (const term of topicTerms) {
+            const { args, unfilledRequired } = buildSearchArgs(
+              tool.inputSchema as JsonSchema | undefined,
+              term,
+              window,
+            );
+            if (unfilledRequired.length > 0) continue;
+            const result = await client.callTool(tool.name, args);
+            const text = textOf(result);
+            if (text.trim()) {
+              out.push({ source: `${source.name}（「${term}」で検索）`, text });
+            }
+          }
         }
       } catch (e) {
         // A token that expired, a server that moved, no network — none of these

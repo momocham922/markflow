@@ -815,13 +815,28 @@ export function VoicePanel({
       const { useContextSourceStore } =
         await import("@/stores/context-source-store");
       const contextStore = useContextSourceStore.getState();
-      const { useAppStore } = await import("@/stores/app-store");
+      const { useAppStore: getAppStore } = await import("@/stores/app-store");
       const recordedAtMs =
-        useAppStore.getState().documents.find((d) => d.id === docId)
+        getAppStore.getState().documents.find((d) => d.id === docId)
           ?.voiceRecordedAt || Date.now();
       let contextRecords: Array<{ source: string; text: string }> = [];
       if (contextStore.sources.length > 0) {
-        contextRecords = await contextStore.collect(recordedAtMs);
+        // Terms for the topic pass, which reaches back past the recording's own
+        // window. Taken from the document TITLE first — it is where the client
+        // or project is actually named — then the longest distinctive terms in
+        // the document body. Kept to a handful: each one is a round trip, and a
+        // generic word would drag back everything.
+        const { useAppStore } = await import("@/stores/app-store");
+        const doc = useAppStore
+          .getState()
+          .documents.find((d) => d.id === docId);
+        const topicTerms = [
+          ...new Set([
+            ...extractHints(doc?.title ?? ""),
+            ...extractHints(existingDoc),
+          ]),
+        ].slice(0, 3);
+        contextRecords = await contextStore.collect(recordedAtMs, topicTerms);
       }
 
       const body: CreateRefineJobBody = {

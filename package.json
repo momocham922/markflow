@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:rules": "firebase emulators:exec --only firestore --project demo-markflow-rules \"vitest run --config vitest.rules.config.ts\"",
+    "test:live-context": "vitest run --config vitest.live.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:tauri": "./scripts/run-e2e-tauri.sh",

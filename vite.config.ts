@@ -47,6 +47,9 @@ export default defineConfig(async () => ({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    // `*.live-test.ts` is deliberately NOT matched: those call real models and
+    // real servers, cost money and take minutes. Run them by path when changing
+    // the thing they guard (see server/ai-proxy/context-contamination.live-test.ts).
     include: ["src/**/*.test.{ts,tsx}", "server/**/*.test.ts"],
   },
 }));
