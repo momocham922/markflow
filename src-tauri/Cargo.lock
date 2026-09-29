@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "markflow"
-version = "0.6.4-beta.6"
+version = "0.6.4-beta.7"
 dependencies = [
  "base64 0.22.1",
  "bytes",
