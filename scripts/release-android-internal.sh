@@ -85,7 +85,13 @@ cd "$ROOT"
 VITE_BILLING_ENABLED=true pnpm tauri android build --target aarch64
 
 AAB="src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab"
-UNSIGNED_APK="src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+# Gradle names the APK by whether the release signingConfig applied. This build
+# HAS one (app/build.gradle.kts), so the output is `app-universal-release.apk`,
+# already signed — the `-unsigned` name only appears without a signing config.
+# Looking for the latter alone silently skipped APK creation entirely.
+APK_DIR="src-tauri/gen/android/app/build/outputs/apk/universal/release"
+UNSIGNED_APK="$APK_DIR/app-universal-release-unsigned.apk"
+GRADLE_APK="$APK_DIR/app-universal-release.apk"
 
 if [ ! -f "$AAB" ]; then
   echo "ERROR: AAB not found at $AAB"
@@ -103,19 +109,45 @@ jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
   -keypass "${KEY_PASS:-$KEYSTORE_PASS}" \
   "$SIGNED_AAB" "$KEY_ALIAS" 2>&1 | tail -3
 
-# ─── Also build signed APK for direct distribution ───
-SIGNED_APK="src-tauri/gen/android/app/build/outputs/apk/universal/release/MarkFlow_${VERSION}_arm64.apk"
+# ─── Also produce a signed APK for direct distribution ───
+# Used when someone needs the build before their Play tester invite lands. It
+# must carry the SAME release key as the Play build, or Play cannot upgrade
+# over a sideloaded install.
+SIGNED_APK="$APK_DIR/MarkFlow_${VERSION}_arm64.apk"
+BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
 if [ -f "$UNSIGNED_APK" ]; then
   cp "$UNSIGNED_APK" "$SIGNED_APK"
-  "$ANDROID_HOME/build-tools/34.0.0/zipalign" -f 4 "$SIGNED_APK" "${SIGNED_APK}.aligned"
+  "$BUILD_TOOLS/zipalign" -f 4 "$SIGNED_APK" "${SIGNED_APK}.aligned"
   mv "${SIGNED_APK}.aligned" "$SIGNED_APK"
-  "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
+  "$BUILD_TOOLS/apksigner" sign \
     --ks "$KEYSTORE" \
     --ks-pass "pass:$KEYSTORE_PASS" \
     --ks-key-alias "$KEY_ALIAS" \
     --key-pass "pass:${KEY_PASS:-$KEYSTORE_PASS}" \
     "$SIGNED_APK"
-  echo "APK (signed): $SIGNED_APK"
+  echo "APK (signed here): $SIGNED_APK"
+elif [ -f "$GRADLE_APK" ]; then
+  cp "$GRADLE_APK" "$SIGNED_APK"
+  echo "APK (signed by Gradle): $SIGNED_APK"
+else
+  echo "WARNING: no APK found in $APK_DIR — skipping direct-distribution APK"
+fi
+
+# Whatever produced it, prove the APK carries the release key before anyone
+# installs it: a debug-signed APK would block the Play upgrade path later.
+if [ -f "$SIGNED_APK" ]; then
+  APK_SHA=$("$BUILD_TOOLS/apksigner" verify --print-certs "$SIGNED_APK" 2>/dev/null \
+    | awk -F": " '/SHA-256 digest/ {print toupper($2); exit}')
+  KS_SHA=$(keytool -list -v -keystore "$KEYSTORE" -alias "$KEY_ALIAS" \
+    -storepass "$KEYSTORE_PASS" 2>/dev/null \
+    | awk -F"SHA256: " '/SHA256:/ {gsub(/:/,"",$2); print toupper($2); exit}')
+  if [ -z "$APK_SHA" ] || [ "$APK_SHA" != "$KS_SHA" ]; then
+    echo "ERROR: APK signer does not match the release keystore"
+    echo "  apk:      ${APK_SHA:-<unsigned>}"
+    echo "  keystore: $KS_SHA"
+    exit 1
+  fi
+  echo "APK signer verified against release keystore"
 fi
 
 # ─── Upload to Google Play Internal Testing ───
