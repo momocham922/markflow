@@ -141,7 +141,6 @@ import {
   REFINE_JOB_PARTS,
   isAudioTooLongMessage,
   REFINE_HEARTBEAT_MS,
-  REFINE_RETENTION_MS,
   REFINE_EFFORT,
   REFINE_MAX_TOKENS,
   parseRefineRequest,
@@ -4194,15 +4193,19 @@ async function runMeteredBatch(
 // Firestore first, so a client that disconnects (backgrounded app, closed panel,
 // dropped network — none of which Cloud Run propagates over HTTP/1.1) can fetch
 // the finished job later, from any device. Both collections are server-only
-// (firestore.rules) and expire via a TTL policy on `expireAt`.
+// (firestore.rules) and are KEPT INDEFINITELY.
+//
+// They used to carry an `expireAt` for a 14-day Firestore TTL. That was set
+// without a reason and measured badly: 12 real jobs came to 685 KB in total,
+// 57 KB each, so a hundred refinements a year cost about 5 MB — nothing against
+// a 1 GiB free tier. Meanwhile the transcript these parts hold is already kept
+// forever on the document itself, so deleting the job copy was not even
+// consistent. What it did cost was evidence: the jobs behind several design
+// decisions were a day from deletion before anyone had reviewed them.
 // =====================================================================
 
 function refineJobRef(jobId: string) {
   return getFirestore().collection(REFINE_JOBS).doc(jobId);
-}
-
-function refineExpireAt(now: number): Timestamp {
-  return Timestamp.fromMillis(now + REFINE_RETENTION_MS);
 }
 
 /** Store `text` as ordered parts (each well under Firestore's 1 MiB doc cap). */
@@ -4222,7 +4225,6 @@ async function writeRefineParts(
       name,
       index: i,
       text: parts[i],
-      expireAt: refineExpireAt(now),
     });
   }
   return parts.length;
@@ -4698,7 +4700,7 @@ async function handleRefineJobPost(
         return { action: { kind: "busy" as const }, job: existing };
       }
       const rec = newJobRecord(uid, parsed.req, runnerId, inputParts, now);
-      tx.create(ref, { ...rec, expireAt: refineExpireAt(now) });
+      tx.create(ref, rec);
       return { action, job: rec };
     }
     if (action.kind === "run" && existing) {

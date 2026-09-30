@@ -29,8 +29,6 @@ export const REFINE_HEARTBEAT_MS = 30_000;
 export const REFINE_STALE_MS = 3 * 60_000;
 /** Give up after this many runs of the same job (each resume counts). */
 export const REFINE_MAX_ATTEMPTS = 4;
-/** Jobs (and their parts) are deleted by a Firestore TTL policy after this. */
-export const REFINE_RETENTION_MS = 14 * 24 * 60 * 60_000;
 /** Pending (unacknowledged) jobs older than this are not offered for resume. */
 export const REFINE_RESUME_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
