@@ -13,6 +13,7 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { EditorView } from "@codemirror/view";
 import { marked } from "marked";
+import { ensureMarkedFootnote } from "@/lib/marked-footnote-setup";
 import hljs from "highlight.js";
 import TurndownService from "turndown";
 import { getPlatform, isIOS, isMobile } from "@/platform";
@@ -166,6 +167,7 @@ renderer.link = function ({ href, text }: { href: string; text: string }) {
 };
 
 marked.use({ renderer });
+ensureMarkedFootnote();
 
 // Neutral safety-net init at module load. The real brand palette is applied
 // per render pass from the active preview theme (see mermaidCfg below).

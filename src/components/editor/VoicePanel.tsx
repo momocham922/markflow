@@ -19,7 +19,12 @@ import type { ResearchCard } from "@/stores/research-store";
 import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
 import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
-import { extractHints } from "@/lib/text-utils";
+import {
+  extractHints,
+  cleanTopicTerms,
+  isPlaceholderTitle,
+} from "@/lib/text-utils";
+import type { SourceOutcome } from "@/stores/context-source-store";
 import { friendlyErrorMessage } from "@/lib/friendly-error";
 import { track } from "@/services/telemetry";
 import {
@@ -809,9 +814,10 @@ export function VoicePanel({
       );
       const refineIncludedCards = refineCards;
       // Outside records from the user's own connected servers, for the window
-      // around this recording. Best-effort: `collect` swallows an unreachable
-      // source rather than failing a refinement that would otherwise work, and
-      // an empty list simply omits the block from the prompt.
+      // around this recording. Best-effort for SUCCESS (an unreachable source
+      // never fails a refinement), but NOT silent: each source's outcome is
+      // recorded so the user is told when a configured source could not
+      // contribute (サイレントフォールバック禁止) and can re-connect.
       const { useContextSourceStore } =
         await import("@/stores/context-source-store");
       const contextStore = useContextSourceStore.getState();
@@ -820,24 +826,29 @@ export function VoicePanel({
         getAppStore.getState().documents.find((d) => d.id === docId)
           ?.voiceRecordedAt || Date.now();
       let contextRecords: Array<{ source: string; text: string }> = [];
+      let contextOutcomes: SourceOutcome[] = [];
       if (contextStore.sources.length > 0) {
         // Terms for the topic pass, which reaches back past the recording's own
         // window. Taken from the document TITLE first — it is where the client
         // or project is actually named — then the longest distinctive terms in
-        // the document body. Kept to a handful: each one is a round trip, and a
-        // generic word would drag back everything.
-        const { useAppStore } = await import("@/stores/app-store");
-        const doc = useAppStore
+        // the body. Cleaned of placeholder titles ("Untitled") and split
+        // artefacts ("様提案", a stray leading middle-dot), which would otherwise
+        // drag back unrelated records. Kept to a handful: each one is a round trip.
+        const doc = getAppStore
           .getState()
           .documents.find((d) => d.id === docId);
-        const topicTerms = [
-          ...new Set([
-            ...extractHints(doc?.title ?? ""),
-            ...extractHints(existingDoc),
-          ]),
-        ].slice(0, 3);
-        contextRecords = await contextStore.collect(recordedAtMs, topicTerms);
+        const title = doc?.title ?? "";
+        const topicTerms = cleanTopicTerms([
+          ...(isPlaceholderTitle(title) ? [] : extractHints(title)),
+          ...extractHints(existingDoc),
+        ]).slice(0, 3);
+        const collected = await contextStore.collect(recordedAtMs, topicTerms);
+        contextRecords = collected.records;
+        contextOutcomes = collected.outcomes;
       }
+      // Record the outcome against this document (clears any stale warning when
+      // no source is configured, flags the banner/badges when one failed).
+      contextStore.noteCollect(docId, contextOutcomes);
 
       const body: CreateRefineJobBody = {
         jobId: newRefineJobId(),
@@ -866,7 +877,15 @@ export function VoicePanel({
         ),
         doc_chars: existingDoc.length,
         research_cards: refineResearchCards.length,
+        // Context telemetry splits the two kinds of empty apart so a silent
+        // disconnect is visible in BigQuery: sources configured vs records
+        // actually attached vs sources that failed (and of those, auth).
+        context_sources: contextOutcomes.length,
         context_records: contextRecords.length,
+        context_failed: contextOutcomes.filter(
+          (o) => o.status === "auth" || o.status === "error",
+        ).length,
+        context_auth: contextOutcomes.filter((o) => o.status === "auth").length,
         question_cards: refineQuestionCards.length,
         upload_ms: Date.now() - startedAt,
       });

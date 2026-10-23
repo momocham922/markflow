@@ -1,5 +1,11 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { Loader2, Waypoints, Trash2, ShieldCheck } from "lucide-react";
+import {
+  Loader2,
+  Waypoints,
+  Trash2,
+  ShieldCheck,
+  AlertTriangle,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -39,7 +45,7 @@ export function ContextSourceDialog({
 }) {
   const uid = useAuthStore((s) => s.user?.uid ?? null);
   const documents = useAppStore((s) => s.documents);
-  const { sources, loaded, testing, load, add, remove } =
+  const { sources, loaded, testing, load, add, remove, lastOutcomes } =
     useContextSourceStore();
 
   const [url, setUrl] = useState("");
@@ -113,30 +119,65 @@ export function ContextSourceDialog({
           {sources.length > 0 && (
             <div className="space-y-2">
               <div className="font-medium">追加済み</div>
-              {sources.map((s) => (
-                <div
-                  key={s.id}
-                  className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 font-medium">
-                      <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-                      {s.name}
+              {sources.map((s) => {
+                const st = lastOutcomes.find((o) => o.id === s.id)?.status;
+                const failed = st === "auth" || st === "error";
+                return (
+                  <div
+                    key={s.id}
+                    className={
+                      "flex items-center justify-between gap-3 rounded-md border p-2 " +
+                      (failed
+                        ? "border-amber-600/40 bg-amber-600/5"
+                        : "border-border/60")
+                    }
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 font-medium">
+                        {failed ? (
+                          <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                        ) : (
+                          <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
+                        )}
+                        {s.name}
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {s.url}
+                      </div>
+                      {failed && (
+                        <div className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
+                          {st === "auth"
+                            ? "前回つながりませんでした（トークンの再入力が必要かもしれません）。"
+                            : "前回つながりませんでした。"}
+                        </div>
+                      )}
                     </div>
-                    <div className="truncate text-xs text-muted-foreground">
-                      {s.url}
+                    <div className="flex shrink-0 items-center gap-1">
+                      {failed && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => {
+                            setUrl(s.url);
+                            setToken("");
+                          }}
+                        >
+                          再接続
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => uid && void remove(uid, s.id)}
+                        aria-label={`${s.name} を削除`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => uid && void remove(uid, s.id)}
-                    aria-label={`${s.name} を削除`}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 

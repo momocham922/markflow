@@ -53,3 +53,23 @@ describe("generatePublishHtml never leaks a closing script tag from theme colors
     expect(html).not.toContain("</script><script>document");
   });
 });
+
+describe("generatePublishHtml renders GitHub-style footnotes", () => {
+  it("keeps the footnotes section and ref/backref anchors through sanitize", () => {
+    const html = generatePublishHtml({
+      title: "Minutes",
+      content:
+        "## 提案\nサーバーサイドGTMで計測欠損を補う[^1]。\n\n[^1]: ITP は 16.4 以降クッキーを24時間に短縮 — [webkit](https://webkit.org/)\n",
+      themeId: "github",
+      isDark: false,
+    });
+    // The trailing footnotes section and its list item survive DOMPurify.
+    expect(html).toContain('class="footnotes"');
+    expect(html).toContain('id="footnote-1"');
+    // The inline marker anchors to the definition, and the source link is kept.
+    expect(html).toContain('href="#footnote-1"');
+    expect(html).toContain('href="https://webkit.org/"');
+    // No legacy appendix heading leaks into the body.
+    expect(html).not.toContain("補足情報（Web調査）");
+  });
+});

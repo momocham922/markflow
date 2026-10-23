@@ -60,6 +60,7 @@
     "lowlight": "^3.3.0",
     "lucide-react": "^0.577.0",
     "marked": "^17.0.4",
+    "marked-footnote": "1.4.0",
     "mermaid": "^11.13.0",
     "radix-ui": "^1.4.3",
     "react": "^19.0.0",

@@ -376,6 +376,17 @@ describe("buildRefinePrompt (verbatim port of the client prompt)", () => {
     );
     expect(user.endsWith("API連携の許可は？")).toBe(true);
   });
+  // Research is woven in as curated footnotes, not dumped into a trailing
+  // '## 補足情報（Web調査）' appendix.
+  it("instructs research to be cited as curated footnotes, not an appendix", () => {
+    const { system, user } = buildRefinePrompt("t", 1, input);
+    expect(system).toContain("SUPPLEMENTARY RESEARCH AS FOOTNOTES");
+    expect(system).toContain("CURATE HARD");
+    expect(system).toContain("[^1]");
+    // The model must not be told to build the old appendix heading.
+    expect(system).not.toContain("titled '## 補足情報（Web調査）'");
+    expect(user).toContain("cite as FOOTNOTES");
+  });
   // The outside-records block is primary evidence, not background reading: it
   // is what supplies the real spelling of a name the audio misheard and who
   // actually did a thing. It must never become a section of its own.

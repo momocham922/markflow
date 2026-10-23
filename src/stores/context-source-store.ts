@@ -59,11 +59,38 @@ export interface AddOutcome {
   report?: ProbeReport;
 }
 
+/**
+ * What one source produced on a `collect` for Refine. The point is to tell the
+ * two kinds of empty apart — "reachable, nothing relevant in the window" vs
+ * "could not connect / token rejected" — so the result is never a silent zero
+ * (プロジェクト規則: サイレントフォールバック禁止).
+ */
+export interface SourceOutcome {
+  id: string;
+  name: string;
+  /**
+   * ok: records returned. empty: reachable but nothing in the window.
+   * auth: token missing on this device or rejected — needs re-connecting.
+   * error: unreachable / moved / network.
+   */
+  status: "ok" | "empty" | "auth" | "error";
+  records: number;
+}
+
+export interface CollectResult {
+  records: Array<{ source: string; text: string }>;
+  outcomes: SourceOutcome[];
+}
+
 interface ContextSourceState {
   sources: ContextSource[];
   loaded: boolean;
   /** True while a probe is running, so the dialog can disable its button. */
   testing: boolean;
+  /** Per-source result of the most recent collect, for badges + the banner. */
+  lastOutcomes: SourceOutcome[];
+  /** Which document that collect was for, so the banner scopes itself. */
+  lastOutcomesDocId: string | null;
   load: (uid: string) => Promise<void>;
   /** Probe a candidate server and keep it only if it answers a required slot. */
   add: (
@@ -78,12 +105,18 @@ interface ContextSourceState {
   /**
    * Ask every configured source what was said around a recording. Used by
    * Refine; never throws, because a source being unreachable must not stop a
-   * refinement that would otherwise succeed.
+   * refinement that would otherwise succeed. Returns the gathered records AND a
+   * per-source outcome so the caller can tell "nothing relevant" from "could
+   * not connect" and surface the latter instead of swallowing it.
    */
   collect: (
     recordedAtMs: number,
     topicTerms?: string[],
-  ) => Promise<Array<{ source: string; text: string }>>;
+  ) => Promise<CollectResult>;
+  /** Record a collect's outcomes against a document (drives the banner/badges). */
+  noteCollect: (docId: string, outcomes: SourceOutcome[]) => void;
+  /** Dismiss the banner (clears the doc scope but keeps outcomes for badges). */
+  dismissOutcomes: () => void;
   reset: () => void;
 }
 
@@ -140,6 +173,8 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
   sources: [],
   loaded: false,
   testing: false,
+  lastOutcomes: [],
+  lastOutcomesDocId: null,
 
   load: async (uid) => {
     try {
@@ -225,14 +260,24 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
 
   collect: async (recordedAtMs, topicTerms = []) => {
     const window = probeWindow(recordedAtMs);
-    const out: Array<{ source: string; text: string }> = [];
+    const records: Array<{ source: string; text: string }> = [];
+    const outcomes: SourceOutcome[] = [];
     for (const source of get().sources) {
+      let got = 0;
       try {
         const token = await get().tokenFor(source.id);
-        const client = new McpHttpClient({
-          url: source.url,
-          bearer: token ?? undefined,
-        });
+        if (!token) {
+          // Sources follow the user between devices; their tokens do not. A
+          // missing token here is "re-connect on this device", not a silent 0.
+          outcomes.push({
+            id: source.id,
+            name: source.name,
+            status: "auth",
+            records: 0,
+          });
+          continue;
+        }
+        const client = new McpHttpClient({ url: source.url, bearer: token });
         await client.initialize();
         const tools = await client.listTools();
         // Same ranking the probe used, so Refine calls the tool that was
@@ -247,7 +292,8 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
           const result = await client.callTool(tool.name, args);
           const text = textOf(result);
           if (text.trim()) {
-            out.push({ source: source.name, text });
+            records.push({ source: source.name, text });
+            got++;
           }
           break;
         }
@@ -268,18 +314,48 @@ export const useContextSourceStore = create<ContextSourceState>((set, get) => ({
             const result = await client.callTool(tool.name, args);
             const text = textOf(result);
             if (text.trim()) {
-              out.push({ source: `${source.name}（「${term}」で検索）`, text });
+              records.push({
+                source: `${source.name}（「${term}」で検索）`,
+                text,
+              });
+              got++;
             }
           }
         }
+        outcomes.push({
+          id: source.id,
+          name: source.name,
+          status: got > 0 ? "ok" : "empty",
+          records: got,
+        });
       } catch (e) {
         // A token that expired, a server that moved, no network — none of these
-        // are worth failing the whole refinement over.
+        // fail the refinement, but they are reported (not swallowed) so the user
+        // learns the context was missing and can re-connect.
+        const auth = e instanceof McpHttpError && e.code === "auth";
         console.error(`[context-source] ${source.name} unavailable:`, e);
+        outcomes.push({
+          id: source.id,
+          name: source.name,
+          status: auth ? "auth" : "error",
+          records: got,
+        });
       }
     }
-    return out;
+    return { records, outcomes };
   },
 
-  reset: () => set({ sources: [], loaded: false, testing: false }),
+  noteCollect: (docId, outcomes) =>
+    set({ lastOutcomes: outcomes, lastOutcomesDocId: docId }),
+
+  dismissOutcomes: () => set({ lastOutcomesDocId: null }),
+
+  reset: () =>
+    set({
+      sources: [],
+      loaded: false,
+      testing: false,
+      lastOutcomes: [],
+      lastOutcomesDocId: null,
+    }),
 }));

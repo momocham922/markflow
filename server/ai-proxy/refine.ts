@@ -601,7 +601,8 @@ export function partId(
 /**
  * Build the "Questions Context" block. Speaker-questions are prompts the user may
  * ASK — NOT facts and NOT meeting speech — so they go into their own trailing
- * '## 確認したいこと' section, separate from '## 補足情報（Web調査）'.
+ * '## 確認したいこと' section at the end of the document (research now lives in
+ * footnotes, which the renderer gathers below everything).
  */
 export function buildQuestionsContext(questionSummaries: string[]): string {
   return (
@@ -609,11 +610,11 @@ export function buildQuestionsContext(questionSummaries: string[]): string {
     "These are candidate questions the user may want to ASK the other participants. " +
     "They are NOT facts and NOT anything anyone said. Follow the SEPARATION RULE: " +
     "collect them under a SINGLE trailing section titled '## 確認したいこと' " +
-    "(translate the title to match the document's language), placed AFTER any " +
-    "'## 補足情報（Web調査）' section and clearly separate from it. Render as a " +
-    "bulleted checklist of the questions themselves; you MAY drop any ' — *intent*' " +
-    "annotation and merge duplicate/near-identical questions. Do NOT weave them " +
-    "into the minutes body. Omit the section entirely if none are meaningful.\n\n" +
+    "(translate the title to match the document's language), placed at the END of " +
+    "the document. Render as a bulleted checklist of the questions themselves; you " +
+    "MAY drop any ' — *intent*' annotation and merge duplicate/near-identical " +
+    "questions. Do NOT weave them into the minutes body. Omit the section entirely " +
+    "if none are meaningful.\n\n" +
     questionSummaries.join("\n")
   );
 }
@@ -659,7 +660,7 @@ export function buildRefinePrompt(
     "4) Organize by TOPIC, not chronologically. Extract and distill: key decisions, action items, facts, issues, background context, and conclusions. " +
     "5) CONSOLIDATION (CRITICAL — non-redundant): Each distinct topic, decision, fact, definition, number, or conclusion must appear EXACTLY ONCE, in the single most relevant section. The conversation circles back to topics — do NOT create a new section or restate a point each time it recurs; gather everything about a topic into its one section. Never repeat the same conclusion/figure/definition/action item across sections; refer to it in one short phrase if needed elsewhere. Before finalizing, scan your output and merge sections/bullets covering the same subject. Prefer a tight, consolidated document over a long, repetitive one. " +
     "6) Omit filler, repetition, backchannel responses, and off-topic tangents. " +
-    "7) SEPARATION RULE: If web-search supplementary information is provided (a 'Research Context' block), it is NOT part of the meeting and MUST NOT be woven into the minutes body. Place it in a SINGLE dedicated section at the very end, titled '## 補足情報（Web調査）' (match the document's language), clearly separated from the meeting minutes. Include ONLY research points that ADD information the minutes do not already contain — never restate a fact/figure/conclusion already in the body. Keep each supplement concise. Do NOT create this section if no research information was provided. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language), after '## 補足情報（Web調査）'; they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
+    "7) SUPPLEMENTARY RESEARCH AS FOOTNOTES: If web-search supplementary information is provided (a 'Research Context' block), it is background reference, NOT meeting speech, and MUST NOT be stated in the minutes body as if it had been discussed. Weave it in as FOOTNOTES, never as a trailing appendix section: (a) CURATE HARD — keep only the few supplements that genuinely add something the minutes do not already contain, and DROP the rest entirely; never restate a fact/figure/conclusion already in the body; (b) for each supplement you keep, place a GitHub-style footnote marker like [^1] at the END of the single body sentence it supplements (right after the punctuation), and nowhere else; (c) write each definition as '[^1]: <one or two concise sentences — do not dump the summary verbatim> — [出典名](URL)'; (d) number them [^1], [^2], … in order of first appearance, with exactly one definition per marker and one marker per definition; (e) put ALL the definitions together at the very end of the document — the renderer gathers them into a footnotes section, so do NOT add any '## 補足情報（Web調査）' or '参考' heading yourself. If nothing survives curation, add no footnotes. If a 'Questions Context' block is provided, collect those follow-up questions under a SEPARATE trailing section '## 確認したいこと' (match the document's language); they are prompts to ask, NOT facts, and MUST NOT enter the minutes body. Omit if none. " +
     "8) PARTICIPANTS: When two or more people take part and their names or sides can be established from the transcript, open the document with a short '## 参加者' section (match the document's language) listing each person by the name used in the transcript, or — when no name is spoken — by organisation and role. Never invent a name or an organisation. If you could not decide whether two labels are the same person, list the participants you are sure of and say so in one short line instead of inflating the count. Omit this section for a solo recording, or when no side or role can be established. " +
     "9) COVERAGE CHECK — do this before you output: re-read the transcript from the start against your draft and confirm that every decision, figure, date, name, deadline, condition, commitment and action item that was actually spoken survives somewhere in the document. Put back anything you dropped. This is not a licence to repeat: rule 5 still holds, so a recovered item goes in the one section it belongs to. Anything the speakers themselves retracted or corrected must NOT be restored — keep only the corrected version. " +
     "10) OUTSIDE RECORDS: If a 'Context Records' block is provided, it holds real messages from the user's own systems (chat, mail) written around the time of this recording. They are PRIMARY EVIDENCE about the same events, not background reading, and they outrank the transcript on anything the transcript could only have guessed at: SPELLINGS OF NAMES (people, companies, products), WHO did a thing, and WHAT HAPPENED AFTER the recording stopped. Use them to (a) correct misheard proper nouns throughout the document — silently, with no note about the correction, (b) fix an attribution the audio got backwards, and (c) mark an action item as already done when a record shows it was. Do NOT add their content to the minutes as if it had been discussed, do NOT create a section for them, and do NOT cite them inline. A record that merely happens to fall in the same time window and concerns an unrelated matter must be IGNORED — judge relevance by whether it involves this meeting's participants or subject. " +
@@ -687,10 +688,9 @@ export function buildRefinePrompt(
   }
   if (input.researchCards.length > 0) {
     user +=
-      "\n\n## Research Context (web search — SUPPLEMENTARY, NOT meeting content)\n" +
+      "\n\n## Research Context (web search — SUPPLEMENTARY, cite as FOOTNOTES, NOT meeting content)\n" +
       "Gathered via web search during the recording — background reference, NOT meeting speech. " +
-      "Follow the SEPARATION RULE: put these in the trailing '## 補足情報（Web調査）' section, NOT in the minutes body. " +
-      "For EACH item: use a natural H3 heading like '### 〇〇の件について' (never the raw query); write 1–2 concise sentences (do not dump the summary verbatim); include ONLY what adds to the minutes; and, if it clearly supplements a specific meeting section, add a link on its own line — [本文「<見出し>」への補足](#<見出し>) — copying that body heading VERBATIM. Cite sources as markdown links.\n\n" +
+      "Follow rule 7: CURATE HARD and keep only the items that genuinely add to the minutes; for each kept item, attach a footnote marker [^n] to the exact body sentence it supplements and write its definition — '[^n]: <concise note> — [source](url)' — among the footnote definitions at the very end. Do NOT dump the summary verbatim and do NOT create a '補足情報' section. The items below are raw material to draw from, not an outline to reproduce.\n\n" +
       input.researchCards
         .map((c) => {
           const srcList = c.sources

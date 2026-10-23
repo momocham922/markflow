@@ -423,6 +423,52 @@ input::selection {
   font-size: var(--prose-bq-font-size, inherit);
 }
 
+/* ---- Footnotes (Refine cites web research here, not a trailing appendix) ---- */
+.prose .footnotes {
+  margin-top: 2.5em;
+  padding-top: 0.75em;
+  border-top: 1px solid var(--prose-h1-border, var(--prose-blockquote-border));
+  font-size: 0.85em;
+  color: var(--prose-blockquote-fg);
+}
+/* The renderer emits a screen-reader-only "Footnotes" h2; show a quiet,
+   localized label in its place. */
+.prose .footnotes > h2 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.prose .footnotes::before {
+  content: "参考";
+  display: block;
+  font-size: 0.85em;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+  margin-bottom: 0.5em;
+}
+.prose .footnotes ol {
+  padding-left: 1.25em;
+  margin: 0;
+}
+.prose .footnotes li {
+  margin: 0.2em 0;
+}
+.prose sup a[data-footnote-ref] {
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0 0.15em;
+}
+.prose a[data-footnote-backref] {
+  text-decoration: none;
+  margin-left: 0.25em;
+}
+
 /* ---- Inline code ---- */
 .tiptap code,
 .prose code {

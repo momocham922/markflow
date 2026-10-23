@@ -1,8 +1,20 @@
 import { useEffect } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  Waypoints,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { retryRefineJob } from "@/services/refine-runner";
-import { useRefineStore, type RefineDocState } from "@/stores/refine-store";
+import {
+  isRefineBusy,
+  useRefineStore,
+  type RefineDocState,
+} from "@/stores/refine-store";
+import { useContextSourceStore } from "@/stores/context-source-store";
+import { useEntitlementStore } from "@/stores/entitlement-store";
 
 const APPLIED_NOTICE_MS = 8000;
 
@@ -34,6 +46,17 @@ export function RefineStatusBanner({
     s.notice && s.notice.docId === docId ? s.notice : null,
   );
   const setNotice = useRefineStore((s) => s.setNotice);
+
+  // A configured context source that could not contribute to THIS document's
+  // last Refine. Shown so the gap is never silent, with a way to re-connect.
+  const lastOutcomes = useContextSourceStore((s) => s.lastOutcomes);
+  const lastOutcomesDocId = useContextSourceStore((s) => s.lastOutcomesDocId);
+  const dismissOutcomes = useContextSourceStore((s) => s.dismissOutcomes);
+  const openContextSources = useEntitlementStore((s) => s.openContextSources);
+  const contextFailed =
+    lastOutcomesDocId === docId
+      ? lastOutcomes.filter((o) => o.status === "auth" || o.status === "error")
+      : [];
 
   useEffect(() => {
     if (!notice || notice.kind !== "applied") return;
@@ -109,6 +132,39 @@ export function RefineStatusBanner({
           {state.phase === "transcribe" ? "文字起こし" : "整形"}
           ）です。アプリを閉じても処理は続き、次に開いたときに反映されます。
         </span>
+      </div>
+    );
+  }
+
+  if (contextFailed.length > 0 && !isRefineBusy(state)) {
+    const names = contextFailed.map((o) => o.name).join("・");
+    const anyAuth = contextFailed.some((o) => o.status === "auth");
+    return (
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs border-t border-amber-200 dark:border-amber-800/40 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        <span className="flex-1 min-w-[12rem]">
+          情報源「{names}
+          」に接続できなかったため、この整形は録音だけで作成しました。
+          {anyAuth ? "トークンの再入力が必要かもしれません。" : ""}
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-xs"
+          onClick={() => openContextSources()}
+        >
+          <Waypoints className="mr-1 h-3 w-3" />
+          再接続
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-6 w-6"
+          onClick={() => dismissOutcomes()}
+          title="閉じる"
+        >
+          <X className="h-3.5 w-3.5" />
+        </Button>
       </div>
     );
   }

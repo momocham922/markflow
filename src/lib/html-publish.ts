@@ -4,6 +4,7 @@
  */
 
 import { marked } from "marked";
+import { ensureMarkedFootnote } from "@/lib/marked-footnote-setup";
 import hljs from "highlight.js";
 import DOMPurify from "dompurify";
 import { previewThemes, type PreviewTheme } from "@/styles/preview-themes";
@@ -145,10 +146,13 @@ export function generatePublishHtml(opts: PublishOptions): string {
     `<div class="table-wrap">${defaultTable(token)}</div>`;
 
   marked.setOptions({ gfm: true, breaks: true });
+  // Research supplements are cited as GitHub-style footnotes ([^1] + a trailing
+  // <section class="footnotes">); register that support on the shared instance.
+  ensureMarkedFootnote();
   // marked (v17) does NOT sanitize HTML — raw <script>/<img onerror=…> in the
   // markdown would become stored XSS on the published page. Sanitize the body
-  // while preserving heading ids (the TOC anchors depend on them) and the
-  // mermaid/hljs class hooks used by the runtime scripts and styles.
+  // while preserving heading ids (the TOC anchors depend on them), the footnote
+  // ref/backref anchors, and the mermaid/hljs class hooks used by the runtime.
   const rawBody = marked.parse(content, { renderer }) as string;
   const bodyHtml = DOMPurify.sanitize(rawBody, {
     ADD_ATTR: ["target", "id", "class"],
@@ -498,6 +502,23 @@ body {
   padding-top: 0.5em; padding-bottom: 0.5em; padding-right: 1em;
   font-size: var(--prose-bq-font-size, inherit);
 }
+.prose .footnotes {
+  margin-top: 2.5em; padding-top: 0.75em;
+  border-top: 1px solid var(--prose-h1-border, var(--prose-blockquote-border));
+  font-size: 0.85em; color: var(--prose-blockquote-fg);
+}
+.prose .footnotes > h2 {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.prose .footnotes::before {
+  content: "参考"; display: block; font-size: 0.85em;
+  letter-spacing: 0.08em; opacity: 0.6; margin-bottom: 0.5em;
+}
+.prose .footnotes ol { padding-left: 1.25em; margin: 0; }
+.prose .footnotes li { margin: 0.2em 0; }
+.prose sup a[data-footnote-ref] { text-decoration: none; font-weight: 600; padding: 0 0.15em; }
+.prose a[data-footnote-backref] { text-decoration: none; margin-left: 0.25em; }
 .prose code {
   background: var(--code-bg);
   border: 1px solid var(--code-border);
