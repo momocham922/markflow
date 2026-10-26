@@ -4451,6 +4451,48 @@ async function executeRefineJob(
   };
 
   try {
+    if (job.kind === "structure") {
+      // Structure job: the client's pre-built prompt IS the stored input; run it
+      // as the structure stage with no audio and no transcribe. The server does
+      // not rebuild the prompt, so the live in-recording structuring is byte-for-
+      // byte unchanged — jobification only makes it survive a cut stream.
+      stage = "structure";
+      emit({ type: "stage", stage: "structure" });
+      const sp = JSON.parse(
+        await readRefineParts(jobId, "input", job.inputParts),
+      ) as { system: string; user: string };
+      const s = await runMeteredStructure(req, uid, sp.system, sp.user, () => {
+        void beat();
+      });
+      if (s.kind !== "ok") {
+        await fail(String(s.body.error || "ai_failed"), s.status, s.body);
+        return;
+      }
+      const now = Date.now();
+      const n = await writeRefineParts(jobId, uid, "output", s.text, now);
+      const rec = await writeIfOwner({
+        status: "done",
+        stage: "done",
+        outputParts: n,
+        outputChars: s.text.length,
+        stopReason: s.stopReason,
+        structuredAt: now,
+        error: null,
+      });
+      if (!rec) {
+        console.error(`[refine-job] ${jobId} lost ownership after structuring`);
+        return;
+      }
+      console.log(
+        `[refine-job] ${jobId} structure done: ${s.text.length} chars, stop=${s.stopReason}, ${Math.round((now - t0) / 1000)}s, clientGone=${clientGone}`,
+      );
+      emit({
+        type: "done",
+        job: toJobView(jobId, rec, now, { output: s.text }),
+      });
+      return;
+    }
+
     let transcript = "";
     let speakerCount = job.speakerCount;
     if (from === "transcribe") {
@@ -4671,17 +4713,29 @@ async function handleRefineJobPost(
   const runnerId = randomUUID();
   const isCreate = parsed.kind === "create";
 
+  // A Structure job carries its transcript inline (no audio); a Refine job
+  // transcribes audio first. For a Structure create we persist that transcript
+  // up front so the job opens at the structure stage.
+  const createStructurePrompt =
+    parsed.kind === "create" ? parsed.req.structurePrompt : undefined;
+  const createFrom: "transcribe" | "structure" = createStructurePrompt
+    ? "structure"
+    : "transcribe";
+
   // Persist the prompt input BEFORE the job exists, so a job record never
-  // points at missing input (a resume on another instance re-reads it).
+  // points at missing input (a resume on another instance re-reads it). For a
+  // structure job the "input" IS the client's pre-built {system,user} prompt,
+  // run verbatim; for a refine job it is the structured input the server builds
+  // the prompt from.
   let inputParts = 0;
-  if (isCreate) {
+  if (isCreate && parsed.kind === "create") {
     const pre = await ref.get();
     if (!pre.exists) {
       inputParts = await writeRefineParts(
         jobId,
         uid,
         "input",
-        JSON.stringify(parsed.req.input),
+        JSON.stringify(createStructurePrompt ?? parsed.req.input),
         Date.now(),
       );
     }
@@ -4749,8 +4803,9 @@ async function handleRefineJobPost(
     return;
   }
   res.write(encodeEvent({ type: "accepted", job: toJobView(jobId, job, now) }));
+  const runFrom = action.kind === "create" ? createFrom : action.from;
   console.log(
-    `[refine-job] ${jobId} ${action.kind === "create" ? "created" : "resumed"} for ${uid}: from=${action.kind === "create" ? "transcribe" : action.from} chunks=${job.chunks.length} attempt=${job.attempts}`,
+    `[refine-job] ${jobId} ${action.kind === "create" ? "created" : "resumed"} for ${uid}: from=${runFrom} chunks=${job.chunks.length} attempt=${job.attempts}`,
   );
   await executeRefineJob(
     req,
@@ -4759,7 +4814,7 @@ async function handleRefineJobPost(
     jobId,
     job,
     runnerId,
-    action.kind === "create" ? "transcribe" : action.from,
+    runFrom,
     // A resumed job always rebuilds its prompt from the input saved at creation,
     // so the result matches the job's baseContentHash even if a retry sent newer
     // document text.

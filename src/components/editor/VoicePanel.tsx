@@ -18,7 +18,7 @@ import { useResearchStore } from "@/stores/research-store";
 import type { ResearchCard } from "@/stores/research-store";
 import { triggerResearchAnalysis } from "@/hooks/use-research-pipeline";
 import { auth } from "@/services/firebase";
-import { aiProxyHeaders, reportIfQuota } from "@/services/ai-proxy";
+import { reportIfQuota } from "@/services/ai-proxy";
 import {
   extractHints,
   cleanTopicTerms,
@@ -30,16 +30,16 @@ import { track } from "@/services/telemetry";
 import {
   newRefineJobId,
   sha256Hex,
+  RefineHttpError,
   type CreateRefineJobBody,
 } from "@/services/refine-jobs";
+import { runStructureJob } from "@/services/structure-job";
 import {
   recordLocalRefineFailure,
   runRefineStream,
   supersedeRefineJob,
 } from "@/services/refine-runner";
 import { isRefineBusy, useRefineStore } from "@/stores/refine-store";
-
-const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL || "";
 
 /**
  * Build the "Questions Context" block for Structure/Refine. Speaker-questions
@@ -494,55 +494,21 @@ export function VoicePanel({
         userContent += buildQuestionsContext(questionCards);
       }
 
-      const res = await fetch(`${AI_PROXY_URL}/v1/chat`, {
-        method: "POST",
-        headers: aiProxyHeaders(token),
-        body: JSON.stringify({
+      // Run the structuring as a server job (same prompt, built above). The
+      // server finishes and persists even if this stream is cut, so a dropped
+      // connection no longer loses the pass — runStructureJob polls the saved
+      // result in that case. The document is still written directly below, so
+      // the UX is unchanged (no review banner); only the reliability improves.
+      const { output: markdown, stopReason: structStopReason } =
+        await runStructureJob({
+          docId: documentIdRef.current,
+          // Stored on the job for bookkeeping; Structure applies to the live
+          // document directly (no hash-gated review), like the call it replaces.
+          baseContentHash: await sha256Hex(docContentRef.current),
           system: systemPrompt,
-          messages: [{ role: "user", content: userContent }],
-          // Max out at opus-5's full 128K streaming ceiling so even very long
-          // meetings never truncate. It's a cap, not a charge.
-          max_tokens: 128000,
-          stream: true,
-        }),
-      });
-
-      if (!res.ok) {
-        reportIfQuota(res.status, await res.text().catch(() => ""));
-        throw new Error(`Structure failed: ${res.status}`);
-      }
-
-      const structReader = res.body?.getReader();
-      if (!structReader) throw new Error("No response body");
-      const structDecoder = new TextDecoder();
-      let structSseBuffer = "";
-      let markdown = "";
-      let structStopReason = "";
-      while (true) {
-        const { done, value } = await structReader.read();
-        if (done) break;
-        structSseBuffer += structDecoder.decode(value, { stream: true });
-        const sseLines = structSseBuffer.split("\n");
-        structSseBuffer = sseLines.pop() || "";
-        for (const sseLine of sseLines) {
-          if (!sseLine.startsWith("data: ")) continue;
-          const ssePayload = sseLine.slice(6).trim();
-          if (ssePayload === "[DONE]") continue;
-          try {
-            const sseEvt = JSON.parse(ssePayload);
-            if (sseEvt.type === "content_block_delta" && sseEvt.delta?.text) {
-              markdown += sseEvt.delta.text;
-            } else if (
-              sseEvt.type === "message_delta" &&
-              sseEvt.delta?.stop_reason
-            ) {
-              structStopReason = sseEvt.delta.stop_reason;
-            }
-          } catch {
-            // skip malformed SSE lines
-          }
-        }
-      }
+          user: userContent,
+          token,
+        });
 
       // No-silent-failure: warn when the model hit the output cap and truncated.
       // Persistent (no auto-dismiss): the document is about to be replaced with a
@@ -602,13 +568,17 @@ export function VoicePanel({
       }
     } catch (err) {
       console.error("[voice] Structuring failed:", err);
-      const statusMatch = /Structure failed: (\d{3})/.exec(
-        err instanceof Error ? err.message : "",
-      );
+      // A server refusal arrives as RefineHttpError now (the job endpoint).
+      // Keep raising the global upsell banner on quota, and record the real
+      // HTTP status for telemetry; a cut stream that could not be recovered
+      // (poll timeout) throws a plain Error and lands as status 0.
+      if (err instanceof RefineHttpError) {
+        reportIfQuota(err.status, JSON.stringify(err.body ?? {}));
+      }
       track("structure_failed", {
         manual,
         ms: Date.now() - structureStartedAt,
-        status: statusMatch ? Number(statusMatch[1]) : 0,
+        status: err instanceof RefineHttpError ? err.status : 0,
       });
       // Surface the failure so a manual "Structure" click never fails silently
       // (the user would otherwise stare at an unchanged document). Auto-runs

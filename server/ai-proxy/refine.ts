@@ -46,6 +46,9 @@ export const MAX_CARD_SOURCES = 20;
 export const MAX_INCLUDED_CARD_IDS = 400;
 /** One answer per connected server; each is a whole rendered listing. */
 export const MAX_CONTEXT_RECORDS = 8;
+// A structure job carries the live transcript inline (no audio/STT). Cap it so a
+// POST body cannot be an abuse vector; the parts writer splits it across rows.
+export const MAX_STRUCTURE_TRANSCRIPT_CHARS = 1_000_000;
 
 export const REFINE_MAX_TOKENS = 128_000;
 /**
@@ -118,6 +121,16 @@ export interface RefineCreateRequest {
   baseContentHash: string;
   includedCardIds: string[];
   input: RefinePromptInput;
+  /**
+   * Structure job only: the fully-built prompt the client already uses for the
+   * in-recording structuring pass, handed over verbatim (no audio, no STT, and
+   * the server does NOT rebuild it — so the live-structure prompt is unchanged).
+   * When set, `chunks` is empty and the job runs only the structure stage; the
+   * server finishes even if the client's long stream is cut (the failure mode
+   * that dropped ~7% of Windows structurings). A Refine (audio) job omits it and
+   * the server builds the prompt from `input` as before.
+   */
+  structurePrompt?: { system: string; user: string };
 }
 
 export type ParsedRefineRequest =
@@ -138,6 +151,12 @@ export interface RefineJobError {
 export interface RefineJobRecord {
   uid: string;
   docId: string;
+  /**
+   * refine: audio → transcribe → structure (server builds the prompt from the
+   * saved input). structure: the in-recording pass — no audio, the client's
+   * pre-built prompt is stored in the input parts and run as-is.
+   */
+  kind: "refine" | "structure";
   status: RefineStatus;
   stage: RefineStage;
   createdAt: number;
@@ -202,28 +221,58 @@ export function parseRefineRequest(
   if (typeof b.docId !== "string" || !DOC_ID_RE.test(b.docId))
     return { kind: "invalid", status: 400, error: "invalid_doc_id" };
 
-  const rawChunks = Array.isArray(b.chunks) ? b.chunks : [];
-  if (rawChunks.length === 0)
-    return { kind: "invalid", status: 400, error: "chunks_required" };
-  if (rawChunks.length > maxChunks)
-    return {
-      kind: "invalid",
-      status: 400,
-      error: "too_many_chunks",
-      message: "録音が長すぎます。もう少し短い録音に分けてお試しください。",
-    };
-  const chunks: RefineChunk[] = rawChunks.map((c) => {
-    const o = (c && typeof c === "object" ? c : {}) as Record<string, unknown>;
-    return {
-      gcsUri: String(o.gcsUri || ""),
-      startSec: Number(o.startSec) || 0,
-      durationSec: Number(o.durationSec) || 0,
-    };
-  });
-  if (chunks.some((c) => !c.gcsUri))
-    return { kind: "invalid", status: 400, error: "chunks_required" };
-  if (chunks.some((c) => !c.gcsUri.startsWith(audioPrefix)))
-    return { kind: "invalid", status: 403, error: "invalid_audio_path" };
+  // Two shapes share this endpoint: a Refine job carries audio `chunks`
+  // (transcribe → structure); a Structure job carries a pre-built
+  // `structurePrompt` (structure only, no STT). The structure form skips every
+  // audio check below.
+  const sp = b.structurePrompt;
+  const structurePrompt =
+    sp &&
+    typeof sp === "object" &&
+    typeof (sp as Record<string, unknown>).system === "string" &&
+    typeof (sp as Record<string, unknown>).user === "string" &&
+    (sp as Record<string, unknown>).user !== ""
+      ? {
+          system: str(
+            (sp as Record<string, unknown>).system,
+            MAX_STRUCTURE_TRANSCRIPT_CHARS,
+          ),
+          user: str(
+            (sp as Record<string, unknown>).user,
+            MAX_STRUCTURE_TRANSCRIPT_CHARS,
+          ),
+        }
+      : undefined;
+  let chunks: RefineChunk[] = [];
+  if (structurePrompt) {
+    // Structure job: no audio to validate.
+  } else {
+    const rawChunks = Array.isArray(b.chunks) ? b.chunks : [];
+    if (rawChunks.length === 0)
+      return { kind: "invalid", status: 400, error: "chunks_required" };
+    if (rawChunks.length > maxChunks)
+      return {
+        kind: "invalid",
+        status: 400,
+        error: "too_many_chunks",
+        message: "録音が長すぎます。もう少し短い録音に分けてお試しください。",
+      };
+    chunks = rawChunks.map((c) => {
+      const o = (c && typeof c === "object" ? c : {}) as Record<
+        string,
+        unknown
+      >;
+      return {
+        gcsUri: String(o.gcsUri || ""),
+        startSec: Number(o.startSec) || 0,
+        durationSec: Number(o.durationSec) || 0,
+      };
+    });
+    if (chunks.some((c) => !c.gcsUri))
+      return { kind: "invalid", status: 400, error: "chunks_required" };
+    if (chunks.some((c) => !c.gcsUri.startsWith(audioPrefix)))
+      return { kind: "invalid", status: 403, error: "invalid_audio_path" };
+  }
 
   const baseContentHash =
     typeof b.baseContentHash === "string" && HASH_RE.test(b.baseContentHash)
@@ -306,6 +355,7 @@ export function parseRefineRequest(
         questionSummaries,
         contextRecords,
       },
+      ...(structurePrompt ? { structurePrompt } : {}),
     },
   };
 }
@@ -366,10 +416,15 @@ export function decideJobAction(
   if (job.status === "running" && !isStale(job, now)) return { kind: "busy" };
   if (job.attempts >= REFINE_MAX_ATTEMPTS) return { kind: "exhausted" };
   // Quota / input errors are not fixed by retrying the transcription itself,
-  // but a saved transcript still lets a later retry skip straight to Claude.
+  // but a saved transcript still lets a later retry skip straight to Claude. A
+  // structure job never transcribes (its prompt is already built), so it always
+  // resumes at the structure stage.
   return {
     kind: "run",
-    from: job.transcriptParts > 0 ? "structure" : "transcribe",
+    from:
+      job.kind === "structure" || job.transcriptParts > 0
+        ? "structure"
+        : "transcribe",
   };
 }
 
@@ -380,11 +435,15 @@ export function newJobRecord(
   inputParts: number,
   now: number,
 ): RefineJobRecord {
+  // A structure job carries its prompt pre-built (stored in the input parts),
+  // so it opens at the structure stage with no transcribe to run.
+  const isStructure = req.structurePrompt !== undefined;
   return {
     uid,
     docId: req.docId,
+    kind: isStructure ? "structure" : "refine",
     status: "running",
-    stage: "transcribe",
+    stage: isStructure ? "structure" : "transcribe",
     createdAt: now,
     updatedAt: now,
     heartbeatAt: now,
@@ -399,7 +458,8 @@ export function newJobRecord(
     transcriptParts: 0,
     transcriptChars: 0,
     speakerCount: 0,
-    transcribedAt: null,
+    // A structure job has no transcribe stage; mark it already past that.
+    transcribedAt: isStructure ? now : null,
     outputParts: 0,
     outputChars: 0,
     stopReason: "",
@@ -423,6 +483,8 @@ export function toJobRecord(data: Record<string, unknown>): RefineJobRecord {
   return {
     uid: s(data.uid),
     docId: s(data.docId),
+    // Older records (pre-structure-jobs) have no kind — they are all Refine.
+    kind: s(data.kind) === "structure" ? "structure" : "refine",
     status: (["running", "done", "error"].includes(status)
       ? status
       : "error") as RefineStatus,

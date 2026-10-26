@@ -532,3 +532,98 @@ describe("encodeEvent", () => {
     expect(JSON.parse(line)).toEqual({ type: "stage", stage: "structure" });
   });
 });
+
+describe("structure jobs (client-built prompt, no audio)", () => {
+  const SP = { system: "sys rules", user: "## Doc\n\n## New\n話した内容" };
+
+  it("accepts a structurePrompt create without chunks and marks it structure", () => {
+    const p = parseRefineRequest(
+      body({ chunks: undefined, structurePrompt: SP }),
+      PREFIX,
+      48,
+    );
+    expect(p.kind).toBe("create");
+    if (p.kind !== "create") return;
+    expect(p.req.chunks).toEqual([]);
+    expect(p.req.structurePrompt).toEqual(SP);
+  });
+
+  it("ignores audio-path checks for a structure create", () => {
+    // A structure create never looks at chunks/prefix (audio belongs to Refine).
+    const p = parseRefineRequest(
+      {
+        jobId: JOB,
+        docId: "doc-1",
+        baseContentHash: HASH,
+        chunks: [{ gcsUri: "gs://bucket/audio/other/x.wav" }],
+        structurePrompt: SP,
+      },
+      PREFIX,
+      48,
+    );
+    expect(p.kind === "create" && p.req.structurePrompt).toEqual(SP);
+  });
+
+  it("rejects a structurePrompt missing the user content (falls through)", () => {
+    const p = parseRefineRequest(
+      body({ chunks: undefined, structurePrompt: { system: "s", user: "" } }),
+      PREFIX,
+      48,
+    );
+    // Empty user → not a valid structure prompt → audio path → no chunks.
+    expect(p).toMatchObject({ kind: "invalid", error: "chunks_required" });
+  });
+
+  it("still requires a base content hash for a structure create", () => {
+    const p = parseRefineRequest(
+      { jobId: JOB, docId: "doc-1", structurePrompt: SP },
+      PREFIX,
+      48,
+    );
+    expect(p).toMatchObject({ kind: "invalid", error: "invalid_base_hash" });
+  });
+
+  it("falls back to chunks_required when neither prompt nor chunks given", () => {
+    const p = parseRefineRequest(body({ chunks: undefined }), PREFIX, 48);
+    expect(p).toMatchObject({ kind: "invalid", error: "chunks_required" });
+  });
+
+  it("newJobRecord opens a structure job at the structure stage, no audio", () => {
+    const req = (() => {
+      const p = parseRefineRequest(
+        body({ chunks: undefined, structurePrompt: SP }),
+        PREFIX,
+        48,
+      );
+      if (p.kind !== "create") throw new Error("expected create");
+      return p.req;
+    })();
+    const rec = newJobRecord(UID, req, "r1", 2, 1_000);
+    expect(rec.kind).toBe("structure");
+    expect(rec.stage).toBe("structure");
+    expect(rec.inputParts).toBe(2);
+    expect(rec.transcriptParts).toBe(0);
+    expect(rec.transcribedAt).toBe(1_000);
+    expect(rec.chunks).toEqual([]);
+  });
+
+  it("a refine create stays kind=refine at the transcribe stage", () => {
+    const rec = newJobRecord(UID, createReq(), "r1", 1, 1_000);
+    expect(rec.kind).toBe("refine");
+    expect(rec.stage).toBe("transcribe");
+    expect(rec.transcribedAt).toBeNull();
+  });
+
+  it("an interrupted structure job re-runs from structure, never transcribe", () => {
+    const rec = record({ kind: "structure", status: "error" });
+    const action = decideJobAction(rec, UID, false, rec.heartbeatAt + 10);
+    expect(action).toEqual({ kind: "run", from: "structure" });
+  });
+
+  it("toJobRecord defaults a legacy record (no kind) to refine", () => {
+    expect(toJobRecord({ docId: "d" }).kind).toBe("refine");
+    expect(toJobRecord({ docId: "d", kind: "structure" }).kind).toBe(
+      "structure",
+    );
+  });
+});

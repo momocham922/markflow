@@ -83,6 +83,13 @@ export interface CreateRefineJobBody {
   includedCardIds: string[];
   /** Verbatim answers from the user's connected MCP servers (may be empty). */
   contextRecords: Array<{ source: string; text: string }>;
+  /**
+   * Structure job only: the fully-built {system, user} prompt, run by the server
+   * verbatim (no audio, no transcribe). When set the server ignores `chunks` and
+   * the structured fields above. The in-recording structuring sends this so a
+   * cut stream no longer loses the result — the server finishes and persists it.
+   */
+  structurePrompt?: { system: string; user: string };
 }
 
 export type AckAction = "applied" | "discarded" | "dismissed";
