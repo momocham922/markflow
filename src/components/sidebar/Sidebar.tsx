@@ -23,6 +23,7 @@ import { createPortal } from "react-dom";
 import { useIMEGuard } from "@/hooks/use-ime-guard";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { LabelFilter } from "./LabelFilter";
 import { cn } from "@/lib/utils";
 import { useAppStore, type Document } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -1546,25 +1547,14 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Tag filter */}
+      {/* Label filter — one compact control (searchable popover) instead of a
+          wrapping row of pills, so many labels never crowd out the tree. */}
       {allTags.length > 0 && (
-        <div className="px-3 pb-2 flex flex-wrap gap-1">
-          {allTags.map((tag) => (
-            <button
-              key={tag}
-              onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
-              className={cn(
-                "inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] transition-colors",
-                selectedTag === tag
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-sidebar-accent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <Tag className="h-2 w-2" />
-              {tag}
-            </button>
-          ))}
-        </div>
+        <LabelFilter
+          tags={allTags}
+          selectedTag={selectedTag}
+          onSelect={setSelectedTag}
+        />
       )}
 
       <div className="flex-1 px-1 overflow-y-auto">
