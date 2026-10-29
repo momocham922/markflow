@@ -55,12 +55,12 @@
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.markflow.editor</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>markflow</string>
 			</array>
-			<key>CFBundleURLName</key>
-			<string>markflow</string>
 		</dict>
 	</array>
 </dict>
