@@ -44,6 +44,7 @@ import { fetchDocument } from "@/services/firebase";
 import { track } from "@/services/telemetry";
 import { isIOS, isMobile } from "@/platform";
 import { friendlyErrorMessage } from "@/lib/friendly-error";
+import { confirmDialog } from "@/lib/confirm";
 
 // ── Folder tree helpers ──────────────────────────────────────
 
@@ -1024,7 +1025,7 @@ export function Sidebar() {
               />
               <Trash2
                 className="h-3 w-3 text-muted-foreground hover:text-destructive"
-                onClick={(e) => {
+                onClick={async (e) => {
                   e.stopPropagation();
                   const docCount = documents.filter(
                     (d) =>
@@ -1035,7 +1036,7 @@ export function Sidebar() {
                     docCount > 0
                       ? `「${node.name}」とその中の ${docCount} 件のドキュメントを削除しますか？`
                       : `「${node.name}」を削除しますか？`;
-                  if (confirm(msg)) deleteFolder(node.path);
+                  if (await confirmDialog(msg)) deleteFolder(node.path);
                 }}
               />
             </div>
@@ -1307,7 +1308,7 @@ export function Sidebar() {
               />
               <Trash2
                 className="h-3 w-3 text-muted-foreground hover:text-destructive"
-                onClick={(e) => {
+                onClick={async (e) => {
                   e.stopPropagation();
                   const docCount = allTeamDocs.filter(
                     (d) =>
@@ -1318,7 +1319,8 @@ export function Sidebar() {
                     docCount > 0
                       ? `「${node.name}」とその中の ${docCount} 件のドキュメントを削除しますか？`
                       : `「${node.name}」を削除しますか？`;
-                  if (confirm(msg)) handleDeleteTeamFolder(team.id, node.path);
+                  if (await confirmDialog(msg))
+                    handleDeleteTeamFolder(team.id, node.path);
                 }}
               />
             </div>
@@ -2157,13 +2159,17 @@ export function Sidebar() {
                     onMouseLeave={(e) => {
                       e.currentTarget.style.background = "transparent";
                     }}
-                    onClick={() => {
+                    onClick={async () => {
                       // Deleting a document also removes it from the cloud and
                       // is not undoable — confirm first, matching folder delete.
-                      if (confirm(`「${title}」を削除しますか？`)) {
-                        onDelete(contextMenu.docId);
-                      }
+                      // confirmDialog MUST be awaited: in the Tauri app
+                      // window.confirm is async, so a bare `if (confirm(...))`
+                      // tests a Promise (always truthy) and deletes on Cancel.
+                      const docId = contextMenu.docId;
                       setContextMenu(null);
+                      if (await confirmDialog(`「${title}」を削除しますか？`)) {
+                        onDelete(docId);
+                      }
                     }}
                   >
                     <Trash2 style={{ width: 11, height: 11, flexShrink: 0 }} />

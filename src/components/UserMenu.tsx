@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { confirmDialog } from "@/lib/confirm";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   useEntitlementStore,
@@ -132,7 +133,7 @@ export function UserMenu() {
       );
       return;
     }
-    const ok = window.confirm(
+    const ok = await confirmDialog(
       "クラウドをリセットして、このデバイスのドキュメントで上書きします。\n\n" +
         "正しいドキュメントがあるデバイスで実行してください。\n本当に実行しますか？",
     );

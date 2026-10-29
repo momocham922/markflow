@@ -29,6 +29,7 @@ import { useAppStore } from "@/stores/app-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTauri } from "@/platform";
 import { friendlyErrorMessage } from "@/lib/friendly-error";
+import { confirmDialog } from "@/lib/confirm";
 import {
   enableShareLink,
   disableShareLink,
@@ -236,7 +237,7 @@ export function ShareDialog({
     try {
       const exists = await checkUserExists(inviteEmail.trim());
       if (!exists) {
-        const proceed = window.confirm(
+        const proceed = await confirmDialog(
           `「${inviteEmail.trim()}」はまだMarkFlowに登録されていません。\n\n` +
             "招待を続行すると、相手がアプリをインストール・ログインした時点で共有が有効になります。\n" +
             "招待を続行しますか？",

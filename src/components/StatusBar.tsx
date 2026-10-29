@@ -11,6 +11,7 @@ import { isIOS, isMobile, isTauri } from "@/platform";
 import { cn } from "@/lib/utils";
 import { countWords } from "@/lib/editor-utils";
 import { friendlyErrorMessage } from "@/lib/friendly-error";
+import { confirmDialog } from "@/lib/confirm";
 import * as db from "@/services/database";
 
 export function StatusBar() {
@@ -93,7 +94,7 @@ function DesktopStatusBar() {
 
     // Switching from beta → stable: offer to force-install stable if current version is beta
     if (!next && isTauri && __APP_VERSION__.includes("beta")) {
-      const confirmed = window.confirm(
+      const confirmed = await confirmDialog(
         "Stableチャンネルに切り替えます。\n最新のStable版をインストールしてアプリを再起動しますか？",
       );
       if (!confirmed) return;
