@@ -300,6 +300,25 @@ export function Editor() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState("");
+  // The document a recording is BOUND to. Set the moment recording starts,
+  // cleared when it stops. While recording, the voice panel stays bound to this
+  // doc even if the user navigates elsewhere: recording keeps running and the
+  // transcript keeps saving to the ORIGIN doc (never the doc currently in view).
+  // Recording controls are locked while any other document is open.
+  const [recordingDocId, setRecordingDocId] = useState<string | null>(null);
+  const boundDocId = recordingDocId ?? activeDocId;
+  const boundDoc = documents.find((d) => d.id === boundDocId);
+  const recordingElsewhere =
+    recordingDocId != null && recordingDocId !== activeDocId;
+  const handleRecordingChange = useCallback(
+    (rec: boolean) => {
+      setVoiceRecording(rec);
+      // Bind to the current doc on start; keep the existing binding across doc
+      // switches (prev is already set); release on stop.
+      setRecordingDocId((prev) => (rec ? (prev ?? activeDocId) : null));
+    },
+    [activeDocId],
+  );
   const [ogpVersion, setOgpVersion] = useState(0);
   const pendingOgpUrlsRef = useRef<string[]>([]);
   const setView = useEditorStore((s) => s.setView);
@@ -1139,7 +1158,10 @@ export function Editor() {
 
   const handleVoiceDataChange = useCallback(
     (update: VoiceDataUpdate) => {
-      if (!activeDocId) return;
+      // Save to the doc the voice panel is BOUND to (the recording's origin
+      // while recording, otherwise the active doc) — never the doc currently in
+      // view when recording continues after navigating away.
+      if (!boundDocId) return;
       // A live transcript update carries only { voiceTranscript } and — unlike a
       // content edit (bumps updatedAt) or a Refine archive (sets voiceRecordedAt)
       // — touches NONE of the fields syncToCloud's filter uses to pick what to
@@ -1156,9 +1178,9 @@ export function Editor() {
         !("voiceRecordedAt" in update)
           ? { ...update, voiceRecordedAt: Date.now() }
           : update;
-      updateDocument(activeDocId, patch);
+      updateDocument(boundDocId, patch);
     },
-    [activeDocId, updateDocument],
+    [boundDocId, updateDocument],
   );
 
   // Server-side Refine: follow / apply this document's job even when the voice
@@ -1469,18 +1491,28 @@ export function Editor() {
           onDismissError={refineSync.dismissError}
         />
       )}
-      {voiceOpen && activeDocId && (
+      {voiceOpen && boundDocId && (
         <VoicePanel
-          key={activeDocId}
-          documentId={activeDocId}
+          // Keyed by the BOUND doc, not the active doc: while recording this
+          // keeps the panel (and the live recording) mounted across document
+          // navigation instead of remounting — switching docs no longer stops
+          // the recording. Props follow the bound doc so the transcript saves
+          // to the recording's origin.
+          key={boundDocId}
+          documentId={boundDocId}
           onInsertMarkdown={handleInsertMarkdown}
           onSetContent={handleSetContent}
-          documentContent={activeDoc?.content || ""}
+          documentContent={boundDoc?.content || ""}
           onTranscriptChange={setVoiceTranscript}
-          onRecordingChange={setVoiceRecording}
-          voiceTranscript={activeDoc?.voiceTranscript}
-          voiceGcsUri={activeDoc?.voiceGcsUri}
+          onRecordingChange={handleRecordingChange}
+          voiceTranscript={boundDoc?.voiceTranscript}
+          voiceGcsUri={boundDoc?.voiceGcsUri}
           onVoiceDataChange={handleVoiceDataChange}
+          locked={recordingElsewhere}
+          boundDocTitle={boundDoc?.title || "無題"}
+          onReturnToRecordingDoc={() =>
+            recordingDocId && setActiveDocId(recordingDocId)
+          }
         />
       )}
     </div>

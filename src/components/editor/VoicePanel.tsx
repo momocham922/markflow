@@ -85,6 +85,17 @@ interface VoicePanelProps {
   voiceTranscript?: string | null;
   voiceGcsUri?: string | null;
   onVoiceDataChange?: (update: VoiceDataUpdate) => void;
+  /**
+   * True when a recording is in progress but a DIFFERENT document is currently
+   * open. The panel stays mounted (recording keeps running, bound to its origin
+   * doc) but shows a compact locked banner instead of operable controls — you
+   * can only start/stop/clear from the document the recording belongs to.
+   */
+  locked?: boolean;
+  /** Title of the document the recording is bound to (for the locked banner). */
+  boundDocTitle?: string;
+  /** Jump back to the recording's origin document. */
+  onReturnToRecordingDoc?: () => void;
 }
 
 function ResearchTriggerButton() {
@@ -172,6 +183,9 @@ export function VoicePanel({
   voiceTranscript: savedVoiceTranscript,
   voiceGcsUri: savedVoiceGcsUri,
   onVoiceDataChange,
+  locked = false,
+  boundDocTitle,
+  onReturnToRecordingDoc,
 }: VoicePanelProps) {
   const [structuring, setStructuring] = useState(false);
   const [hasArchive, setHasArchive] = useState(false);
@@ -904,6 +918,32 @@ export function VoicePanel({
       <div className="border-t border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground text-center">
         Microphone access is not available. Please check your browser/app
         permissions.
+      </div>
+    );
+  }
+
+  // A recording is running on a DIFFERENT document. The hook above keeps the
+  // capture alive (recording continues, bound to its origin doc); here we only
+  // swap the UI for a compact, read-only banner so recording controls can't be
+  // operated from another document. Returning after all hooks keeps hook order
+  // stable.
+  if (locked) {
+    return (
+      <div className="flex items-center gap-2 border-t border-border bg-background px-4 py-2.5 text-xs">
+        <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-red-500 animate-pulse" />
+        <span className="min-w-0 truncate text-foreground">
+          <span className="font-medium">「{boundDocTitle || "無題"}」</span>
+          を録音中（{formatDuration(duration)}）
+        </span>
+        <div className="flex-1" />
+        <Button
+          variant="secondary"
+          size="sm"
+          className="shrink-0"
+          onClick={onReturnToRecordingDoc}
+        >
+          録音中のドキュメントへ
+        </Button>
       </div>
     );
   }
