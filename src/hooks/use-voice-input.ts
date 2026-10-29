@@ -588,8 +588,13 @@ export function useVoiceInput({
       }, MAX_DURATION_SECONDS * 1000);
 
       setIsRecording(true);
-      transcriptRef.current = "";
-      setFullTranscript("");
+      // Do NOT reset the accumulated transcript here. Pressing record again
+      // after a stop must APPEND to what was already transcribed (the result
+      // handler prepends a "\n---\n" separator), not wipe it. Resetting here
+      // also pushed an empty string through onTranscriptUpdate, which overwrote
+      // the document's SAVED transcript — so accidentally hitting stop and then
+      // record again destroyed the entire recording. Resetting is the explicit
+      // "Clear transcript" button's job (clearTranscript), never start's.
       setInterimText("");
     } catch (err) {
       // FriendlyError messages (permission/mic guidance above) pass through
