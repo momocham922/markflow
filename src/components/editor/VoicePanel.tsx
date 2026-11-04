@@ -77,8 +77,20 @@ export interface VoiceDataUpdate {
 interface VoicePanelProps {
   /** The open document — Refine jobs are tracked per document. */
   documentId: string;
-  onInsertMarkdown: (markdown: string) => void;
-  onSetContent: (content: string) => void;
+  /**
+   * Write live Structure output into the document the recording is bound to.
+   * Returns false when that document can't be written right now (it isn't open
+   * and is a shared document) — the pass is then NOT counted as structured, so
+   * the same transcript is integrated again on a later pass.
+   */
+  onInsertMarkdown: (markdown: string) => boolean;
+  onSetContent: (content: string) => boolean;
+  /**
+   * Skip automatic Structure passes for now (recording continues on another
+   * document while the bound one is shared and can't be written). The pending
+   * transcript is structured on the first pass after returning.
+   */
+  deferStructure?: boolean;
   documentContent: string;
   onTranscriptChange?: (transcript: string) => void;
   onRecordingChange?: (isRecording: boolean) => void;
@@ -177,6 +189,7 @@ export function VoicePanel({
   documentId,
   onInsertMarkdown,
   onSetContent,
+  deferStructure = false,
   documentContent,
   onTranscriptChange,
   onRecordingChange,
@@ -244,6 +257,8 @@ export function VoicePanel({
   const refiningRef = useRef(false);
   const onInsertRef = useRef(onInsertMarkdown);
   const onSetContentRef = useRef(onSetContent);
+  const deferStructureRef = useRef(deferStructure);
+  deferStructureRef.current = deferStructure;
   const docContentRef = useRef(documentContent);
   const sttVocabRef = useRef<Set<string>>(new Set());
   const onVoiceDataChangeRef = useRef(onVoiceDataChange);
@@ -411,6 +426,7 @@ export function VoicePanel({
       ? transcript.slice(lastStructuredRef.current.length).trim()
       : transcript.trim();
     if (!manual && newPart.length < 80) return;
+    if (!manual && deferStructureRef.current) return;
 
     setStructuring(true);
     structuringRef.current = true;
@@ -556,10 +572,20 @@ export function VoicePanel({
           }
         }
 
-        if (hasExisting) {
-          onSetContentRef.current(cleanOutput);
-        } else {
-          onInsertRef.current(`\n\n${cleanOutput}\n`);
+        // Written into the BOUND document (the recording's origin), even if
+        // the user opened another document while this pass was running.
+        const written = hasExisting
+          ? onSetContentRef.current(cleanOutput)
+          : onInsertRef.current(`\n\n${cleanOutput}\n`);
+        if (!written) {
+          // The bound document couldn't be written (shared and not open). Keep
+          // this part unstructured so the next pass integrates it again.
+          track("structure_deferred", {
+            manual,
+            ms: Date.now() - structureStartedAt,
+            new_chars: newPart.length,
+          });
+          return;
         }
         lastStructuredRef.current = transcript;
         setLastStructuredText(transcript);

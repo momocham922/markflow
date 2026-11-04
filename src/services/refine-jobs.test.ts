@@ -148,6 +148,62 @@ describe("streamRefineJob", () => {
     expect(err.status).toBe(409);
     expect(err.body).toEqual({ error: "job_running" });
   });
+  // Regression: 2026-11-04 iOS beta.11 — the WebView was suspended while the
+  // job ran; the read stayed pending with no data, no error and no end, so the
+  // job counted as attached and nothing ever polled it.
+  it("cuts a stream that has gone silent so the caller falls back to polling", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                '{"type":"accepted","job":{"jobId":"j1"}}\n',
+              ),
+            );
+            // ...then nothing, ever.
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const seen: RefineStreamEvent[] = [];
+    const out = await streamRefineJob(
+      body,
+      "tok",
+      (e) => seen.push(e),
+      undefined,
+      60,
+    );
+    expect(out).toBe("detached");
+    expect(seen.map((e) => e.type)).toEqual(["accepted"]);
+  });
+  it("keeps a slow stream that keeps pinging", async () => {
+    const enc = new TextEncoder();
+    let n = 0;
+    fetchMock.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(c) {
+            await new Promise((r) => setTimeout(r, 25));
+            n += 1;
+            if (n < 6) c.enqueue(enc.encode('{"type":"ping"}\n'));
+            else {
+              c.enqueue(
+                enc.encode(`{"type":"done","job":${JSON.stringify(JOB)}}\n`),
+              );
+              c.close();
+            }
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    // 6 × 25 ms = 150 ms total, but never more than 25 ms of silence.
+    expect(
+      await streamRefineJob(body, "tok", () => {}, undefined, 80),
+    ).toBe("completed");
+  });
   it("rethrows a network failure unless the caller aborted", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(streamRefineJob(body, "tok", () => {})).rejects.toThrow(

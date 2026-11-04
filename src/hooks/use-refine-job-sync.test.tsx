@@ -6,9 +6,22 @@ const ackMock = vi.fn();
 const findMock = vi.fn();
 const pollMock = vi.fn();
 
-vi.mock("@/services/firebase", () => ({
-  auth: { currentUser: { getIdToken: () => Promise.resolve("tok") } },
-}));
+const { SIGNED_IN, fakeAuth } = vi.hoisted(() => {
+  const SIGNED_IN = { getIdToken: () => Promise.resolve("tok") };
+  const fakeAuth: { currentUser: typeof SIGNED_IN | null } = {
+    currentUser: SIGNED_IN,
+  };
+  return { SIGNED_IN, fakeAuth };
+});
+vi.mock("@/services/firebase", () => ({ auth: fakeAuth }));
+vi.mock("@/stores/auth-store", async () => {
+  const { create } = await import("zustand");
+  return {
+    useAuthStore: create<{ user: { uid: string } | null }>(() => ({
+      user: { uid: "u1" },
+    })),
+  };
+});
 vi.mock("@/services/telemetry", () => ({
   track: (...a: unknown[]) => trackMock(...a),
 }));
@@ -39,6 +52,10 @@ import { useRefineJobSync } from "./use-refine-job-sync";
 import { sha256Hex, type RefineJobView } from "@/services/refine-jobs";
 import { useRefineStore } from "@/stores/refine-store";
 import { useResearchStore } from "@/stores/research-store";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "firebase/auth";
+
+const FAKE_USER = { uid: "u1" } as unknown as User;
 
 const ORIGINAL = "# 暫定メモ";
 
@@ -89,6 +106,8 @@ function setup(initial: {
 }
 
 beforeEach(() => {
+  fakeAuth.currentUser = SIGNED_IN;
+  useAuthStore.setState({ user: FAKE_USER });
   useRefineStore.getState().reset();
   trackMock.mockReset();
   ackMock.mockReset().mockResolvedValue(undefined);
@@ -254,6 +273,29 @@ describe("useRefineJobSync — discovery and polling", () => {
       "refine_pending_found",
       expect.objectContaining({ status: "done" }),
     );
+  });
+
+  // Regression: 2026-11-04 iOS beta.11 — the app was relaunched straight into
+  // the recorded document before Firebase auth resolved. The lookup bailed on
+  // the missing token but had already marked the document as looked up, so the
+  // finished Refine was never fetched for the rest of the session.
+  it("looks up once auth resolves when the document opened before sign-in", async () => {
+    fakeAuth.currentUser = null;
+    useAuthStore.setState({ user: null });
+    const job = await doneJob();
+    findMock.mockResolvedValue(job);
+    const { setContent } = setup({
+      docId: "d1",
+      content: ORIGINAL,
+      hasVoiceData: true,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(findMock).not.toHaveBeenCalled();
+    // Auth restores (Firebase sets currentUser before notifying listeners).
+    fakeAuth.currentUser = SIGNED_IN;
+    act(() => useAuthStore.setState({ user: FAKE_USER }));
+    await waitFor(() => expect(setContent).toHaveBeenCalledWith("# 清書"));
+    expect(findMock).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a failed job with a friendly message", async () => {

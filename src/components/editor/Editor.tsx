@@ -23,6 +23,7 @@ import {
   escapeHtml,
 } from "@/lib/editor-utils";
 import { useAppStore } from "@/stores/app-store";
+import { resolveBoundWrite } from "@/lib/voice-bound-write";
 import { useEditorStore } from "@/stores/editor-store";
 import { editorThemes } from "@/styles/editor-themes";
 import { previewThemes } from "@/styles/preview-themes";
@@ -1156,6 +1157,59 @@ export function Editor() {
     ],
   );
 
+  // Live Structure output from the voice panel must land in the document the
+  // recording is BOUND to — never the one in view. handleInsertMarkdown /
+  // handleSetContent write to activeDocId, so once recording continued after
+  // the user opened another document, a structuring pass that finished then
+  // replaced THAT document's whole body with the origin's minutes (measured
+  // 2026-11-02, Windows beta.11: the 23:20:54 pass overwrote an unrelated
+  // 12,271-char document with 9,418 chars of the recording's minutes).
+  // Returns false when the bound document can't be written safely right now —
+  // it isn't open and is a shared document, whose content lives in its Y.Doc,
+  // not the store — so the panel keeps that part unstructured and retries on
+  // return instead of dropping it.
+  const writeBoundContent = useCallback(
+    (build: (current: string) => string): boolean => {
+      const state = useAppStore.getState();
+      const target = state.documents.find((d) => d.id === boundDocId);
+      const where = resolveBoundWrite({
+        boundDocId,
+        renderedActiveDocId: activeDocId,
+        currentActiveDocId: state.activeDocId,
+        boundDoc: target,
+      });
+      if (where === "defer" || !boundDocId || !target) return false;
+      if (where === "active") {
+        handleSetContent(build(activeDoc?.content ?? ""));
+        return true;
+      }
+      // Not open and not collaborative: the store is its source of truth and
+      // the editor renders it from the store when the user returns.
+      updateDocument(boundDocId, {
+        content: build(target.content ?? ""),
+        updatedAt: Date.now(),
+      });
+      emitLocalEdit(boundDocId, target.title ?? "");
+      return true;
+    },
+    [
+      boundDocId,
+      activeDocId,
+      activeDoc?.content,
+      handleSetContent,
+      updateDocument,
+    ],
+  );
+  const handleVoiceInsertMarkdown = useCallback(
+    (markdown: string) =>
+      writeBoundContent((current) => current.trimEnd() + markdown),
+    [writeBoundContent],
+  );
+  const handleVoiceSetContent = useCallback(
+    (newContent: string) => writeBoundContent(() => newContent),
+    [writeBoundContent],
+  );
+
   const handleVoiceDataChange = useCallback(
     (update: VoiceDataUpdate) => {
       // Save to the doc the voice panel is BOUND to (the recording's origin
@@ -1500,8 +1554,9 @@ export function Editor() {
           // to the recording's origin.
           key={boundDocId}
           documentId={boundDocId}
-          onInsertMarkdown={handleInsertMarkdown}
-          onSetContent={handleSetContent}
+          onInsertMarkdown={handleVoiceInsertMarkdown}
+          onSetContent={handleVoiceSetContent}
+          deferStructure={recordingElsewhere && !!boundDoc?.isShared}
           documentContent={boundDoc?.content || ""}
           onTranscriptChange={setVoiceTranscript}
           onRecordingChange={handleRecordingChange}

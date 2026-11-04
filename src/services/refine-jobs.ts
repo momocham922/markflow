@@ -163,11 +163,18 @@ export function parseNdjson(buffer: string): {
  * the server refused the request outright (validation, auth, job already
  * running, …).
  */
+/**
+ * A progress stream that has been silent this long is treated as dead. The
+ * server pings every 30 s (REFINE_HEARTBEAT_MS), so 75 s is 2½ missed pings.
+ */
+export const REFINE_STREAM_STALL_MS = 75_000;
+
 export async function streamRefineJob(
   body: CreateRefineJobBody | { jobId: string; resume: true },
   token: string,
   onEvent: (e: RefineStreamEvent) => void,
   signal?: AbortSignal,
+  stallMs: number = REFINE_STREAM_STALL_MS,
 ): Promise<"completed" | "detached"> {
   let res: Response;
   try {
@@ -190,10 +197,29 @@ export async function streamRefineJob(
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal = false;
+  // A suspended mobile WebView can leave this read pending forever: no data, no
+  // error, no end. While it is pending the job counts as "attached" and nothing
+  // polls it. Measured 2026-11-04 (iOS beta.11, job 16ba331f): the server
+  // streamed to completion (POST 200 after 227 s) but the device never saw
+  // another event and the finished minutes never reached the document. Cut a
+  // stream that has gone silent so the caller falls back to polling. Timers are
+  // frozen while the app is suspended and fire on resume, which is exactly when
+  // the stale stream has to be dropped.
+  let lastActivity = Date.now();
+  const watchdog = setInterval(
+    () => {
+      if (Date.now() - lastActivity > stallMs) {
+        clearInterval(watchdog);
+        reader.cancel().catch(() => {});
+      }
+    },
+    Math.min(5_000, stallMs),
+  );
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      lastActivity = Date.now();
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseNdjson(buffer);
       buffer = parsed.rest;
@@ -211,6 +237,8 @@ export async function streamRefineJob(
     // Stream broke (backgrounded app, network change, unmount abort): the
     // server is unaffected — fall back to polling.
     return terminal ? "completed" : "detached";
+  } finally {
+    clearInterval(watchdog);
   }
   return terminal ? "completed" : "detached";
 }

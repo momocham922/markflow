@@ -10,6 +10,7 @@ import {
   type RefineJobView,
 } from "@/services/refine-jobs";
 import { pollRefineJob } from "@/services/refine-runner";
+import { useAuthStore } from "@/stores/auth-store";
 import { useRefineStore } from "@/stores/refine-store";
 import { useResearchStore } from "@/stores/research-store";
 
@@ -49,6 +50,10 @@ export function useRefineJobSync({
   setVoiceTranscript,
 }: Options) {
   const state = useRefineStore((s) => (docId ? s.byDoc[docId] : undefined));
+  // The lookup needs a signed-in user. On a cold start the last-open document
+  // is restored from SQLite BEFORE Firebase auth resolves, so the first run has
+  // no token — the effect must run again once the user is known.
+  const signedIn = useAuthStore((s) => !!s.user);
   const contentRef = useRef(content);
   contentRef.current = content;
   // The document open RIGHT NOW. An async step must re-check it: applying after
@@ -60,14 +65,21 @@ export function useRefineJobSync({
 
   // 1) Discover a pending job for this document (once per document per session).
   useEffect(() => {
-    if (!docId || !hasVoiceData || lookedUpRef.current.has(docId)) return;
+    if (!docId || !hasVoiceData || !signedIn || lookedUpRef.current.has(docId))
+      return;
     if (useRefineStore.getState().byDoc[docId]) return;
-    lookedUpRef.current.add(docId);
     let cancelled = false;
     (async () => {
       try {
         const token = await auth.currentUser?.getIdToken();
+        // Only mark the document as looked up once the request can actually go
+        // out. Marking it first and then bailing on a missing token skipped the
+        // lookup for the rest of the session — measured 2026-11-04 (iOS
+        // beta.11): the app was relaunched into the recorded document, the
+        // finished Refine (job 16ba331f) was never fetched or applied, and the
+        // document stayed empty although the server had the minutes.
         if (!token || cancelled) return;
+        lookedUpRef.current.add(docId);
         const job = await findPendingRefineJob(docId, token);
         if (!job || cancelled || useRefineStore.getState().byDoc[docId]) return;
         useRefineStore.getState().patch(docId, {
@@ -106,7 +118,7 @@ export function useRefineJobSync({
     return () => {
       cancelled = true;
     };
-  }, [docId, hasVoiceData]);
+  }, [docId, hasVoiceData, signedIn]);
 
   // 2) Poll while the server works and no live stream is attached. Also poll
   // the moment the app comes back to the foreground.
