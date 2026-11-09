@@ -3175,3 +3175,74 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod orphan_adoption_tests {
+    use super::*;
+
+    // Drives the real commands against a private temp dir (TMPDIR → temp_dir()).
+    // Single test so the process-wide statics are not shared across threads.
+    #[test]
+    fn orphan_is_adopted_kept_and_retired_only_after_upload() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("mf-adopt-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("TMPDIR", &dir);
+        assert_eq!(std::env::temp_dir(), dir, "TMPDIR override must reach temp_dir()");
+
+        *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
+        *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+        VOICE_ARCHIVE_ADOPTED.store(false, Ordering::SeqCst);
+        VOICE_ACTIVE.store(false, Ordering::SeqCst);
+
+        // Negative: nothing on disk → no archive, no notice.
+        assert!(!check_voice_archive());
+        assert!(voice_archive_info().is_none());
+
+        // A stranded 2-second recording from a previous app process.
+        let orphan = dir.join("markflow_voice_lost.pcm");
+        std::fs::write(&orphan, vec![0u8; 64_000]).unwrap();
+
+        // While recording, never adopt.
+        VOICE_ACTIVE.store(true, Ordering::SeqCst);
+        assert!(!check_voice_archive());
+        assert!(voice_archive_info().is_none());
+        VOICE_ACTIVE.store(false, Ordering::SeqCst);
+
+        // Positive: adopted, and reported as an orphan with its size/duration.
+        assert!(check_voice_archive());
+        let adopted = VOICE_ARCHIVE_PATH.lock().unwrap().clone().unwrap();
+        assert_eq!(std::path::PathBuf::from(&adopted), orphan);
+        let info = voice_archive_info().expect("orphan info");
+        assert_eq!(info.key, "markflow_voice_lost.pcm");
+        assert_eq!(info.bytes, 64_000);
+        assert!((info.duration_sec - 2.0).abs() < 1e-9);
+
+        // "Clear transcript" releases but must NOT delete the only copy.
+        clear_voice_archive();
+        assert!(orphan.exists(), "adopted orphan must survive clear_voice_archive");
+        assert!(VOICE_ARCHIVE_PATH.lock().unwrap().is_none());
+
+        // Re-adopted on the next check; a successful upload retires it.
+        assert!(check_voice_archive());
+        retire_uploaded_voice_archive(&adopted);
+        assert!(!orphan.exists());
+        assert!(voice_archive::uploaded_path(&orphan).exists());
+        assert!(VOICE_ARCHIVE_PATH.lock().unwrap().is_none());
+        assert!(!VOICE_ARCHIVE_ADOPTED.load(Ordering::SeqCst));
+        assert!(!check_voice_archive(), "uploaded file is no longer offered");
+
+        // This session's own (non-adopted) recording is not announced as an orphan.
+        let own = dir.join("markflow_voice_own.pcm");
+        std::fs::write(&own, vec![0u8; 64_000]).unwrap();
+        *VOICE_ARCHIVE_PATH.lock().unwrap() = Some(own.to_string_lossy().to_string());
+        assert!(check_voice_archive());
+        assert!(voice_archive_info().is_none());
+        *VOICE_ARCHIVE_PATH.lock().unwrap() = None;
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
