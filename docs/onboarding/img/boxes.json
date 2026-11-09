@@ -1,0 +1,123 @@
+{
+ "pc.signin": {
+  "x": 1184.859375,
+  "y": 28,
+  "width": 83.140625,
+  "height": 32
+ },
+ "pc.ok": {
+  "x": 866.96875,
+  "y": 735,
+  "width": 44.03125,
+  "height": 32
+ },
+ "pc.plus": {
+  "x": 193,
+  "y": 115,
+  "width": 14,
+  "height": 14
+ },
+ "pc.voice": {
+  "x": 983.9375,
+  "y": 76,
+  "width": 69.453125,
+  "height": 24
+ },
+ "pc.share": {
+  "x": 1088.859375,
+  "y": 30,
+  "width": 28,
+  "height": 28
+ },
+ "pc.interval": {
+  "x": 1051.421875,
+  "y": 734,
+  "width": 76,
+  "height": 28
+ },
+ "pc.record": {
+  "x": 256,
+  "y": 732,
+  "width": 88.890625,
+  "height": 32
+ },
+ "pc.structure": {
+  "x": 1135.421875,
+  "y": 732,
+  "width": 96.578125,
+  "height": 32
+ },
+ "pc.stop": {
+  "x": 256,
+  "y": 732,
+  "width": 72.859375,
+  "height": 32
+ },
+ "pc.recstructure": {
+  "x": 1135.421875,
+  "y": 732,
+  "width": 96.578125,
+  "height": 32
+ },
+ "pc.countdown": {
+  "x": 1236,
+  "y": 704,
+  "width": 32,
+  "height": 15
+ },
+ "sp.cw": 390,
+ "sp.signin": {
+  "x": 334,
+  "y": 32,
+  "width": 44,
+  "height": 44
+ },
+ "sp.ok": {
+  "x": 316.96875,
+  "y": 783,
+  "width": 44.03125,
+  "height": 32
+ },
+ "sp.menu": {
+  "x": 12,
+  "y": 32,
+  "width": 44,
+  "height": 44
+ },
+ "sp.plus": {
+  "x": 241,
+  "y": 72,
+  "width": 20,
+  "height": 20
+ },
+ "sp.voice": {
+  "x": 12,
+  "y": 109,
+  "width": 44,
+  "height": 44
+ },
+ "sp.share": {
+  "x": 190,
+  "y": 32,
+  "width": 44,
+  "height": 44
+ },
+ "sp.interval": {
+  "x": 139.421875,
+  "y": 772,
+  "width": 64,
+  "height": 32
+ },
+ "sp.record": {
+  "x": 8,
+  "y": 772,
+  "width": 88.890625,
+  "height": 32
+ },
+ "sp.return": {
+  "x": 121.390625,
+  "y": 468.703125,
+  "width": 147.203125,
+  "height": 45.375
+ }
+}
