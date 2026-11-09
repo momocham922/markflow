@@ -15,6 +15,16 @@ const MAX_SEND_RETRIES = 2;
 const LIVE_SEGMENT_RECOVERABLE_MSG =
   "この区間はライブ表示に取り込めませんでしたが、録音は継続しています。停止後に「Refine」で全体を文字起こし・構造化できます。";
 
+// Recording while signed out used to "work" on screen while every live segment
+// was silently thrown away (no account → no transcription), and the full audio
+// could then be stranded in a temp file (2026-11-09 iPhone incident). Never
+// start a recording without an account, and never drop segments without saying so.
+export const RECORD_NEEDS_LOGIN_MSG = "録音するにはログインしてください。";
+export const RECORD_AUTH_LOADING_MSG =
+  "ログイン状態を確認しています。数秒後にもう一度「Record」を押してください。";
+export const LIVE_SEGMENT_SIGNED_OUT_MSG =
+  "ログインが切れているため、ライブの文字起こしが止まっています。録音は続いています。ログインし直してから、停止後に「Refine」で全体を文字起こしできます。";
+
 import { isAndroid } from "@/platform";
 
 const isTauri =
@@ -122,6 +132,10 @@ export function useVoiceInput({
     null,
   );
   const startTimeRef = useRef(0);
+  // One notice per recording for segments dropped because the account is gone
+  // / the send queue overflowed (shown, but not repeated every 25s).
+  const signedOutNotifiedRef = useRef(false);
+  const queueDropNotifiedRef = useRef(false);
   const transcriptRef = useRef(initialTranscript || "");
   const onTranscriptRef = useRef(onTranscript);
   const onTranscriptUpdateRef = useRef(onTranscriptUpdate);
@@ -163,6 +177,10 @@ export function useVoiceInput({
       const user = useAuthStore.getState().user;
       if (!user) {
         console.warn("[voice] No authenticated user — skipping transcription");
+        if (!signedOutNotifiedRef.current) {
+          signedOutNotifiedRef.current = true;
+          onInfoRef.current?.(LIVE_SEGMENT_SIGNED_OUT_MSG);
+        }
         return;
       }
 
@@ -377,6 +395,17 @@ export function useVoiceInput({
       onErrorRef.current?.("このデバイスでは音声入力に対応していません。");
       return;
     }
+    {
+      const auth = useAuthStore.getState();
+      if (!auth.user) {
+        onErrorRef.current?.(
+          auth.loading ? RECORD_AUTH_LOADING_MSG : RECORD_NEEDS_LOGIN_MSG,
+        );
+        return;
+      }
+    }
+    signedOutNotifiedRef.current = false;
+    queueDropNotifiedRef.current = false;
 
     stopRecording();
 
@@ -485,6 +514,10 @@ export function useVoiceInput({
               if (chunkQueue.length >= MAX_QUEUE) {
                 console.warn("[voice] Queue full, dropping oldest chunk");
                 chunkQueue.shift();
+                if (!queueDropNotifiedRef.current) {
+                  queueDropNotifiedRef.current = true;
+                  onInfoRef.current?.(LIVE_SEGMENT_RECOVERABLE_MSG);
+                }
               }
               chunkQueue.push(result);
               processQueue();

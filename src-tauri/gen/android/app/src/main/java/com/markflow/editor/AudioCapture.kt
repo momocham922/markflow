@@ -22,6 +22,7 @@ class AudioCapture(private val activity: MainActivity) {
     private var useFloat = true
     private var archiveFile: FileOutputStream? = null
     private var archivePath: String? = null
+    @Volatile private var adoptedOrphan = false
     private var captureThread: Thread? = null
 
     fun hasPermission(): Boolean {
@@ -89,6 +90,7 @@ class AudioCapture(private val activity: MainActivity) {
         try {
             val tempFile = File(activity.cacheDir, "markflow_voice_${System.currentTimeMillis()}.pcm")
             archivePath = tempFile.absolutePath
+            adoptedOrphan = false
             archiveFile = FileOutputStream(tempFile)
             android.util.Log.i("MarkFlow", "Archive file created: ${tempFile.absolutePath}")
         } catch (e: Exception) {
@@ -211,15 +213,58 @@ class AudioCapture(private val activity: MainActivity) {
         }
     }
 
-    fun getArchivePath(): String? = archivePath
+    // The archive path lives only in memory: if the process dies (crash, OS
+    // kill, update) the file stays in cacheDir but Refine can no longer reach
+    // it. Fall back to the newest orphaned archive so it can still be refined
+    // (2026-11-09: a signed-out recording was stranded this way on iOS).
+    fun getArchivePath(): String? {
+        val current = archivePath
+        if (current != null && File(current).exists()) return current
+        if (isRecording) return null
+        val orphan = findNewestOrphan() ?: return null
+        archivePath = orphan.absolutePath
+        adoptedOrphan = true
+        android.util.Log.i("MarkFlow", "Adopted orphaned archive: ${orphan.absolutePath} (${orphan.length()} bytes)")
+        return archivePath
+    }
+
+    fun hasArchive(): Boolean = getArchivePath() != null
+
+    /** JSON {key, bytes, modifiedMs} for an adopted orphan, or null. */
+    fun getOrphanArchiveInfo(): String? {
+        if (isRecording) return null
+        val current = archivePath
+        if (current != null && File(current).exists() && !adoptedOrphan) return null
+        val path = getArchivePath() ?: return null
+        if (!adoptedOrphan) return null
+        val f = File(path)
+        if (!f.exists()) return null
+        val key = f.name.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "{\"key\":\"$key\",\"bytes\":${f.length()},\"modifiedMs\":${f.lastModified()}}"
+    }
+
+    private fun findNewestOrphan(): File? {
+        val files = activity.cacheDir.listFiles() ?: return null
+        return files
+            .filter { f ->
+                f.isFile && f.name.startsWith("markflow_voice_") && f.name.endsWith(".pcm") &&
+                    f.name.length > "markflow_voice_.pcm".length && f.length() > 32000L
+            }
+            .maxByOrNull { it.lastModified() }
+    }
 
     fun clearArchive() {
         try { archiveFile?.close() } catch (_: Exception) {}
         archiveFile = null
-        archivePath?.let {
-            try { File(it).delete() } catch (_: Exception) {}
+        // An adopted orphan is the only copy of an earlier recording: release it
+        // but never delete it here.
+        if (!adoptedOrphan) {
+            archivePath?.let {
+                try { File(it).delete() } catch (_: Exception) {}
+            }
         }
         archivePath = null
+        adoptedOrphan = false
     }
 
     fun getSampleRate(): Int = sampleRate

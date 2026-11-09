@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isAndroid, isMobile, isTauri } from "@/platform";
+import { checkVoiceArchive } from "@/lib/voice-archive";
 import { useVoiceInput } from "@/hooks/use-voice-input";
 import { useAuthStore } from "@/stores/auth-store";
 import { useResearchStore } from "@/stores/research-store";
@@ -25,7 +26,7 @@ import {
   isPlaceholderTitle,
 } from "@/lib/text-utils";
 import type { SourceOutcome } from "@/stores/context-source-store";
-import { friendlyErrorMessage } from "@/lib/friendly-error";
+import { FriendlyError, friendlyErrorMessage } from "@/lib/friendly-error";
 import { track } from "@/services/telemetry";
 import {
   newRefineJobId,
@@ -61,6 +62,9 @@ function buildQuestionsContext(questionCards: ResearchCard[]): string {
     questionCards.map((c) => c.summary).join("\n")
   );
 }
+
+const REFINE_NEEDS_LOGIN_MSG =
+  "「Refine」を使うにはログインしてください。ログイン後にもう一度「Refine」を押すと、録音全体を文字起こしできます。";
 
 export interface VoiceDataUpdate {
   voiceTranscript?: string | null;
@@ -301,13 +305,13 @@ export function VoicePanel({
 
   useEffect(() => {
     if (!isTauri) return;
-    import("@tauri-apps/api/core").then(({ invoke }) => {
-      invoke<boolean>("check_voice_archive")
-        .then((exists) => {
-          if (exists) setHasArchive(true);
-        })
-        .catch(() => {});
-    });
+    // Also re-adopts a recording orphaned by an app restart (its in-memory path
+    // was lost), so "Refine" reappears for it — see lib/voice-archive.ts.
+    checkVoiceArchive()
+      .then((exists) => {
+        if (exists) setHasArchive(true);
+      })
+      .catch((e) => console.warn("[voice] check_voice_archive failed:", e));
   }, []);
 
   // Background-gap notice (mobile). While the app is backgrounded / screen-off,
@@ -433,7 +437,8 @@ export function VoicePanel({
     const structureStartedAt = Date.now();
     try {
       const user = useAuthStore.getState().user;
-      if (!user) throw new Error("Not authenticated");
+      if (!user)
+        throw new FriendlyError("構造化するにはログインしてください。");
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error("No token");
 
@@ -654,6 +659,14 @@ export function VoicePanel({
       !savedVoiceGcsUriRef.current
     )
       return;
+    // Refine uploads under the signed-in account — say so instead of failing
+    // silently in the background.
+    if (!useAuthStore.getState().user) {
+      setVoiceError(REFINE_NEEDS_LOGIN_MSG);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = setTimeout(() => setVoiceError(null), 12000);
+      return;
+    }
 
     const startedAt = Date.now();
     refineStore.begin(docId, "");

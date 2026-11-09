@@ -1,3 +1,5 @@
+mod voice_archive;
+
 use tauri::Emitter;
 use std::io::{Read, Write};
 use std::sync::Mutex;
@@ -1268,6 +1270,67 @@ struct VoiceChunkData {
 /// Archive file handle for full-session audio (used by Refine pipeline).
 static VOICE_ARCHIVE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static VOICE_ARCHIVE_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// True when VOICE_ARCHIVE_PATH points at an orphan picked up from a previous
+/// app process (see voice_archive.rs). Such a file is the ONLY copy of a
+/// recording whose path was lost, so starting a new recording or "Clear
+/// transcript" must never delete it — only a successful upload retires it.
+static VOICE_ARCHIVE_ADOPTED: AtomicBool = AtomicBool::new(false);
+
+/// Pick up the newest orphaned Refine archive in temp_dir() as the current
+/// archive (no file is opened, moved or deleted). Not while recording.
+fn adopt_orphan_voice_archive() -> Option<String> {
+    if VOICE_ACTIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let dir = std::env::temp_dir();
+    let current = VOICE_ARCHIVE_PATH.lock().unwrap().clone();
+    let exclude = current.as_ref().map(std::path::PathBuf::from);
+    let found = voice_archive::find_newest_orphan(
+        &dir,
+        voice_archive::MIN_ORPHAN_BYTES,
+        exclude.as_deref(),
+    )?;
+    let path_str = found.path.to_string_lossy().to_string();
+    *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
+    *VOICE_ARCHIVE_PATH.lock().unwrap() = Some(path_str.clone());
+    VOICE_ARCHIVE_ADOPTED.store(true, Ordering::SeqCst);
+    println!(
+        "[voice] Adopted orphaned archive: {} ({} bytes)",
+        path_str, found.bytes
+    );
+    Some(path_str)
+}
+
+/// Rename an uploaded archive out of the orphan scan and drop it as the current
+/// archive. Also prunes week-old *.uploaded leftovers in the same directory.
+fn retire_uploaded_voice_archive(path: &str) {
+    let p = std::path::Path::new(path);
+    let dest = voice_archive::uploaded_path(p);
+    match std::fs::rename(p, &dest) {
+        Ok(()) => println!("[voice] Archive retired after upload: {}", dest.display()),
+        Err(e) => println!("[voice] Could not retire uploaded archive {}: {}", path, e),
+    }
+    {
+        let mut current = VOICE_ARCHIVE_PATH.lock().unwrap();
+        if current.as_deref() == Some(path) {
+            *current = None;
+            VOICE_ARCHIVE_ADOPTED.store(false, Ordering::SeqCst);
+        }
+    }
+    if let Some(dir) = p.parent() {
+        voice_archive::prune_uploaded(dir, std::time::Duration::from_secs(7 * 24 * 3600));
+    }
+}
+
+#[derive(serde::Serialize)]
+struct OrphanVoiceArchiveInfo {
+    /// File name only (stable key for "dismissed" bookkeeping in the UI).
+    key: String,
+    bytes: u64,
+    /// Last write time (≈ end of the recording), ms since epoch.
+    modified_ms: u64,
+    duration_sec: f64,
+}
 
 #[derive(serde::Serialize)]
 struct VoiceArchiveChunk {
@@ -1446,10 +1509,14 @@ fn list_audio_devices() -> Result<Vec<String>, String> {
 fn start_voice_recording(device_name: Option<String>, system_audio: Option<bool>) -> Result<String, String> {
     let want_sys = system_audio.unwrap_or(false);
 
-    // Clean up any previous archive before creating a new one
+    // Clean up any previous archive before creating a new one — except an
+    // adopted orphan: that is the only copy of an earlier recording whose path
+    // was lost, so it stays on disk and is offered again later.
     {
         if let Some(old_path) = VOICE_ARCHIVE_PATH.lock().unwrap().take() {
-            let _ = std::fs::remove_file(&old_path);
+            if !VOICE_ARCHIVE_ADOPTED.swap(false, Ordering::SeqCst) {
+                let _ = std::fs::remove_file(&old_path);
+            }
         }
         *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
     }
@@ -2497,13 +2564,20 @@ async fn upload_voice_archive(
         }
         // Close the Rust archive file handle before reading
         *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
-        VOICE_ARCHIVE_PATH.lock().unwrap().clone()
+        let current = VOICE_ARCHIVE_PATH.lock().unwrap().clone();
+        let current = current.filter(|p| std::path::Path::new(p).exists());
+        // The in-memory path is lost after an app restart — fall back to the
+        // newest orphaned archive on disk (16 kHz mono s16le, same format).
+        current
+            .or_else(adopt_orphan_voice_archive)
             .ok_or("No voice archive available")?
     };
 
     let file_meta = std::fs::metadata(&path)
         .map_err(|e| format!("Failed to read archive: {}", e))?;
-    let pcm_size = file_meta.len();
+    // s16le samples are 2 bytes: a file cut mid-sample (process killed while
+    // writing) gets its dangling odd byte dropped so the WAV stays well-formed.
+    let pcm_size = file_meta.len() & !1u64;
     if pcm_size == 0 {
         return Err("Voice archive is empty".into());
     }
@@ -2597,6 +2671,12 @@ async fn upload_voice_archive(
         chunks.len(),
         gcs_uri
     );
+
+    // The audio now lives in Storage (and the document keeps its URI), so retire
+    // the local file from the orphan scan: rename it to *.uploaded instead of
+    // deleting (pruned after a week). The next check then offers the next
+    // orphaned recording, if any.
+    retire_uploaded_voice_archive(&path);
 
     Ok(VoiceArchiveResult {
         gcs_uri,
@@ -2805,20 +2885,71 @@ async fn prepare_gcs_voice_chunks(
 /// Check if a voice archive file exists (for restoring hasArchive after remount).
 #[tauri::command]
 fn check_voice_archive() -> bool {
-    if let Some(ref path) = *VOICE_ARCHIVE_PATH.lock().unwrap() {
-        std::path::Path::new(path).exists()
-    } else {
-        false
+    {
+        let current = VOICE_ARCHIVE_PATH.lock().unwrap();
+        if let Some(ref path) = *current {
+            if std::path::Path::new(path).exists() {
+                return true;
+            }
+        }
     }
+    // Path lost (app restarted) or its file gone: offer the newest orphaned
+    // recording instead so "Refine" can still reach it.
+    adopt_orphan_voice_archive().is_some()
 }
 
-/// Clean up voice archive temp file.
+/// Info about an orphaned recording (from an earlier app process) that is
+/// currently adopted — drives the "previous recording found" notice. None when
+/// recording, when the current archive belongs to this session, or when no
+/// orphan exists.
+#[tauri::command]
+fn voice_archive_info() -> Option<OrphanVoiceArchiveInfo> {
+    if VOICE_ACTIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let current = VOICE_ARCHIVE_PATH.lock().unwrap().clone();
+    let current_exists = current
+        .as_ref()
+        .map(|p| std::path::Path::new(p).exists())
+        .unwrap_or(false);
+    let path = if current_exists {
+        if !VOICE_ARCHIVE_ADOPTED.load(Ordering::SeqCst) {
+            return None; // this session's own recording — not an orphan
+        }
+        current?
+    } else {
+        adopt_orphan_voice_archive()?
+    };
+    let meta = std::fs::metadata(&path).ok()?;
+    let bytes = meta.len();
+    let modified_ms = meta
+        .modified()
+        .map(voice_archive::system_time_ms)
+        .unwrap_or(0);
+    let key = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    Some(OrphanVoiceArchiveInfo {
+        key,
+        bytes,
+        modified_ms,
+        duration_sec: bytes as f64 / voice_archive::ARCHIVE_BYTES_PER_SEC as f64,
+    })
+}
+
+/// Clean up voice archive temp file. An adopted orphan is only released, never
+/// deleted here (it is the sole copy of an earlier recording).
 #[tauri::command]
 fn clear_voice_archive() {
     *VOICE_ARCHIVE_FILE.lock().unwrap() = None;
     if let Some(path) = VOICE_ARCHIVE_PATH.lock().unwrap().take() {
-        let _ = std::fs::remove_file(&path);
-        println!("[voice] Archive file cleaned up");
+        if VOICE_ARCHIVE_ADOPTED.swap(false, Ordering::SeqCst) {
+            println!("[voice] Released adopted archive (kept on disk): {}", path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+            println!("[voice] Archive file cleaned up");
+        }
     }
 }
 
@@ -3040,7 +3171,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, mcp_http_rpc, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, prepare_gcs_voice_chunks, check_voice_archive, clear_voice_archive, get_crash_reports, clear_crash_reports])
+        .invoke_handler(tauri::generate_handler![oauth_listen, get_pending_oauth_code, open_safari_vc, dismiss_safari_vc, open_external_url, send_slack_webhook, exchange_oauth_code, fetch_ogp, mcp_http_rpc, print_html, save_image, copy_image_file, read_file_bytes, upload_image_cloud, upload_image_from_path, upload_image_from_base64, check_for_update, install_update, force_install_stable, cancel_auto_update, list_audio_devices, start_voice_recording, stop_voice_recording, start_system_audio_capture, get_voice_chunk, get_voice_level, get_audio_debug, upload_voice_archive, prepare_gcs_voice_chunks, check_voice_archive, voice_archive_info, clear_voice_archive, get_crash_reports, clear_crash_reports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

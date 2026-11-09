@@ -39,6 +39,7 @@ import { McpConnectorDialog } from "@/components/McpConnectorDialog";
 import { ContextSourceDialog } from "@/components/ContextSourceDialog";
 import { useFeedbackStore } from "@/stores/feedback-store";
 import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
+import { OrphanRecordingBanner } from "@/components/OrphanRecordingBanner";
 import { useTelemetryStore } from "@/stores/telemetry-store";
 import { track, getConsent } from "@/services/telemetry";
 import { initCrashReporting } from "@/services/crash";
@@ -1612,6 +1613,7 @@ th,td{border:1px solid #ddd;padding:0.4em 0.8em;text-align:left;}
         <GlobalContextSourceDialog />
         {/* Regional analytics consent surface (once, until the user decides) */}
         <TelemetryConsentBanner />
+        <OrphanRecordingBanner />
       </div>
     </TooltipProvider>
   );

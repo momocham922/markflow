@@ -171,4 +171,10 @@ class AudioBridge(private val activity: MainActivity) {
 
   @JavascriptInterface
   fun clearArchive() = activity.audioCapture.clearArchive()
+
+  @JavascriptInterface
+  fun hasArchive(): Boolean = activity.audioCapture.hasArchive()
+
+  @JavascriptInterface
+  fun getOrphanArchiveInfo(): String? = activity.audioCapture.getOrphanArchiveInfo()
 }
